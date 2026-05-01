@@ -313,7 +313,7 @@ To distribute the standalone executable:
 
 ```bash
 # Copy the executable
-cp /home/thearchitect/OMC/standalone.omc ~/distribution/omnimcode.omc
+cp  ~/distribution/omnimcode.omc
 
 # Works on any Linux x86-64 system with libc
 # No additional dependencies needed!
