@@ -1,0 +1,14 @@
+# Array Operations - Test array functions
+print("Array Operations Test");
+print("====================");
+
+h numbers = arr_from_range(1, 11);
+print("Array created: [1, 2, ..., 10]");
+
+h len = arr_len(numbers);
+print("Length: ");
+print(len);
+
+h sum = arr_sum(numbers);
+print("Sum: ");
+print(sum);

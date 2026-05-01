@@ -1,0 +1,4 @@
+# Hello World - Basic Test
+print("═════════════════════════════════════════");
+print("Hello, Harmonic World!");
+print("═════════════════════════════════════════");

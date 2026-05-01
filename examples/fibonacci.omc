@@ -1,0 +1,15 @@
+# Fibonacci Numbers - Demonstrate harmonic math
+print("Computing Fibonacci sequence...");
+
+fn fib(n) {
+    if n <= 1 { return n; }
+    return fib(n - 1) + fib(n - 2);
+}
+
+h f10 = fib(10);
+print("fib(10) = ");
+print(f10);
+
+h f15 = fib(15);
+print("fib(15) = ");
+print(f15);

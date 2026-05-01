@@ -1,0 +1,15 @@
+# String Operations - Test string functions
+print("String Operations Test");
+print("====================");
+
+h text = "hello world";
+print("Original: ");
+print(text);
+
+h upper = str_uppercase(text);
+print("Uppercase: ");
+print(upper);
+
+h len = str_len(text);
+print("Length: ");
+print(len);

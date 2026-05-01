@@ -1,0 +1,27 @@
+[package]
+name = "omnimcode"
+version = "1.0.0"
+edition = "2021"
+authors = ["The Architect <architect@sovereign-lattice.io>"]
+description = "OMNIcode - Standalone Harmonic Computing Language Compiler & Runtime"
+readme = "BUILD.md"
+license = "MIT"
+
+[[bin]]
+name = "standalone"
+path = "src/main.rs"
+
+[dependencies]
+regex = "1.10"
+thiserror = "1.0"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+
+[profile.dev]
+opt-level = 1
+
+[dev-dependencies]

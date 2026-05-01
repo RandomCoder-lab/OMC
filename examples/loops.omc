@@ -1,0 +1,12 @@
+# Control Flow - Loop and conditional tests
+print("Control Flow Test");
+print("================");
+
+h count = 0;
+while count < 5 {
+    print("Count: ");
+    print(count);
+    count = count + 1;
+}
+
+print("Loop complete!");
