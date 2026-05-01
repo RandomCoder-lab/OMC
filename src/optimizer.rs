@@ -184,7 +184,7 @@ impl CircuitOptimizer {
         }
     }
 
-    /// Get constant value of a gate if it's constant
+    /// Get constant value of a gate if it's constant or was folded to a constant
     fn get_gate_constant_value(
         &self,
         gate_id: GateId,
@@ -195,6 +195,7 @@ impl CircuitOptimizer {
             return None;
         }
 
+        // First check if this gate is already a constant in the original circuit
         if let Gate::Constant { value } = &circuit.gates[gate_id] {
             return Some(*value);
         }

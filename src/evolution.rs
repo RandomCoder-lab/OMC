@@ -133,10 +133,22 @@ pub fn crossover(parent1: &Circuit, parent2: &Circuit) -> (Circuit, Circuit) {
     let crossover_point1 = seed1 % parent1.gates.len();
     let crossover_point2 = seed2 % parent2.gates.len();
 
-    // Swap gate at crossover points (simplified crossover)
-    if crossover_point1 < child1.gates.len() && crossover_point2 < child2.gates.len() {
-        child1.gates.swap(child1.output, crossover_point1);
-        child2.gates.swap(child2.output, crossover_point2);
+    // Swap gates at crossover points (simplified subtree crossover)
+    // Cache the lengths to avoid borrow checker issues
+    let child1_len = child1.gates.len();
+    let child2_len = child2.gates.len();
+    
+    if crossover_point1 < child1_len && crossover_point2 < child2_len {
+        // Swap the gate at crossover_point1 in child1 with corresponding gate in child2
+        let swap_idx1 = crossover_point2 % child1_len;
+        let swap_idx2 = crossover_point1 % child2_len;
+        
+        if swap_idx1 != crossover_point1 {
+            child1.gates.swap(crossover_point1, swap_idx1);
+        }
+        if swap_idx2 != crossover_point2 {
+            child2.gates.swap(crossover_point2, swap_idx2);
+        }
     }
 
     (child1, child2)

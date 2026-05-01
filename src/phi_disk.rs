@@ -40,12 +40,19 @@ struct CacheEntry<T> {
 }
 
 /// Simple in-memory LRU cache
+/// 
+/// Despite the name "PhiDiskCache", this is an in-memory LRU cache, not a persistent disk cache.
+/// It was originally named aspirationally (for future persistence), but it's simpler and more honest
+/// to treat it as a generic LRU cache that accelerates repeated computations.
 pub struct PhiDiskCache<T: Clone> {
     entries: HashMap<u64, CacheEntry<T>>,
     max_capacity: usize,
     access_counter: u64, // Incremented on each access
     stats: CacheStats,
 }
+
+/// Type alias: LRUCache is a more accurate name for this in-memory cache
+pub type LRUCache<T> = PhiDiskCache<T>;
 
 /// Cache statistics
 #[derive(Clone, Debug, Default)]

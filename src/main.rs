@@ -1,23 +1,12 @@
 // src/main.rs - OMNIcode Standalone Executable Entry Point
 
-mod ast;
-mod value;
-mod parser;
-mod interpreter;
-mod runtime;
-mod circuits;      // Genetic logic circuits
-mod evolution;     // Genetic operators
-mod circuit_dsl;   // Circuit DSL and transpiler [Tier 2]
-mod optimizer;     // Circuit optimization engine [Tier 3]
-mod hbit;          // HBit dual-band processing [Tier 2+]
-mod phi_pi_fib;    // O(log_phi_pi_fibonacci n) search algorithm [Tier 4]
-mod phi_disk;      // Phi Disk cache system [Tier 4]
+use omnimcode::parser::Parser;
+use omnimcode::interpreter::Interpreter;
 
 use std::env;
 use std::fs;
 use std::io::{self, Write};
-use parser::Parser;
-use interpreter::Interpreter;
+
 
 fn main() {
     let args: Vec<String> = env::args().collect();
