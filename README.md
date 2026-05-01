@@ -169,13 +169,13 @@ while count < 5 {
 
 ### Compile
 ```bash
-cd /home/thearchitect/OMC
+cd ~/OMC
 cargo build --release
 ```
 
 ### Output
 ```
-/home/thearchitect/OMC/target/release/standalone
+/OMC/target/release/standalone
 ```
 
 ### Optimized Build
