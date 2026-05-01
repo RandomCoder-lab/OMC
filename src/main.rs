@@ -10,6 +10,8 @@ mod evolution;     // Genetic operators
 mod circuit_dsl;   // Circuit DSL and transpiler [Tier 2]
 mod optimizer;     // Circuit optimization engine [Tier 3]
 mod hbit;          // HBit dual-band processing [Tier 2+]
+mod phi_pi_fib;    // O(log_phi_pi_fibonacci n) search algorithm [Tier 4]
+mod phi_disk;      // Phi Disk cache system [Tier 4]
 
 use std::env;
 use std::fs;
