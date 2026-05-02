@@ -1,72 +1,56 @@
 #!/bin/bash
-# scripts/bump-version.sh
-# Automate version bumping across all crates and configuration files
+# Bump version across all crates and config files
+# Usage: ./bump-version.sh <major|minor|patch>
 
-set -e  # Exit on error
+set -e
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
+if [ -z "$1" ]; then
+  echo "Usage: $0 <major|minor|patch>"
+  exit 1
+fi
 
-# Parse arguments
-if [ $# -ne 2 ]; then
-    echo "Usage: $0 <old-version> <new-version>"
-    echo "Example: $0 1.0.0 1.1.0"
+# Read current version from Cargo.toml
+CURRENT_VERSION=$(grep -m1 'version = "' /home/thearchitect/OMC/Cargo.toml | sed 's/.*"$.*$".*/\1/')
+echo "Current version: $CURRENT_VERSION"
+
+# Split version into major, minor, patch
+MAJOR=$(echo $CURRENT_VERSION | cut -d. -f1)
+MINOR=$(echo $CURRENT_VERSION | cut -d. -f2)
+PATCH=$(echo $CURRENT_VERSION | cut -d. -f3)
+
+# Bump version
+case $1 in
+  major)
+    MAJOR=$((MAJOR + 1))
+    MINOR=0
+    PATCH=0
+    ;;
+  minor)
+    MINOR=$((MINOR + 1))
+    PATCH=0
+    ;;
+  patch)
+    PATCH=$((PATCH + 1))
+    ;;
+  *)
+    echo "Invalid bump type: $1. Use major, minor, or patch."
     exit 1
-fi
+    ;;
+esac
 
-OLD_VERSION=$1
-NEW_VERSION=$2
+NEW_VERSION="$MAJOR.$MINOR.$PATCH"
+echo "New version: $NEW_VERSION"
 
-echo -e "${YELLOW}Bumping version from ${OLD_VERSION} to ${NEW_VERSION}${NC}"
+# Update all Cargo.toml files
+find /home/thearchitect/OMC -name "Cargo.toml" -exec sed -i "s/version = \"$CURRENT_VERSION\"/version = \"$NEW_VERSION\"/g" {} \;
 
-# Verify version format
-if ! [[ "$NEW_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    echo -e "${RED}Error: Invalid version format. Expected X.Y.Z${NC}"
-    exit 1
-fi
+# Update VERSION.txt
+echo $NEW_VERSION > /home/thearchitect/OMC/VERSION.txt
 
-# 1. Update Cargo.toml workspace version
-echo -e "${YELLOW}Updating Cargo.toml...${NC}"
-sed -i.bak "s/version = \"$OLD_VERSION\"/version = \"$NEW_VERSION\"/g" Cargo.toml
-rm -f Cargo.toml.bak
+# Update package.json (Unity package)
+sed -i "s/\"version\": \".*\"/\"version\": \"$NEW_VERSION\"/g" /home/thearchitect/OMC/packages/OMNIcode-Unity/package.json
 
-# 2. Update VERSION.txt
-echo -e "${YELLOW}Updating VERSION.txt...${NC}"
-echo "$NEW_VERSION" > VERSION.txt
-
-# 3. Update package.json for Unity
-if [ -f "packages/OMNIcode-Unity/package.json" ]; then
-    echo -e "${YELLOW}Updating Unity package.json...${NC}"
-    sed -i.bak "s/\"version\": \"$OLD_VERSION\"/\"version\": \"$NEW_VERSION\"/g" packages/OMNIcode-Unity/package.json
-    rm -f packages/OMNIcode-Unity/package.json.bak
-fi
-
-# 4. Update OMNIcode.uplugin for Unreal
-if [ -f "packages/OMNIcode-Unreal/OMNIcode.uplugin" ]; then
-    echo -e "${YELLOW}Updating Unreal OMNIcode.uplugin...${NC}"
-    sed -i.bak "s/\"VersionName\": \"$OLD_VERSION\"/\"VersionName\": \"$NEW_VERSION\"/g" packages/OMNIcode-Unreal/OMNIcode.uplugin
-    rm -f packages/OMNIcode-Unreal/OMNIcode.uplugin.bak
-fi
-
-# 5. Create git tag
-echo -e "${YELLOW}Creating git tag v${NEW_VERSION}...${NC}"
-git add -A
-git commit -m "Bump version to $NEW_VERSION"
+# Create git tag
 git tag -a "v$NEW_VERSION" -m "Release v$NEW_VERSION"
 
-echo -e "${GREEN}✅ Version bumped successfully!${NC}"
-echo ""
-echo -e "${YELLOW}Next steps:${NC}"
-echo "1. Review changes: git show v$NEW_VERSION"
-echo "2. Push tag: git push origin v$NEW_VERSION"
-echo "3. GitHub Actions will automatically build and publish"
-echo ""
-echo -e "${GREEN}Files updated:${NC}"
-echo "  - Cargo.toml (workspace version)"
-echo "  - VERSION.txt"
-echo "  - package.json (Unity)"
-echo "  - OMNIcode.uplugin (Unreal)"
-echo ""
+echo "Version bumped to $NEW_VERSION. Remember to git push --tags"
