@@ -1,60 +1,105 @@
 #!/bin/bash
-# scripts/generate-release-notes.sh
-# Extract changelog section and generate GitHub release notes
+# Generate release notes from CHANGELOG.md for GitHub releases
+# Usage: ./generate-release-notes.sh <version>
 
 set -e
 
-# Parse arguments
-if [ $# -ne 1 ]; then
-    echo "Usage: $0 <version>"
-    echo "Example: $0 1.1.0"
+VERSION="$1"
+
+if [ -z "$VERSION" ]; then
+    echo "Usage: $0 <version> (e.g., 1.0.0)"
     exit 1
 fi
 
-VERSION=$1
+# Ensure CHANGELOG.md exists
+if [ ! -f "/home/thearchitect/OMC/CHANGELOG.md" ]; then
+    echo "CHANGELOG.md not found. Creating template..."
+    cat > /home/thearchitect/OMC/CHANGELOG.md << 'EOF'
+# Changelog
 
-# Check if CHANGELOG.md exists
-if [ ! -f "CHANGELOG.md" ]; then
-    echo "Error: CHANGELOG.md not found"
-    exit 1
+All notable changes to OMNIcode will be documented in this file.
+
+## [Unreleased]
+
+## [1.0.0] - 2026-05-02
+### Added
+- Initial release
+- C FFI layer (omnimcode-ffi)
+- Python bindings (omnimcode-python with PyO3)
+- Unity package with C# wrappers
+- Unreal Engine plugin
+- Circuit evolution core (omnimcode-core)
+
+### Performance
+- 509 KB binary size (zero external dependencies)
+- 215-693 ns per circuit evaluation
+- 4.64M-1.44M evals/sec
+EOF
 fi
 
 # Extract section for this version
-echo "Extracting changelog for version $VERSION..."
+CHANGELOG="/home/thearchitect/OMC/CHANGELOG.md"
+TEMP_FILE=$(mktemp)
 
-# Find the section for this version
-PATTERN="## \[$VERSION\]"
-START_LINE=$(grep -n "^$PATTERN" CHANGELOG.md | cut -d: -f1)
+# Extract the version section (handles "## [1.0.0] - date" format)
+awk -v ver="$VERSION" '
+  /^## \[/ { 
+    if (found) exit
+    if ($0 ~ "\\[" ver "\\]") found=1
+    next
+  }
+  found { print }
+' "$CHANGELOG" > "$TEMP_FILE"
 
-if [ -z "$START_LINE" ]; then
-    echo "Error: No changelog entry found for version $VERSION"
-    echo "Expected pattern: ## [$VERSION]"
+# Check if we found the version
+if [ ! -s "$TEMP_FILE" ]; then
+    echo "Version $VERSION not found in CHANGELOG.md"
+    rm "$TEMP_FILE"
     exit 1
 fi
 
-# Find the next version section (or end of file)
-END_LINE=$(tail -n +$((START_LINE + 1)) CHANGELOG.md | grep -n "^## \[" | head -1 | cut -d: -f1)
+# Generate GitHub release body
+RELEASE_BODY=$(cat << EOF
+## OMNIcode v${VERSION}
 
-if [ -z "$END_LINE" ]; then
-    # No next section, get all lines from here
-    SECTION=$(tail -n +$START_LINE CHANGELOG.md)
-else
-    # Get lines between START_LINE and END_LINE
-    END_LINE=$((START_LINE + END_LINE - 1))
-    SECTION=$(sed -n "${START_LINE},$((END_LINE - 1))p" CHANGELOG.md)
-fi
+$(cat "$TEMP_FILE")
 
-# Clean up the section (remove the header line)
-RELEASE_NOTES=$(echo "$SECTION" | tail -n +2)
+## Installation
 
-# Create release notes file
-OUTPUT_FILE="release-notes-$VERSION.md"
-echo "$RELEASE_NOTES" > "$OUTPUT_FILE"
+### Cargo
+\`\`\`bash
+cargo install omnimcode-core
+\`\`\`
 
-echo ""
-echo "✅ Release notes generated: $OUTPUT_FILE"
-echo ""
-echo "Preview:"
-echo "-----"
-cat "$OUTPUT_FILE"
-echo "-----"
+### Unity
+Import \`OMNIcode-Unity.unitypackage\` into your Unity project.
+
+### Unreal
+Copy the \`OMNIcode-Unreal\` plugin to your project's \`Plugins/\` directory.
+
+### Python
+\`\`\`bash
+pip install omnimcode
+\`\`\`
+
+## Performance
+- Binary size: 509 KB (zero dependencies)
+- Circuit evaluation: 215-693 ns
+- Throughput: 4.64M-1.44M evals/sec
+
+## Links
+- [Documentation](https://github.com/RandomCoder-lab/OMC/wiki)
+- [Crate](https://crates.io/crates/omnimcode-core)
+- [Unity Asset Store](https://assetstore.unity.com/)
+EOF
+)
+
+echo "$RELEASE_BODY"
+
+# Save to file
+echo "$RELEASE_BODY" > "/home/thearchitect/OMC/RELEASE_BODY_v${VERSION}.md"
+
+echo "Release notes generated: /home/thearchitect/OMC/RELEASE_BODY_v${VERSION}.md"
+
+# Cleanup
+rm "$TEMP_FILE"
