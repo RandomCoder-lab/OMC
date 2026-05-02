@@ -1,0 +1,27 @@
+{
+  "FileVersion": 3,
+  "Version": 1,
+  "VersionName": "1.0.0",
+  "FriendlyName": "OMNIcode - Circuit Evolution Engine",
+  "Description": "Fast genetic circuit evolution for game AI and procedural generation. 509 KB native binary, zero dependencies, 50-230× faster than Python frameworks.",
+  "Category": "AI",
+  "CreatedBy": "Sovereign Lattice",
+  "CreatedByURL": "https://github.com/sovereignlattice/omnimcode",
+  "DocsURL": "",
+  "MarketplaceURL": "",
+  "SupportURL": "",
+  "CanContainContent": true,
+  "Installed": false,
+  "Modules": [
+    {
+      "Name": "OMNIcode",
+      "Type": "Runtime",
+      "LoadingPhase": "Default",
+      "PlatformAllowList": [
+        "Win64",
+        "Linux",
+        "Mac"
+      ]
+    }
+  ]
+}

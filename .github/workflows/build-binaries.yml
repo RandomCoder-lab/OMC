@@ -1,0 +1,127 @@
+name: Build Binaries
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build for ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            artifact_name: omnimcode-linux-x64
+            
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+            artifact_name: omnimcode-macos-x64
+            
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+            artifact_name: omnimcode-macos-arm64
+            
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            artifact_name: omnimcode-windows-x64.exe
+            
+          - target: i686-pc-windows-msvc
+            runner: windows-latest
+            artifact_name: omnimcode-windows-x86.exe
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      
+      - uses: Swatinem/rust-cache@v2
+      
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }} -p omnimcode-core --bin omnimcode-standalone
+      
+      - name: Calculate SHA256
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" == "Windows" ]; then
+            certUtil -hashfile target/${{ matrix.target }}/release/${{ matrix.artifact_name }} SHA256 > checksums.txt
+          else
+            sha256sum target/${{ matrix.target }}/release/${{ matrix.artifact_name }} > checksums.txt
+          fi
+      
+      - name: Upload artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: binaries
+          path: |
+            target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+            checksums.txt
+
+  build-libraries:
+    name: Build FFI libraries for ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            lib_name: libomnimcode.so
+            
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+            lib_name: libomnimcode.dylib
+            
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+            lib_name: libomnimcode.dylib
+            
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            lib_name: omnimcode.dll
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      
+      - uses: Swatinem/rust-cache@v2
+      
+      - name: Build FFI library
+        run: cargo build --release --target ${{ matrix.target }} -p omnimcode-ffi
+      
+      - name: Upload FFI artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: ffi-libraries
+          path: target/${{ matrix.target }}/release/${{ matrix.lib_name }}
+
+  create-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [build, build-libraries]
+    if: startsWith(github.ref, 'refs/tags/')
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Download artifacts
+        uses: actions/download-artifact@v3
+      
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            binaries/*
+            ffi-libraries/*
+          draft: false
+          prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') }}

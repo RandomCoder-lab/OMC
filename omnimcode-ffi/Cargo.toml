@@ -1,0 +1,15 @@
+[package]
+name = "omnimcode-ffi"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "OMNIcode - C FFI Bindings for Harmonic Computing Language"
+repository = "https://github.com/sovereignlattice/omnimcode"
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+omnimcode-core = { path = "../omnimcode-core" }
+libc = "0.2"

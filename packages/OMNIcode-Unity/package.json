@@ -1,0 +1,40 @@
+{
+  "name": "com.sovereignlattice.omnimcode",
+  "version": "1.0.0",
+  "displayName": "OMNIcode - Circuit Evolution Engine",
+  "description": "Fast genetic circuit evolution for game AI and procedural generation. 50-230x faster than Python, zero dependencies, 509 KB footprint.",
+  "unity": "2020.3",
+  "unityRelease": "0f1",
+  "documentationUrl": "https://omnimcode.io/docs",
+  "changelogUrl": "https://github.com/sovereignlattice/omnimcode/blob/main/CHANGELOG.md",
+  "licensesUrl": "https://github.com/sovereignlattice/omnimcode/blob/main/LICENSE.md",
+  "keywords": [
+    "ai",
+    "genetic",
+    "algorithm",
+    "circuit",
+    "evolution",
+    "game-ai",
+    "procedural-generation",
+    "performance"
+  ],
+  "author": {
+    "name": "The Architect",
+    "email": "architect@sovereign-lattice.io",
+    "url": "https://sovereign-lattice.io"
+  },
+  "type": "tool",
+  "hideInEditor": false,
+  "samples": [
+    {
+      "displayName": "XOR Circuit Evolution",
+      "description": "Simple example evolving a circuit to solve XOR",
+      "path": "Samples~/XORCircuitExample"
+    },
+    {
+      "displayName": "Game AI Demo",
+      "description": "Evolved AI controlling a game character",
+      "path": "Samples~/GameAIExample"
+    }
+  ]
+}

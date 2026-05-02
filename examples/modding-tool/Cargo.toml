@@ -1,0 +1,23 @@
+[package]
+name = "modding-tool"
+version = "1.0.0"
+edition = "2021"
+authors = ["Sovereign Lattice <architect@sovereign-lattice.io>"]
+description = "User-friendly circuit evolution tool with multi-format export"
+
+[[bin]]
+name = "modding-tool"
+path = "src/main.rs"
+
+[dependencies]
+omnimcode-core = { path = "../../omnimcode-core" }
+
+[dev-dependencies]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+
+[workspace]

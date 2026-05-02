@@ -1,0 +1,15 @@
+[package]
+name = "omnimcode-python"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "OMNIcode - Python Bindings for Harmonic Computing Language"
+repository = "https://github.com/sovereignlattice/omnimcode"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+omnimcode-core = { path = "../omnimcode-core" }
+pyo3 = { version = "0.21", features = ["extension-module", "abi3-py38"] }

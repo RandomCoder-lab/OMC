@@ -1,24 +1,18 @@
-[package]
-name = "omnimcode"
+[workspace]
+members = [
+    "omnimcode-core",
+    "omnimcode-ffi",
+    "omnimcode-python"
+]
+resolver = "2"
+
+[workspace.package]
 version = "1.0.0"
 edition = "2021"
 authors = ["The Architect <architect@sovereign-lattice.io>"]
-description = "OMNIcode - Standalone Harmonic Computing Language Compiler & Runtime"
-readme = "BUILD.md"
 license = "MIT"
 
-[[bin]]
-name = "standalone"
-path = "src/main.rs"
-
-[lib]
-path = "src/lib.rs"
-
-
-[dependencies]
-regex = "1.10"
-thiserror = "1.0"
-
+# Shared profile settings for all workspace members
 [profile.release]
 opt-level = 3
 lto = "fat"
@@ -27,11 +21,3 @@ strip = true
 
 [profile.dev]
 opt-level = 1
-
-[dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
-
-[[bench]]
-name = "genetic_algorithm_bench"
-harness = false
-

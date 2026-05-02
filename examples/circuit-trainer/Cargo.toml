@@ -1,0 +1,23 @@
+[package]
+name = "circuit-trainer"
+version = "1.0.0"
+edition = "2021"
+authors = ["Sovereign Lattice <architect@sovereign-lattice.io>"]
+description = "Interactive circuit evolution trainer - learn how genetic algorithms work"
+
+[[bin]]
+name = "circuit-trainer"
+path = "src/main.rs"
+
+[dependencies]
+omnimcode-core = { path = "../../omnimcode-core" }
+
+[dev-dependencies]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+
+[workspace]
