@@ -1,0 +1,62 @@
+name: OMC CI/CD
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnai/rust-toolchain@stable
+        with:
+          toolchain: stable
+      
+      - name: Build workspace
+        run: cargo build --release --workspace
+      
+      - name: Run tests
+        run: cargo test --workspace
+      
+      - name: Upload FFI binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: libomnimcode_ffi.so
+          path: target/release/libomnimcode_ffi.so
+      
+      - name: Upload core binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: omnimcode-core
+          path: target/release/omnimcode-core
+
+  package-unity:
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Download FFI binary
+        uses: actions/download-artifact@v4
+        with:
+          name: libomnimcode_ffi.so
+          path: packages/OMNIcode-Unity/Runtime/Plugins/x86_64/
+      
+      - name: Create Unity package
+        run: |
+          cd packages
+          zip -r OMNIcode-Unity.unitypackage OMNIcode-Unity/
+      
+      - name: Upload Unity package
+        uses: actions/upload-artifact@v4
+        with:
+          name: OMNIcode-Unity-Package
+          path: packages/OMNIcode-Unity.unitypackage
