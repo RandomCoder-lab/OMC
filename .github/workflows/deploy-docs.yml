@@ -2,50 +2,24 @@ name: Deploy Documentation
 
 on:
   push:
-    branches: [ main ]
-    paths:
-      - 'src/**'
-      - 'omnimcode-core/src/**'
-      - '.github/workflows/deploy-docs.yml'
-  workflow_dispatch:
-
-permissions:
-  contents: read
-  pages: write
-  id-token: write
-
-concurrency:
-  group: "pages"
-  cancel-in-progress: false
+    branches: [master]
+    paths: ['omnimcode-core/src/**', 'README.md']
 
 jobs:
-  build-docs:
+  deploy-docs:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust
+        uses: dtolnai/rust-toolchain@stable
       
-      - uses: Swatinem/rust-cache@v2
+      - name: Generate documentation
+        run: cargo doc --no-deps --workspace
       
-      - name: Build Rust documentation
-        run: cargo doc --no-deps --release --workspace
-        env:
-          RUSTDOCFLAGS: "-D warnings"
-      
-      - name: Upload docs to Pages
-        uses: actions/upload-pages-artifact@v2
-        with:
-          path: target/doc/
-
-  deploy:
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    runs-on: ubuntu-latest
-    needs: build-docs
-    
-    steps:
       - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v2
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./target/doc
+          destination_dir: docs

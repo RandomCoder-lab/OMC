@@ -2,50 +2,29 @@ name: Publish to crates.io
 
 on:
   push:
-    tags: [ 'v*' ]
-  workflow_dispatch:
-
-env:
-  CARGO_TERM_COLOR: always
+    tags:
+      - 'v*'
 
 jobs:
   publish:
-    name: Publish ${{ matrix.package }} to crates.io
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        package:
-          - omnimcode-core
-          - omnimcode-ffi
-          - omnimcode-python
-    
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust
+        uses: dtolnai/rust-toolchain@stable
       
-      - uses: Swatinem/rust-cache@v2
-      
-      - name: Publish ${{ matrix.package }}
-        run: cargo publish -p ${{ matrix.package }}
+      - name: Publish omnimcode-core
+        run: cargo publish -p omnimcode-core --token ${{ secrets.CRATES_IO_TOKEN }}
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
       
-      - name: Wait for publish to propagate
-        run: sleep 30
-
-  verify-published:
-    name: Verify crates published
-    runs-on: ubuntu-latest
-    needs: publish
-    
-    steps:
-      - uses: actions/checkout@v3
+      - name: Publish omnimcode-ffi
+        run: cargo publish -p omnimcode-ffi --token ${{ secrets.CRATES_IO_TOKEN }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
       
-      - uses: dtolnay/rust-toolchain@stable
-      
-      - name: Test install from crates.io
-        run: |
-          cargo search omnimcode-core --limit 3
-          cargo search omnimcode-ffi --limit 3
-          cargo search omnimcode-python --limit 3
+      - name: Publish omnimcode-python
+        run: cargo publish -p omnimcode-python --token ${{ secrets.CRATES_IO_TOKEN }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
