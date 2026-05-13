@@ -1,0 +1,15 @@
+# Unity auto-generated caches and outputs (never commit these)
+examples/game-ai-demo/Library/
+examples/game-ai-demo/Temp/
+examples/game-ai-demo/Obj/
+examples/game-ai-demo/Build/
+examples/game-ai-demo/Builds/
+examples/game-ai-demo/Logs/
+examples/game-ai-demo/UserSettings/
+examples/game-ai-demo/MemoryCaptures/
+
+# Local Claude Code session state
+.claude/
+
+# OMC consolidation safety net (orphaned src/ tree, kept locally only)
+src.deleted.bak/
