@@ -6,11 +6,11 @@ BUILD.md - OMNIcode Standalone Binary Build & Usage
 ```bash
 cd /home/thearchitect/OMC
 cargo build --release
-./target/release/standalone examples/fibonacci.omc
+./target/release/omnimcode-standalone examples/fibonacci.omc
 ```
 
-The binary is at: `/home/thearchitect/OMC/target/release/standalone`
-Size: ~502 KB, fully self-contained, no runtime dependencies.
+The binary is at: `/home/thearchitect/OMC/target/release/omnimcode-standalone`
+Size: ~544 KB, fully self-contained, no runtime dependencies.
 
 ---
 
@@ -27,7 +27,7 @@ Size: ~502 KB, fully self-contained, no runtime dependencies.
 ```bash
 cd /home/thearchitect/OMC
 cargo build --release
-# Binary: target/release/standalone
+# Binary: target/release/omnimcode-standalone
 ```
 
 **Debug Binary (slower, more symbols):**
@@ -44,11 +44,11 @@ cargo build --release
 
 **Size:**
 ```bash
-ls -lh target/release/standalone
-# 502 KB (stripped)
+ls -lh target/release/omnimcode-standalone
+# 544 KB (stripped)
 
-strip target/release/standalone
-# Still 502 KB (already stripped)
+strip target/release/omnimcode-standalone
+# Still 544 KB (already stripped)
 ```
 
 ### Build Time
@@ -62,7 +62,7 @@ strip target/release/standalone
 
 ### REPL Mode (Interactive)
 ```bash
-./target/release/standalone
+./target/release/omnimcode-standalone
 ```
 
 Starts an interactive shell:
@@ -84,7 +84,7 @@ Commands:
 
 ### File Mode (Script Execution)
 ```bash
-./target/release/standalone program.omc
+./target/release/omnimcode-standalone program.omc
 ```
 
 Example program:
@@ -99,14 +99,14 @@ print fib(10);
 
 Run:
 ```bash
-./target/release/standalone fibonacci.omc
+./target/release/omnimcode-standalone fibonacci.omc
 # Output: 55
 ```
 
 ### Batch Execution
 ```bash
 for file in examples/*.omc; do
-    ./target/release/standalone "$file"
+    ./target/release/omnimcode-standalone "$file"
 done
 ```
 
@@ -181,7 +181,7 @@ cargo test --release test_fibonacci_search_found -- --exact
 
 ### Cache Configuration
 
-Edit `src/phi_disk.rs` to adjust capacities:
+Edit `omnimcode-core/src/phi_disk.rs` to adjust capacities:
 
 ```rust
 pub fn create_fitness_cache() -> FitnessCache {
@@ -260,8 +260,8 @@ RUST_LOG=debug cargo run --release examples/test.omc
 
 ### Backtrace on Panic
 ```bash
-RUST_BACKTRACE=1 ./target/release/standalone program.omc
-RUST_BACKTRACE=full ./target/release/standalone program.omc  # More verbose
+RUST_BACKTRACE=1 ./target/release/omnimcode-standalone program.omc
+RUST_BACKTRACE=full ./target/release/omnimcode-standalone program.omc  # More verbose
 ```
 
 ### Assembly Inspection
@@ -272,7 +272,7 @@ cargo rustc --release -- --emit asm
 
 ### Profiling (Linux perf)
 ```bash
-perf record ./target/release/standalone program.omc
+perf record ./target/release/omnimcode-standalone program.omc
 perf report
 ```
 
@@ -309,7 +309,7 @@ Then: `chmod +x .git/hooks/pre-commit`
 ### "Finished after 0.00s" (Nothing Built)
 Cargo thinks everything is up-to-date. Force rebuild:
 ```bash
-touch src/main.rs
+touch omnimcode-core/src/main.rs
 cargo build --release
 ```
 
@@ -334,8 +334,8 @@ cargo test --release -- --test-threads=1
 ### Binary Won't Execute
 Check permissions:
 ```bash
-chmod +x target/release/standalone
-./target/release/standalone
+chmod +x target/release/omnimcode-standalone
+./target/release/omnimcode-standalone
 ```
 
 ---
@@ -345,14 +345,14 @@ chmod +x target/release/standalone
 ### Standalone Executable
 The binary is fully standalone:
 ```bash
-cp target/release/standalone /usr/local/bin/omnimcode
+cp target/release/omnimcode-standalone /usr/local/bin/omnimcode
 omnimcode examples/fibonacci.omc
 ```
 
 No additional files needed.
 
 ### Shrinking Binary
-Current: 502 KB
+Current: 544 KB
 Strip symbols (already done in release mode)
 Use `cargo-strip` if available:
 ```bash
@@ -430,11 +430,11 @@ cargo clippy --release
 ## Summary
 
 - **Build:** `cargo build --release`
-- **Run:** `./target/release/standalone program.omc`
+- **Run:** `./target/release/omnimcode-standalone program.omc`
 - **Test:** `cargo test --release`
-- **Binary:** Single 502 KB ELF executable, fully standalone
+- **Binary:** Single 544 KB ELF executable, fully standalone
 - **Features:** Tier 1-4 complete (circuit design, GA, optimization, caching)
-- **Quality:** 49/49 tests passing, documented, production-ready
+- **Quality:** 72/72 tests passing, documented, production-ready
 
 For questions or issues, see the inline documentation in source files or
 the TIER_4_COMPLETE.md summary.

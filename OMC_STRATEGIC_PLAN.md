@@ -16,8 +16,8 @@ OMNIcode has evolved from a harmonic computing interpreter (v1.0) to a fully nat
 - **Advanced transpiler and optimizer** (Tier 2–3)
 - **Harmonic integer processors** with band tracking (Tier 2+)
 - **LRU caching and Fibonacci search optimization** (Tier 4)
-- **502 KB zero-dependency native binary**
-- **49/49 production-ready tests**
+- **544 KB zero-dependency native binary**
+- **72/72 production-ready tests**
 
 This strategic plan identifies three major opportunity vectors:
 
@@ -208,7 +208,7 @@ Current OMNIcode is CLI-based. A web UI enables non-technical users (traders, bi
 
 **Current Codebase Health**:
 - ✅ Zero external dependencies (Rust std only)
-- ✅ 49/49 tests passing
+- ✅ 72/72 tests passing
 - ✅ Well-documented (50+ KB of docs)
 - ✅ Modular architecture (10 source files, clean separation)
 - ⚠️ No continuous integration (GitHub Actions could auto-test on push)
@@ -233,7 +233,7 @@ Current OMNIcode is CLI-based. A web UI enables non-technical users (traders, bi
 The embedded ML market is projected to grow 35% annually (2023–2028), driven by IoT, smartwatches, and automotive. Models must fit in <1 MB RAM and run in <100 ms.
 
 **Why OMNIcode Fits**:
-- 502 KB binary (single executable)
+- 544 KB binary (single executable)
 - 0.001 µs/gate evaluation (ultra-low latency)
 - Evolves interpretable circuits (vs. black-box neural nets)
 - No floating-point arithmetic required (works on 8-bit microcontrollers)
@@ -689,7 +689,7 @@ Network intrusion detection is a $15B+ market. Traditional approaches (Snort, Ze
 |----------|-----------|-----------|-------------------|
 | **Genetic Programming (Gplearn, DEAP)** | Python, mature, easy to use | Slow (interpreted), bloated dependencies | 100× faster, zero deps, native binary |
 | **Cartesian GP (CGP)** | Efficient circuit representation | Limited to grid topology | Full DAG support, more expressive |
-| **TensorFlow/PyTorch** | Powerful, mature ecosystem | Black box, heavy (100s MB), not interpretable | Human-readable, tiny (502 KB), explainable |
+| **TensorFlow/PyTorch** | Powerful, mature ecosystem | Black box, heavy (100s MB), not interpretable | Human-readable, tiny (544 KB), explainable |
 | **FPGA HLS (Xilinx, Altera)** | Direct hardware deployment | Steep learning curve, expensive CAD tools | Much simpler, free, portable |
 | **GAMA (Game AI)** | Designed for games | Proprietary, closed-source | Open-source, community-driven |
 | **Suricata/Snort** (Cybersecurity) | Industry standard | Hand-crafted rules, slow adaptation | Automated rule evolution, adaptive |

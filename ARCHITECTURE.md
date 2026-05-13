@@ -6,7 +6,7 @@ The standalone OMNIcode executable is a complete self-hosting compiler and inter
 
 ## Component Architecture
 
-### 1. Lexer (`src/parser.rs` - Lines 60-330)
+### 1. Lexer (`omnimcode-core/src/parser.rs` - Lines 60-330)
 
 **Purpose**: Convert raw source code into tokens
 
@@ -37,7 +37,7 @@ pub enum Token {
 
 **Performance**: O(n) where n = source length, single pass
 
-### 2. Parser (`src/parser.rs` - Lines 330-850)
+### 2. Parser (`omnimcode-core/src/parser.rs` - Lines 330-850)
 
 **Purpose**: Convert token stream into Abstract Syntax Tree (AST)
 
@@ -80,7 +80,7 @@ pub enum Expression {
 - Support for nested structures (blocks, functions, arrays)
 - Harmonic operation support (`res()`, `fold()`)
 
-### 3. Interpreter (`src/interpreter.rs` - Lines 1-520)
+### 3. Interpreter (`omnimcode-core/src/interpreter.rs` - Lines 1-520)
 
 **Purpose**: Execute AST statements and evaluate expressions
 
@@ -125,7 +125,7 @@ Expression::Fold(e) => {
 }
 ```
 
-### 4. Runtime Value Types (`src/value.rs` - Lines 1-240)
+### 4. Runtime Value Types (`omnimcode-core/src/value.rs` - Lines 1-240)
 
 **Purpose**: Define core data types and operations
 
@@ -201,7 +201,7 @@ pub enum Value {
 - `arr_max(arr)` → HInt
 - [And 26 more...]
 
-### 6. Entry Point (`src/main.rs`)
+### 6. Entry Point (`omnimcode-core/src/main.rs`)
 
 **Modes**:
 
@@ -359,19 +359,19 @@ Statement::Print(
 ## Future Extensibility
 
 ### Adding New Built-in Function
-1. Define in `src/interpreter.rs` `call_function()` match block
+1. Define in `omnimcode-core/src/interpreter.rs` `call_function()` match block
 2. Add test case
 3. Recompile: `cargo build --release`
 
 ### Adding New Language Feature
-1. Add AST node in `src/ast.rs`
-2. Add lexer token in `src/parser.rs` Token enum
+1. Add AST node in `omnimcode-core/src/ast.rs`
+2. Add lexer token in `omnimcode-core/src/parser.rs` Token enum
 3. Add parser rule in Parser impl
 4. Add interpreter handler in Interpreter impl
 5. Test with .omc program
 
 ### Adding New Value Type
-1. Define struct in `src/value.rs`
+1. Define struct in `omnimcode-core/src/value.rs`
 2. Implement Display and conversion methods
 3. Add to Value enum
 4. Update interpreter matching
@@ -399,4 +399,4 @@ Statement::Print(
 
 **Architecture Version**: 1.0  
 **Last Updated**: April 30, 2026  
-**Total Lines of Code**: ~1,800 (Rust)
+**Total Lines of Code**: ~5,868 (Rust)

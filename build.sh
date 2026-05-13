@@ -32,10 +32,14 @@ echo
 echo "✅ Build complete!"
 echo
 
-cp target/release/standalone standalone.omc
+# standalone.omc is a symlink to target/release/omnimcode-standalone — refresh if missing
+if [ ! -L standalone.omc ] || [ ! -e standalone.omc ]; then
+    rm -f standalone.omc
+    ln -s target/release/omnimcode-standalone standalone.omc
+fi
 echo "📋 Binary details:"
 ls -lh standalone.omc
-file standalone.omc
+file -L standalone.omc
 echo
 
 # Run tests

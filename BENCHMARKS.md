@@ -101,4 +101,4 @@ cargo bench --bench genetic_algorithm_bench -- --verbose
 
 - Criterion.rs: https://github.com/bheisler/criterion.rs
 - DEAP (Distributed Evolutionary Algorithms in Python): http://deap.readthedocs.io/
-- OMNIcode: `target/release/standalone`
+- OMNIcode: `target/release/omnimcode-standalone`

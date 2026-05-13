@@ -29,6 +29,28 @@ pub enum Gate {
     
     /// NOT: logical negation
     Not { input: GateId },
+
+    /// FloatConstant: hardcoded float value (for continuous gates)
+    FloatConstant { value: f64 },
+
+    /// FloatInput: references a continuous input by index (separate from bool inputs)
+    FloatInput { index: usize },
+
+    /// FloatWeightedSum: Σ(wi * xi) — weighted sum for attention scoring
+    /// Stores (weight_gate_id, input_gate_id) pairs for dot-product computation
+    FloatWeightedSum { terms: Vec<(GateId, GateId)> },
+
+    /// Sigmoid: σ(x) = 1 / (1 + e^(-x)), with configurable steepness
+    Sigmoid { input: GateId, steepness: f64 },
+
+    /// FloatMultiply: element-wise float multiplication (scalar)
+    FloatMultiply { left: GateId, right: GateId },
+
+    /// FloatAdd: float addition
+    FloatAdd { left: GateId, right: GateId },
+
+    /// PhiFold: fold a float value through golden ratio harmonics
+    PhiFold { input: GateId, depth: usize },
 }
 
 /// A genetic logic circuit - a DAG of gates with single output
@@ -138,6 +160,15 @@ impl Circuit {
                 else_gate,
             } => vec![*condition, *then_gate, *else_gate],
             Gate::Not { input } => vec![*input],
+            Gate::FloatWeightedSum { terms } => {
+                let mut ids: Vec<GateId> = Vec::new();
+                for &(w, i) in terms { ids.push(w); ids.push(i); }
+                ids
+            }
+            Gate::Sigmoid { input, .. } => vec![*input],
+            Gate::FloatMultiply { left, right } => vec![*left, *right],
+            Gate::FloatAdd { left, right } => vec![*left, *right],
+            Gate::PhiFold { input, .. } => vec![*input],
             _ => vec![],
         };
 
@@ -200,6 +231,14 @@ impl Circuit {
                 }
             }
             Gate::XElse { default_value } => *default_value,
+            // Float gates: use 0.5 as boolean threshold
+            Gate::FloatConstant { value } => *value >= 0.5,
+            Gate::FloatInput { index: _ } => false, // no float inputs in bool mode
+            Gate::FloatWeightedSum { terms: _ } => false,
+            Gate::Sigmoid { input: _, steepness: _ } => false,
+            Gate::FloatMultiply { left: _, right: _ } => false,
+            Gate::FloatAdd { left: _, right: _ } => false,
+            Gate::PhiFold { input: _, depth: _ } => false,
         };
 
         cache.insert(gate_id, result);
@@ -274,6 +313,43 @@ impl Circuit {
             Gate::XElse { default_value } => {
                 if *default_value { 1.0 } else { 0.0 }
             }
+            // Float gates: full continuous support
+            Gate::FloatConstant { value } => *value,
+            Gate::FloatInput { index } => {
+                if *index < inputs.len() {
+                    inputs[*index]
+                } else {
+                    0.0
+                }
+            }
+            Gate::FloatWeightedSum { terms } => {
+                let mut sum = 0.0;
+                for &(weight_id, input_id) in terms {
+                    let w = self.eval_gate_soft(weight_id, inputs, cache);
+                    let x = self.eval_gate_soft(input_id, inputs, cache);
+                    sum += w * x;
+                }
+                sum
+            }
+            Gate::Sigmoid { input, steepness } => {
+                let x = self.eval_gate_soft(*input, inputs, cache);
+                1.0 / (1.0 + (-steepness * x).exp())
+            }
+            Gate::FloatMultiply { left, right } => {
+                self.eval_gate_soft(*left, inputs, cache) * self.eval_gate_soft(*right, inputs, cache)
+            }
+            Gate::FloatAdd { left, right } => {
+                self.eval_gate_soft(*left, inputs, cache) + self.eval_gate_soft(*right, inputs, cache)
+            }
+            Gate::PhiFold { input, depth } => {
+                let x = self.eval_gate_soft(*input, inputs, cache);
+                // Golden ratio folding: x -> x * phi mod 1, repeated depth times
+                let mut folded = x;
+                for _ in 0..*depth {
+                    folded = (folded * 1.6180339887498948482).fract();
+                }
+                folded
+            }
         };
 
         cache.insert(gate_id, result);
@@ -298,6 +374,13 @@ impl Circuit {
                 Gate::Not { .. } => "NOT".to_string(),
                 Gate::XIf { .. } => "xIF".to_string(),
                 Gate::XElse { .. } => "xELSE".to_string(),
+                Gate::FloatConstant { value } => format!("FloatConst({:.3})", value),
+                Gate::FloatInput { index } => format!("FloatInput({})", index),
+                Gate::FloatWeightedSum { .. } => "FloatWeightedSum".to_string(),
+                Gate::Sigmoid { steepness, .. } => format!("Sigmoid(k={:.2})", steepness),
+                Gate::FloatMultiply { .. } => "FloatMul".to_string(),
+                Gate::FloatAdd { .. } => "FloatAdd".to_string(),
+                Gate::PhiFold { depth, .. } => format!("PhiFold(d={})", depth),
             };
 
             let shape = if id == self.output {
@@ -379,6 +462,21 @@ impl Circuit {
                 cond_depth.max(then_depth).max(else_depth)
             }
             Gate::Not { input } => self.compute_depth_recursive(*input, depths),
+            Gate::FloatWeightedSum { terms } => {
+                let mut max_d = 0;
+                for &(w, i) in terms {
+                    max_d = max_d.max(self.compute_depth_recursive(w, depths))
+                        .max(self.compute_depth_recursive(i, depths));
+                }
+                max_d
+            }
+            Gate::Sigmoid { input, .. } | Gate::PhiFold { input, .. } => {
+                self.compute_depth_recursive(*input, depths)
+            }
+            Gate::FloatMultiply { left, right } | Gate::FloatAdd { left, right } => {
+                self.compute_depth_recursive(*left, depths)
+                    .max(self.compute_depth_recursive(*right, depths))
+            }
             _ => 0,
         };
 
@@ -398,6 +496,13 @@ impl Circuit {
                 Gate::Constant { .. } => "Const",
                 Gate::Input { .. } => "Input",
                 Gate::XElse { .. } => "xELSE",
+                Gate::FloatConstant { .. } => "FloatConst",
+                Gate::FloatInput { .. } => "FloatInput",
+                Gate::FloatWeightedSum { .. } => "FloatWeightedSum",
+                Gate::Sigmoid { .. } => "Sigmoid",
+                Gate::FloatMultiply { .. } => "FloatMul",
+                Gate::FloatAdd { .. } => "FloatAdd",
+                Gate::PhiFold { .. } => "PhiFold",
             };
             *hist.entry(gate_type.to_string()).or_insert(0) += 1;
         }
@@ -512,5 +617,104 @@ mod tests {
         assert!(dot.contains("digraph Circuit"));
         assert!(dot.contains("xAND"));
         assert!(dot.contains("Input(0)"));
+    }
+
+    #[test]
+    fn test_float_weighted_sum() {
+        let mut c = Circuit::new(2);
+        let i0 = c.add_gate(Gate::FloatInput { index: 0 });
+        let i1 = c.add_gate(Gate::FloatInput { index: 1 });
+        let w0 = c.add_gate(Gate::FloatConstant { value: 0.5 });
+        let w1 = c.add_gate(Gate::FloatConstant { value: 0.5 });
+        let sum = c.add_gate(Gate::FloatWeightedSum {
+            terms: vec![(w0, i0), (w1, i1)],
+        });
+        c.output = sum;
+
+        let result = c.eval_soft(&[0.4, 0.6]);
+        assert!((result - 0.5).abs() < 0.01); // 0.5*0.4 + 0.5*0.6 = 0.5
+    }
+
+    #[test]
+    fn test_sigmoid_gate() {
+        let mut c = Circuit::new(1);
+        let i0 = c.add_gate(Gate::FloatInput { index: 0 });
+        let sig = c.add_gate(Gate::Sigmoid { input: i0, steepness: 1.0 });
+        c.output = sig;
+
+        let result = c.eval_soft(&[0.0]);
+        assert!((result - 0.5).abs() < 0.01); // sigmoid(0) = 0.5
+
+        let result2 = c.eval_soft(&[10.0]);
+        assert!(result2 > 0.99); // sigmoid(10) ≈ 1.0
+    }
+
+    #[test]
+    fn test_float_multiply() {
+        let mut c = Circuit::new(2);
+        let i0 = c.add_gate(Gate::FloatInput { index: 0 });
+        let i1 = c.add_gate(Gate::FloatInput { index: 1 });
+        let mul = c.add_gate(Gate::FloatMultiply { left: i0, right: i1 });
+        c.output = mul;
+
+        let result = c.eval_soft(&[0.5, 0.8]);
+        assert!((result - 0.4).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_float_add() {
+        let mut c = Circuit::new(2);
+        let i0 = c.add_gate(Gate::FloatInput { index: 0 });
+        let i1 = c.add_gate(Gate::FloatInput { index: 1 });
+        let add = c.add_gate(Gate::FloatAdd { left: i0, right: i1 });
+        c.output = add;
+
+        let result = c.eval_soft(&[0.3, 0.7]);
+        assert!((result - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_phi_fold() {
+        let mut c = Circuit::new(1);
+        let i0 = c.add_gate(Gate::FloatInput { index: 0 });
+        let folded = c.add_gate(Gate::PhiFold { input: i0, depth: 2 });
+        c.output = folded;
+
+        let result = c.eval_soft(&[0.7]);
+        assert!(result >= 0.0 && result <= 1.0);
+    }
+
+    #[test]
+    fn test_float_circuit_depth() {
+        let mut c = Circuit::new(2);
+        let i0 = c.add_gate(Gate::FloatInput { index: 0 });
+        let i1 = c.add_gate(Gate::FloatInput { index: 1 });
+        let w0 = c.add_gate(Gate::FloatConstant { value: 1.0 });
+        let w1 = c.add_gate(Gate::FloatConstant { value: 1.0 });
+        let sum = c.add_gate(Gate::FloatWeightedSum {
+            terms: vec![(w0, i0), (w1, i1)],
+        });
+        let sig = c.add_gate(Gate::Sigmoid { input: sum, steepness: 1.0 });
+        c.output = sig;
+
+        let m = c.metrics();
+        assert_eq!(m.depth, 3); // input -> weighted_sum -> sigmoid
+    }
+
+    #[test]
+    fn test_float_circuit_histogram() {
+        let mut c = Circuit::new(2);
+        let i0 = c.add_gate(Gate::FloatInput { index: 0 });
+        let _i1 = c.add_gate(Gate::FloatInput { index: 1 });
+        let _w = c.add_gate(Gate::FloatConstant { value: 1.0 });
+        let _sum = c.add_gate(Gate::FloatWeightedSum {
+            terms: vec![(2, i0)],
+        });
+        c.output = i0;
+
+        let m = c.metrics();
+        assert_eq!(m.gate_histogram.get("FloatInput"), Some(&2));
+        assert_eq!(m.gate_histogram.get("FloatConst"), Some(&1));
+        assert_eq!(m.gate_histogram.get("FloatWeightedSum"), Some(&1));
     }
 }

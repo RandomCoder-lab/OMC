@@ -68,7 +68,7 @@ Execution:
 
 ## MODULE BREAKDOWN
 
-### 1. `src/main.rs` - Entry Point (127 lines)
+### 1. `omnimcode-core/src/main.rs` - Entry Point (127 lines)
 
 **Responsibility**: Program entry, REPL, file execution
 
@@ -84,7 +84,7 @@ Execution:
 
 ---
 
-### 2. `src/parser.rs` - Lexer & Parser (850 lines)
+### 2. `omnimcode-core/src/parser.rs` - Lexer & Parser (850 lines)
 
 **Responsibility**: Text → AST conversion
 
@@ -151,7 +151,7 @@ Primary (literals, variables, function calls)
 
 ---
 
-### 3. `src/ast.rs` - Type Definitions (120 lines)
+### 3. `omnimcode-core/src/ast.rs` - Type Definitions (120 lines)
 
 **Responsibility**: AST node types for parser output
 
@@ -174,7 +174,7 @@ pub enum ForIterable { ... } // Range or Array
 
 ---
 
-### 4. `src/value.rs` - Type System (250 lines)
+### 4. `omnimcode-core/src/value.rs` - Type System (250 lines)
 
 **Responsibility**: Runtime value representation
 
@@ -218,7 +218,7 @@ pub struct HArray {
 
 ---
 
-### 5. `src/circuits.rs` - Genetic Circuits (540 lines)
+### 5. `omnimcode-core/src/circuits.rs` - Genetic Circuits (540 lines)
 
 **Responsibility**: Logic gates, circuit evaluation, DAG operations
 
@@ -268,7 +268,7 @@ pub fn eval_soft(&self, inputs: &[f64]) -> f64 {
 
 ---
 
-### 6. `src/evolution.rs` - Genetic Operators (360 lines)
+### 6. `omnimcode-core/src/evolution.rs` - Genetic Operators (360 lines)
 
 **Responsibility**: Mutation, crossover, fitness, GA framework
 
@@ -321,7 +321,7 @@ pub type TestCase = (Vec<bool>, bool);
 
 ---
 
-### 7. `src/interpreter.rs` - Execution Engine (520 lines)
+### 7. `omnimcode-core/src/interpreter.rs` - Execution Engine (520 lines)
 
 **Responsibility**: AST traversal, scope management, function calls
 
@@ -371,7 +371,7 @@ Each function call pushes a scope, pops on return.
 
 ---
 
-### 8. `src/runtime/stdlib.rs` - Standard Library (309 lines)
+### 8. `omnimcode-core/src/runtime/stdlib.rs` - Standard Library (309 lines)
 
 **Responsibility**: Built-in function implementations
 
@@ -553,7 +553,7 @@ Generate Rust → Compile to .so/.dll → Load dynamically
 
 **Example**: Add `circuit_print_stats(circuit) → String`
 
-**Step 1**: Add test in `src/circuits.rs`
+**Step 1**: Add test in `omnimcode-core/src/circuits.rs`
 ```rust
 #[test]
 fn test_circuit_stats() {
@@ -567,7 +567,7 @@ fn test_circuit_stats() {
 }
 ```
 
-**Step 2**: Implement in `src/circuits.rs`
+**Step 2**: Implement in `omnimcode-core/src/circuits.rs`
 ```rust
 pub fn print_stats(&self) -> String {
     let m = self.metrics();
@@ -576,7 +576,7 @@ pub fn print_stats(&self) -> String {
 }
 ```
 
-**Step 3**: Add function handler in `src/interpreter.rs`
+**Step 3**: Add function handler in `omnimcode-core/src/interpreter.rs`
 ```rust
 fn call_function(&mut self, name: &str, args: &[Expression]) 
     -> Result<Value, String> {
@@ -611,7 +611,7 @@ cargo build --release
 
 **Example**: Add `Multiplexer { selector: GateId, options: Vec<GateId> }`
 
-**Step 1**: Update `src/circuits.rs` Gate enum
+**Step 1**: Update `omnimcode-core/src/circuits.rs` Gate enum
 ```rust
 pub enum Gate {
     // ...existing...
@@ -945,7 +945,7 @@ This guide covers the essentials of extending OMNIcode:
 - Common mistakes to avoid
 
 **Next Steps**:
-1. Study `src/circuits.rs` to understand gate types
+1. Study `omnimcode-core/src/circuits.rs` to understand gate types
 2. Implement a simple new built-in function
 3. Write tests for your changes
 4. Profile and optimize hotspots

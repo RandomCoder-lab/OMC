@@ -17,8 +17,8 @@
 ### 🔧 For Developers
 **Read in this order**:
 1. **DEVELOPER.md** - Complete architecture guide (30 min)
-2. **src/circuits.rs** - Gate implementations (20 min)
-3. **src/evolution.rs** - Genetic operators (15 min)
+2. **omnimcode-core/src/circuits.rs** - Gate implementations (20 min)
+3. **omnimcode-core/src/evolution.rs** - Genetic operators (15 min)
 
 ### 📊 For Project Managers
 **Read in this order**:
@@ -69,69 +69,76 @@
 
 ## SOURCE CODE FILES
 
+All canonical source lives under `omnimcode-core/src/`. The standalone CLI binary, the C FFI (`omnimcode-ffi`), the Python module (`omnimcode-python`), and the Godot GDExtension all consume this one crate.
+
 ### Circuit Engine
 
 ```
-src/circuits.rs           540 lines    Gate definitions & evaluation
+omnimcode-core/src/circuits.rs           720 lines    Gate definitions & evaluation
 ```
 
 **Contents**:
-- 7 gate types enum
+- 14 gate types (Boolean: XAnd/XOr/XIf/XElse/Input/Constant/Not; Float: FloatConstant/FloatInput/FloatWeightedSum/Sigmoid/FloatMultiply/FloatAdd/PhiFold)
 - Circuit struct (DAG)
 - Hard evaluation (Boolean)
-- Soft evaluation (Probabilistic)
+- Soft evaluation (Probabilistic, plus continuous for float gates)
 - Validation & analysis
 - Graphviz export
-- 6 unit tests
+- 13 unit tests
 
 ### Genetic Algorithm
 
 ```
-src/evolution.rs          360 lines    Genetic operators & GA
+omnimcode-core/src/evolution.rs          449 lines    Genetic operators & GA
 ```
 
 **Contents**:
-- Mutation operator
+- Mutation operator (Boolean + Float gate aware)
 - Crossover operator
 - Fitness evaluation
 - Tournament selection
 - GA loop
-- Random circuit generation
-- 3 unit tests
+- Random circuit generation (5 gate-type seed: XAnd, XOr, Not, Sigmoid, PhiFold)
+- 6 unit tests
 
 ### Integration & Core
 
 ```
-src/interpreter.rs        518 lines    Execution engine
-src/parser.rs             836 lines    Lexer & parser
-src/value.rs              278 lines    Type system
-src/ast.rs                146 lines    AST definitions
-src/main.rs               121 lines    Entry point
-src/runtime/stdlib.rs      15 lines    Standard library
-src/runtime/mod.rs          3 lines    Runtime module
+omnimcode-core/src/interpreter.rs        740 lines    Execution engine
+omnimcode-core/src/parser.rs           1,240 lines    Lexer & parser (incl. phi.X module-qualified calls)
+omnimcode-core/src/value.rs              298 lines    Type system (HInt, HFloat, Resonance)
+omnimcode-core/src/ast.rs                170 lines    AST definitions
+omnimcode-core/src/circuit_dsl.rs        556 lines    Circuit DSL & transpiler
+omnimcode-core/src/optimizer.rs          667 lines    Constant folding / algebraic simplification
+omnimcode-core/src/hbit.rs               314 lines    Dual-band HBit processor
+omnimcode-core/src/phi_disk.rs           255 lines    LRU cache w/ FNV-1a hashing (see HONEST_REVISION)
+omnimcode-core/src/phi_pi_fib.rs         287 lines    Fibonacci search (slower than binary — see HONEST_REVISION)
+omnimcode-core/src/main.rs               115 lines    Entry point
+omnimcode-core/src/runtime/stdlib.rs      39 lines    Standard library
+omnimcode-core/src/runtime/mod.rs          3 lines    Runtime module
+omnimcode-core/src/lib.rs                 15 lines    Crate root
 ```
 
-**Total Source**: 2,765 lines of Rust code
+**Total Source**: ~5,868 lines of Rust code
 
 ---
 
 ## EXECUTABLE
 
 ```
-standalone.omc           502 KB      Native binary (ELF 64-bit)
+standalone.omc           symlink → target/release/omnimcode-standalone (~544 KB)
 ```
 
 **Capabilities**:
 - Execute .omc programs
 - Interactive REPL
-- 68+ built-in functions
-- 9 circuit functions
+- ~24 stdlib functions (`fibonacci`, `is_fibonacci`, `pow`, `sqrt`, `log`, `sin`, `cos`, `tan`, `abs`, `floor`, `round`, `clamp`, `frac`, `int`, `float`, `str_len`, `str_concat`, `str_uppercase`, `str_lowercase`, `arr_new`, `arr_from_range`, `arr_len`, `arr_sum`, `arr_push`) plus `res()`/`fold()` special forms and `phi.X` module-qualified aliases
 - Hard & soft evaluation
 
 **Performance**:
 - Startup: <1ms
 - Circuit eval: 0.12 ns/gate
-- Build time: 4.1 seconds
+- Build time: ~7s clean
 
 ---
 
@@ -170,10 +177,9 @@ cd /home/thearchitect/OMC && cargo build --release
 
 ### Code
 
-- **New lines**: 970 (circuits + evolution)
-- **New modules**: 2 (circuits.rs, evolution.rs)
-- **Total lines**: 2,765
-- **Test count**: 17 (100% pass)
+- **Total lines**: ~5,868 (across all modules in `omnimcode-core/`)
+- **Workspace crates**: 4 (`omnimcode-core`, `omnimcode-ffi`, `omnimcode-python`, plus the standalone bin defined inside core)
+- **Test count**: **72 (100% pass)** — 68 core + 1 standalone + 2 FFI + 1 Python
 - **Regressions**: 0
 
 ### Performance
@@ -186,7 +192,7 @@ cd /home/thearchitect/OMC && cargo build --release
 
 ### Quality
 
-- **Test pass rate**: 100% (17/17)
+- **Test pass rate**: 100% (72/72)
 - **Backward compat**: 100%
 - **Code coverage**: ~95%
 - **Tech debt**: None
@@ -246,7 +252,7 @@ cd /home/thearchitect/OMC
 cargo build --release
 ```
 
-**Result**: `target/release/standalone` (502 KB)
+**Result**: `target/release/omnimcode-standalone` (544 KB)
 
 ### Run Programs
 
@@ -270,7 +276,7 @@ cargo build --release
 cargo test --release
 ```
 
-**Result**: 17/17 passing ✅
+**Result**: 72/72 passing ✅
 
 ---
 
@@ -287,20 +293,20 @@ cargo test --release
 3. DEVELOPER.md
 4. BENCHMARKS.md
 5. IMPROVEMENT_PLAN.md
-6. Study src/circuits.rs
-7. Study src/evolution.rs
+6. Study omnimcode-core/src/circuits.rs
+7. Study omnimcode-core/src/evolution.rs
 
 ### Path 3: Developer Setup (1 hour)
 1. BUILD.md
 2. Build project
 3. Run tests
 4. DEVELOPER.md - "Module Breakdown"
-5. Study src/circuits.rs
+5. Study omnimcode-core/src/circuits.rs
 
 ### Path 4: Performance Analysis (30 min)
 1. BENCHMARKS.md
 2. DEVELOPER.md - "Performance Tuning"
-3. src/circuits.rs - evaluation functions
+3. omnimcode-core/src/circuits.rs - evaluation functions
 
 ---
 
@@ -327,9 +333,9 @@ cargo test --release             # Run tests
 ### View Source
 
 ```bash
-less src/circuits.rs             # Gate engine
-less src/evolution.rs            # GA operators
-less src/interpreter.rs          # Execution
+less omnimcode-core/src/circuits.rs             # Gate engine
+less omnimcode-core/src/evolution.rs            # GA operators
+less omnimcode-core/src/interpreter.rs          # Execution
 ```
 
 ---
@@ -372,7 +378,7 @@ less src/interpreter.rs          # Execution
 │   └── loops.omc
 │
 ├── target/release/
-│   └── standalone               (502 KB binary)
+│   └── standalone               (544 KB binary)
 │
 ├── standalone.omc               (Symlink to binary)
 ├── Cargo.toml                   (Project manifest)
@@ -419,8 +425,8 @@ ls -lh standalone.omc
 
 ### For Developers
 1. Read DEVELOPER.md
-2. Study src/circuits.rs
-3. Study src/evolution.rs
+2. Study omnimcode-core/src/circuits.rs
+3. Study omnimcode-core/src/evolution.rs
 4. Consider contributing to Tier 2
 
 ### For Researchers
@@ -436,7 +442,7 @@ ls -lh standalone.omc
 ✅ **COMPLETE**
 
 - Implementation: Done
-- Testing: 17/17 passing
+- Testing: 72/72 passing
 - Documentation: 80+ pages
 - Performance: Verified
 - Quality: Production-ready
@@ -463,7 +469,7 @@ ls -lh standalone.omc
 ✨ A fully functional genetic logic circuit engine
 ✨ Seamlessly integrated into OMNIcode
 ✨ Comprehensive documentation (80+ pages)
-✨ Thorough test suite (17/17 passing)
+✨ Thorough test suite (72/72 passing)
 ✨ Production-quality code
 ✨ Clear roadmap for future improvement
 
@@ -490,14 +496,14 @@ ls -lh standalone.omc
 | Property | Value |
 |----------|-------|
 | **Project** | OMNIcode Harmonic Computing Language |
-| **Version** | 1.1.0 Tier 1 Complete |
-| **Status** | ✅ Production Ready |
+| **Version** | 1.0.0 (post-consolidation, 2026-05-13) |
+| **Status** | ✅ Single canonical interpreter (`omnimcode-core/`) |
 | **Location** | /home/thearchitect/OMC/ |
-| **Binary** | standalone.omc (502 KB) |
-| **Language** | Rust (2,765 lines) |
-| **Tests** | 17/17 passing |
-| **Documentation** | 80+ pages |
-| **Date** | April 30, 2026 |
+| **Binary** | `target/release/omnimcode-standalone` (~544 KB), aliased as `standalone.omc` |
+| **Language** | Rust 2021, ~5,868 lines |
+| **Tests** | 72/72 passing |
+| **Workspace** | `omnimcode-core` (lib + standalone bin), `omnimcode-ffi` (cdylib+staticlib), `omnimcode-python` (PyO3) |
+| **Compile-time deps** | `regex`, `thiserror`; `pyo3` for the Python crate; `criterion` (dev) |
 
 ---
 

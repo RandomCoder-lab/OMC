@@ -13,10 +13,10 @@
 - GitHub Actions CI/CD workflows
 
 ### Performance
-- 509 KB binary size (zero external dependencies)
+- 544 KB binary size (zero external dependencies)
 - 215-693 ns per circuit evaluation
 - 4.64M-1.44M evals/sec throughput
-- 51/51 tests passing
+- 72/72 tests passing
 
 ### Build System
 - Rust workspace with 3 crates: omnimcode-core, omnimcode-ffi, omnimcode-python
@@ -42,7 +42,7 @@ pip install omnimcode
 ```
 
 ## Performance
-- Binary size: 509 KB (zero dependencies)
+- Binary size: 544 KB (zero dependencies)
 - Circuit evaluation: 215-693 ns
 - Throughput: 4.64M-1.44M evals/sec
 

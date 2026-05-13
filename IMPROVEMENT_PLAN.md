@@ -2,7 +2,7 @@
 
 **Date**: April 30, 2026  
 **Project**: OMNIcode Harmonic Computing Language  
-**Current State**: Complete standalone native executable with 1,850 lines of Rust  
+**Current State**: Complete standalone native executable with 5,868 lines of Rust  
 **Goal**: Add genetic logic circuit engine, advanced transpiler, optimizing compiler, and performance improvements
 
 ---
@@ -32,7 +32,7 @@ The OMNIcode project has successfully reached v1.0 with a fully standalone nativ
 - **Interpreter**: Tree-walk evaluation, scope management, 68+ stdlib functions
 - **Runtime**: HInt harmonic integers with φ-resonance, arrays, strings
 - **Testing**: 5 example programs, all passing
-- **Code Quality**: ~1,850 lines of well-structured Rust
+- **Code Quality**: ~5,868 lines of well-structured Rust
 
 ### Gaps & Opportunities
 
@@ -53,7 +53,7 @@ The OMNIcode project has successfully reached v1.0 with a fully standalone nativ
 ### TIER 1: Core Genetic Engine (Highest Impact, ~2-3 weeks)
 
 #### 1.1 Circuit Primitives Module
-**File**: `src/circuits.rs` (new, ~400 lines)
+**File**: `omnimcode-core/src/circuits.rs` (new, ~400 lines)
 
 **What**: Define `xIF`, `xELSE`, `xAND`, `xOR` as first-class circuit gates
 
@@ -90,7 +90,7 @@ impl Circuit {
 ---
 
 #### 1.2 Genetic Operators Module
-**File**: `src/evolution.rs` (new, ~350 lines)
+**File**: `omnimcode-core/src/evolution.rs` (new, ~350 lines)
 
 **What**: Implement mutation, crossover, fitness evaluation
 
@@ -126,7 +126,7 @@ pub fn evaluate_fitness(circuit: &Circuit, test_cases: &[(Vec<bool>, bool)]) -> 
 ---
 
 #### 1.3 Callable Genetic Functions in OMNIcode
-**File**: Updated `src/interpreter.rs` (~+100 lines in function_call)
+**File**: Updated `omnimcode-core/src/interpreter.rs` (~+100 lines in function_call)
 
 **New stdlib functions**:
 - `circuit_new(num_inputs)` → Circuit
@@ -151,7 +151,7 @@ print(circuit_to_dot(evolved[0]));  # Print best circuit as Graphviz
 ### TIER 2: Advanced Transpiler (High Impact, ~2 weeks)
 
 #### 2.1 Extended Grammar with Infix Support
-**File**: `src/parser.rs` (refactor, ~+200 lines)
+**File**: `omnimcode-core/src/parser.rs` (refactor, ~+200 lines)
 
 **Current**:
 ```
@@ -233,7 +233,7 @@ pub fn lint_circuit(circuit: &Circuit) -> Vec<LintWarning> {
 ---
 
 #### 2.3 Visual Export (Graphviz)
-**File**: Enhanced `src/circuits.rs` (~+100 lines)
+**File**: Enhanced `omnimcode-core/src/circuits.rs` (~+100 lines)
 
 **Output**: Graphviz DOT format for circuit visualization
 
@@ -268,7 +268,7 @@ digraph Circuit {
 ### TIER 3: Optimizing Compiler (High Impact, ~3 weeks)
 
 #### 3.1 Expression Simplification Pass
-**File**: `src/optimizer.rs` (new, ~300 lines)
+**File**: `omnimcode-core/src/optimizer.rs` (new, ~300 lines)
 
 **Optimizations**:
 - **Constant Folding**: `xAND(1, x)` → `x`, `xOR(0, x)` → `x`
@@ -379,7 +379,7 @@ pub extern "C" fn eval_circuit_xor(a: bool, b: bool) -> bool {
 ### TIER 4: Performance & Architecture (Medium Impact, ~2 weeks)
 
 #### 4.1 Multithreaded Population Evaluation
-**File**: Enhanced `src/evolution.rs` (~+100 lines)
+**File**: Enhanced `omnimcode-core/src/evolution.rs` (~+100 lines)
 
 **Current**: Sequential population evaluation  
 **Enhanced**: Parallel fitness calculation using work-stealing pool
@@ -447,7 +447,7 @@ impl CircuitPool {
 ---
 
 #### 4.3 Iterative Traversal (Stack Safety)
-**File**: Refactor `src/circuits.rs` (~+150 lines)
+**File**: Refactor `omnimcode-core/src/circuits.rs` (~+150 lines)
 
 **Current**: Recursive eval_hard/eval_soft  
 **Issue**: Stack overflow on deeply nested circuits (depth > 10k gates)
@@ -490,7 +490,7 @@ pub fn eval_hard_iterative(&self, inputs: &[bool]) -> bool {
 ### TIER 5: Developer Experience (Medium Impact, ~1.5 weeks)
 
 #### 5.1 Enhanced Error Messages with Position Tracking
-**File**: Refactor `src/parser.rs` (~+100 lines)
+**File**: Refactor `omnimcode-core/src/parser.rs` (~+100 lines)
 
 **Current**: Basic error messages, no position info
 
@@ -577,13 +577,13 @@ cargo bench --bench circuit_eval
 ## INTEGRATION ROADMAP
 
 ### Phase 1: Foundation (Week 1-2)
-1. Add `src/circuits.rs` with Gate/Circuit types
+1. Add `omnimcode-core/src/circuits.rs` with Gate/Circuit types
 2. Implement hard and soft evaluation
 3. Add basic circuit stdlib functions
 4. Write 5 circuit examples
 
 ### Phase 2: Genetics (Week 2-3)
-1. Implement mutation/crossover in `src/evolution.rs`
+1. Implement mutation/crossover in `omnimcode-core/src/evolution.rs`
 2. Add evolution functions to stdlib
 3. Write population-based example
 4. Initial performance benchmarks

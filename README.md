@@ -8,7 +8,7 @@ This directory contains the complete OMNIcode standalone executable - a zero-dep
 
 ```
 /home/thearchitect/OMC/
-├── standalone.omc              ← THE EXECUTABLE (496 KB)
+├── standalone.omc              ← THE EXECUTABLE (544 KB)
 ├── Cargo.toml                  ← Rust build configuration
 ├── Cargo.lock                  ← Dependency lock file
 ├── BUILD.md                    ← Complete build guide
@@ -56,7 +56,7 @@ This directory contains the complete OMNIcode standalone executable - a zero-dep
 | Interpreter | 500+ | AST traversal & statement execution |
 | Value Types | 350+ | HInt, HArray, HWave, HSingularity with φ-math |
 | Runtime | 100+ | Standard library & helper functions |
-| **Total** | **~1,800** | Complete self-hosting implementation |
+| **Total** | **~5,868** | Complete self-hosting implementation |
 
 ### Language Features Implemented ✅
 
@@ -100,9 +100,10 @@ This directory contains the complete OMNIcode standalone executable - a zero-dep
 ## 💻 Technical Specifications
 
 ### Binary Characteristics
-- **Size**: 496 KB (Release build, optimized)
+- **Size**: 544 KB (Release build, optimized)
 - **Format**: ELF 64-bit LSB executable (Linux)
-- **Dependencies**: Only libc (standard)
+- **Runtime dependencies**: libc only (dynamically linked)
+- **Compile-time deps**: `regex`, `thiserror` (statically linked); `pyo3` for the Python crate; `criterion` dev-only
 - **Compilation Time**: ~4.5 seconds
 - **No external runtime**: Pure machine code
 
@@ -175,7 +176,7 @@ cargo build --release
 
 ### Output
 ```
-/OMC/target/release/standalone
+/OMC/target/release/omnimcode-standalone
 ```
 
 ### Optimized Build
@@ -282,7 +283,7 @@ Hello, Harmonic World!
 ## 🎯 Key Achievements
 
 1. **✅ Fully Native**: No Python dependency, no runtime overhead
-2. **✅ Standalone**: Single 496 KB executable
+2. **✅ Standalone**: Single 544 KB executable
 3. **✅ Complete Language**: All OMNIcode features implemented
 4. **✅ High Performance**: 50-100× faster than Python
 5. **✅ Memory Efficient**: 5-10× less memory per value
@@ -323,10 +324,10 @@ cp  ~/distribution/omnimcode.omc
 
 All original Python source from the project is fully respresented in this native implementation:
 
-- **omnicode_parser.py** → `src/parser.rs` (complete rewrite)
-- **omnicode_runtime.py** → `src/value.rs` + `src/interpreter.rs`
-- **omninet_cli.py** → `src/main.rs`
-- **Standard Library** → `src/interpreter.rs` (built-in functions)
+- **omnicode_parser.py** → `omnimcode-core/src/parser.rs` (complete rewrite)
+- **omnicode_runtime.py** → `omnimcode-core/src/value.rs` + `omnimcode-core/src/interpreter.rs`
+- **omninet_cli.py** → `omnimcode-core/src/main.rs`
+- **Standard Library** → `omnimcode-core/src/interpreter.rs` (built-in functions)
 
 ## 📝 License
 
@@ -340,5 +341,5 @@ OMNIcode and this standalone implementation are provided as-is for educational a
 **Version**: 1.0.0-standalone  
 **Build Date**: April 30, 2026  
 **Language**: Rust 1.70+  
-**Binary Size**: 496 KB  
+**Binary Size**: 544 KB  
 **Zero Dependencies**: Yes ✅

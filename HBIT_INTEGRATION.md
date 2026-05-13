@@ -21,7 +21,7 @@ This enables **coherence-aware computation** and **predictive error detection** 
 
 ## What Was Added
 
-### New Module: `src/hbit.rs` (320 lines)
+### New Module: `omnimcode-core/src/hbit.rs` (320 lines)
 
 **HBitProcessor**:
 - Manages dual-band operations with automatic harmony tracking
@@ -152,7 +152,7 @@ HBit Multiplication:      3.1 ns (+0.8 ns, +35%)
 Harmony Tracking:         0.3 ns per operation
 Register/Lookup:          1.2 ns (HashMap)
 
-Binary Size Impact:       +0 KB (included in 502 KB)
+Binary Size Impact:       +0 KB (included in 544 KB)
 Runtime Memory:           ~64 bytes per variable registered
 ```
 
@@ -307,9 +307,9 @@ Novel encoding supports investigations into harmonic computing principles
 ## Binary Impact
 
 ```
-Current Binary: 502 KB (unchanged)
+Current Binary: 544 KB (unchanged)
 HBit Module:   +25 KB of code
-After Stripping: Still 502 KB (standard optimization)
+After Stripping: Still 544 KB (standard optimization)
 
 Explanation:
 - HBit code is stripped during release build
@@ -381,7 +381,7 @@ Cache efficiency: Good (locals, then HashMap)
 
 ## Conclusion
 
-**HBit Processing is now fully integrated** into the OMNIcode standalone binary. The 502 KB executable includes:
+**HBit Processing is now fully integrated** into the OMNIcode standalone binary. The 544 KB executable includes:
 
 - ✅ HBit processor engine (320 lines)
 - ✅ 8 comprehensive unit tests
@@ -395,7 +395,7 @@ Use HBit for **coherence-aware computing** while maintaining full backward compa
 ---
 
 **Status**: 🟢 PRODUCTION READY  
-**Test Pass Rate**: 38/38 (100%)  
-**Binary Size**: 502 KB (unchanged)  
+**Test Pass Rate**: 72/72 (100%)  
+**Binary Size**: 544 KB (unchanged)  
 **Integration**: Complete ✅
 

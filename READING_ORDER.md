@@ -36,12 +36,12 @@
    - Compiler pipeline
    - Testing strategy
 
-2. **src/circuits.rs** (20 min) - Gate implementations
+2. **omnimcode-core/src/circuits.rs** (20 min) - Gate implementations
    - Gate enum definition
    - Hard & soft evaluation
    - Validation logic
 
-3. **src/evolution.rs** (15 min) - Genetic operators
+3. **omnimcode-core/src/evolution.rs** (15 min) - Genetic operators
    - Mutation, crossover, selection
    - GA loop
    - Fitness calculation
@@ -87,9 +87,9 @@
 ### Source Code (Read Next)
 | File | Lines | Purpose | Time |
 |------|-------|---------|------|
-| src/circuits.rs | 540 | Gate logic | 20 min |
-| src/evolution.rs | 360 | GA operators | 15 min |
-| src/interpreter.rs | 520 | Execution | 20 min |
+| omnimcode-core/src/circuits.rs | 540 | Gate logic | 20 min |
+| omnimcode-core/src/evolution.rs | 360 | GA operators | 15 min |
+| omnimcode-core/src/interpreter.rs | 520 | Execution | 20 min |
 
 ---
 
@@ -111,7 +111,7 @@ cargo test --release       # Test
 | Understand project | README.md |
 | Learn architecture | DEVELOPER.md |
 | Optimize performance | BENCHMARKS.md |
-| Add feature | DEVELOPER.md + src/circuits.rs |
+| Add feature | DEVELOPER.md + omnimcode-core/src/circuits.rs |
 | Debug issue | DEVELOPER.md |
 | See roadmap | IMPROVEMENT_PLAN.md |
 
@@ -126,15 +126,15 @@ cargo test --release       # Test
 4. DEVELOPER.md
 5. IMPROVEMENT_PLAN.md
 6. Build and run examples
-7. Study src/circuits.rs
-8. Study src/evolution.rs
+7. Study omnimcode-core/src/circuits.rs
+8. Study omnimcode-core/src/evolution.rs
 
 ### Path 2: Developer Setup (1 hour)
 1. BUILD.md
 2. Build project
 3. Run tests
 4. DEVELOPER.md - "Module Breakdown"
-5. Study src/circuits.rs
+5. Study omnimcode-core/src/circuits.rs
 6. Run examples
 
 ### Path 3: Quick Start (15 minutes)

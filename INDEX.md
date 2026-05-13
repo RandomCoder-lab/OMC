@@ -3,7 +3,7 @@
 ## 📦 Deliverable Summary
 
 **Location**: `/home/thearchitect/OMC/`  
-**Primary Artifact**: `standalone.omc` (496 KB executable)  
+**Primary Artifact**: `standalone.omc` (544 KB executable)  
 **Status**: ✅ Complete, Tested, Production-Ready
 
 ---
@@ -11,11 +11,11 @@
 ## 🎯 The Executable
 
 ### Main Binary
-- **File**: `/home/thearchitect/OMC/standalone.omc`
-- **Size**: 496 KB
-- **Type**: ELF 64-bit native executable
-- **Dependencies**: libc only (standard)
-- **Platforms**: Linux x86-64
+- **File**: `/home/thearchitect/OMC/standalone.omc` — symlink to `target/release/omnimcode-standalone`
+- **Size**: ~544 KB
+- **Type**: ELF 64-bit native executable (Linux x86-64)
+- **Runtime dependencies**: libc only (dynamically linked)
+- **Compile-time deps**: `regex`, `thiserror` (statically linked); `pyo3` for the Python crate; `criterion` dev-only
 
 ### Usage
 ```bash
@@ -54,68 +54,45 @@
    - Standard library listing
    - Getting started
 
-4. **COMPLETION_REPORT.md** (10.5 KB)
-   - Final status report
-   - Verification results
-   - Metrics and benchmarks
-   - Compliance checklist
+4. **DEVELOPER.md** (~24 KB)
+   - Architecture & extension guide
+   - Module breakdown
+   - Performance tuning
 
 5. **INDEX.md** (This file)
    - Complete file inventory
    - Quick reference
    - Navigation guide
 
+> **Historical docs** (tier-completion reports, phase summaries, HBit bugfix narratives, verification meta) have been moved to **`docs/archive/`**. Git history preserves them; the active root keeps only living docs.
+
 ---
 
 ## 💻 Source Code
 
-All in `src/` directory:
+All canonical source lives in `omnimcode-core/src/`. The standalone binary, FFI, Python, and Godot all consume this one crate.
 
 ### Core Modules
-1. **src/main.rs** (112 lines)
-   - Entry point
-   - File mode execution
-   - REPL mode (interactive)
-
-2. **src/parser.rs** (850+ lines)
-   - Lexer (tokenization)
-   - Recursive descent parser
-   - Token definitions
-   - Error handling
-
-3. **src/ast.rs** (120 lines)
-   - Abstract Syntax Tree definitions
-   - Statement and Expression types
-   - Tree construction helpers
-
-4. **src/value.rs** (350+ lines)
-   - HInt (Harmonic Integer) implementation
-   - HArray, HWave, HSingularity types
-   - φ-mathematics functions
-   - Resonance calculation
-   - Type conversion methods
-
-5. **src/interpreter.rs** (500+ lines)
-   - Tree-walk interpreter
-   - Scope management (stack of HashMaps)
-   - Statement execution
-   - Expression evaluation
-   - Function calls and recursion
-
-6. **src/runtime/mod.rs** (39 lines)
-   - Runtime module organization
-
-7. **src/runtime/stdlib.rs** (309 lines)
-   - 68+ standard library functions
-   - String functions (30+)
-   - Array functions (35+)
-   - Math functions
+1. **`omnimcode-core/src/main.rs`** (115 lines) — Entry point, file mode, REPL
+2. **`omnimcode-core/src/parser.rs`** (1,240 lines) — Lexer, recursive descent parser, `phi.X` module-qualified call syntax
+3. **`omnimcode-core/src/ast.rs`** (170 lines) — Statement / Expression enums, `ForIterable`
+4. **`omnimcode-core/src/value.rs`** (298 lines) — HInt, HFloat, HArray, Resonance, φ-math constants
+5. **`omnimcode-core/src/interpreter.rs`** (740 lines) — Tree-walk interpreter, scope stack, ~24 stdlib functions in `call_function`
+6. **`omnimcode-core/src/circuits.rs`** (720 lines) — 14 Gate variants (7 Boolean + 7 Float), Circuit DAG, hard/soft eval, Graphviz
+7. **`omnimcode-core/src/evolution.rs`** (449 lines) — GA: mutation, crossover, tournament, fitness
+8. **`omnimcode-core/src/circuit_dsl.rs`** (556 lines) — Circuit DSL transpiler with macros
+9. **`omnimcode-core/src/optimizer.rs`** (667 lines) — Constant folding, algebraic simplification
+10. **`omnimcode-core/src/hbit.rs`** (314 lines) — Dual-band processor (α/β/harmony)
+11. **`omnimcode-core/src/phi_disk.rs`** (255 lines) — LRU cache w/ FNV-1a (see TIER_4_HONEST_REVISION.md)
+12. **`omnimcode-core/src/phi_pi_fib.rs`** (287 lines) — Fibonacci search (slower than binary — see HONEST_REVISION)
+13. **`omnimcode-core/src/runtime/stdlib.rs`** (39 lines) — Built-in function aliases
+14. **`omnimcode-core/src/runtime/mod.rs`** (3 lines) — Module organization
+15. **`omnimcode-core/src/lib.rs`** (15 lines) — Crate root
 
 ### Total Source
-- **~1,850 lines of Rust**
-- Well-structured, modular design
-- Comprehensive comments
-- Ready for extension
+- **~5,868 lines of Rust** across `omnimcode-core/`
+- Plus crates: `omnimcode-ffi` (C FFI), `omnimcode-python` (PyO3)
+- And examples: `agent-decision-evolution/`, `circuit-trainer/`, `modding-tool/`, `game-ai-demo/`
 
 ---
 
@@ -198,7 +175,7 @@ In `examples/` directory:
 
 | Metric | Value |
 |--------|-------|
-| Binary size | 496 KB |
+| Binary size | 544 KB |
 | Startup time | < 1ms |
 | Parse + Execute | < 10ms (small programs) |
 | HInt arithmetic (1M ops) | 0.2ms |
@@ -216,7 +193,7 @@ cargo build --release
 ```
 
 ### Result
-- Executable: `target/release/standalone`
+- Executable: `target/release/omnimcode-standalone`
 - Stripped: No debug symbols
 - Optimized: LTO + opt-level=3
 - Ready to distribute
@@ -292,15 +269,15 @@ cargo build --release
 ## 🎓 How to Extend
 
 ### Add New Built-in Function
-1. Edit `src/interpreter.rs` call_function()
+1. Edit `omnimcode-core/src/interpreter.rs` call_function()
 2. Add match case with implementation
 3. Add test in examples/
 4. Rebuild: `cargo build --release`
 
 ### Add Language Feature
-1. Add token to `src/parser.rs` Token enum
+1. Add token to `omnimcode-core/src/parser.rs` Token enum
 2. Add parser rule
-3. Add AST node to `src/ast.rs`
+3. Add AST node to `omnimcode-core/src/ast.rs`
 4. Add interpreter handler
 5. Test and rebuild
 
@@ -329,20 +306,20 @@ See BUILD.md "Troubleshooting" section for common issues
 | Item | Count |
 |------|-------|
 | Source files | 7 |
-| Source lines | ~1,850 |
+| Source lines | ~5,868 |
 | Test programs | 5 |
 | Stdlib functions | 68+ |
 | Documentation pages | 5 |
-| Binary size | 496 KB |
+| Binary size | 544 KB |
 | Build time | ~4.5 sec |
 
 ---
 
 ## 🎯 Success Criteria Met
 
-✅ **Standalone executable** - Yes (496 KB)  
+✅ **Standalone executable** - Yes (544 KB)  
 ✅ **Native language** - Yes (Rust)  
-✅ **Zero dependencies** - Yes (libc only)  
+✅ **Minimal runtime deps** - libc only (dynamically linked); `regex`+`thiserror` statically linked in  
 ✅ **All features** - Yes (100% implementation)  
 ✅ **Better performance** - Yes (50-100×)  
 ✅ **Tested** - Yes (5 programs, all pass)  

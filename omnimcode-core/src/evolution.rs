@@ -46,23 +46,24 @@ pub fn evaluate_fitness(circuit: &Circuit, test_cases: &[TestCase]) -> f64 {
 pub fn mutate_circuit(circuit: &Circuit, mutation_rate: f64) -> Circuit {
     use std::collections::hash_map::RandomState;
     use std::hash::{BuildHasher, Hasher};
-    
+
     let mut mutated = circuit.clone();
-    
+
     // Simple RNG using time-based seed (would use rand crate in production)
     let seed = (std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_nanos() as u64) ^ ((mutation_rate * 1000.0) as u64);
-    
+        .as_nanos() as u64)
+        ^ ((mutation_rate * 1000.0) as u64);
+
     for gate_id in 0..mutated.gates.len() {
         let random = pseudo_random(seed.wrapping_add(gate_id as u64));
-        
+
         if (random as f64 / u32::MAX as f64) < mutation_rate {
             mutate_gate(&mut mutated, gate_id);
         }
     }
-    
+
     mutated
 }
 
@@ -74,37 +75,58 @@ fn mutate_gate(circuit: &mut Circuit, gate_id: usize) {
 
     use std::collections::hash_map::RandomState;
     use std::hash::{BuildHasher, Hasher};
-    
+
     let mut hasher = RandomState::new().build_hasher();
     hasher.write_usize(gate_id);
-    hasher.write_u64(std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos() as u64);
+    hasher.write_u64(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64,
+    );
     let mutation_type = (hasher.finish() % 3) as usize;
 
     match mutation_type {
         0 => {
-            // Flip gate type
-            match &circuit.gates[gate_id] {
+            // Flip gate type or modify float parameters
+            match &mut circuit.gates[gate_id] {
                 Gate::XAnd { inputs } => {
-                    circuit.gates[gate_id] = Gate::XOr { inputs: inputs.clone() };
+                    circuit.gates[gate_id] = Gate::XOr {
+                        inputs: inputs.clone(),
+                    };
                 }
                 Gate::XOr { inputs } => {
-                    circuit.gates[gate_id] = Gate::XAnd { inputs: inputs.clone() };
+                    circuit.gates[gate_id] = Gate::XAnd {
+                        inputs: inputs.clone(),
+                    };
                 }
-                Gate::Not { input } => {
+                Gate::Not { input: _ } => {
                     circuit.gates[gate_id] = Gate::Constant { value: true };
+                }
+                Gate::FloatConstant { value } => {
+                    *value = *value
+                        + (pseudo_random(gate_id as u64) as f64 / u32::MAX as f64 - 0.5) * 0.2;
+                    *value = value.clamp(-1.0, 1.0);
+                }
+                Gate::Sigmoid {
+                    input: _,
+                    steepness,
+                } => {
+                    *steepness = (*steepness
+                        + (pseudo_random(gate_id as u64) as f64 / u32::MAX as f64 - 0.5) * 0.5)
+                        .clamp(0.1, 10.0);
                 }
                 _ => {}
             }
         }
         1 => {
             // Add/remove input (for XAnd/XOr gates)
-            if let Gate::XAnd { ref mut inputs } | Gate::XOr { ref mut inputs } = &mut circuit.gates[gate_id] {
+            if let Gate::XAnd { ref mut inputs } | Gate::XOr { ref mut inputs } =
+                &mut circuit.gates[gate_id]
+            {
                 if !inputs.is_empty() && pseudo_random(gate_id as u64) % 2 == 0 {
-                    // Remove random input
-                    let idx = pseudo_random((gate_id as u64).wrapping_mul(2)) as usize % inputs.len();
+                    let idx =
+                        pseudo_random((gate_id as u64).wrapping_mul(2)) as usize % inputs.len();
                     inputs.remove(idx);
                 }
             }
@@ -129,7 +151,7 @@ pub fn crossover(parent1: &Circuit, parent2: &Circuit) -> (Circuit, Circuit) {
 
     let seed1 = pseudo_random(1) as usize;
     let seed2 = pseudo_random(2) as usize;
-    
+
     let crossover_point1 = seed1 % parent1.gates.len();
     let crossover_point2 = seed2 % parent2.gates.len();
 
@@ -137,12 +159,12 @@ pub fn crossover(parent1: &Circuit, parent2: &Circuit) -> (Circuit, Circuit) {
     // Cache the lengths to avoid borrow checker issues
     let child1_len = child1.gates.len();
     let child2_len = child2.gates.len();
-    
+
     if crossover_point1 < child1_len && crossover_point2 < child2_len {
         // Swap the gate at crossover_point1 in child1 with corresponding gate in child2
         let swap_idx1 = crossover_point2 % child1_len;
         let swap_idx2 = crossover_point1 % child2_len;
-        
+
         if swap_idx1 != crossover_point1 {
             child1.gates.swap(crossover_point1, swap_idx1);
         }
@@ -157,20 +179,25 @@ pub fn crossover(parent1: &Circuit, parent2: &Circuit) -> (Circuit, Circuit) {
 /// Create a random circuit
 pub fn create_random_circuit(num_inputs: usize, max_gates: usize) -> Circuit {
     let mut circuit = Circuit::new(num_inputs);
-    
+
     // Create input gates
     for i in 0..num_inputs {
         circuit.add_gate(Gate::Input { index: i });
     }
 
     // Create random internal gates
-    let num_internal = pseudo_random((num_inputs as u64).wrapping_mul(1000)) as usize % (max_gates - num_inputs).max(1) + 1;
-    
+    let num_internal = pseudo_random((num_inputs as u64).wrapping_mul(1000)) as usize
+        % (max_gates - num_inputs)
+            .max(1)
+        + 1;
+
     for _ in 0..num_internal {
-        let gate_type = pseudo_random(std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos() as u64) % 3;
+        let gate_type = pseudo_random(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64,
+        ) % 5; // Extended to include float gate types
 
         let gate = match gate_type {
             0 => {
@@ -181,12 +208,29 @@ pub fn create_random_circuit(num_inputs: usize, max_gates: usize) -> Circuit {
                 Gate::XAnd { inputs }
             }
             1 => {
-                let inputs = vec![
-                    pseudo_random(200) as usize % circuit.gates.len(),
-                ];
+                let inputs = vec![pseudo_random(200) as usize % circuit.gates.len()];
                 Gate::Not { input: inputs[0] }
             }
-            _ => Gate::Constant { value: pseudo_random(300) % 2 == 0 },
+            2 => {
+                let inputs = vec![
+                    pseudo_random(100) as usize % circuit.gates.len(),
+                    pseudo_random(101) as usize % circuit.gates.len(),
+                ];
+                Gate::XOr { inputs }
+            }
+            // Float gate mutations for richer evolution
+            3 => {
+                let input = pseudo_random(300) as usize % circuit.gates.len();
+                Gate::Sigmoid {
+                    input,
+                    steepness: 1.0 + (pseudo_random(400) as f64 / u32::MAX as f64),
+                }
+            }
+            _ => {
+                let input = pseudo_random(500) as usize % circuit.gates.len();
+                let depth = ((pseudo_random(600) % 4) + 1) as usize;
+                Gate::PhiFold { input, depth }
+            }
         };
 
         circuit.add_gate(gate);
@@ -194,7 +238,7 @@ pub fn create_random_circuit(num_inputs: usize, max_gates: usize) -> Circuit {
 
     circuit.output = circuit.gates.len() - 1;
     let _ = circuit.validate(); // Ignore validation errors for random circuits
-    
+
     circuit
 }
 
@@ -249,11 +293,7 @@ pub fn evolve_circuits(
 
         // Elitism: keep best individuals
         let mut elite_indices: Vec<usize> = (0..population.len()).collect();
-        elite_indices.sort_by(|a, b| {
-            fitness_scores[*b]
-                .partial_cmp(&fitness_scores[*a])
-                .unwrap()
-        });
+        elite_indices.sort_by(|a, b| fitness_scores[*b].partial_cmp(&fitness_scores[*a]).unwrap());
 
         for i in 0..config.elite_size.min(population.len()) {
             new_population.push(population[elite_indices[i]].clone());
@@ -261,15 +301,24 @@ pub fn evolve_circuits(
 
         // Fill rest with crossover and mutation
         while new_population.len() < config.population_size {
-            let parent1_idx = elite_indices[pseudo_random((generation as u64).wrapping_mul(1)) as usize % config.elite_size];
-            let parent2_idx = elite_indices[pseudo_random((generation as u64).wrapping_mul(2)) as usize % config.elite_size];
+            let parent1_idx =
+                elite_indices[pseudo_random((generation as u64).wrapping_mul(1)) as usize
+                    % config.elite_size];
+            let parent2_idx =
+                elite_indices[pseudo_random((generation as u64).wrapping_mul(2)) as usize
+                    % config.elite_size];
 
-            let (mut child1, mut child2) = crossover(&population[parent1_idx], &population[parent2_idx]);
+            let (mut child1, mut child2) =
+                crossover(&population[parent1_idx], &population[parent2_idx]);
 
-            if (pseudo_random((generation as u64).wrapping_mul(3)) as f64 / u32::MAX as f64) < config.mutation_rate {
+            if (pseudo_random((generation as u64).wrapping_mul(3)) as f64 / u32::MAX as f64)
+                < config.mutation_rate
+            {
                 child1 = mutate_circuit(&child1, 0.1);
             }
-            if (pseudo_random((generation as u64).wrapping_mul(4)) as f64 / u32::MAX as f64) < config.mutation_rate {
+            if (pseudo_random((generation as u64).wrapping_mul(4)) as f64 / u32::MAX as f64)
+                < config.mutation_rate
+            {
                 child2 = mutate_circuit(&child2, 0.1);
             }
 
@@ -340,5 +389,62 @@ mod tests {
         let c = create_random_circuit(2, 10);
         assert_eq!(c.num_inputs, 2);
         assert!(c.gates.len() > 0);
+    }
+
+    #[test]
+    fn test_evolve_circuits() {
+        let mut c = Circuit::new(2);
+        let i0 = c.add_gate(Gate::Input { index: 0 });
+        let i1 = c.add_gate(Gate::Input { index: 1 });
+        c.output = c.add_gate(Gate::XAnd {
+            inputs: vec![i0, i1],
+        });
+
+        let test_cases = vec![
+            (vec![true, true], true),
+            (vec![true, false], false),
+            (vec![false, true], false),
+            (vec![false, false], false),
+        ];
+
+        let config = EvolutionConfig {
+            population_size: 20,
+            num_generations: 10,
+            mutation_rate: 0.15,
+            crossover_rate: 0.7,
+            elite_size: 4,
+        };
+
+        let result = evolve_circuits(&c, &test_cases, &config);
+        assert!(result.best_fitness >= 0.0);
+        assert!(result.fitness_history.len() == 10);
+    }
+
+    #[test]
+    fn test_float_gate_mutation() {
+        let mut c = Circuit::new(2);
+        let i0 = c.add_gate(Gate::FloatInput { index: 0 });
+        let w = c.add_gate(Gate::FloatConstant { value: 0.5 });
+        let sum = c.add_gate(Gate::FloatWeightedSum {
+            terms: vec![(w, i0)],
+        });
+        c.output = sum;
+
+        let mutated = mutate_circuit(&c, 1.0); // 100% mutation rate
+        let _ = mutated.validate();
+        // Mutation should produce valid circuit with possibly modified float params
+    }
+
+    #[test]
+    fn test_sigmoid_gate_mutation() {
+        let mut c = Circuit::new(1);
+        let i0 = c.add_gate(Gate::FloatInput { index: 0 });
+        c.output = c.add_gate(Gate::Sigmoid {
+            input: i0,
+            steepness: 1.0,
+        });
+
+        let mutated = mutate_circuit(&c, 1.0);
+        let _ = mutated.validate();
     }
 }
