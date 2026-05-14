@@ -1,0 +1,312 @@
+# =============================================================================
+# JSON parser and serializer — written in OMC
+# =============================================================================
+# Subset of RFC 8259 sufficient for config / interchange use:
+#   - objects {"k": v, ...}      → Value::Dict
+#   - arrays  [a, b, c]          → Value::Array
+#   - strings "..."              with \n \t \" \\ \r escapes
+#   - numbers (int, float; no exponent notation)
+#   - booleans true / false
+#   - null
+#
+# Not supported: scientific notation, unicode escapes, comments,
+# trailing commas. A real implementation would handle these — left as
+# known-limitations for the demo.
+#
+# The parser uses a mutable-closure cursor pattern: the lexer state
+# (source, position) is captured inside `make_cursor()` and exposed
+# via [peek, advance, eof, pos] closures. This is the same pattern
+# the log_analyzer counter table used; it's how OMC carries object-
+# oriented state without classes.
+#
+# Run:
+#   ./target/release/omnimcode-standalone examples/json.omc
+#   OMC_VM=1 ./target/release/omnimcode-standalone examples/json.omc
+# =============================================================================
+
+# ---- Cursor: encapsulated lexer state via mutable closures ----------------
+
+fn make_cursor(src) {
+    h pos = 0;
+    h len = str_len(src);
+    h peek = fn() {
+        if pos >= len { return ""; }
+        return str_slice(src, pos, pos + 1);
+    };
+    h advance = fn() {
+        h c = "";
+        if pos < len {
+            c = str_slice(src, pos, pos + 1);
+        }
+        pos = pos + 1;
+        return c;
+    };
+    h eof = fn() {
+        if pos >= len { return 1; }
+        return 0;
+    };
+    h get_pos = fn() { return pos; };
+    h slice_from = fn(start) { return str_slice(src, start, pos); };
+    return [peek, advance, eof, get_pos, slice_from];
+}
+
+# Cursor accessor sugar
+fn c_peek(c)            { h f = arr_get(c, 0); return f(); }
+fn c_advance(c)         { h f = arr_get(c, 1); return f(); }
+fn c_eof(c)             { h f = arr_get(c, 2); return f(); }
+fn c_pos(c)             { h f = arr_get(c, 3); return f(); }
+fn c_slice(c, start)    { h f = arr_get(c, 4); return f(start); }
+
+# ---- Skip whitespace -------------------------------------------------------
+
+fn skip_ws(c) {
+    while c_eof(c) == 0 {
+        h ch = c_peek(c);
+        if ch == " " { c_advance(c); }
+        else { if ch == "\n" { c_advance(c); }
+        else { if ch == "\t" { c_advance(c); }
+        else { if ch == "\r" { c_advance(c); }
+        else { return 0; } } } }
+    }
+    return 0;
+}
+
+# ---- Parse helpers ---------------------------------------------------------
+
+fn is_digit(ch) {
+    if ch == "0" { return 1; }
+    if ch == "1" { return 1; }
+    if ch == "2" { return 1; }
+    if ch == "3" { return 1; }
+    if ch == "4" { return 1; }
+    if ch == "5" { return 1; }
+    if ch == "6" { return 1; }
+    if ch == "7" { return 1; }
+    if ch == "8" { return 1; }
+    if ch == "9" { return 1; }
+    return 0;
+}
+
+fn parse_string(c) {
+    h q = c_advance(c);   # consume opening quote
+    if q != "\"" {
+        error(concat_many("expected string at pos ", c_pos(c)));
+    }
+    h out = "";
+    while c_eof(c) == 0 {
+        h ch = c_advance(c);
+        if ch == "\"" { return out; }
+        if ch == "\\" {
+            h esc = c_advance(c);
+            if esc == "n" { out = out + "\n"; }
+            else { if esc == "t" { out = out + "\t"; }
+            else { if esc == "r" { out = out + "\r"; }
+            else { if esc == "\"" { out = out + "\""; }
+            else { if esc == "\\" { out = out + "\\"; }
+            else { error(concat_many("bad escape: \\", esc)); } } } } }
+        }
+        else {
+            out = out + ch;
+        }
+    }
+    error("unterminated string");
+    return "";
+}
+
+fn parse_number(c) {
+    h start = c_pos(c);
+    h is_float = 0;
+    if c_peek(c) == "-" { c_advance(c); }
+    while c_eof(c) == 0 {
+        h ch = c_peek(c);
+        if is_digit(ch) == 1 { c_advance(c); }
+        else { if ch == "." { c_advance(c); is_float = 1; }
+        else { return _finalize_number(c_slice(c, start), is_float); } }
+    }
+    return _finalize_number(c_slice(c, start), is_float);
+}
+
+fn _finalize_number(s, is_float) {
+    if is_float == 1 {
+        return to_float(s);
+    }
+    return to_int(s);
+}
+
+fn parse_literal(c, word, value) {
+    h n = str_len(word);
+    h start = c_pos(c);
+    h i = 0;
+    while i < n {
+        if c_advance(c) != str_slice(word, i, i + 1) {
+            error(concat_many("expected literal '", word, "' at pos ", start));
+        }
+        i = i + 1;
+    }
+    return value;
+}
+
+# ---- Recursive descent ----------------------------------------------------
+
+fn parse_value(c) {
+    skip_ws(c);
+    if c_eof(c) == 1 { error("unexpected end of input"); }
+    h ch = c_peek(c);
+    if ch == "{" { return parse_object(c); }
+    if ch == "[" { return parse_array(c); }
+    if ch == "\"" { return parse_string(c); }
+    if ch == "t" { return parse_literal(c, "true", 1); }
+    if ch == "f" { return parse_literal(c, "false", 0); }
+    if ch == "n" { return parse_literal(c, "null", 0); }   # OMC has no Null literal in expressions; encode as 0 sentinel for now
+    if is_digit(ch) == 1 { return parse_number(c); }
+    if ch == "-" { return parse_number(c); }
+    error(concat_many("unexpected char '", ch, "' at pos ", c_pos(c)));
+    return 0;
+}
+
+fn parse_object(c) {
+    c_advance(c);   # consume {
+    h out = {};
+    skip_ws(c);
+    if c_peek(c) == "}" { c_advance(c); return out; }
+    while c_eof(c) == 0 {
+        skip_ws(c);
+        h key = parse_string(c);
+        skip_ws(c);
+        if c_advance(c) != ":" {
+            error(concat_many("expected ':' after key at pos ", c_pos(c)));
+        }
+        skip_ws(c);
+        h val = parse_value(c);
+        dict_set(out, key, val);
+        skip_ws(c);
+        h next = c_advance(c);
+        if next == "}" { return out; }
+        if next != "," {
+            error(concat_many("expected ',' or '}' in object at pos ", c_pos(c)));
+        }
+    }
+    error("unterminated object");
+    return out;
+}
+
+fn parse_array(c) {
+    c_advance(c);   # consume [
+    h out = [];
+    skip_ws(c);
+    if c_peek(c) == "]" { c_advance(c); return out; }
+    while c_eof(c) == 0 {
+        skip_ws(c);
+        arr_push(out, parse_value(c));
+        skip_ws(c);
+        h next = c_advance(c);
+        if next == "]" { return out; }
+        if next != "," {
+            error(concat_many("expected ',' or ']' in array at pos ", c_pos(c)));
+        }
+    }
+    error("unterminated array");
+    return out;
+}
+
+fn json_parse(src) {
+    h c = make_cursor(src);
+    h v = parse_value(c);
+    skip_ws(c);
+    return v;
+}
+
+# ---- Serializer -----------------------------------------------------------
+# Re-emits Values back to JSON. Strings get their special chars escaped.
+# Dicts and arrays are recursive. Numbers go raw via to_display_string
+# (already produces "42" not "HInt(42, ...)" thanks to Phase 1).
+
+fn json_escape(s) {
+    h out = "";
+    h n = str_len(s);
+    h i = 0;
+    while i < n {
+        h ch = str_slice(s, i, i + 1);
+        if ch == "\"" { out = out + "\\\""; }
+        else { if ch == "\\" { out = out + "\\\\"; }
+        else { if ch == "\n" { out = out + "\\n"; }
+        else { if ch == "\t" { out = out + "\\t"; }
+        else { if ch == "\r" { out = out + "\\r"; }
+        else { out = out + ch; } } } } }
+        i = i + 1;
+    }
+    return out;
+}
+
+fn json_stringify(v) {
+    h t = type_of(v);
+    if t == "string" { return concat_many("\"", json_escape(v), "\""); }
+    if t == "int" { return concat_many("", v); }
+    if t == "float" { return concat_many("", v); }
+    if t == "bool" {
+        if v == 1 { return "true"; }
+        return "false";
+    }
+    if t == "null" { return "null"; }
+    if t == "array" {
+        h parts = arr_map(v, json_stringify);
+        return concat_many("[", arr_join(parts, ","), "]");
+    }
+    if t == "dict" {
+        h ks = dict_keys(v);
+        h pairs = [];
+        h i = 0;
+        while i < arr_len(ks) {
+            h k = arr_get(ks, i);
+            h vv = dict_get(v, k);
+            arr_push(pairs, concat_many("\"", json_escape(k), "\":", json_stringify(vv)));
+            i = i + 1;
+        }
+        return concat_many("{", arr_join(pairs, ","), "}");
+    }
+    return "null";
+}
+
+# ---- Demo ------------------------------------------------------------------
+
+println("=== JSON parse + stringify demo ===========================");
+println("");
+
+# Round-trip a config-shaped document
+h src = "{\"name\":\"omc\",\"version\":2,\"features\":[\"closures\",\"dicts\",\"try-catch\"],\"perf\":{\"vm_speedup\":2.4,\"hof_speedup\":2.22}}";
+
+println(concat_many("input:  ", src));
+
+h parsed = json_parse(src);
+println(concat_many("parsed: ", parsed));
+
+h restringified = json_stringify(parsed);
+println(concat_many("output: ", restringified));
+
+println("");
+println("=== Pulling values out of the parsed structure =============");
+println(concat_many("  name: ", dict_get(parsed, "name")));
+println(concat_many("  version: ", dict_get(parsed, "version")));
+h feats = dict_get(parsed, "features");
+println(concat_many("  feature count: ", arr_len(feats)));
+println(concat_many("  first feature: ", arr_get(feats, 0)));
+h perf = dict_get(parsed, "perf");
+println(concat_many("  vm_speedup: ", dict_get(perf, "vm_speedup")));
+
+println("");
+println("=== Error handling (try/catch) =============================");
+try {
+    h bad = json_parse("{\"a\": 1, \"b\":}");
+    println(concat_many("should not reach: ", bad));
+} catch err {
+    println(concat_many("caught parse error: ", err));
+}
+
+try {
+    h bad = json_parse("{\"a\": tru}");
+} catch err {
+    println(concat_many("caught: ", err));
+}
+
+println("");
+println("=== Done ===================================================");
