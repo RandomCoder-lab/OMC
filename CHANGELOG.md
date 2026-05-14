@@ -4,6 +4,61 @@ All notable changes to OMNIcode will be documented in this file.
 
 ## [Unreleased]
 
+### Added (Phase H.5: array-bounds healing via fold_escape on the index, 2026-05-14)
+
+🎯 **`examples/self_healing_h5.omc` — `safe arr_get(a, idx)` and `safe arr_set(a, idx, v)` make out-of-bounds accesses total.**
+
+H.4 made dynamic divide-by-zero safe at the math level (`safe a / b` → `safe_divide(a, b)` → fold the divisor away from zero). H.5 extends the same pattern to the next obvious bug class: **array-index violations.**
+
+#### The healing formula
+
+For a `safe`-wrapped array access, the encoder rewrites the call to a new host primitive that applies:
+
+```
+healed_idx = ((fold_escape(idx) % arr_len(a)) + arr_len(a)) % arr_len(a)
+```
+
+`fold_escape` pulls the index onto the nearest Fibonacci attractor; modulo by `arr_len(a)` keeps it in-bounds; the redundant `+ len) % len` handles negative remainders cleanly. Empty arrays return `Null` rather than error — the access stays total.
+
+What this means in practice for `safe arr_get([10, 20, 30], idx)`:
+
+| `idx` | `fold_escape(idx)` | `% 3` | Result |
+|---|---|---|---|
+| 1 | 1 | 1 | `20` (in bounds, attractor) |
+| 7 | 8 | 2 | `30` |
+| 999 | 610 | 1 | `20` |
+| -5 | -5 | 1 (after sign-fix) | `20` |
+
+Deterministic, in-bounds, attractor-landing where the Fibonacci grid permits.
+
+#### Implementation surface
+
+Adding the new primitive is a ~30-line composition:
+
+- `omnimcode-core/src/interpreter.rs` — two new host builtins `safe_arr_get` and `safe_arr_set`. Both reuse the existing `fold_to_fibonacci_const` helper.
+- `examples/self_healing_h5.omc`:
+  - `is_builtin` recognizes the two new names.
+  - `call_builtin` dispatches them.
+  - `collect_defined` adds them to the typo-correction name table.
+  - `enc_expr`'s `SAFE_EXPR` branch extends to recognize `safe arr_get(...)` and `safe arr_set(...)` call shapes, rewriting to the new builtins.
+  - `p_stmt` gains a `SAFE` branch so `safe arr_set(buf, i, v);` works as a bare statement.
+
+No new keywords, no new AST nodes — H.4's `SAFE_EXPR` is reused.
+
+#### Five demos, five convergences
+
+- Demo 1 (regression): H.4's `safe a / b` still works — `compute(144, 0) → 144`.
+- Demo 2 (baseline): unguarded `arr_get(xs, idx)` — runs only because the demo index is in-bounds.
+- Demo 3 (headline): `safe arr_get` with indices `{1, 999, -5, 7}` against a 3-element array. All four reads return finite values; the OOB indices land on attractor positions.
+- Demo 4 (loop walking off the end): `i = 0..7` reading from a 5-element array via `safe arr_get`. **Every output value has `φ=1.000`** — every read landed on a Fibonacci attractor.
+- Demo 5 (H.4 + H.5 composed): a function that does both a safe array read and a safe division on the result. Survives both a singular divisor and an OOB index in one call.
+
+#### One known limit (logged for H.5.1)
+
+`safe arr_set(VAR, ...)` works under tree-walk but not via the OMC bytecode VM. The bytecode VM routes `CALL_BUILTIN` through a synthetic-scope shim that copies the array argument; the mutation lives in the temporary scope and doesn't propagate back to the caller's variable. The Rust VM solved this same problem in V.7c with `ARR_SET_NAMED` opcodes. H.5.1 would add an `SAFE_ARR_SET_NAMED` variant. Reads (`safe arr_get`) compose cleanly through either path because they return a value rather than mutating a binding.
+
+Demo 4 was rewritten to use `safe arr_get` only, avoiding this trap. The Phase H semantic claim — that out-of-bounds accesses become total — is intact for reads on both interpretation paths.
+
 ### Added (Phase H.4: `safe` keyword — runtime self-healing as user syntax, 2026-05-14)
 
 🎯 **`examples/self_healing_h4.omc` — the user can now DECLARE self-healing intent in source code, not just rely on the compiler to detect it.**

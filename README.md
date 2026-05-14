@@ -5,7 +5,7 @@
 OMNIcode (OMC) is an experimental programming language built around a single architectural premise: **φ-math (Fibonacci resonance, value-danger, harmonic alignment) is not decoration — it is a decidable, cheap-to-compute substrate the compiler can reason against.** That substrate makes possible two things conventional languages structurally cannot do without external tooling:
 
 1. **Self-hosting at the back-end level.** The OMC compiler is written in OMC, and the bytecode the compiler produces for its own source is byte-identical to the bytecode the host-language tree-walker would produce. See `examples/self_hosting_v9b.omc` — `gen2 == gen3` of a real compiler-as-function.
-2. **Self-healing at compile time AND runtime.** The compiler can detect a working class of bugs (numeric off-by-one against Fibonacci attractors, identifier typos, dynamic divide-by-singularity, missing braces / parens / semicolons) and rewrite the program — using the language's own φ-math primitives, not a hand-written rule table. See `examples/self_healing_h4.omc`.
+2. **Self-healing at compile time AND runtime.** The compiler can detect a working class of bugs (numeric off-by-one against Fibonacci attractors, identifier typos, dynamic divide-by-singularity, array-index out-of-bounds, missing braces / parens / semicolons) and rewrite the program — using the language's own φ-math primitives, not a hand-written rule table. See `examples/self_healing_h5.omc`.
 
 This is a research artifact. It is not a production runtime. But the architectural claims above are **demonstrable, reproducible, and run on the binary in this repository.**
 
@@ -41,6 +41,7 @@ What this is **not**: a fast runtime, a production toolchain, a stable API, a de
 | The compiler is a fixed point under self-application | `examples/self_hosting_v9b.omc` | `✓✓✓ ALL THREE FIXPOINTS REACHED` |
 | Self-healing across two stages (token + AST), 5 bugs healed in one source | `examples/self_healing_h3.omc` | All four demos converge; `safe(8) → 8` on the integrated case |
 | User-declared runtime self-healing via `safe` keyword | `examples/self_healing_h4.omc` | `compute(144, 0) → 144` — runtime crash converted to finite answer on attractor |
+| Array-bounds healing — out-of-bounds reads become attractor-landing | `examples/self_healing_h5.omc` | Loop walking 8 indices off a 5-element array; every output has `φ=1.000` |
 
 Run any of these with the binary built from this repo:
 
@@ -96,6 +97,8 @@ Built on top of the Phase V self-hosting stack. The compiler now uses φ-math to
   Token-level repair: missing braces, parens, semicolons. The integrated demo handles **five bugs across two stages** (token + AST) in one source. Output: `safe(8) → 8` on attractor.
 - **H.4 — `safe` keyword** (`examples/self_healing_h4.omc`)
   User-declared runtime self-healing. `safe count / mod` unconditionally rewrites to `safe_divide(count, mod)` even when `mod` is a variable the static healer can't reach. `compute(144, 0)` returns 144 instead of crashing.
+- **H.5 — Array-bounds healing** (`examples/self_healing_h5.omc`)
+  Extends `safe` to array accesses. `safe arr_get(xs, idx)` rewrites to `safe_arr_get`, which folds the index onto the nearest Fibonacci attractor and modulos by `arr_len(xs)`. Out-of-bounds reads become total, deterministic, attractor-landing finite values. Demo: a loop reading 8 indices off a 5-element array — every value has `φ=1.000`.
 
 The full design rationale, milestone-by-milestone, is in `CHANGELOG.md`.
 

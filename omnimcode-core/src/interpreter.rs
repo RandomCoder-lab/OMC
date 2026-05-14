@@ -1428,6 +1428,51 @@ impl Interpreter {
                 }
                 Err("arr_set: first argument must be an array variable".to_string())
             }
+            // Phase H.5: self-healing array access. fold_escape pulls the
+            // index onto the nearest Fibonacci attractor, then modulo by
+            // arr_len keeps it in-bounds. Out-of-bounds reads become finite
+            // attractor-landing reads; the math is the bounds check.
+            "safe_arr_get" => {
+                if args.len() < 2 {
+                    return Err("safe_arr_get requires (array, index)".to_string());
+                }
+                let arr_v = self.eval_expr(&args[0])?;
+                let raw_idx = self.eval_expr(&args[1])?.to_int();
+                if let Value::Array(arr) = arr_v {
+                    let len = arr.items.len();
+                    if len == 0 {
+                        // No valid index for empty array. Return Null
+                        // rather than error — keeps the access total.
+                        return Ok(Value::Null);
+                    }
+                    let folded = fold_to_fibonacci_const(raw_idx);
+                    let healed = ((folded % (len as i64)) + (len as i64)) % (len as i64);
+                    Ok(arr.items[healed as usize].clone())
+                } else {
+                    Err("safe_arr_get: first argument must be an array".to_string())
+                }
+            }
+            "safe_arr_set" => {
+                if args.len() < 3 {
+                    return Err("safe_arr_set requires (array_name, index, value)".to_string());
+                }
+                let raw_idx = self.eval_expr(&args[1])?.to_int();
+                let val = self.eval_expr(&args[2])?;
+                if let Expression::Variable(name) = &args[0] {
+                    if let Some(Value::Array(mut arr)) = self.get_var(name) {
+                        let len = arr.items.len();
+                        if len == 0 {
+                            return Ok(Value::Null);
+                        }
+                        let folded = fold_to_fibonacci_const(raw_idx);
+                        let healed = ((folded % (len as i64)) + (len as i64)) % (len as i64);
+                        arr.items[healed as usize] = val;
+                        self.set_var(name.clone(), Value::Array(arr));
+                        return Ok(Value::Null);
+                    }
+                }
+                Err("safe_arr_set: first argument must be an array variable".to_string())
+            }
             "arr_first" => {
                 if let Value::Array(arr) = self.eval_expr(&args[0])? {
                     arr.items
