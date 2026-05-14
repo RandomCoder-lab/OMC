@@ -11,56 +11,147 @@ use std::io::{self, Write};
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    match args.len() {
-        1 => {
-            // REPL mode
-            repl();
-        }
-        2 => {
-            // File mode
-            let filename = &args[1];
-            match fs::read_to_string(filename) {
-                Ok(content) => {
-                    if let Err(e) = execute_program(&content) {
-                        eprintln!("Error: {}", e);
-                        std::process::exit(1);
-                    }
-                }
-                Err(e) => {
-                    eprintln!("Error reading file '{}': {}", filename, e);
-                    std::process::exit(1);
-                }
+    // Parse simple flag-style args: --check, --fmt, --help / -h
+    // Anything else after the flag is the input file.
+    let mut mode = "run";
+    let mut file_arg: Option<&str> = None;
+    for a in args.iter().skip(1) {
+        match a.as_str() {
+            "--check" | "-c" => mode = "check",
+            "--fmt" | "--format" | "-f" => mode = "fmt",
+            "--help" | "-h" => mode = "help",
+            other if !other.starts_with('-') => file_arg = Some(other),
+            other => {
+                eprintln!("Unknown flag: {}", other);
+                eprintln!("Try --help for usage.");
+                std::process::exit(2);
             }
         }
-        _ => {
-            eprintln!("Usage: {} [program.omc]", args[0]);
-            eprintln!("  If no file specified, starts REPL mode");
-            std::process::exit(1);
-        }
     }
+
+    if mode == "help" {
+        print_help();
+        return;
+    }
+
+    let exit_code: i32 = match (mode, file_arg) {
+        ("run", None) => { repl(); 0 }
+        ("run", Some(path)) => match read_and_run(path) {
+            Ok(()) => 0,
+            Err(e) => { eprintln!("Error: {}", e); 1 }
+        },
+        ("check", Some(path)) => check_program(path),
+        ("check", None) => {
+            eprintln!("--check requires a file argument.");
+            2
+        }
+        ("fmt", Some(path)) => format_program_to_stdout(path),
+        ("fmt", None) => {
+            eprintln!("--fmt requires a file argument.");
+            2
+        }
+        _ => unreachable!(),
+    };
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
+}
+
+fn print_help() {
+    let prog = env::args().next().unwrap_or_else(|| "omnimcode-standalone".to_string());
+    println!("Usage:");
+    println!("  {} [FILE]              run a program (or start REPL if no file)", prog);
+    println!("  {} --check FILE        run heal pass, print diagnostics, exit", prog);
+    println!("  {} --fmt FILE          pretty-print AST as canonical OMC source", prog);
+    println!("  {} --help              this message", prog);
+    println!();
+    println!("Environment variables:");
+    println!("  OMC_VM=1               execute through the Rust bytecode VM");
+    println!("  OMC_HEAL=1             auto-heal AST before execution (iterative)");
+    println!("  OMC_HEAL_RETRY=1       catch runtime errors, heal, retry once");
+    println!("  OMC_HEAL_QUIET=1       suppress heal-pass diagnostic output");
+    println!("  OMC_DISASM=1           dump bytecode disassembly before VM run");
+    println!("  OMC_OPT=0              disable optimizer (on by default)");
+    println!("  OMC_OPT_STATS=1        print optimizer pass statistics");
+    println!("  OMC_STDLIB_PATH=...    colon-separated module search path");
+}
+
+fn read_and_run(path: &str) -> Result<(), String> {
+    let content = fs::read_to_string(path)
+        .map_err(|e| format!("reading {}: {}", path, e))?;
+    execute_program(&content)
+}
+
+/// `--check`: parse, run heal_ast_until_fixpoint, print diagnostics to
+/// stdout, never execute. Exit code is the number of diagnostics
+/// (clamped to 1). Useful for CI / lint workflows.
+fn check_program(path: &str) -> i32 {
+    let content = match fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) => { eprintln!("reading {}: {}", path, e); return 1; }
+    };
+    let mut parser = Parser::new(&content);
+    let statements = match parser.parse() {
+        Ok(s) => s,
+        Err(e) => { eprintln!("parse error: {}", e); return 1; }
+    };
+    let interpreter = Interpreter::new();
+    let (_healed, diagnostics, iters, outcome) =
+        interpreter.heal_ast_until_fixpoint(statements, 5);
+    if diagnostics.is_empty() {
+        println!("{}: clean ({} iteration{})", path, iters,
+                 if iters == 1 { "" } else { "s" });
+        return 0;
+    }
+    println!("{}: {} diagnostic(s) over {} iteration(s) ({})",
+             path, diagnostics.len(), iters, outcome);
+    for d in &diagnostics {
+        println!("  {}", d);
+    }
+    1
+}
+
+/// `--fmt`: parse, pretty-print the AST back to canonical OMC source,
+/// write to stdout. Lossy on whitespace/comments — produces canonical
+/// indentation, parentheses around BIN ops (avoids precedence ambiguity),
+/// and consistent statement spacing.
+fn format_program_to_stdout(path: &str) -> i32 {
+    let content = match fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) => { eprintln!("reading {}: {}", path, e); return 1; }
+    };
+    let mut parser = Parser::new(&content);
+    let statements = match parser.parse() {
+        Ok(s) => s,
+        Err(e) => { eprintln!("parse error: {}", e); return 1; }
+    };
+    print!("{}", omnimcode_core::formatter::format_program(&statements));
+    0
 }
 
 fn execute_program(source: &str) -> Result<(), String> {
     let mut parser = Parser::new(source);
     let mut statements = parser.parse()?;
 
-    // OMC_HEAL=1 — run the host-side self-healing pass over the AST
-    // before interpretation. Catches harmonic violations, identifier
-    // typos, literal divide-by-zero, and arity mismatches at call
-    // sites. Diagnostics print to stderr; healed AST executes
-    // normally. Same heal classes as the OMC-written self-healing
-    // demo in examples/self_healing_h5.omc, but applied to ANY OMC
-    // program through the standard toolchain.
+    // OMC_HEAL=1 — run the host-side self-healing pass (iteratively
+    // until fixpoint, max 5 passes). Catches harmonic violations,
+    // identifier typos, literal divide-by-zero, and arity mismatches
+    // at call sites. Diagnostics print to stderr; healed AST
+    // executes normally.
     //
-    // OMC_HEAL_QUIET=1 suppresses the diagnostic output (heal still
-    // happens; just runs silently).
+    // OMC_HEAL_QUIET=1 suppresses the diagnostic output (still heals).
+    // OMC_HEAL_RETRY=1 (handled later) catches a runtime error after
+    //                  execution, runs heal_ast, and retries once.
+    let heal_quiet = std::env::var("OMC_HEAL_QUIET").as_deref() == Ok("1");
     if std::env::var("OMC_HEAL").as_deref() == Ok("1") {
         let interpreter = Interpreter::new();
-        let (healed, diagnostics) = interpreter.heal_ast(statements);
-        if !diagnostics.is_empty()
-            && std::env::var("OMC_HEAL_QUIET").as_deref() != Ok("1")
-        {
-            eprintln!("--- OMC_HEAL: {} diagnostic(s) ---", diagnostics.len());
+        let (healed, diagnostics, iters, outcome) =
+            interpreter.heal_ast_until_fixpoint(statements, 5);
+        if !diagnostics.is_empty() && !heal_quiet {
+            eprintln!(
+                "--- OMC_HEAL: {} diagnostic(s) across {} iteration(s) ({}) ---",
+                diagnostics.len(), iters, outcome
+            );
             for d in &diagnostics {
                 eprintln!("  {}", d);
             }
@@ -115,6 +206,41 @@ fn execute_program(source: &str) -> Result<(), String> {
     }
 
     let mut interpreter = Interpreter::new();
+    // OMC_HEAL_RETRY=1 — catch runtime errors after execution starts,
+    // run the heal pass on a fresh copy of the AST, and retry. Captures
+    // bugs that the static heal pass missed (e.g. dynamic /0, missing
+    // names that only surface at call time). Single retry: if the
+    // healed AST also errors, that error propagates unmodified.
+    //
+    // The retry runs even WITHOUT OMC_HEAL=1 — it's a separate opt-in
+    // that catches errors after the fact rather than preventing them.
+    if std::env::var("OMC_HEAL_RETRY").as_deref() == Ok("1") {
+        let retry_source = statements.clone();
+        match interpreter.execute(statements) {
+            Ok(()) => return Ok(()),
+            Err(first_err) => {
+                if !heal_quiet {
+                    eprintln!("--- OMC_HEAL_RETRY: caught error, attempting heal+retry ---");
+                    eprintln!("  first error: {}", first_err);
+                }
+                // Fresh interpreter so any partial side-effects from
+                // the first run don't leak into the retry.
+                let mut retry_interp = Interpreter::new();
+                let (healed, diags, _, _) =
+                    retry_interp.heal_ast_until_fixpoint(retry_source, 5);
+                if !diags.is_empty() && !heal_quiet {
+                    eprintln!("  healing pass found {} diagnostic(s):", diags.len());
+                    for d in &diags {
+                        eprintln!("    {}", d);
+                    }
+                }
+                if !heal_quiet {
+                    eprintln!("--- retrying with healed AST ---");
+                }
+                return retry_interp.execute(healed);
+            }
+        }
+    }
     interpreter.execute(statements)?;
 
     Ok(())

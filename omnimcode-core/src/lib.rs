@@ -18,3 +18,4 @@ pub mod compiler;      // AST -> bytecode lowering [Phase H]
 pub mod vm;            // Stack-based VM execution loop [Phase H]
 pub mod bytecode_opt;  // Constant folding + peephole optimizer [Phase K]
 pub mod disasm;        // Bytecode disassembler [Phase P]
+pub mod formatter;     // AST -> canonical OMC source (for --fmt)

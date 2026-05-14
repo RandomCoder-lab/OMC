@@ -4,6 +4,84 @@ All notable changes to OMNIcode will be documented in this file.
 
 ## [Unreleased]
 
+### Added (Iterative heal + heal-retry + VM-native reflective dispatch + --check / --fmt CLI, 2026-05-14)
+
+🎯 **Four tracks: the autofixer snowballs to a fixpoint, catches runtime errors, the VM speedup applies to reflective dispatch, and OMC gets `--check` and `--fmt` CLI flags.**
+
+#### Track 1 — Iterative heal pass
+
+`heal_ast_until_fixpoint(stmts, max_iter)` runs `heal_ast` repeatedly until convergence, "stuck" (same diagnostic count two iterations in a row), or "exhausted" (hit max_iter). `OMC_HEAL=1` now uses iterative with `max_iter=5`. Catches cases where one fix exposes another — e.g. a typo correction whose new arg list also has harmonic violations.
+
+#### Track 2 — Heal-on-runtime-error (`OMC_HEAL_RETRY=1`)
+
+When set, catches the error from `interpreter.execute(stmts)`, runs `heal_ast_until_fixpoint` on a fresh copy of the AST, and retries once. Combines static discovery (catches what compile-time analysis can see) with dynamic discovery (catches what only fires at runtime).
+
+Demo: a program that calls undefined `fbi(7)` errors normally; with `OMC_HEAL_RETRY=1` it catches the `Undefined function: fbi`, heals to `fib(8)`, and re-runs to produce `21`.
+
+The two heal modes compose — you can set both `OMC_HEAL=1` and `OMC_HEAL_RETRY=1` for "pre-heal AST + retry if something still goes wrong."
+
+#### Track 3 — VM-native dispatch for `call(fn, args)`
+
+The reflective dispatch path `call(fn, args_array)` previously routed through `vm_call_builtin → call_function → invoke_user_function` (tree-walk), losing the bytecode-VM hot-path advantage. Now intercepted at the `Op::Call("call")` site:
+
+```
+if name == "call" && argvals.len() == 2 {
+    // Extract fn name + args array, check if target is VM-compiled,
+    // dispatch via self.run_function with captured env attached.
+    // Falls through to tree-walk for non-VM-compiled targets.
+}
+```
+
+**Real speedup:** `recursive_fib(22)` invoked via `call(bench_recursive_fib, [22])` drops from 2.4 ms (via tree-walk) to 1.09 ms (VM-native) — a **2.2× speedup on reflective dispatch**. The test runner — which dispatches every test via `call(test_name, args)` — now runs at full bytecode-VM speed under `OMC_VM=1`.
+
+Verified end-to-end: `examples/test_runner.omc` runs cleanly via `OMC_VM=1`, 5/6 with the expected intentional failure.
+
+#### Track 4 — CLI flags `--check`, `--fmt`, `--help`
+
+OMC gets real toolchain integration:
+
+- **`--check FILE`** runs the heal pass and reports diagnostics without executing. Exits 0 if clean, 1 with diagnostics. Useful for CI / lint workflows.
+- **`--fmt FILE`** pretty-prints the AST back to canonical OMC source — indented, BIN operations parenthesized for unambiguous re-parse, escape sequences re-encoded. Strips whitespace and comments (lossy on those). New `omnimcode-core/src/formatter.rs` module.
+- **`--help`** lists all flags and environment variables.
+
+```
+$ ./target/release/omnimcode-standalone --check examples/heal_pass_demo.omc
+examples/heal_pass_demo.omc: 8 diagnostic(s) over 1 iteration(s) (converged)
+  harmonic: 145 not Fibonacci → 144 (|Δ|=1)
+  divide-by-zero: rewriting to safe_divide(...)
+  ...
+```
+
+```
+$ cat /tmp/ugly.omc
+fn fib(n){if n<2{return n;}return fib(n-1)+fib(n-2);}
+h x=89;print(fib(x));
+
+$ ./target/release/omnimcode-standalone --fmt /tmp/ugly.omc
+fn fib(n) {
+    if (n < 2) {
+        return n;
+    }
+    return (fib((n - 1)) + fib((n - 2)));
+}
+h x = 89;
+print(fib(x));
+```
+
+#### One bug found and fixed along the way: lambda namespace collision
+
+The compile-time lambda counter (`LAMBDA_SEQ` in `compiler.rs`) and the tree-walk lambda counter (`self.lambda_counter`) both produced `__lambda_N` names starting from 0. Nested fns dispatch via tree-walk (not VM-native), so a lambda created inside a nested fn at runtime would overwrite a VM-compiled lambda with the same number, corrupting the global function table. The cross-test contamination would manifest as `Undefined variable: n` after test_closures had run (its captured `n` env leaked into a sibling test).
+
+Fix: tree-walk-time lambdas now use prefix `__rt_lambda_N`, distinct from the compiler's `__lambda_N` pool. `defined_functions()` filters both prefixes.
+
+#### Nested fn registration
+
+`register_user_functions` now walks recursively into fn bodies, if/elif/else branches, while bodies, and for-loop bodies — registering EVERY `Statement::FunctionDef` into the interpreter's function table. Required because `fn make_adder()` inside `fn test_closures()` would otherwise be unreachable when the test runner dispatches `test_closures` and that body calls `make_adder()` directly.
+
+#### Regression
+
+V.9b ✓✓✓ unchanged. H.5: 6/6 demos converge. test_runner: 5/6 on BOTH tree-walk and `OMC_VM=1`. `safe_keyword_host`, `module_demo`, `mutable_closure_test`, `heal_pass_demo`, `benchmarks` all produce expected output. No surface broken.
+
 ### Added (Host-side autofixer + VM closures + direct-call benchmarks, 2026-05-14)
 
 🎯 **The healer becomes a toolchain feature; lambdas work on the Rust VM; direct-call benchmark variant reveals the VM's 2.4× speedup on recursion.**

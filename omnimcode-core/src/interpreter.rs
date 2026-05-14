@@ -235,6 +235,40 @@ impl Interpreter {
         (healed, diags)
     }
 
+    /// Iterative heal: run heal_ast repeatedly until convergence or
+    /// max_iter exceeded. Handles cases where one heal exposes another
+    /// (e.g. a typo correction turns into a previously-unknown name
+    /// that itself needs harmonic / arity fixes on its arguments).
+    ///
+    /// Returns `(final_stmts, all_diagnostics, iterations, outcome)`.
+    /// Outcomes: `"converged"` (zero diagnostics in last pass),
+    /// `"stuck"` (no new diagnostics but non-zero — heal can't make
+    /// further progress), `"exhausted"` (hit max_iter).
+    pub fn heal_ast_until_fixpoint(
+        &self,
+        mut statements: Vec<Statement>,
+        max_iter: usize,
+    ) -> (Vec<Statement>, Vec<String>, usize, &'static str) {
+        let mut all_diags: Vec<String> = Vec::new();
+        let mut prev_count: usize = usize::MAX;
+        for iter in 0..max_iter {
+            let (healed, diags) = self.heal_ast(statements);
+            statements = healed;
+            let count = diags.len();
+            if count == 0 {
+                return (statements, all_diags, iter, "converged");
+            }
+            // Same diagnostic count two iterations in a row → no progress.
+            if count == prev_count {
+                all_diags.extend(diags);
+                return (statements, all_diags, iter + 1, "stuck");
+            }
+            prev_count = count;
+            all_diags.extend(diags);
+        }
+        (statements, all_diags, max_iter, "exhausted")
+    }
+
     fn collect_defined_for_heal(&self, stmts: &[Statement]) -> HashSet<String> {
         let mut set: HashSet<String> = HashSet::new();
         // Baseline: every known builtin name (the healer should never flag
@@ -926,7 +960,14 @@ impl Interpreter {
                 // Anonymous-name collision avoidance is just a monotonic
                 // counter — single-threaded interpreter, so it's fine.
                 self.lambda_counter += 1;
-                let fn_name = format!("__lambda_{}", self.lambda_counter);
+                // Distinct prefix from the compiler-side `__lambda_N`
+                // pool (LAMBDA_SEQ in compiler.rs). Both counters
+                // assign sequential numbers starting from 0; if they
+                // share the same prefix, tree-walk-time lambdas
+                // overwrite VM-time lambdas in self.functions and
+                // every nested fn that creates a lambda corrupts the
+                // global function table.
+                let fn_name = format!("__rt_lambda_{}", self.lambda_counter);
                 self.functions.insert(
                     fn_name.clone(),
                     (params.clone(), body.clone()),
@@ -2400,7 +2441,8 @@ impl Interpreter {
                 // Auto-generated lambdas (__lambda_N) are excluded so
                 // the test runner doesn't try to run them as tests.
                 let mut names: Vec<String> = self.functions.keys()
-                    .filter(|n| !n.starts_with("__lambda_"))
+                    .filter(|n| !n.starts_with("__lambda_")
+                             && !n.starts_with("__rt_lambda_"))
                     .cloned()
                     .collect();
                 names.sort();
@@ -3190,6 +3232,15 @@ impl Interpreter {
         self.locals.push(env);
     }
 
+    /// Drop the topmost closure-env frame (companion to vm_push_closure_env).
+    /// Used by the VM's reflective dispatch path so it doesn't have to
+    /// reach into Interpreter internals.
+    pub(crate) fn vm_pop_closure_env(&mut self) {
+        if self.locals.len() > 1 {
+            self.locals.pop();
+        }
+    }
+
     pub fn vm_set_local(&mut self, name: &str, value: Value) {
         self.set_var(name.to_string(), value);
     }
@@ -3211,10 +3262,32 @@ impl Interpreter {
     /// way; the user pays a slight cost for reflective dispatch in
     /// VM mode, but the regular Op::Call path stays bytecode-fast.
     pub fn register_user_functions(&mut self, statements: &[Statement]) {
-        for stmt in statements {
-            if let Statement::FunctionDef { name, params, body, .. } = stmt {
-                self.functions.insert(name.clone(), (params.clone(), body.clone()));
+        // Walks every FunctionDef anywhere in the AST — including those
+        // nested inside other fn bodies, if-branches, while bodies, etc.
+        // Matches the tree-walker's flat function-table semantics: a
+        // nested `fn foo()` inside `fn bar()` becomes globally callable
+        // after `bar` runs once. The VM path needs them pre-registered
+        // so reflective dispatch can resolve them without depending on
+        // execution order.
+        fn visit(stmt: &Statement, fns: &mut HashMap<String, (Vec<String>, Vec<Statement>)>) {
+            match stmt {
+                Statement::FunctionDef { name, params, body, .. } => {
+                    fns.insert(name.clone(), (params.clone(), body.clone()));
+                    for s in body { visit(s, fns); }
+                }
+                Statement::If { then_body, elif_parts, else_body, .. } => {
+                    for s in then_body { visit(s, fns); }
+                    for (_, b) in elif_parts { for s in b { visit(s, fns); } }
+                    if let Some(b) = else_body { for s in b { visit(s, fns); } }
+                }
+                Statement::While { body, .. } | Statement::For { body, .. } => {
+                    for s in body { visit(s, fns); }
+                }
+                _ => {}
             }
+        }
+        for stmt in statements {
+            visit(stmt, &mut self.functions);
         }
     }
 
