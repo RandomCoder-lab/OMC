@@ -1,511 +1,118 @@
-# OMNIMCODE v1.1 - MASTER DELIVERY INDEX
+# OMNIcode — Start Here
 
-**Status**: ✅ TIER 1 COMPLETE & PRODUCTION READY  
-**Date**: April 30, 2026  
-**Location**: `/home/thearchitect/OMC/`
+You've just opened the OMC repository. This file orients you in about 5 minutes.
 
----
-
-## START HERE
-
-### 📍 For First-Time Users
-**Read in this order**:
-1. **README.md** - Feature overview (5 min)
-2. **BUILD.md** - How to build and run (5 min)
-3. **READING_ORDER.md** - Navigation guide (5 min)
-
-### 🔧 For Developers
-**Read in this order**:
-1. **DEVELOPER.md** - Complete architecture guide (30 min)
-2. **omnimcode-core/src/circuits.rs** - Gate implementations (20 min)
-3. **omnimcode-core/src/evolution.rs** - Genetic operators (15 min)
-
-### 📊 For Project Managers
-**Read in this order**:
-1. **PROJECT_STATUS.txt** - Quick summary
-2. **COMPLETION_SUMMARY.md** - Tier 1 status
-3. **IMPROVEMENT_PLAN.md** - Future roadmap
+**Current state (2026-05-14):** OMC is a self-hosting harmonic computing language with a self-healing compiler. The architectural bootstrap is closed (Phase V.9b) and the self-healing compiler works across token and AST stages with user-declared runtime opt-in (Phase H.4). The supporting circuit-evolution engine from the v1.0.0 release is still here too — see *Two arms of the project* below.
 
 ---
 
-## DOCUMENTATION FILES
+## If this is your first time here
 
-### Overview Documents
+Read these three files in order, in about 25 minutes total:
 
-| File | Size | Purpose | Read Time |
-|------|------|---------|-----------|
-| **README.md** | 10 KB | Feature overview & examples | 5 min |
-| **FINAL_DELIVERY.md** | 9.8 KB | What was delivered | 10 min |
-| **PROJECT_STATUS.txt** | 8.7 KB | Executive summary | 5 min |
+1. **`README.md`** (10 min) — what OMC is, what's proven, the V→H phase arc.
+2. **`CHANGELOG.md`** (10 min, skim — pin the Phase V.6 through H.4 entries) — the design history with concrete demo files at every milestone.
+3. **`ARCHITECTURE.md`** (5 min, skim) — type system, interpreter, VM internals.
 
-### Implementation Reports
-
-| File | Size | Purpose | Read Time |
-|------|------|---------|-----------|
-| **COMPLETION_SUMMARY.md** | 15.1 KB | Tier 1 complete status | 10 min |
-| **TIER1_COMPLETE.md** | 11.8 KB | Completion details | 10 min |
-| **COMPLETION_REPORT.md** | 10.5 KB | v1.0 baseline status | 8 min |
-
-### Technical Documentation
-
-| File | Size | Purpose | Read Time |
-|------|------|---------|-----------|
-| **DEVELOPER.md** | 24.2 KB | Architecture & extension guide | 30 min |
-| **BUILD.md** | 10 KB | Build & run instructions | 5 min |
-| **ARCHITECTURE.md** | 10.5 KB | System design | 10 min |
-| **BENCHMARKS.md** | 8.6 KB | Performance metrics | 10 min |
-
-### Planning & Roadmap
-
-| File | Size | Purpose | Read Time |
-|------|------|---------|-----------|
-| **IMPROVEMENT_PLAN.md** | 20.7 KB | 5-tier improvement roadmap | 15 min |
-| **INDEX.md** | 7.8 KB | Document navigation | 5 min |
-| **READING_ORDER.md** | 3.7 KB | Recommended reading paths | 3 min |
-
-**Total Documentation**: ~130 KB (80+ pages equivalent)
+Then run any demo from the "What's proven right now" table in the README. If `examples/self_hosting_v9b.omc` prints `✓✓✓ ALL THREE FIXPOINTS REACHED`, you have a working build.
 
 ---
 
-## SOURCE CODE FILES
+## Two arms of the project
 
-All canonical source lives under `omnimcode-core/src/`. The standalone CLI binary, the C FFI (`omnimcode-ffi`), the Python module (`omnimcode-python`), and the Godot GDExtension all consume this one crate.
+OMC has been two different research artifacts at different times. Both are still in the repo. Keep them straight:
 
-### Circuit Engine
+### Arm 1 — The language (Phase V + H, 2026-05)
 
-```
-omnimcode-core/src/circuits.rs           720 lines    Gate definitions & evaluation
-```
+This is what the current README leads with and what gets active development. Self-hosting compiler, self-healing diagnostics, φ-math substrate. Lives in `omnimcode-core/src/{parser,ast,interpreter,vm,value}.rs` and the `examples/self_hosting_*.omc` / `examples/self_healing_*.omc` files. See `CHANGELOG.md` for the milestone-by-milestone account.
 
-**Contents**:
-- 14 gate types (Boolean: XAnd/XOr/XIf/XElse/Input/Constant/Not; Float: FloatConstant/FloatInput/FloatWeightedSum/Sigmoid/FloatMultiply/FloatAdd/PhiFold)
-- Circuit struct (DAG)
-- Hard evaluation (Boolean)
-- Soft evaluation (Probabilistic, plus continuous for float gates)
-- Validation & analysis
-- Graphviz export
-- 13 unit tests
+### Arm 2 — Circuit evolution (v1.0.0, 2026-04)
 
-### Genetic Algorithm
+The original release. Genetic algorithms over Boolean and float logic circuits, with FFI bindings to Python, Unity, and Unreal. Lives in `omnimcode-core/src/{circuits,evolution,circuit_dsl}.rs` and the `examples/agent-decision-evolution/`, `examples/game-ai-demo/` directories. This arm is **stable**, **functional**, and **mostly frozen** — the circuit engine works as documented. See `RELEASE_BODY_v1.0.0.md` for what shipped.
 
-```
-omnimcode-core/src/evolution.rs          449 lines    Genetic operators & GA
-```
-
-**Contents**:
-- Mutation operator (Boolean + Float gate aware)
-- Crossover operator
-- Fitness evaluation
-- Tournament selection
-- GA loop
-- Random circuit generation (5 gate-type seed: XAnd, XOr, Not, Sigmoid, PhiFold)
-- 6 unit tests
-
-### Integration & Core
-
-```
-omnimcode-core/src/interpreter.rs        740 lines    Execution engine
-omnimcode-core/src/parser.rs           1,240 lines    Lexer & parser (incl. phi.X module-qualified calls)
-omnimcode-core/src/value.rs              298 lines    Type system (HInt, HFloat, Resonance)
-omnimcode-core/src/ast.rs                170 lines    AST definitions
-omnimcode-core/src/circuit_dsl.rs        556 lines    Circuit DSL & transpiler
-omnimcode-core/src/optimizer.rs          667 lines    Constant folding / algebraic simplification
-omnimcode-core/src/hbit.rs               314 lines    Dual-band HBit processor
-omnimcode-core/src/phi_disk.rs           255 lines    LRU cache w/ FNV-1a hashing (see HONEST_REVISION)
-omnimcode-core/src/phi_pi_fib.rs         287 lines    Fibonacci search (slower than binary — see HONEST_REVISION)
-omnimcode-core/src/main.rs               115 lines    Entry point
-omnimcode-core/src/runtime/stdlib.rs      39 lines    Standard library
-omnimcode-core/src/runtime/mod.rs          3 lines    Runtime module
-omnimcode-core/src/lib.rs                 15 lines    Crate root
-```
-
-**Total Source**: ~5,868 lines of Rust code
+**Why both?** The circuits / GA work proved out the φ-math primitives (resonance scoring, Fibonacci attractors, harmony values) on a concrete substrate. Those same primitives are what the Phase H self-healing compiler now uses to detect and repair bugs. The line from "evolve a circuit by selecting for harmony" to "heal a program by rewriting toward harmony" is short and real.
 
 ---
 
-## EXECUTABLE
+## Recommended reading paths
 
-```
-standalone.omc           symlink → target/release/omnimcode-standalone (~544 KB)
-```
+### For language designers / PL researchers
 
-**Capabilities**:
-- Execute .omc programs
-- Interactive REPL
-- ~24 stdlib functions (`fibonacci`, `is_fibonacci`, `pow`, `sqrt`, `log`, `sin`, `cos`, `tan`, `abs`, `floor`, `round`, `clamp`, `frac`, `int`, `float`, `str_len`, `str_concat`, `str_uppercase`, `str_lowercase`, `arr_new`, `arr_from_range`, `arr_len`, `arr_sum`, `arr_push`) plus `res()`/`fold()` special forms and `phi.X` module-qualified aliases
-- Hard & soft evaluation
+1. `README.md` — both tracks
+2. `CHANGELOG.md` → Phase V.6 → V.9b → H.1 → H.4 entries
+3. `examples/self_hosting_v9b.omc` — the gen2==gen3 fixpoint
+4. `examples/self_healing_h4.omc` — the `safe` keyword and runtime healing
+5. `PHI_PI_FIB_ALGORITHM.md` — math foundation
+6. `ARCHITECTURE.md` — type system internals
 
-**Performance**:
-- Startup: <1ms
-- Circuit eval: 0.12 ns/gate
-- Build time: ~7s clean
+### For developers and engineers
 
----
+1. `README.md` → "Quick start" + "Try the language"
+2. `BUILD.md` — build flags, cross-compilation, optimization
+3. `examples/` — runnable programs covering most features
+4. `DEVELOPER.md` — extending the language host-side
+5. `BENCHMARKS.md` — performance numbers (tree-walk vs VM vs VM+opt)
 
-## EXAMPLE PROGRAMS
+### For circuit / GA work
 
-All located in `examples/`:
+1. `README.md` (the language sections are skippable for this lane)
+2. `RELEASE_BODY_v1.0.0.md` — what the GA arm delivered
+3. `omnimcode-core/src/circuits.rs` and `evolution.rs` — implementations
+4. `examples/agent-decision-evolution/` — the demo
+5. `HBIT_INTEGRATION.md` — the dual-band α/β/harmony programming model
 
-```
-hello_world.omc          Basic I/O example
-fibonacci.omc            Recursion example
-array_ops.omc            Array operations
-strings.omc              String operations
-loops.omc                Control flow
-```
+### For LLM-generated-code researchers
 
-**All Examples**: ✅ PASSING (100% compatibility)
+The Phase H self-healing compiler is the relevant lane. Specifically:
 
----
-
-## BUILD FILES
-
-```
-Cargo.toml               Project manifest
-Cargo.lock               Dependency lock (clean)
-build.sh                 Build automation script
-```
-
-**Build Command**:
-```bash
-cd /home/thearchitect/OMC && cargo build --release
-```
+1. `README.md` → "Implications" section
+2. `CHANGELOG.md` → Phase H.1 through H.4
+3. `examples/self_healing_h3.omc` — 5 bugs healed in one source across two stages
+4. `examples/self_healing_h4.omc` — `safe` keyword for dynamic singularities
 
 ---
 
-## KEY METRICS AT A GLANCE
+## What's *not* in this repo
 
-### Code
+Honest list:
 
-- **Total lines**: ~5,868 (across all modules in `omnimcode-core/`)
-- **Workspace crates**: 4 (`omnimcode-core`, `omnimcode-ffi`, `omnimcode-python`, plus the standalone bin defined inside core)
-- **Test count**: **72 (100% pass)** — 68 core + 1 standalone + 2 FFI + 1 Python
-- **Regressions**: 0
-
-### Performance
-
-- **Binary overhead**: +6 KB (+1.2%)
-- **Circuit eval**: 0.12 ns/gate
-- **GA generation**: 5 ms (pop=50)
-- **Build time**: 4.1 seconds
-- **Startup**: <1 millisecond
-
-### Quality
-
-- **Test pass rate**: 100% (72/72)
-- **Backward compat**: 100%
-- **Code coverage**: ~95%
-- **Tech debt**: None
-
-### Documentation
-
-- **Total size**: ~130 KB
-- **Files**: 13 (.md + .txt)
-- **Pages equivalent**: 80+
-- **Sections**: 100+
+- **No production-grade bytecode runtime.** The OMC-written bytecode VM in `examples/self_hosting_v7c.omc` is *correct* (byte-identical to tree-walk) but runs on the tree-walker, which makes it slow. A native bytecode VM in Rust is future work.
+- **No LSP, formatter, debugger, or package manager.** OMC is a research codebase, not a deployment target.
+- **No external review.** Single-developer experiment. There are bugs we don't know about.
+- **The healer doesn't handle every error class.** What it handles is documented in the README "What this doesn't do yet" section. `stuck` and `exhausted` outcomes are designed but unexercised.
 
 ---
 
-## WHAT WAS DELIVERED
+## Where to file work
 
-✅ **Genetic Circuit Engine**
-- 7 gate types (xAND, xOR, xIF, xELSE, Input, Constant, NOT)
-- Hard (Boolean) evaluation
-- Soft (probabilistic) evaluation
-- 540 lines of code
-
-✅ **Genetic Algorithm Framework**
-- Mutation operator
-- Crossover operator
-- Tournament selection
-- Fitness evaluation
-- GA loop with convergence
-- 360 lines of code
-
-✅ **OMNIcode Integration**
-- Circuit as first-class type
-- 9 new stdlib functions
-- Seamless interoperability
-- 100% backward compatible
-
-✅ **Comprehensive Documentation**
-- 13 documentation files
-- 80+ pages of guides
-- Architecture explanation
-- Performance analysis
-- Improvement roadmap
-
-✅ **Full Test Suite**
-- 9 new unit tests
-- 5 integration tests
-- 100% pass rate
-- Zero regressions
+- Issues, observations, and PRs on the GitHub repo.
+- For OMC programs that don't behave as expected: include the source and the output. The interpreter at `target/release/omnimcode-standalone` is the reference behavior.
+- For research questions about the φ-math substrate or the self-healing approach: open a discussion / issue rather than a PR; the design space is still moving.
 
 ---
 
-## HOW TO USE
+## Index of top-level docs
 
-### Build
-
-```bash
-cd /home/thearchitect/OMC
-cargo build --release
-```
-
-**Result**: `target/release/omnimcode-standalone` (544 KB)
-
-### Run Programs
-
-```bash
-./standalone.omc examples/hello_world.omc
-./standalone.omc my_program.omc
-```
-
-### Interactive REPL
-
-```bash
-./standalone.omc
-# Now type OMNIcode commands:
-# h x = 42;
-# print(x);
-```
-
-### Run Tests
-
-```bash
-cargo test --release
-```
-
-**Result**: 72/72 passing ✅
+| Document | Purpose |
+|---|---|
+| `README.md` | Landing page, headline claims, arc, quick start |
+| `CHANGELOG.md` | Phase-by-phase design history (V.6 → H.4) |
+| `ARCHITECTURE.md` | Type system, interpreter, VM internals |
+| `BUILD.md` | Build instructions, optimization flags, cross-compilation |
+| `BENCHMARKS.md` | Criterion benchmarks: tree-walk vs VM vs VM+optimizer |
+| `DEVELOPER.md` | Extending the host language |
+| `READING_ORDER.md` | Navigation guide, multiple paths through the docs |
+| `INDEX.md` | Detailed deliverable index (v1.0.0 era; partial relevance) |
+| `RELEASE_BODY_v1.0.0.md` | v1.0.0 release notes (circuit-evolution arm) |
+| `PHI_PI_FIB_ALGORITHM.md` | Mathematical foundation |
+| `OMC_STRATEGIC_PLAN.md` | Direction-of-travel for future phases |
+| `HBIT_INTEGRATION.md` | Dual-band α/β/harmony programming model |
+| `IMPROVEMENT_PLAN.md` | Concrete next-step items |
+| `PHI_DISK.md` | Storage-layer experiment notes |
+| `TIER_4_HONEST_REVISION.md` | Honest write-up of the Fibonacci-search / LRU sub-component |
+| `CODE_SIGNING.md` | Release signing process |
+| `BUILD_TARGETS.md` | Supported build targets |
 
 ---
 
-## RECOMMENDED READING PATH
-
-### Path 1: Quick Overview (15 min)
-1. README.md
-2. PROJECT_STATUS.txt
-3. READING_ORDER.md
-
-### Path 2: Complete Understanding (2 hours)
-1. README.md
-2. COMPLETION_SUMMARY.md
-3. DEVELOPER.md
-4. BENCHMARKS.md
-5. IMPROVEMENT_PLAN.md
-6. Study omnimcode-core/src/circuits.rs
-7. Study omnimcode-core/src/evolution.rs
-
-### Path 3: Developer Setup (1 hour)
-1. BUILD.md
-2. Build project
-3. Run tests
-4. DEVELOPER.md - "Module Breakdown"
-5. Study omnimcode-core/src/circuits.rs
-
-### Path 4: Performance Analysis (30 min)
-1. BENCHMARKS.md
-2. DEVELOPER.md - "Performance Tuning"
-3. omnimcode-core/src/circuits.rs - evaluation functions
-
----
-
-## FILE REFERENCE
-
-### View Documentation
-
-```bash
-cat README.md                    # Feature overview
-cat DEVELOPER.md                 # Architecture guide
-cat IMPROVEMENT_PLAN.md          # Roadmap
-cat BENCHMARKS.md                # Performance metrics
-cat PROJECT_STATUS.txt           # Quick summary
-```
-
-### Build & Test
-
-```bash
-cargo build --release            # Compile
-cargo test --release             # Run tests
-./standalone.omc -h              # Help (TBD)
-```
-
-### View Source
-
-```bash
-less omnimcode-core/src/circuits.rs             # Gate engine
-less omnimcode-core/src/evolution.rs            # GA operators
-less omnimcode-core/src/interpreter.rs          # Execution
-```
-
----
-
-## PROJECT STRUCTURE
-
-```
-/home/thearchitect/OMC/
-├── README.md                    (Feature overview)
-├── BUILD.md                     (Build instructions)
-├── DEVELOPER.md                 (Architecture guide)
-├── BENCHMARKS.md                (Performance metrics)
-├── IMPROVEMENT_PLAN.md          (Roadmap)
-├── COMPLETION_SUMMARY.md        (Tier 1 status)
-├── PROJECT_STATUS.txt           (Executive summary)
-├── FINAL_DELIVERY.md            (What was delivered)
-├── READING_ORDER.md             (Navigation guide)
-├── TIER1_COMPLETE.md            (Completion details)
-├── ARCHITECTURE.md              (System design)
-├── INDEX.md                     (Document index)
-├── COMPLETION_REPORT.md         (v1.0 baseline)
-│
-├── src/
-│   ├── main.rs                  (Entry point)
-│   ├── parser.rs                (Lexer & parser)
-│   ├── ast.rs                   (AST definitions)
-│   ├── interpreter.rs           (Execution engine)
-│   ├── value.rs                 (Type system)
-│   ├── circuits.rs              (Circuit engine) [NEW]
-│   ├── evolution.rs             (GA framework) [NEW]
-│   └── runtime/
-│       ├── mod.rs
-│       └── stdlib.rs
-│
-├── examples/
-│   ├── hello_world.omc
-│   ├── fibonacci.omc
-│   ├── array_ops.omc
-│   ├── strings.omc
-│   └── loops.omc
-│
-├── target/release/
-│   └── standalone               (544 KB binary)
-│
-├── standalone.omc               (Symlink to binary)
-├── Cargo.toml                   (Project manifest)
-├── Cargo.lock                   (Dependencies)
-└── build.sh                     (Build script)
-```
-
----
-
-## QUICK COMMANDS
-
-```bash
-# Build
-cd /home/thearchitect/OMC && cargo build --release
-
-# Test
-cargo test --release
-
-# Run example
-./standalone.omc examples/hello_world.omc
-
-# Enter REPL
-./standalone.omc
-
-# View documentation
-less README.md
-less DEVELOPER.md
-less BENCHMARKS.md
-
-# Check binary
-file standalone.omc
-ls -lh standalone.omc
-```
-
----
-
-## NEXT STEPS
-
-### For Users
-1. Read README.md
-2. Build the project
-3. Run examples
-4. Write your own .omc programs
-
-### For Developers
-1. Read DEVELOPER.md
-2. Study omnimcode-core/src/circuits.rs
-3. Study omnimcode-core/src/evolution.rs
-4. Consider contributing to Tier 2
-
-### For Researchers
-1. Review BENCHMARKS.md
-2. Explore circuit evolution
-3. Read IMPROVEMENT_PLAN.md
-4. Propose optimizations
-
----
-
-## TIER 1 STATUS
-
-✅ **COMPLETE**
-
-- Implementation: Done
-- Testing: 72/72 passing
-- Documentation: 80+ pages
-- Performance: Verified
-- Quality: Production-ready
-
----
-
-## TIER 2-5 ROADMAP
-
-| Tier | Focus | Effort | Impact |
-|------|-------|--------|--------|
-| 2 | Advanced Transpiler | 2 weeks | 1.5× expressiveness |
-| 3 | Optimizing Compiler | 3 weeks | 3-5× faster eval |
-| 4 | Performance | 2 weeks | 4-8× GA speedup |
-| 5 | Polish | 1.5 weeks | Production maturity |
-
-**Total**: ~9.5 weeks for complete pipeline
-
----
-
-## SUMMARY
-
-### What You Have
-
-✨ A fully functional genetic logic circuit engine
-✨ Seamlessly integrated into OMNIcode
-✨ Comprehensive documentation (80+ pages)
-✨ Thorough test suite (72/72 passing)
-✨ Production-quality code
-✨ Clear roadmap for future improvement
-
-### What You Can Do
-
-- Design logic circuits with 7 gate types
-- Evaluate circuits in hard or soft mode
-- Evolve circuits using genetic algorithms
-- Visualize circuits as Graphviz diagrams
-- Integrate circuits into OMNIcode programs
-- Extend with your own gates and operators
-
-### What's Next
-
-- Start using circuits in real applications
-- Collect feedback and performance data
-- Begin Tier 2 (Advanced Transpiler) work
-- Explore optimizations in Tier 3-4
-
----
-
-## PROJECT INFORMATION
-
-| Property | Value |
-|----------|-------|
-| **Project** | OMNIcode Harmonic Computing Language |
-| **Version** | 1.0.0 (post-consolidation, 2026-05-13) |
-| **Status** | ✅ Single canonical interpreter (`omnimcode-core/`) |
-| **Location** | /home/thearchitect/OMC/ |
-| **Binary** | `target/release/omnimcode-standalone` (~544 KB), aliased as `standalone.omc` |
-| **Language** | Rust 2021, ~5,868 lines |
-| **Tests** | 72/72 passing |
-| **Workspace** | `omnimcode-core` (lib + standalone bin), `omnimcode-ffi` (cdylib+staticlib), `omnimcode-python` (PyO3) |
-| **Compile-time deps** | `regex`, `thiserror`; `pyo3` for the Python crate; `criterion` (dev) |
-
----
-
-**Everything you need is here. Start with README.md or DEVELOPER.md depending on your role. Enjoy!** 🚀
-
+**Built around φ (1.618…). The substrate is the architecture.**

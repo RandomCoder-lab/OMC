@@ -1,163 +1,25 @@
-# READING ORDER - OMNIcode v1.1 Documentation
+# Reading Order
 
-**Start here** if you're new to the project.
+The recommended reading paths for OMC are now consolidated in **`00-START-HERE.md`** — see the "Recommended reading paths" section there for paths tailored to:
 
----
+- Language designers / PL researchers
+- Developers and engineers
+- Circuit / GA work
+- LLM-generated-code researchers
 
-## First Time Users
-
-### 1️⃣ **README.md** (5 min read)
-   - What is OMNIcode?
-   - Feature overview
-   - Quick start guide
-
-### 2️⃣ **COMPLETION_SUMMARY.md** (10 min read)
-   - Tier 1 implementation status
-   - What was delivered
-   - Performance metrics
-   - Next steps
-
-### 3️⃣ **Build and Run** (5 min)
-   ```
-   cd /home/thearchitect/OMC
-   cargo build --release
-   ./standalone.omc examples/hello_world.omc
-   ```
+This file is preserved as a stable URL for anyone who linked here before the consolidation. For new readers: open `00-START-HERE.md` instead.
 
 ---
 
-## Developers
+## Quick links
 
-### For Understanding the Architecture
+| You are | Read |
+|---|---|
+| First-time visitor | `README.md` → `CHANGELOG.md` (Phase V.6–H.4 entries) → `ARCHITECTURE.md` |
+| Setting up to build | `BUILD.md` → `cargo build --release` → run `examples/self_hosting_v9b.omc` |
+| Extending the language host-side | `DEVELOPER.md` + `omnimcode-core/src/interpreter.rs` |
+| Writing OMC programs | `examples/` directory + `README.md` syntax section |
+| Curious about the math | `PHI_PI_FIB_ALGORITHM.md` |
+| Curious about the circuit-evolution arm | `RELEASE_BODY_v1.0.0.md` + `omnimcode-core/src/circuits.rs` |
 
-1. **DEVELOPER.md** (30 min read) - Detailed architecture guide
-   - Module breakdown
-   - Circuit DSL grammar
-   - Compiler pipeline
-   - Testing strategy
-
-2. **omnimcode-core/src/circuits.rs** (20 min) - Gate implementations
-   - Gate enum definition
-   - Hard & soft evaluation
-   - Validation logic
-
-3. **omnimcode-core/src/evolution.rs** (15 min) - Genetic operators
-   - Mutation, crossover, selection
-   - GA loop
-   - Fitness calculation
-
-### For Performance Tuning
-
-1. **BENCHMARKS.md** (15 min) - Detailed metrics
-   - Before/after performance
-   - Bottleneck analysis
-   - Optimization opportunities
-
----
-
-## Project Managers / Stakeholders
-
-### For Understanding Scope & Progress
-
-1. **COMPLETION_SUMMARY.md** (10 min)
-   - Status: Tier 1 Complete ✅
-   - Deliverables checklist
-
-2. **IMPROVEMENT_PLAN.md** (15 min)
-   - 5-tier roadmap
-   - Time estimates
-
-3. **BENCHMARKS.md** (5 min)
-   - Performance gains
-
----
-
-## File-by-File Guide
-
-### Documentation (Read First)
-| File | Size | Purpose | Time |
-|------|------|---------|------|
-| README.md | 10 KB | Overview | 5 min |
-| COMPLETION_SUMMARY.md | 15 KB | Status | 10 min |
-| DEVELOPER.md | 24 KB | Architecture | 30 min |
-| IMPROVEMENT_PLAN.md | 20 KB | Roadmap | 15 min |
-| BENCHMARKS.md | 8 KB | Metrics | 10 min |
-| BUILD.md | 10 KB | Building | 5 min |
-
-### Source Code (Read Next)
-| File | Lines | Purpose | Time |
-|------|-------|---------|------|
-| omnimcode-core/src/circuits.rs | 540 | Gate logic | 20 min |
-| omnimcode-core/src/evolution.rs | 360 | GA operators | 15 min |
-| omnimcode-core/src/interpreter.rs | 520 | Execution | 20 min |
-
----
-
-## Quick Reference
-
-### Commands
-
-```
-cd /home/thearchitect/OMC
-cargo build --release      # Build
-cargo test --release       # Test
-./standalone.omc examples/hello_world.omc  # Run
-```
-
-### Key Files by Objective
-
-| Goal | Read This |
-|------|-----------|
-| Understand project | README.md |
-| Learn architecture | DEVELOPER.md |
-| Optimize performance | BENCHMARKS.md |
-| Add feature | DEVELOPER.md + omnimcode-core/src/circuits.rs |
-| Debug issue | DEVELOPER.md |
-| See roadmap | IMPROVEMENT_PLAN.md |
-
----
-
-## Recommended Reading Paths
-
-### Path 1: Complete Overview (2 hours)
-1. README.md
-2. COMPLETION_SUMMARY.md
-3. BENCHMARKS.md
-4. DEVELOPER.md
-5. IMPROVEMENT_PLAN.md
-6. Build and run examples
-7. Study omnimcode-core/src/circuits.rs
-8. Study omnimcode-core/src/evolution.rs
-
-### Path 2: Developer Setup (1 hour)
-1. BUILD.md
-2. Build project
-3. Run tests
-4. DEVELOPER.md - "Module Breakdown"
-5. Study omnimcode-core/src/circuits.rs
-6. Run examples
-
-### Path 3: Quick Start (15 minutes)
-1. README.md
-2. BUILD.md
-3. Build and run hello_world.omc
-
----
-
-## Key Concepts (Glossary)
-
-| Term | Explanation |
-|------|-------------|
-| Circuit | DAG of logic gates producing output |
-| Gate | Basic logic operation (xAND, xOR, etc.) |
-| Hard eval | Boolean evaluation (true/false) |
-| Soft eval | Probabilistic evaluation (0.0-1.0) |
-| Mutation | Random gate modifications |
-| Crossover | Breeding operation combining parents |
-| Fitness | Score measuring circuit correctness |
-| GA | Genetic Algorithm - evolution framework |
-| DAG | Directed Acyclic Graph structure |
-
----
-
-**Start with README.md, then follow your role/goal path.** ✨
+For the full index of top-level docs: see the table at the bottom of `00-START-HERE.md`.
