@@ -72,9 +72,34 @@ pub enum Token {
     Eof,
 }
 
+/// Source position. 1-indexed for human-friendly error reports.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Pos {
+    pub line: u32,
+    pub col: u32,
+}
+
+impl Pos {
+    pub fn unknown() -> Self {
+        Pos { line: 0, col: 0 }
+    }
+}
+
+impl std::fmt::Display for Pos {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.line == 0 {
+            write!(f, "<unknown>")
+        } else {
+            write!(f, "{}:{}", self.line, self.col)
+        }
+    }
+}
+
 pub struct Lexer {
     input: Vec<char>,
     pos: usize,
+    line: u32,
+    col: u32,
 }
 
 impl Lexer {
@@ -82,6 +107,8 @@ impl Lexer {
         Lexer {
             input: input.chars().collect(),
             pos: 0,
+            line: 1,
+            col: 1,
         }
     }
 
@@ -105,10 +132,23 @@ impl Lexer {
         if self.pos < self.input.len() {
             let c = self.input[self.pos];
             self.pos += 1;
+            if c == '\n' {
+                self.line += 1;
+                self.col = 1;
+            } else {
+                self.col += 1;
+            }
             Some(c)
         } else {
             None
         }
+    }
+
+    /// Position at the start of the next token (i.e. after whitespace/comments
+    /// have been skipped). The token-emitting code in `next_token` consumes
+    /// the lookahead chars, so we capture this just before that consumption.
+    fn snapshot_pos(&self) -> Pos {
+        Pos { line: self.line, col: self.col }
     }
 
     fn skip_whitespace(&mut self) {
@@ -436,27 +476,99 @@ impl Lexer {
         }
         tokens
     }
+
+    /// Like `tokenize`, but returns each token paired with the source
+    /// position where it starts (1-indexed). Used by Parser for error
+    /// messages with line:col.
+    pub fn tokenize_with_pos(&mut self) -> Vec<(Token, Pos)> {
+        let mut tokens = Vec::new();
+        loop {
+            // Capture position BEFORE skipping whitespace inside next_token.
+            // `next_token` skips its own whitespace; we want the position of
+            // the first char of the actual token, so we replicate the skip.
+            self.skip_whitespace_and_comments_inline();
+            let pos = self.snapshot_pos();
+            let token = self.next_token();
+            if token == Token::Eof {
+                tokens.push((token, pos));
+                break;
+            }
+            tokens.push((token, pos));
+        }
+        tokens
+    }
+
+    /// Pre-skip whitespace + comments without consuming the lookahead a
+    /// token would start at. Used by `tokenize_with_pos` to grab the right
+    /// starting position.
+    fn skip_whitespace_and_comments_inline(&mut self) {
+        loop {
+            self.skip_whitespace();
+            if self.current() == Some('#') {
+                self.skip_comment();
+                continue;
+            }
+            if self.current() == Some('/') && self.peek(1) == Some('/') {
+                while let Some(c) = self.current() {
+                    if c == '\n' {
+                        break;
+                    }
+                    self.advance();
+                }
+                continue;
+            }
+            if self.current() == Some('/') && self.peek(1) == Some('*') {
+                self.advance();
+                self.advance();
+                while let Some(c) = self.current() {
+                    if c == '*' && self.peek(1) == Some('/') {
+                        self.advance();
+                        self.advance();
+                        break;
+                    }
+                    self.advance();
+                }
+                continue;
+            }
+            break;
+        }
+    }
 }
 
 pub struct Parser {
-    tokens: VecDeque<Token>,
+    tokens: VecDeque<(Token, Pos)>,
 }
 
 impl Parser {
     pub fn new(input: &str) -> Self {
         let mut lexer = Lexer::new(input);
-        let tokens = lexer.tokenize();
+        let tokens = lexer.tokenize_with_pos();
         Parser {
             tokens: tokens.into_iter().collect(),
         }
     }
 
     fn current(&self) -> Token {
-        self.tokens.front().cloned().unwrap_or(Token::Eof)
+        self.tokens
+            .front()
+            .map(|(t, _)| t.clone())
+            .unwrap_or(Token::Eof)
+    }
+
+    /// Position of the current (lookahead) token. Used to annotate error
+    /// messages — "Expected RBrace, got Eof at line 12, col 5".
+    fn current_pos(&self) -> Pos {
+        self.tokens
+            .front()
+            .map(|(_, p)| *p)
+            .unwrap_or_else(Pos::unknown)
     }
 
     fn advance(&mut self) -> Token {
-        self.tokens.pop_front().unwrap_or(Token::Eof)
+        self.tokens
+            .pop_front()
+            .map(|(t, _)| t)
+            .unwrap_or(Token::Eof)
     }
 
     fn expect(&mut self, expected: Token) -> Result<(), String> {
@@ -464,7 +576,12 @@ impl Parser {
             self.advance();
             Ok(())
         } else {
-            Err(format!("Expected {:?}, got {:?}", expected, self.current()))
+            Err(format!(
+                "at {}: Expected {:?}, got {:?}",
+                self.current_pos(),
+                expected,
+                self.current()
+            ))
         }
     }
 
@@ -1107,7 +1224,11 @@ impl Parser {
                 }
             }
             Token::Ident(_) => self.parse_ident_expr(),
-            _ => Err(format!("Unexpected token in expression: {:?}", self.current())),
+            _ => Err(format!(
+                "at {}: Unexpected token in expression: {:?}",
+                self.current_pos(),
+                self.current()
+            )),
         }
     }
 
@@ -1192,7 +1313,11 @@ impl Parser {
                 self.advance();
                 Ok(val)
             }
-            _ => Err(format!("Expected identifier, got {:?}", self.current())),
+            _ => Err(format!(
+                "at {}: Expected identifier, got {:?}",
+                self.current_pos(),
+                self.current()
+            )),
         }
     }
 }

@@ -4,6 +4,24 @@ All notable changes to OMNIcode will be documented in this file.
 
 ## [Unreleased]
 
+### Added (Phase T: source positions in error messages, 2026-05-13)
+
+Every parser error now reports the precise `line:col` where it occurred. The lexer tracks `line` and `col` as it consumes characters (incrementing line on `\n`, col otherwise). `tokenize_with_pos` returns `Vec<(Token, Pos)>` paired; `Parser` stores them and exposes `current_pos()` to error-reporting sites.
+
+Before:
+```
+Error: Expected Semicolon, got Print
+```
+
+After:
+```
+Error: at 2:1: Expected Semicolon, got Print
+```
+
+The `Pos` struct is `Copy` and `Debug + Display`; `Pos::unknown()` represents synthesized tokens with no source location. Errors are 1-indexed (line 1, col 1 is the first character) for human-friendly reading.
+
+This is the foundation for every future error-quality improvement: the runtime can now annotate values with origin spans, the compiler can show "this variable was declared at line 4, but used at line 12 where it's out of scope," and the optimizer can blame the right source position when something it can't fold ends up at runtime.
+
 ### Added (Phase R + S: multi-layer Phi-Field LLM + OmniWeight quantization, 2026-05-13)
 
 **Phase R — Multi-layer Phi-Field LLM**
