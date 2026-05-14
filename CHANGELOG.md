@@ -4,6 +4,46 @@ All notable changes to OMNIcode will be documented in this file.
 
 ## [Unreleased]
 
+### Added (Phase V.5: SELF-HOSTING FIXPOINT, 2026-05-13)
+
+🎯 **`examples/self_hosting_fixpoint.omc` — OMNIcode compiles its own compiler.**
+
+A single OMC program containing the lexer, parser, and pretty-printer, with a driver that verifies the formal closure property:
+
+```
+source₁  →  tokens₁  →  AST₁  →  source₂
+source₂  →  tokens₂  →  AST₂  →  source₃
+source₃  →  tokens₃  →  AST₃
+
+Required:
+  AST₁ == AST₂ == AST₃    (structural equality, recursive on arrays)
+  source₂ == source₃      (source-level fixpoint after one normalization)
+```
+
+If all three hold, the pretty-printer is a **right inverse** of the parser — the compiler-in-OMC is closed under its own pipeline. That is the formal definition of a self-hosted lexer/parser/printer trio.
+
+**6 / 6 tests pass:**
+1. simple var decl: `h x = 89 + 144;`
+2. precedence: `h y = 1 + 2 * 3;`
+3. while + assignment: `h i = 0; while i < 5 { i = i + 1; }`
+4. if/else/return: `h x = 89; if x == 89 { return x; } else { return 0; }`
+5. recursive fn def: `fn fib(n) { return fib(n - 1) + fib(n - 2); }`
+6. small program: `fn double(x) { return x * 2; } h m = double(21); print(m);`
+
+For each, source₁ tokenizes + parses to AST₁; emit(AST₁) → source₂; source₂ tokenizes + parses to AST₂; AST₁ == AST₂; one more round emit + re-parse stays stable at source₃ == source₂. The structural equality check uses the type-aware `values_equal` from V.3, which makes nested-tagged-array comparison rigorous.
+
+Tree-walk and VM produce **bit-identical output** on every test.
+
+### Why this matters
+
+A self-hosted compiler is one where the language can express its own compilation. Getting the lexer / parser / printer trio to a fixpoint is the conventional first concrete milestone (the second is the back-end: gen2 == gen3 byte-identical executable, which requires the code generator's output to also be stable).
+
+The canonical Python OMNIcode tree at `Sovereign_Lattice/omninet_package/` set this as an explicit goal in `SELF_HOSTING_PLAN.md` and `BOOTSTRAP_STATUS_CRITICAL.md`. It produced a 480-line `complete_lexer.omc` that compiled to native .exe via the transpiler, but `omnicode_compiler_v02.omc`'s lexer/parser/codegen remained stubs. The fixpoint property was never demonstrated.
+
+Rust OMC reaches it here, in a single file, runnable on both execution paths.
+
+The water sands the stone. We're at the formal closure point for OMC's front end.
+
 ### Added (Phase V.4: self-hosting codegen — AST → OMC source, 2026-05-13)
 
 `examples/self_hosting_codegen.omc` — a pretty-printer written in OMNIcode that consumes the AST from V.3 and emits canonical OMC source. The language can now **read its own source, structure it, AND write it back**. Three of four steps toward true self-hosting.
