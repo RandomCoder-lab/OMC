@@ -1,0 +1,175 @@
+# =============================================================================
+# OMC Test Runner
+# =============================================================================
+# Convention: any function named `test_*` is discovered and run as a test.
+# A test PASSES if no assertion inside it records a failure. A test FAILS
+# if any assertion (assert_eq, assert_true, assert_array_eq, ...) records
+# a failure via the host-side `test_record_failure` channel.
+#
+# Why a host-side channel? OMC arrays pass by value across function calls,
+# so failures recorded inside a nested function (called dynamically by the
+# runner) can't propagate back to the runner via a shared OMC array. The
+# host stores them in interpreter state; the runner queries via
+# `test_failure_count()` and `test_get_failures()`.
+#
+# Usage:
+#   1. Define your tests as `fn test_name() { ... }`
+#   2. Inside each test, use assertion helpers below
+#   3. At the end of your file, call `run_tests();`
+# =============================================================================
+
+# ---- Assertion helpers ----------------------------------------------------
+# Each assert returns 1 on success and records a failure (returning 0) on
+# failure. Failure messages get auto-prefixed with the current test name
+# (set by the runner via test_set_current) since the host's
+# test_record_failure attaches the prefix transparently.
+
+fn assert_eq(actual, expected) {
+    if actual == expected {
+        return 1;
+    }
+    test_record_failure(concat_many(
+        "assert_eq failed: actual=", actual, " expected=", expected));
+    return 0;
+}
+
+fn assert_true(cond) {
+    if cond {
+        return 1;
+    }
+    test_record_failure("assert_true failed");
+    return 0;
+}
+
+fn assert_false(cond) {
+    if cond == 0 {
+        return 1;
+    }
+    test_record_failure("assert_false failed");
+    return 0;
+}
+
+fn assert_array_eq(actual, expected) {
+    if arr_len(actual) != arr_len(expected) {
+        test_record_failure(concat_many(
+            "assert_array_eq length mismatch: actual=",
+            arr_len(actual), " expected=", arr_len(expected)));
+        return 0;
+    }
+    h i = 0;
+    while i < arr_len(actual) {
+        h a = arr_get(actual, i);
+        h e = arr_get(expected, i);
+        if a != e {
+            test_record_failure(concat_many(
+                "assert_array_eq mismatch at index ", i,
+                ": actual=", a, " expected=", e));
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# ---- Discovery + dispatch -------------------------------------------------
+
+fn run_tests() {
+    test_clear_failures();
+    h all_fns = defined_functions();
+    h test_fns = arr_filter(all_fns, fn(name) {
+        return str_starts_with(name, "test_");
+    });
+    h n_tests = arr_len(test_fns);
+    h n_passes = 0;
+    println("");
+    println(str_repeat("=", 60));
+    println(concat_many("Running ", n_tests, " test(s)"));
+    println(str_repeat("=", 60));
+    h i = 0;
+    while i < n_tests {
+        h test_name = arr_get(test_fns, i);
+        h failures_before = test_failure_count();
+        test_set_current(test_name);
+        # Invoke zero-arg test via host-side dynamic dispatch.
+        call(test_name, arr_new(0, 0));
+        h failures_after = test_failure_count();
+        if failures_after == failures_before {
+            n_passes = n_passes + 1;
+            println(concat_many("  ✓ ", test_name));
+        } else {
+            println(concat_many("  ✗ ", test_name));
+        }
+        i = i + 1;
+    }
+    println(str_repeat("=", 60));
+    h total = test_failure_count();
+    if total == 0 {
+        println(concat_many("All ", n_passes, " tests passed."));
+    } else {
+        println(concat_many(n_passes, "/", n_tests, " passed, ", total, " failure(s):"));
+        h failures = test_get_failures();
+        h j = 0;
+        while j < arr_len(failures) {
+            println(concat_many("  - ", arr_get(failures, j)));
+            j = j + 1;
+        }
+    }
+    println(str_repeat("=", 60));
+    return total;
+}
+
+# =============================================================================
+# Sample tests demonstrating the pattern
+# =============================================================================
+
+fn test_arithmetic() {
+    assert_eq(2 + 2, 4);
+    assert_eq(10 / 2, 5);
+    assert_eq(7 % 3, 1);
+}
+
+fn test_string_ops() {
+    assert_eq(str_len("hello"), 5);
+    assert_eq(str_concat("foo", "bar"), "foobar");
+    assert_true(str_starts_with("filename.omc", "filename"));
+}
+
+fn test_harmonic_substrate() {
+    # Fibonacci values should have is_fibonacci 1
+    assert_eq(is_fibonacci(89), 1);
+    assert_eq(is_fibonacci(90), 0);
+    # Safe-arr-get heals out-of-bounds reads
+    assert_eq(safe_arr_get([10, 20, 30], 999), 20);
+}
+
+fn test_higher_order_fns() {
+    h xs = [1, 2, 3, 5, 8];
+    h doubled = arr_map(xs, fn(x) { return x * 2; });
+    assert_array_eq(doubled, [2, 4, 6, 10, 16]);
+
+    h above_3 = arr_filter(xs, fn(x) { return x > 3; });
+    assert_array_eq(above_3, [5, 8]);
+
+    h total = arr_reduce(xs, fn(acc, x) { return acc + x; }, 0);
+    assert_eq(total, 19);
+}
+
+fn test_closures() {
+    fn make_adder(n) {
+        return fn(x) {
+            return x + n;
+        };
+    }
+    h add5 = make_adder(5);
+    assert_eq(add5(10), 15);
+    assert_eq(add5(20), 25);
+}
+
+fn test_intentional_failure() {
+    # This test SHOULD fail — demonstrates failure reporting.
+    assert_eq(1, 2);
+}
+
+# =============================================================================
+
+h failures = run_tests();

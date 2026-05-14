@@ -286,12 +286,49 @@ These take ordinary operations and route them through the φ-math substrate. Any
 
 | Function | Signature | Notes |
 |---|---|---|
-| `harmonic_checksum(s)` | `string -> float` | Resonance signature: sum over each char's codepoint resonance. Two strings with the same checksum are harmonically equivalent. |
+| `harmonic_checksum(s)` | `string -> float` | Resonance signature: sum over each char's codepoint resonance. Two strings with the same checksum are harmonically equivalent. Trivially collidable — use `harmonic_hash` if collision-resistance matters. |
+| `harmonic_hash(s)` | `string -> float` | **Position-aware** resonance hash. Weights each char's resonance by φ^i. Different inputs of the same chars in different orders produce different hashes. Use `to_int(harmonic_hash(s))` for hashtable keying. |
+| `harmonic_diff(a, b)` | `string, string -> float` | "How much did the harmonic structure change" — absolute difference of `harmonic_hash` signatures, normalized by max. Returns ~`[0, 1]`. `0` means identical. |
 | `harmonic_write_file(path, content)` | `string, string -> float` | Atomic write with a resonance gate. Computes the content's mean per-char resonance; commits via tmp+rename if score ≥ 0.5; rejects (returns negative score) below the gate. The original target is untouched on rejection. |
 | `harmonic_read_file(path)` | `string -> array<string, float>` | Returns `[content, mean_resonance]` so callers can decide whether to trust low-coherence content. Errors on read failure (use `file_exists` first if uncertain). |
 | `harmonic_sort(arr)` | `array -> array` | Sort by `harmony_value` of each element **descending**. Pure Fibonacci values lead; off-grid values sink. For strings, sorts by mean char-resonance. **Different from `arr_sort`**: that orders by NATURAL value (1<2<3), this by φ-alignment (89 outranks 100). |
 | `harmonic_split(s)` | `string -> array<string>` | Split into chunks whose sizes are nearest-Fibonacci at word boundaries. For a 100-char string: chunk sizes from {89, 55+34, 89+8, ...} respecting whitespace. Useful for φ-aligned line wrapping and packet sizing. |
 | `harmonic_partition(arr)` | `array -> array<array>` | Group elements by nearest Fibonacci attractor. Returns outer array of buckets (one per occupied attractor, in attractor order); inner arrays hold original elements. Use for distribution analysis along the φ-grid. |
+| `harmonic_dedupe(arr, band)` | `array, float -> array` | Collapse elements whose `harmony_value` falls within ±`band` of any already-kept element. **Different from `arr_unique`** (exact equality): this is "harmonically-equivalent enough to drop". Use for noise reduction and near-duplicate filtering. |
+
+---
+
+## Closures and dynamic dispatch
+
+| Function | Signature | Notes |
+|---|---|---|
+| `call(fn, args_arr)` | `function, array -> T` | Dispatch a function value (or function-name string) with an arbitrary argument list unpacked from an array. Lets the test runner invoke zero-arg tests; lets user code do dynamic-arity dispatch. |
+| `defined_functions()` | `-> array<string>` | Sorted array of all user-defined function names. Auto-generated `__lambda_N` anonymous functions are excluded. Used by the test runner to discover `test_*` functions. |
+
+Lambdas — `fn(params) { body }` expression form — capture the current local scope by VALUE (snapshot, not reference). Read-only closures over their environment. Mutable closures require shared refs and are future work.
+
+```omc
+fn make_adder(n) {
+    return fn(x) { return x + n; };
+}
+h add5 = make_adder(5);
+println(add5(10));    # 15
+```
+
+---
+
+## Test runner
+
+OMC ships a test runner in `examples/test_runner.omc`. Convention: any function named `test_*` is discovered and run. Use `assert_eq`, `assert_true`, `assert_false`, `assert_array_eq` inside tests. Failures are tracked in host-side state (bypasses OMC's pass-by-value semantics that would otherwise lose failures across nested calls).
+
+| Function | Signature | Notes |
+|---|---|---|
+| `test_record_failure(msg)` | `string -> int` | Push a failure message. Auto-prefixes with the current test name. Returns 0. |
+| `test_failure_count()` | `-> int` | Total recorded failures. |
+| `test_get_failures()` | `-> array<string>` | All recorded failure messages. |
+| `test_clear_failures()` | `-> null` | Reset the failure log. |
+| `test_set_current(name)` | `string -> null` | Set the current test name (auto-prefix for failures). |
+| `test_get_current()` | `-> string` | Read the current test name. |
 
 ---
 

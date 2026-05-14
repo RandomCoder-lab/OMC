@@ -189,13 +189,20 @@ pub enum Value {
         denominator: i64,
         context: String,
     },
-    /// First-class function reference (by name). Created when a Variable
-    /// expression resolves to a known function rather than a value binding.
-    /// Higher-order builtins (arr_map, arr_filter, arr_reduce) accept this
-    /// as their function argument; the interpreter calls back via the
-    /// function name. Closures over local scope are not yet supported —
-    /// the captured "function" is just its definition.
-    Function(String),
+    /// First-class function reference. When `captured` is `None`, this is
+    /// a plain reference (created when a Variable expression resolves to
+    /// a known function rather than a value binding). When `captured` is
+    /// `Some(env)`, this is a closure that carries a snapshot of the
+    /// local scope from where the lambda was created — `Expression::Lambda`
+    /// produces these.
+    ///
+    /// Capture is by VALUE (snapshot), not by reference. Closures are
+    /// read-only over their environment for now; mutable closures (the
+    /// classic counter pattern) require shared refs and are future work.
+    Function {
+        name: String,
+        captured: Option<std::collections::HashMap<String, Value>>,
+    },
     Null,
 }
 
@@ -237,7 +244,7 @@ impl Value {
             Value::Singularity { .. } => true,
             // A function reference is truthy — it represents a callable
             // entity, like Python's `bool(some_fn)` returning True.
-            Value::Function(_) => true,
+            Value::Function { .. } => true,
             Value::Null => false,
         }
     }
@@ -268,7 +275,13 @@ impl Value {
                     )
                 }
             }
-            Value::Function(name) => format!("<fn {}>", name),
+            Value::Function { name, captured } => {
+                if captured.is_some() {
+                    format!("<closure {}>", name)
+                } else {
+                    format!("<fn {}>", name)
+                }
+            }
         }
     }
 

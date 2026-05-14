@@ -27,6 +27,8 @@ omnimcode-core/test_*.omc
 omnimcode-core/qwen_omc_enhanced*.omc
 examples/test_*.omc
 examples/enemy_ai.omc
+# But the canonical test runner is not scratch — keep it tracked.
+!examples/test_runner.omc
 
 # Tooling caches
 omnimcode-ffi/.cargo/

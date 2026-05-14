@@ -17,6 +17,20 @@ pub struct Interpreter {
     /// time at construction; `random_seed(s)` overrides for deterministic
     /// runs. State is never 0 (xorshift degenerates at 0).
     rng_state: std::cell::Cell<u64>,
+    /// Monotonic counter for anonymous lambda names. Each `fn() {...}`
+    /// expression generates a unique `__lambda_N` identifier so the body
+    /// can be stored in self.functions and looked up at call time.
+    lambda_counter: u64,
+    /// Host-side state for the OMC test runner. Reached via
+    /// `test_record_failure(msg)` / `test_failure_count()` / `test_clear`.
+    /// Bypasses OMC's pass-by-value array semantics — the test runner
+    /// needs failures to propagate across nested-function boundaries
+    /// even though OMC arrays don't.
+    test_failures: std::cell::RefCell<Vec<String>>,
+    /// Current test name, for prefixing failure messages. Same scoping
+    /// reason as test_failures: a plain OMC global wouldn't propagate
+    /// to nested assertion calls.
+    test_current_name: std::cell::RefCell<String>,
 }
 
 impl Interpreter {
@@ -36,6 +50,9 @@ impl Interpreter {
             continue_flag: false,
             imported_modules: HashSet::new(),
             rng_state: std::cell::Cell::new(initial),
+            lambda_counter: 0,
+            test_failures: std::cell::RefCell::new(Vec::new()),
+            test_current_name: std::cell::RefCell::new(String::new()),
         }
     }
 
@@ -338,9 +355,9 @@ impl Interpreter {
                 if let Some(v) = self.get_var(name) {
                     Ok(v)
                 } else if self.functions.contains_key(name) {
-                    Ok(Value::Function(name.clone()))
+                    Ok(Value::Function { name: name.clone(), captured: None })
                 } else if self.is_known_builtin(name) {
-                    Ok(Value::Function(name.clone()))
+                    Ok(Value::Function { name: name.clone(), captured: None })
                 } else {
                     Err(format!("Undefined variable: {}", name))
                 }
@@ -575,6 +592,32 @@ impl Interpreter {
                     _ => self.eval_expr(inner),
                 }
             }
+            Expression::Lambda { params, body } => {
+                // Closures: snapshot the current local scope, generate a
+                // unique anonymous function name, register the body under
+                // that name in self.functions, return a Value::Function
+                // carrying both the name and the captured environment.
+                //
+                // Anonymous-name collision avoidance is just a monotonic
+                // counter — single-threaded interpreter, so it's fine.
+                self.lambda_counter += 1;
+                let fn_name = format!("__lambda_{}", self.lambda_counter);
+                self.functions.insert(
+                    fn_name.clone(),
+                    (params.clone(), body.clone()),
+                );
+                // Snapshot the *current* local scope. This is read-only
+                // closure semantics — captures values at lambda-creation
+                // time, mutations inside the closure don't leak.
+                let captured = self.locals
+                    .last()
+                    .cloned()
+                    .unwrap_or_default();
+                Ok(Value::Function {
+                    name: fn_name,
+                    captured: Some(captured),
+                })
+            }
         }
     }
 
@@ -616,6 +659,7 @@ impl Interpreter {
             // OMNIcode harmonic variants
             | "harmonic_checksum" | "harmonic_write_file" | "harmonic_read_file"
             | "harmonic_sort" | "harmonic_split" | "harmonic_partition"
+            | "harmonic_hash" | "harmonic_diff" | "harmonic_dedupe"
             // Self-healing
             | "safe_divide" | "safe_arr_get" | "safe_arr_set"
             | "safe_add" | "safe_sub" | "safe_mul" | "resolve_singularity"
@@ -627,6 +671,11 @@ impl Interpreter {
             // Time, conversion, introspection
             | "now_ms" | "to_int" | "int" | "to_float" | "float"
             | "to_string" | "string" | "len" | "type_of"
+            | "defined_functions" | "call"
+            // Test runner host-state primitives
+            | "test_record_failure" | "test_failure_count"
+            | "test_get_failures" | "test_clear_failures"
+            | "test_set_current" | "test_get_current"
             // Random
             | "random_int" | "random_float" | "random_seed"
             // Polish round
@@ -637,17 +686,31 @@ impl Interpreter {
     /// Invoke a Value::Function with already-evaluated argument values.
     /// Used by higher-order builtins (arr_map etc.) that have the args in
     /// hand as Values rather than Expressions.
+    ///
+    /// If the function value is a closure (carries a captured environment),
+    /// the captured scope is pushed BEFORE the args. The function body
+    /// will see captured bindings as free variables — that's the closure
+    /// semantics. Capture is read-only (snapshot); mutations inside the
+    /// closure don't leak back to the original scope.
     fn call_first_class_function(&mut self, fn_value: &Value, args: Vec<Value>) -> Result<Value, String> {
-        let fn_name = match fn_value {
-            Value::Function(name) => name.clone(),
-            Value::String(name) => name.clone(),  // accept string form too
+        let (fn_name, captured) = match fn_value {
+            Value::Function { name, captured } => (name.clone(), captured.clone()),
+            Value::String(name) => (name.clone(), None),  // accept string form too
             other => return Err(format!(
                 "call_first_class_function: not a callable ({:?})", other
             )),
         };
         // Stash args under synthetic names, then dispatch via call_function
         // with Expression::Variable refs — mirrors vm_call_builtin's pattern.
+        // The captured scope (if any) is pushed first so its bindings sit
+        // under the synthetic-arg scope. Inside the fn body, locals from
+        // the args shadow any name conflict with the captured environment.
         self.vm_push_scope();
+        if let Some(env) = captured {
+            for (k, v) in env {
+                self.vm_set_local(&k, v);
+            }
+        }
         let mut expr_args = Vec::with_capacity(args.len());
         for (i, v) in args.into_iter().enumerate() {
             let key = format!("__hof_arg_{}", i);
@@ -1996,6 +2059,87 @@ impl Interpreter {
                     .unwrap_or(0);
                 Ok(Value::HInt(HInt::new(ms)))
             }
+            // Introspection of the function table — used by the OMC-side
+            // test runner to discover `test_*` functions and dispatch them.
+            "defined_functions" => {
+                // Returns an array of user-defined function names. Sorted
+                // for deterministic test discovery order (alphabetical).
+                // Auto-generated lambdas (__lambda_N) are excluded so
+                // the test runner doesn't try to run them as tests.
+                let mut names: Vec<String> = self.functions.keys()
+                    .filter(|n| !n.starts_with("__lambda_"))
+                    .cloned()
+                    .collect();
+                names.sort();
+                Ok(Value::Array(HArray {
+                    items: names.into_iter().map(Value::String).collect(),
+                }))
+            }
+            // call(fn_or_name, args_array) — dispatch a function value
+            // (or function-name string) with an arbitrary argument list
+            // unpacked from an array. Complements the HOFs (which fix
+            // arity at 1 or 2). Lets the test runner invoke zero-arg
+            // tests, and lets user code do dynamic-arity dispatch.
+            "call" => {
+                if args.len() < 2 {
+                    return Err("call requires (function, args_array)".to_string());
+                }
+                let fn_v = self.eval_expr(&args[0])?;
+                let args_v = self.eval_expr(&args[1])?;
+                let arg_list = match args_v {
+                    Value::Array(a) => a.items,
+                    _ => return Err("call: second argument must be an array".to_string()),
+                };
+                self.call_first_class_function(&fn_v, arg_list)
+            }
+            // Test runner host-state primitives. The test runner is in
+            // OMC (examples/test_runner.omc); these builtins give it a
+            // side-channel for failure tracking that bypasses OMC's
+            // pass-by-value array semantics (which would otherwise lose
+            // failures recorded inside nested function calls).
+            "test_record_failure" => {
+                if args.is_empty() {
+                    return Err("test_record_failure requires (message)".to_string());
+                }
+                let msg = self.eval_expr(&args[0])?.to_string();
+                // Auto-prefix with the current test name (if set) so the
+                // failure log always carries context. The OMC test runner
+                // just calls test_record_failure(reason) and the prefix
+                // attaches transparently.
+                let prefix = self.test_current_name.borrow().clone();
+                let recorded = if prefix.is_empty() {
+                    msg
+                } else {
+                    format!("{}: {}", prefix, msg)
+                };
+                self.test_failures.borrow_mut().push(recorded);
+                Ok(Value::HInt(HInt::new(0)))
+            }
+            "test_set_current" => {
+                if args.is_empty() {
+                    return Err("test_set_current requires (name)".to_string());
+                }
+                let name = self.eval_expr(&args[0])?.to_string();
+                *self.test_current_name.borrow_mut() = name;
+                Ok(Value::Null)
+            }
+            "test_get_current" => {
+                Ok(Value::String(self.test_current_name.borrow().clone()))
+            }
+            "test_failure_count" => {
+                Ok(Value::HInt(HInt::new(self.test_failures.borrow().len() as i64)))
+            }
+            "test_get_failures" => {
+                let items: Vec<Value> = self.test_failures.borrow()
+                    .iter()
+                    .map(|s| Value::String(s.clone()))
+                    .collect();
+                Ok(Value::Array(HArray { items }))
+            }
+            "test_clear_failures" => {
+                self.test_failures.borrow_mut().clear();
+                Ok(Value::Null)
+            }
             // Random — xorshift64* via the interpreter's RNG state.
             // random_seed(s) for deterministic runs; otherwise seeded from
             // system nanos at interpreter construction.
@@ -2355,6 +2499,106 @@ impl Interpreter {
                     Err("harmonic_partition: argument must be an array".to_string())
                 }
             }
+            "harmonic_hash" => {
+                // Position-aware resonance hash — different from
+                // harmonic_checksum which is just a sum (trivially
+                // colliding). Weights each char's resonance by phi^i
+                // where i is its position. The result is much harder
+                // to collide and still respects the harmonic substrate.
+                //
+                // Output: f64 in roughly [0, len * phi * 1.0). Use
+                // to_int(...) to get a stable integer hash for hashtable
+                // keying when needed.
+                if args.is_empty() {
+                    return Err("harmonic_hash requires (string)".to_string());
+                }
+                let s = self.eval_expr(&args[0])?.to_string();
+                const PHI: f64 = 1.6180339887498949;
+                let mut acc: f64 = 0.0;
+                let mut weight: f64 = 1.0;
+                for c in s.chars() {
+                    let r = HInt::compute_resonance(c as i64);
+                    acc += r * weight;
+                    weight *= PHI;
+                    // Saturate gracefully — for huge strings the weight
+                    // would overflow without this; keep it bounded.
+                    if weight > 1e18 {
+                        weight = 1.0;
+                    }
+                }
+                Ok(Value::HFloat(acc))
+            }
+            "harmonic_diff" => {
+                // Score for "how much did the harmonic structure change"
+                // between two strings. Returns the absolute difference
+                // of their harmonic_hash signatures, normalised by the
+                // max of the two — gives a value in roughly [0, 1].
+                //
+                // 0.0 means harmonically identical; higher means more
+                // structurally different. Useful for diff visualisations
+                // weighted by impact rather than byte count.
+                if args.len() < 2 {
+                    return Err("harmonic_diff requires (a, b)".to_string());
+                }
+                let a = self.eval_expr(&args[0])?.to_string();
+                let b = self.eval_expr(&args[1])?.to_string();
+                const PHI: f64 = 1.6180339887498949;
+                let hash_one = |s: &str| -> f64 {
+                    let mut acc = 0.0;
+                    let mut weight = 1.0;
+                    for c in s.chars() {
+                        acc += HInt::compute_resonance(c as i64) * weight;
+                        weight *= PHI;
+                        if weight > 1e18 { weight = 1.0; }
+                    }
+                    acc
+                };
+                let ha = hash_one(&a);
+                let hb = hash_one(&b);
+                let diff = (ha - hb).abs();
+                let denom = ha.abs().max(hb.abs()).max(1.0);
+                Ok(Value::HFloat(diff / denom))
+            }
+            "harmonic_dedupe" => {
+                // Cluster elements whose values fall in the same
+                // resonance band, collapsing each cluster to the
+                // FIRST representative. `band` controls cluster width
+                // by harmony_value: 0.05 means "elements with resonance
+                // within ±0.05 of any kept element collapse to it."
+                //
+                // Different from arr_unique (exact equality) — this
+                // dedupe is "harmonically-equivalent enough to drop."
+                //
+                // Useful for: noise reduction in measurement sequences,
+                // collapsing near-duplicates that arose from rounding
+                // or float drift, filtering down attractor-aligned data.
+                if args.len() < 2 {
+                    return Err("harmonic_dedupe requires (array, band)".to_string());
+                }
+                let arr_v = self.eval_expr(&args[0])?;
+                let band = self.eval_expr(&args[1])?.to_float();
+                if let Value::Array(arr) = arr_v {
+                    let mut kept: Vec<Value> = Vec::new();
+                    let mut kept_scores: Vec<f64> = Vec::new();
+                    for v in arr.items {
+                        let score = match &v {
+                            Value::HInt(h) => h.resonance,
+                            Value::HFloat(f) => HInt::compute_resonance(*f as i64),
+                            _ => 0.0,
+                        };
+                        // Check if this element falls within `band` of any
+                        // already-kept element's resonance.
+                        let close = kept_scores.iter().any(|s| (s - score).abs() < band);
+                        if !close {
+                            kept_scores.push(score);
+                            kept.push(v);
+                        }
+                    }
+                    Ok(Value::Array(HArray { items: kept }))
+                } else {
+                    Err("harmonic_dedupe: first argument must be an array".to_string())
+                }
+            }
             "arr_first" => {
                 if let Value::Array(arr) = self.eval_expr(&args[0])? {
                     arr.items
@@ -2484,8 +2728,23 @@ impl Interpreter {
                     Err("arr_resonance: requires an array".to_string())
                 }
             }
-            // Unknown name — already checked user-defined functions at the top.
-            _ => Err(format!("Undefined function: {}", name)),
+            // Unknown name — check whether it's a local variable holding
+            // a Value::Function before declaring it undefined. This is
+            // what makes `h f = fn(x) {...}; f(3);` work: f resolves as
+            // a closure value, and we dispatch through call_first_class_function.
+            _ => {
+                if let Some(v) = self.get_var(name) {
+                    if matches!(v, Value::Function { .. }) {
+                        // Evaluate the args here (call_first_class_function
+                        // wants Values, not Expressions).
+                        let arg_vals: Result<Vec<Value>, String> = args.iter()
+                            .map(|e| self.eval_expr(e))
+                            .collect();
+                        return self.call_first_class_function(&v, arg_vals?);
+                    }
+                }
+                Err(format!("Undefined function: {}", name))
+            }
         }
     }
 

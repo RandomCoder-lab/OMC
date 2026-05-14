@@ -4,6 +4,84 @@ All notable changes to OMNIcode will be documented in this file.
 
 ## [Unreleased]
 
+### Added (Closures + harmonic_hash/diff/dedupe + test runner — 15 new builtins, 2026-05-14)
+
+🎯 **Three more tracks land: closures over local scope, three new harmonic variants, and a built-in test runner.**
+
+#### Track 1 — Closures (lambdas with snapshot capture)
+
+`Expression::Lambda { params, body }` is now a real AST node. `Value::Function` carries an optional `captured: HashMap<String, Value>` so first-class function values can now hold their lexical environment.
+
+Lambda syntax: `fn(params) { body }` as an expression (distinguished from the named statement form `fn name(...) { ... }`). At eval time:
+1. The lambda body is registered in `self.functions` under a unique `__lambda_N` identifier
+2. The current local scope is snapshotted into the captured env
+3. A `Value::Function` carrying both is returned
+
+When invoked via `call_first_class_function`, the captured env is pushed as a scope BEFORE binding args. Inside the body, captured bindings appear as free variables; args shadow on collision.
+
+Bare-name dispatch: `add5(10)` works when `add5` is a variable holding a closure value — `call_function`'s final fallback now checks for a local variable holding `Value::Function` before declaring "Undefined function".
+
+Demo:
+```omc
+fn make_adder(n) {
+    return fn(x) {
+        return x + n;
+    };
+}
+h add5 = make_adder(5);
+println(add5(10));   # 15
+```
+
+Captures by VALUE (snapshot). Mutable closures (the classic counter pattern) require shared refs and are future work. Read-only still unlocks currying, partial application, comparator factories, etc.
+
+Tree-walk only — the Rust VM bytecode path returns an error for Lambda expressions because the VM has no captured-scope plumbing. Run with `OMC_VM` unset to use closures.
+
+#### Track 2 — Three more harmonic variants
+
+- **`harmonic_hash(s)`** — position-aware resonance hash. Weights each char's resonance by φ^i. Different from `harmonic_checksum` (which is just a sum, trivially colliding). Same chars in different order → different hash.
+- **`harmonic_diff(a, b)`** — "how much did the harmonic structure change" — absolute diff of `harmonic_hash` signatures normalized by max. Returns ~`[0, 1]`. `0` = identical.
+- **`harmonic_dedupe(arr, band)`** — collapse elements whose `harmony_value` falls within ±`band` of any already-kept element. Different from `arr_unique` (exact equality) — this is "harmonically-equivalent enough to drop". Useful for noise reduction.
+
+Verified: `harmonic_hash("hello") != harmonic_hash("olleh")` (position matters); `harmonic_diff("hello", "hello") == 0`; `harmonic_dedupe([89,90,91,100,144,145], 0.01) → 4 elements`; tighter band `0.05` → `2 elements`.
+
+#### Track 3 — Built-in test runner (`examples/test_runner.omc`)
+
+Convention: any function named `test_*` is discovered via `defined_functions()` and dispatched via the new `call(fn, args_array)` primitive. Failures are tracked in host-side state — pass-by-value semantics would otherwise lose failures recorded inside nested function calls.
+
+New host primitives supporting the runner:
+- `defined_functions()` → array of user-defined function names (sorted, excludes `__lambda_N`)
+- `call(fn_or_name, args_array)` → invoke a function with args unpacked from an array (works for zero-args too, unlike the fixed-arity HOFs)
+- `test_record_failure(msg)` → host-side push with auto-prefix by current test name
+- `test_failure_count()`, `test_get_failures()`, `test_clear_failures()`
+- `test_set_current(name)`, `test_get_current()` → current test name (host-state, bypasses OMC scoping)
+
+The test runner itself is pure OMC — uses all of: first-class functions (lambda predicate for `arr_filter`), closures (test functions sharing a name space), `call(name, args)` for dispatch, `defined_functions()` for discovery, `str_starts_with` for the `test_*` filter, host-side state for failure tracking.
+
+6 sample tests in the file demonstrate the workflow (5 pass, 1 intentional failure). Output:
+```
+============================================================
+Running 6 test(s)
+============================================================
+  ✓ test_arithmetic
+  ✓ test_closures
+  ✓ test_harmonic_substrate
+  ✓ test_higher_order_fns
+  ✗ test_intentional_failure
+  ✓ test_string_ops
+============================================================
+5/6 passed, 1 failure(s):
+  - test_intentional_failure: assert_eq failed: actual=1 expected=2
+============================================================
+```
+
+#### Documentation
+
+`STDLIB.md` updated with full sections for the new HOFs (closures and dynamic dispatch), expanded harmonic-variants table, and a new test runner section. The "Missing on purpose" notes about `println` / `map`/`filter`/`reduce` and the "Future-tense work" note about first-class functions are removed — they're done.
+
+#### Regression
+
+V.9b: ✓✓✓ ALL THREE FIXPOINTS REACHED unchanged. H.5: 6/6 demos converge. safe_keyword_host.omc, stdlib_expansion.omc, harmonic_variants.omc, polish_round.omc all produce identical output. No surface broken.
+
 ### Added (First-class functions + OMNIcode harmonic variants + polish round — 28 new built-ins, 2026-05-14)
 
 🎯 **Three coherent additions: language-level first-class function values, OMNIcode-flavored harmonic operations, and a polish round.**

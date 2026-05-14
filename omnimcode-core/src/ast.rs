@@ -124,6 +124,17 @@ pub enum Expression {
     // Other shapes fall through to evaluating the inner expression
     // directly (no-op), reserving the slot for future runtime guards.
     Safe(Box<Expression>),
+
+    // Anonymous function expression (closure). Distinguished from
+    // Statement::FunctionDef by being usable in expression context —
+    // can be passed as an argument, returned from a function, stored
+    // in a variable. Capture is by VALUE: when evaluated, the current
+    // local scope is snapshot into the resulting Value::Function's
+    // `captured` field. Read-only over its environment.
+    Lambda {
+        params: Vec<String>,
+        body: Vec<Statement>,
+    },
 }
 
 impl Expression {

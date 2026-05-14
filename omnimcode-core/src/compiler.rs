@@ -120,7 +120,9 @@ impl Compiler {
                         | "file_exists" | "write_file" | "gcd" | "lcm"
                         | "now_ms"
                         // polish round (ints)
-                        | "random_int" | "random_seed" => Some("int"),
+                        | "random_int" | "random_seed"
+                        // test runner ints
+                        | "test_failure_count" | "test_record_failure" => Some("int"),
                         "pow" | "sqrt" | "log" | "exp" | "sin" | "cos" | "tan"
                         | "tanh" | "erf" | "sigmoid" | "frac" | "clamp"
                         | "pi" | "e" | "phi" | "tau" | "phi_inv" | "phi_sq"
@@ -138,9 +140,12 @@ impl Compiler {
                         | "str_trim" | "str_replace" | "str_repeat"
                         | "str_join" | "arr_join" | "read_file" | "type_of"
                         // polish round (strings)
-                        | "str_pad_left" | "str_pad_right" => Some("string"),
+                        | "str_pad_left" | "str_pad_right"
+                        // test runner: get_current returns the current test name
+                        | "test_get_current" => Some("string"),
                         // Float returns
-                        "harmonic_checksum" | "harmonic_write_file" => Some("float"),
+                        "harmonic_checksum" | "harmonic_write_file"
+                        | "harmonic_hash" | "harmonic_diff" => Some("float"),
                         "arr_new" | "arr_from_range" | "arr_concat"
                         | "arr_slice" | "cleanup_array"
                         | "filter_by_resonance"
@@ -151,8 +156,13 @@ impl Compiler {
                         // Harmonic variants returning arrays
                         | "harmonic_read_file" | "harmonic_sort"
                         | "harmonic_split" | "harmonic_partition"
+                        | "harmonic_dedupe"
                         // polish round (arrays)
-                        | "arr_zip" | "arr_unique" => Some("array"),
+                        | "arr_zip" | "arr_unique"
+                        // introspection
+                        | "defined_functions"
+                        // test runner: get_failures returns array of strings
+                        | "test_get_failures" => Some("array"),
                         _ => None,
                     }
                 })
@@ -164,6 +174,10 @@ impl Compiler {
             // result mirrors the wrapped call. Delegating to the inner
             // gives the right answer in every supported shape.
             Expression::Safe(inner) => self.infer_type(inner),
+            // Lambdas evaluate to a function value at runtime. Type
+            // inference can't see across the call boundary statically,
+            // so we don't claim a return-type tag here.
+            Expression::Lambda { .. } => None,
         }
     }
 
@@ -480,6 +494,15 @@ impl Compiler {
                     }
                     _ => self.compile_expr(inner)?,
                 }
+            }
+            Expression::Lambda { .. } => {
+                // Closures aren't supported on the Rust VM path yet —
+                // the bytecode VM has no captured-scope plumbing. Tree-walk
+                // handles them via Expression::Lambda evaluation. Run with
+                // OMC_VM unset to use closures.
+                return Err(
+                    "Lambda expressions require tree-walk; unset OMC_VM to use closures".to_string()
+                );
             }
         }
         Ok(())

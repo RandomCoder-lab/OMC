@@ -980,7 +980,73 @@ impl Parser {
             let inner = self.parse_or()?;
             return Ok(Expression::Safe(Box::new(inner)));
         }
+        // Lambda: `fn(params) { body }` as an expression. The named form
+        // `fn name(params) { body }` remains a top-level statement;
+        // lambdas distinguish themselves by having no name token between
+        // `fn` and `(`.
+        if self.current() == Token::Fn {
+            // Peek by cloning the tokens — if the second token is LParen,
+            // this is a lambda. Otherwise leave it for the statement parser
+            // (which will likely error, since `fn name` at expression
+            // position isn't valid).
+            let lookahead = self.tokens.clone();
+            self.advance(); // consume `fn`
+            if self.current() == Token::LParen {
+                return self.parse_lambda();
+            }
+            // Restore tokens — not a lambda; fall through. The caller's
+            // parse_or will hit Token::Fn and error in parse_primary.
+            self.tokens = lookahead;
+        }
         self.parse_or()
+    }
+
+    /// Parse the parameter list + body of a lambda, after `fn` has been
+    /// consumed and the current token is `(`. Mirrors the parameter-list
+    /// shape of named function definitions.
+    fn parse_lambda(&mut self) -> Result<Expression, String> {
+        self.expect(Token::LParen)?;
+        let mut params: Vec<String> = Vec::new();
+        if self.current() != Token::RParen {
+            loop {
+                match self.current() {
+                    Token::Ident(name) => {
+                        self.advance();
+                        params.push(name);
+                    }
+                    other => return Err(format!(
+                        "expected parameter name in lambda, got {:?}", other
+                    )),
+                }
+                if self.current() == Token::Comma {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+        }
+        self.expect(Token::RParen)?;
+        // Optional `-> type` annotation, same as named fn defs. Skipped
+        // structurally for now (informational only).
+        if self.current() == Token::Minus {
+            // Could be either `->` arrow or a stray minus; peek ahead.
+            let saved = self.tokens.clone();
+            self.advance();
+            if self.current() == Token::Gt {
+                self.advance();
+                // Consume the type annotation token (Ident or keyword).
+                self.advance();
+            } else {
+                self.tokens = saved;
+            }
+        }
+        self.expect(Token::LBrace)?;
+        let mut body: Vec<Statement> = Vec::new();
+        while self.current() != Token::RBrace {
+            body.push(self.parse_statement()?);
+        }
+        self.expect(Token::RBrace)?;
+        Ok(Expression::Lambda { params, body })
     }
 
     fn parse_or(&mut self) -> Result<Expression, String> {
