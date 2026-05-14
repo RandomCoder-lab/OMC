@@ -585,7 +585,9 @@ impl Interpreter {
                     return Err("is_fibonacci requires 1 argument".to_string());
                 }
                 let n = self.eval_expr(&args[0])?.to_int();
-                Ok(Value::Bool(is_fibonacci(n)))
+                // Canonical Python OMC returns 0/1 so `if is_fibonacci(x) == 1`
+                // works idiomatically. Tree-walk and VM now agree.
+                Ok(Value::HInt(HInt::new(if is_fibonacci(n) { 1 } else { 0 })))
             }
             // --- Math: scalar functions ---
             "abs" => {

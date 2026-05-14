@@ -11,6 +11,12 @@ struct LoopFrame {
     break_jumps: Vec<usize>,
 }
 
+/// Statically-known type for a variable or expression, used by Phase M's
+/// HIR to specialize arithmetic opcodes. "int" / "float" / "string" / "bool"
+/// / "array" map directly from the source-level annotations; `None` means
+/// the type couldn't be proved statically and runtime polymorphism applies.
+type TypeTag = Option<&'static str>;
+
 pub struct Compiler {
     constants: Vec<Const>,
     ops: Vec<Op>,
@@ -19,6 +25,12 @@ pub struct Compiler {
     /// at call sites where the user has redefined a built-in (e.g. a
     /// canonical recursive `fib`).
     user_fns: std::collections::HashSet<String>,
+    /// Phase M: statically-tracked variable types, populated from parameter
+    /// annotations and obvious-literal var decls.
+    var_types: std::collections::HashMap<String, &'static str>,
+    /// Phase M: declared return types of user-defined functions, looked up
+    /// when inferring the type of a Call expression.
+    fn_return_types: std::collections::HashMap<String, &'static str>,
 }
 
 impl Compiler {
@@ -28,6 +40,8 @@ impl Compiler {
             ops: Vec::new(),
             loop_stack: Vec::new(),
             user_fns: std::collections::HashSet::new(),
+            var_types: std::collections::HashMap::new(),
+            fn_return_types: std::collections::HashMap::new(),
         }
     }
 
@@ -37,6 +51,89 @@ impl Compiler {
             ops: Vec::new(),
             loop_stack: Vec::new(),
             user_fns,
+            var_types: std::collections::HashMap::new(),
+            fn_return_types: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Statically infer the type of an Expression, returning Some(tag) when
+    /// the type is provably one of "int" / "float" / "string" / "bool" /
+    /// "array". Used by arithmetic emission to pick specialized opcodes.
+    fn infer_type(&self, e: &Expression) -> TypeTag {
+        match e {
+            Expression::Number(_) => Some("int"),
+            Expression::Float(_) => Some("float"),
+            Expression::String(_) => Some("string"),
+            Expression::Boolean(_) => Some("bool"),
+            Expression::Array(_) => Some("array"),
+            Expression::Variable(name) => self.var_types.get(name.as_str()).copied(),
+            Expression::Add(l, r)
+            | Expression::Sub(l, r)
+            | Expression::Mul(l, r) => {
+                match (self.infer_type(l), self.infer_type(r)) {
+                    (Some("int"), Some("int")) => Some("int"),
+                    (Some("float"), _) | (_, Some("float")) => Some("float"),
+                    _ => None,
+                }
+            }
+            Expression::Div(l, r) => {
+                // Integer division of two ints stays int; mixed promotes to float.
+                match (self.infer_type(l), self.infer_type(r)) {
+                    (Some("int"), Some("int")) => Some("int"),
+                    (Some("float"), _) | (_, Some("float")) => Some("float"),
+                    _ => None,
+                }
+            }
+            Expression::Mod(_, _) => Some("int"),
+            Expression::Eq(_, _)
+            | Expression::Ne(_, _)
+            | Expression::Lt(_, _)
+            | Expression::Le(_, _)
+            | Expression::Gt(_, _)
+            | Expression::Ge(_, _)
+            | Expression::And(_, _)
+            | Expression::Or(_, _)
+            | Expression::Not(_) => Some("bool"),
+            Expression::BitAnd(_, _)
+            | Expression::BitOr(_, _)
+            | Expression::BitXor(_, _)
+            | Expression::BitNot(_)
+            | Expression::Shl(_, _)
+            | Expression::Shr(_, _) => Some("int"),
+            Expression::Resonance(_) => Some("float"),
+            Expression::Fold(_) => Some("int"),
+            Expression::Call { name, .. } => {
+                self.fn_return_types.get(name.as_str()).copied().or_else(|| {
+                    // Built-ins whose return type is fixed.
+                    match name.as_str() {
+                        "fibonacci" | "fib" | "is_fibonacci" | "factorial"
+                        | "abs" | "floor" | "ceil" | "round" | "is_prime"
+                        | "even" | "odd" | "is_even" | "is_odd"
+                        | "len" | "arr_len" | "arr_min" | "arr_max"
+                        | "arr_sum" | "arr_get" | "arr_index_of" | "arr_contains"
+                        | "is_singularity" | "resolve_singularity"
+                        | "pow_int" | "square" | "cube" | "sign" | "to_int"
+                        | "int" | "classify_resonance" | "safe_add" | "safe_sub"
+                        | "safe_mul" => Some("int"),
+                        "pow" | "sqrt" | "log" | "exp" | "sin" | "cos" | "tan"
+                        | "tanh" | "erf" | "sigmoid" | "frac" | "clamp"
+                        | "pi" | "e" | "phi" | "tau" | "phi_inv" | "phi_sq"
+                        | "phi_squared" | "sqrt_2" | "sqrt_5" | "ln_2"
+                        | "to_float" | "float" | "interfere"
+                        | "harmonic_interfere" | "measure_coherence"
+                        | "arr_resonance" | "collapse" | "res" | "phi.res"
+                        | "phi.fold" | "phi.him" => Some("float"),
+                        "to_string" | "string" | "str_concat"
+                        | "str_uppercase" | "str_lowercase" | "str_reverse"
+                        | "str_slice" | "concat_many" => Some("string"),
+                        "arr_new" | "arr_from_range" | "arr_concat"
+                        | "arr_slice" | "cleanup_array"
+                        | "filter_by_resonance" => Some("array"),
+                        _ => None,
+                    }
+                })
+            }
+            Expression::Index { .. } => None,
         }
     }
 
@@ -94,19 +191,37 @@ impl Compiler {
                 self.emit(Op::NewArray(items.len()));
             }
             Expression::Add(l, r) => {
+                let lt = self.infer_type(l);
+                let rt = self.infer_type(r);
                 self.compile_expr(l)?;
                 self.compile_expr(r)?;
-                self.emit(Op::Add);
+                match (lt, rt) {
+                    (Some("int"), Some("int")) => self.emit(Op::AddInt),
+                    (Some("float"), Some("float")) => self.emit(Op::AddFloat),
+                    _ => self.emit(Op::Add),
+                };
             }
             Expression::Sub(l, r) => {
+                let lt = self.infer_type(l);
+                let rt = self.infer_type(r);
                 self.compile_expr(l)?;
                 self.compile_expr(r)?;
-                self.emit(Op::Sub);
+                match (lt, rt) {
+                    (Some("int"), Some("int")) => self.emit(Op::SubInt),
+                    (Some("float"), Some("float")) => self.emit(Op::SubFloat),
+                    _ => self.emit(Op::Sub),
+                };
             }
             Expression::Mul(l, r) => {
+                let lt = self.infer_type(l);
+                let rt = self.infer_type(r);
                 self.compile_expr(l)?;
                 self.compile_expr(r)?;
-                self.emit(Op::Mul);
+                match (lt, rt) {
+                    (Some("int"), Some("int")) => self.emit(Op::MulInt),
+                    (Some("float"), Some("float")) => self.emit(Op::MulFloat),
+                    _ => self.emit(Op::Mul),
+                };
             }
             Expression::Div(l, r) => {
                 self.compile_expr(l)?;
@@ -281,10 +396,18 @@ impl Compiler {
                 self.emit(Op::Pop);
             }
             Statement::VarDecl { name, value, .. } | Statement::Parameter { name, value } => {
+                // Phase M: remember statically-known type before lowering the
+                // value, so any subsequent uses in expressions can specialize.
+                if let Some(t) = self.infer_type(value) {
+                    self.var_types.insert(name.clone(), t);
+                }
                 self.compile_expr(value)?;
                 self.emit(Op::StoreVar(name.clone()));
             }
             Statement::Assignment { name, value } => {
+                if let Some(t) = self.infer_type(value) {
+                    self.var_types.insert(name.clone(), t);
+                }
                 self.compile_expr(value)?;
                 self.emit(Op::StoreVar(name.clone()));
             }
@@ -524,47 +647,105 @@ impl Compiler {
         Ok(())
     }
 
-    fn finish(self, name: String, params: Vec<String>) -> CompiledFunction {
+    fn finish(
+        self,
+        name: String,
+        params: Vec<String>,
+        param_types: Vec<Option<String>>,
+        return_type: Option<String>,
+    ) -> CompiledFunction {
         CompiledFunction {
             name,
             params,
+            param_types,
+            return_type,
             ops: self.ops,
             constants: self.constants,
         }
     }
 }
 
+/// Map a source-level type name ("int" / "string" / etc.) to the static
+/// TypeTag understood by the compiler's inference helper. Returns None
+/// for unknown annotations so they're treated as untyped.
+fn type_tag_of(s: &str) -> Option<&'static str> {
+    match s {
+        "int" | "i64" => Some("int"),
+        "float" | "f64" => Some("float"),
+        "string" | "str" => Some("string"),
+        "bool" => Some("bool"),
+        "array" => Some("array"),
+        _ => None,
+    }
+}
+
 pub fn compile_program(statements: &[Statement]) -> Result<Module, String> {
     let mut module = Module::default();
 
-    // Pre-pass: collect every user-defined function name. We pass this set
+    // Pre-pass A: collect every user-defined function name. We pass this set
     // into every Compiler so the hot-path inliner can refuse to inline a
     // name the user has shadowed (e.g. a recursive user `fib`).
     let mut user_fns: std::collections::HashSet<String> =
         std::collections::HashSet::new();
+    // Pre-pass B: collect declared return-types so Compiler::infer_type
+    // can see across function boundaries.
+    let mut fn_return_types: std::collections::HashMap<String, &'static str> =
+        std::collections::HashMap::new();
     for stmt in statements {
-        if let Statement::FunctionDef { name, .. } = stmt {
+        if let Statement::FunctionDef {
+            name, return_type, ..
+        } = stmt
+        {
             user_fns.insert(name.clone());
+            if let Some(rt) = return_type {
+                if let Some(tag) = type_tag_of(rt) {
+                    fn_return_types.insert(name.clone(), tag);
+                }
+            }
         }
     }
 
     // First pass: hoist function definitions.
     for stmt in statements {
-        if let Statement::FunctionDef { name, params, body, .. } = stmt {
+        if let Statement::FunctionDef {
+            name,
+            params,
+            param_types,
+            body,
+            return_type,
+            ..
+        } = stmt
+        {
             let mut fc = Compiler::with_user_fns(user_fns.clone());
+            fc.fn_return_types = fn_return_types.clone();
+            // Seed var_types from typed parameters so arithmetic on them
+            // can specialize.
+            for (pname, ptype_opt) in params.iter().zip(param_types.iter()) {
+                if let Some(ptype) = ptype_opt {
+                    if let Some(tag) = type_tag_of(ptype) {
+                        fc.var_types.insert(pname.clone(), tag);
+                    }
+                }
+            }
             for s in body {
                 fc.compile_stmt(s)?;
             }
             // Ensure every function ends with an implicit ReturnNull so the VM
             // doesn't fall off the end.
             fc.emit(Op::ReturnNull);
-            let func = fc.finish(name.clone(), params.clone());
+            let func = fc.finish(
+                name.clone(),
+                params.clone(),
+                param_types.clone(),
+                return_type.clone(),
+            );
             module.functions.insert(name.clone(), func);
         }
     }
 
     // Second pass: compile the top-level (non-fn) statements as `main`.
     let mut mc = Compiler::with_user_fns(user_fns);
+    mc.fn_return_types = fn_return_types;
     for stmt in statements {
         if matches!(stmt, Statement::FunctionDef { .. }) {
             continue;
@@ -572,7 +753,7 @@ pub fn compile_program(statements: &[Statement]) -> Result<Module, String> {
         mc.compile_stmt(stmt)?;
     }
     mc.emit(Op::ReturnNull);
-    module.main = mc.finish("__main__".to_string(), Vec::new());
+    module.main = mc.finish("__main__".to_string(), Vec::new(), Vec::new(), None);
 
     Ok(module)
 }

@@ -86,6 +86,39 @@ impl Vm {
                     };
                     stack.push(result);
                 }
+                // Typed fast-path arithmetic (Phase M). Skip the runtime
+                // is_float() check when the compiler proved both sides have
+                // a single concrete type.
+                Op::AddInt => {
+                    let r = stack.pop().ok_or("stack underflow")?.to_int();
+                    let l = stack.pop().ok_or("stack underflow")?.to_int();
+                    stack.push(Value::HInt(HInt::new(l.wrapping_add(r))));
+                }
+                Op::SubInt => {
+                    let r = stack.pop().ok_or("stack underflow")?.to_int();
+                    let l = stack.pop().ok_or("stack underflow")?.to_int();
+                    stack.push(Value::HInt(HInt::new(l.wrapping_sub(r))));
+                }
+                Op::MulInt => {
+                    let r = stack.pop().ok_or("stack underflow")?.to_int();
+                    let l = stack.pop().ok_or("stack underflow")?.to_int();
+                    stack.push(Value::HInt(HInt::new(l.wrapping_mul(r))));
+                }
+                Op::AddFloat => {
+                    let r = stack.pop().ok_or("stack underflow")?.to_float();
+                    let l = stack.pop().ok_or("stack underflow")?.to_float();
+                    stack.push(Value::HFloat(l + r));
+                }
+                Op::SubFloat => {
+                    let r = stack.pop().ok_or("stack underflow")?.to_float();
+                    let l = stack.pop().ok_or("stack underflow")?.to_float();
+                    stack.push(Value::HFloat(l - r));
+                }
+                Op::MulFloat => {
+                    let r = stack.pop().ok_or("stack underflow")?.to_float();
+                    let l = stack.pop().ok_or("stack underflow")?.to_float();
+                    stack.push(Value::HFloat(l * r));
+                }
                 Op::Neg => {
                     let v = stack.pop().ok_or("stack underflow")?;
                     if v.is_float() {

@@ -52,6 +52,16 @@ pub enum Op {
     Mod,
     Neg,
 
+    // Typed fast-path arithmetic: skip the runtime is_float() check when the
+    // compiler proves both operands are int-typed. Emitted by Phase M's HIR.
+    AddInt,
+    SubInt,
+    MulInt,
+    // Typed fast-path arithmetic for floats (both operands provably float).
+    AddFloat,
+    SubFloat,
+    MulFloat,
+
     Eq,
     Ne,
     Lt,
@@ -112,6 +122,12 @@ pub enum Op {
 pub struct CompiledFunction {
     pub name: String,
     pub params: Vec<String>,
+    /// Optional type annotation per parameter ("int" / "float" / "string" / "bool" / etc.)
+    /// Phase M: used by the compiler to specialize arithmetic on known-int args.
+    pub param_types: Vec<Option<String>>,
+    /// Optional return-type annotation. Used by the type-inference helper
+    /// when a call's return type is statically known.
+    pub return_type: Option<String>,
     pub ops: Vec<Op>,
     pub constants: Vec<Const>,
 }
@@ -129,6 +145,8 @@ impl Default for Module {
             main: CompiledFunction {
                 name: "__main__".to_string(),
                 params: Vec::new(),
+                param_types: Vec::new(),
+                return_type: None,
                 ops: Vec::new(),
                 constants: Vec::new(),
             },

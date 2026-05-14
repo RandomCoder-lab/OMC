@@ -4,6 +4,40 @@ All notable changes to OMNIcode will be documented in this file.
 
 ## [Unreleased]
 
+### Added (Phase L + M: resonance caching + typed HIR, 2026-05-13)
+
+**Phase L — Resonance / portal caching**
+New `unary_cache_pass` in `bytecode_opt.rs`. Folds pure-unary harmonic ops on constants at compile time, before the constant folder runs (so subsequent chained arithmetic sees a single constant):
+
+- `LoadConst(N); Resonance` → `LoadConst(precomputed_float)` — `res(89)` becomes the literal `1.0`
+- `LoadConst(N); Fold1` → `LoadConst(snapped_int)` — `phi.fold(90)` becomes `89`
+- `LoadConst(N); IsFibonacci` → `LoadConst(1 or 0)`
+- `LoadConst(N); Fibonacci` → `LoadConst(fib(N))`
+- `LoadConst(N); HimScore` → `LoadConst(precomputed_float)`
+- `LoadConst(N); Neg` / `BitNot` / `Not` → precomputed inverse
+
+New stats counter `unary_calls_cached`. The omnicc Python compiler calls this "resonance caching"; same semantics, scoped to bytecode. Mixed example: `res(89) + 0.5` folds in two passes — cache `res(89) → 1.0`, then fold `1.0 + 0.5 → 1.5` — collapsing two ops to a single LoadConst.
+
+**Phase M — Typed HIR with specialized dispatch**
+
+The compiler now tracks a `var_types: HashMap<String, &'static str>` populated from:
+- Typed function parameters (`fn add(x: int, y: int)`)
+- Return-type annotations of user-defined functions (looked up across boundaries)
+- Variable declarations whose value's type is statically known (`h x = 89;` ⇒ int)
+- Arithmetic on known-typed operands (int + int ⇒ int)
+- Comparisons and bitwise ops (always bool / int)
+- Built-in function call sites with fixed return types
+
+New typed-fast-path opcodes that skip the runtime `is_float()` check:
+- `Op::AddInt`, `Op::SubInt`, `Op::MulInt`
+- `Op::AddFloat`, `Op::SubFloat`, `Op::MulFloat`
+
+The compiler emits these in place of polymorphic `Op::Add` / `Op::Sub` / `Op::Mul` when **both** operands' static types match. The optimizer's constant folder also knows them — `1 + 2 + 3` with both operands int folds through the typed path, then collapses to a single constant.
+
+`CompiledFunction` gained `param_types: Vec<Option<String>>` and `return_type: Option<String>` fields so cross-function type info is preserved through compilation.
+
+**Tests:** +7 unit tests for resonance caching (covers res, phi.fold, is_fibonacci, fibonacci, unary minus, bitnot, chained cache+fold). 125 total tests passing (was 118).
+
 ### Added (Phase K: bytecode optimizer, 2026-05-13)
 New module `omnimcode-core/src/bytecode_opt.rs`. Runs after compile, before VM execution. On by default in VM mode; disable with `OMC_OPT=0`. Show stats with `OMC_OPT_STATS=1`.
 

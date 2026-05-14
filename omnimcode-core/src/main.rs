@@ -54,8 +54,9 @@ fn execute_program(source: &str) -> Result<(), String> {
             let stats = omnimcode_core::bytecode_opt::optimize_module(&mut module);
             if std::env::var("OMC_OPT_STATS").as_deref() == Ok("1") {
                 eprintln!(
-                    "[opt] folded={} dead_loads={} not={} neg={} (total {})",
+                    "[opt] folded={} cached={} dead_loads={} not={} neg={} (total {})",
                     stats.constants_folded,
+                    stats.unary_calls_cached,
                     stats.dead_loads_removed,
                     stats.double_nots_collapsed,
                     stats.double_negs_collapsed,
