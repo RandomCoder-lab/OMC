@@ -2,7 +2,7 @@
 
 use crate::ast::*;
 use crate::value::{HInt, HArray, Value, fibonacci, is_fibonacci};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub struct Interpreter {
     globals: HashMap<String, Value>,
@@ -11,6 +11,8 @@ pub struct Interpreter {
     return_value: Option<Value>,
     break_flag: bool,
     continue_flag: bool,
+    /// Names of modules already imported (idempotent re-import).
+    imported_modules: HashSet<String>,
 }
 
 impl Interpreter {
@@ -22,7 +24,81 @@ impl Interpreter {
             return_value: None,
             break_flag: false,
             continue_flag: false,
+            imported_modules: HashSet::new(),
         }
+    }
+
+    /// Module search path used by `import NAME;`.
+    /// Honors `OMC_STDLIB_PATH` (colon-separated), then falls back to a
+    /// small built-in list that includes the canonical Python OMC stdlib.
+    fn module_search_path() -> Vec<std::path::PathBuf> {
+        let mut paths = Vec::new();
+        if let Ok(env) = std::env::var("OMC_STDLIB_PATH") {
+            for p in env.split(':') {
+                if !p.is_empty() {
+                    paths.push(std::path::PathBuf::from(p));
+                }
+            }
+        }
+        // Canonical Python OMC stdlib (when present on this machine).
+        paths.push(std::path::PathBuf::from(
+            "/home/thearchitect/Sovereign_Lattice/omninet_package/omnicode_stdlib",
+        ));
+        paths.push(std::path::PathBuf::from(
+            "/home/thearchitect/Sovereign_Lattice/omninet_package/omnicode_stdlib/std",
+        ));
+        // Current working directory and a relative `omc-stdlib/`.
+        paths.push(std::path::PathBuf::from("."));
+        paths.push(std::path::PathBuf::from("omc-stdlib"));
+        paths.push(std::path::PathBuf::from("omc-stdlib/std"));
+        paths
+    }
+
+    fn resolve_module(name: &str) -> Option<std::path::PathBuf> {
+        // Try each search dir with a few naming variants.
+        // For `import std/core;` allow the slashed form too.
+        for dir in Self::module_search_path() {
+            for variant in [
+                format!("{}.omc", name),
+                format!("{}/init.omc", name),
+                format!("std/{}.omc", name),
+            ] {
+                let candidate = dir.join(&variant);
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+        None
+    }
+
+    fn import_module(&mut self, name: &str) -> Result<(), String> {
+        if self.imported_modules.contains(name) {
+            return Ok(()); // Already loaded.
+        }
+        let path = Self::resolve_module(name).ok_or_else(|| {
+            format!(
+                "Could not resolve module `{}` (set OMC_STDLIB_PATH or place {}.omc on the search path)",
+                name, name
+            )
+        })?;
+        let source = std::fs::read_to_string(&path)
+            .map_err(|e| format!("import {}: read failed: {}", name, e))?;
+        // Mark as imported BEFORE executing to avoid infinite recursion on
+        // cyclic imports.
+        self.imported_modules.insert(name.to_string());
+        let mut parser = crate::parser::Parser::new(&source);
+        let stmts = parser
+            .parse()
+            .map_err(|e| format!("import {}: parse error: {}", name, e))?;
+        for stmt in &stmts {
+            self.execute_stmt(stmt)?;
+            // Don't propagate `return` / `break` / `continue` past module boundary.
+            self.return_value = None;
+            self.break_flag = false;
+            self.continue_flag = false;
+        }
+        Ok(())
     }
 
     pub fn execute(&mut self, statements: Vec<Statement>) -> Result<(), String> {
@@ -196,6 +272,11 @@ impl Interpreter {
             Statement::Continue => {
                 self.continue_flag = true;
                 Ok(())
+            }
+            Statement::Import { module, alias: _ } => {
+                // Alias is currently informational only — imports merge into a
+                // flat function namespace (matching canonical Python OMC).
+                self.import_module(module)
             }
             _ => Ok(()),
         }
@@ -420,6 +501,12 @@ impl Interpreter {
         // Module-qualified calls (e.g., "phi.fold", "phi.res", "core.fib")
         if let Some((module, func)) = name.split_once('.') {
             return self.call_module_function(module, func, args);
+        }
+        // User-defined functions win over built-ins so that `import core;`
+        // can override built-in implementations with the canonical Phase 6
+        // versions. Match Python OMC behavior.
+        if let Some((params, body)) = self.functions.get(name).cloned() {
+            return self.invoke_user_function(name, &params, &body, args);
         }
         // Built-in functions
         match name {
@@ -1239,48 +1326,47 @@ impl Interpreter {
                     Err("arr_resonance: requires an array".to_string())
                 }
             }
-            // User-defined functions
-            _ => {
-                if let Some((params, body)) = self.functions.get(name).cloned() {
-                    let mut eval_args = Vec::new();
-                    for arg in args {
-                        eval_args.push(self.eval_expr(arg)?);
-                    }
+            // Unknown name — already checked user-defined functions at the top.
+            _ => Err(format!("Undefined function: {}", name)),
+        }
+    }
 
-                    if params.len() != eval_args.len() {
-                        return Err(format!(
-                            "Function {} expects {} arguments, got {}",
-                            name,
-                            params.len(),
-                            eval_args.len()
-                        ));
-                    }
+    fn invoke_user_function(
+        &mut self,
+        name: &str,
+        params: &[String],
+        body: &[Statement],
+        args: &[Expression],
+    ) -> Result<Value, String> {
+        let mut eval_args = Vec::new();
+        for arg in args {
+            eval_args.push(self.eval_expr(arg)?);
+        }
 
-                    // Create new scope
-                    self.locals.push(HashMap::new());
-                    for (param, arg) in params.iter().zip(eval_args) {
-                        self.set_var(param.clone(), arg);
-                    }
+        if params.len() != eval_args.len() {
+            return Err(format!(
+                "Function {} expects {} arguments, got {}",
+                name,
+                params.len(),
+                eval_args.len()
+            ));
+        }
 
-                    // Execute function body
-                    for stmt in &body {
-                        self.execute_stmt(stmt)?;
-                        if self.return_value.is_some() {
-                            break;
-                        }
-                    }
+        self.locals.push(HashMap::new());
+        for (param, arg) in params.iter().zip(eval_args) {
+            self.set_var(param.clone(), arg);
+        }
 
-                    let result = self.return_value.take().unwrap_or(Value::Null);
-
-                    // Restore scope
-                    self.locals.pop();
-
-                    Ok(result)
-                } else {
-                    Err(format!("Undefined function: {}", name))
-                }
+        for stmt in body {
+            self.execute_stmt(stmt)?;
+            if self.return_value.is_some() {
+                break;
             }
         }
+
+        let result = self.return_value.take().unwrap_or(Value::Null);
+        self.locals.pop();
+        Ok(result)
     }
 
     fn get_var(&self, name: &str) -> Option<Value> {
