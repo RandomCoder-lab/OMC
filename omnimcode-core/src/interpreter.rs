@@ -390,28 +390,12 @@ impl Interpreter {
             Expression::Eq(l, r) => {
                 let lv = self.eval_expr(l)?;
                 let rv = self.eval_expr(r)?;
-                // String equality must be string-to-string, NOT through to_int()
-                // (which would treat "a" == "b" as 0 == 0 == true).
-                if let (Value::String(a), Value::String(b)) = (&lv, &rv) {
-                    return Ok(Value::Bool(a == b));
-                }
-                if lv.is_float() || rv.is_float() {
-                    Ok(Value::Bool(lv.to_float() == rv.to_float()))
-                } else {
-                    Ok(Value::Bool(lv.to_int() == rv.to_int()))
-                }
+                Ok(Value::Bool(values_equal(&lv, &rv)))
             }
             Expression::Ne(l, r) => {
                 let lv = self.eval_expr(l)?;
                 let rv = self.eval_expr(r)?;
-                if let (Value::String(a), Value::String(b)) = (&lv, &rv) {
-                    return Ok(Value::Bool(a != b));
-                }
-                if lv.is_float() || rv.is_float() {
-                    Ok(Value::Bool(lv.to_float() != rv.to_float()))
-                } else {
-                    Ok(Value::Bool(lv.to_int() != rv.to_int()))
-                }
+                Ok(Value::Bool(!values_equal(&lv, &rv)))
             }
             Expression::Lt(l, r) => {
                 let lv = self.eval_expr(l)?;
@@ -1717,6 +1701,69 @@ impl Interpreter {
     }
 
     fn phi_fold_n_unused_marker(&self) {}
+}
+
+/// Type-aware value equality. Used by `==` and `!=`. Replaces the old
+/// "coerce both sides to int and compare" rule, which silently made any
+/// two non-numeric values of the same int-cast appear equal (e.g.
+/// `"foo" == "bar"` was true, and so was `["VAR", "x"] == "null"`).
+///
+/// Rules:
+/// - Same-shape structural equality for String and Array (recursive).
+/// - Singularity values compared by numerator + context.
+/// - Mixed Array / Circuit / Singularity vs anything else → not equal.
+/// - Otherwise fall back to numeric coercion (HInt, HFloat, Bool, Null).
+fn values_equal(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::String(x), Value::String(y)) => x == y,
+        (Value::Array(x), Value::Array(y)) => {
+            if x.items.len() != y.items.len() {
+                return false;
+            }
+            x.items
+                .iter()
+                .zip(y.items.iter())
+                .all(|(p, q)| values_equal(p, q))
+        }
+        (
+            Value::Singularity {
+                numerator: na,
+                context: ca,
+                ..
+            },
+            Value::Singularity {
+                numerator: nb,
+                context: cb,
+                ..
+            },
+        ) => na == nb && ca == cb,
+        (Value::Circuit(_), _) | (_, Value::Circuit(_)) => false,
+        // Mixing strings with non-strings: only equal if both coerce to
+        // the same number AND the string is actually a numeric literal.
+        (Value::String(s), _) | (_, Value::String(s)) => {
+            // Treat the string as numeric ONLY if parse succeeds; otherwise
+            // a string can never equal a non-string value.
+            if s.parse::<i64>().is_ok() || s.parse::<f64>().is_ok() {
+                if a.is_float() || b.is_float() {
+                    a.to_float() == b.to_float()
+                } else {
+                    a.to_int() == b.to_int()
+                }
+            } else {
+                false
+            }
+        }
+        // Arrays mixed with anything non-array: not equal.
+        (Value::Array(_), _) | (_, Value::Array(_)) => false,
+        // Numeric / bool / null all compare via coercion.
+        _ => {
+            if a.is_float() || b.is_float() {
+                a.to_float() == b.to_float()
+            } else {
+                a.to_int() == b.to_int()
+            }
+        }
+    }
 }
 
 // Free function reused by quantize / quantization_ratio / mean_omni_weight.

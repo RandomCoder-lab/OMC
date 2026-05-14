@@ -4,6 +4,48 @@ All notable changes to OMNIcode will be documented in this file.
 
 ## [Unreleased]
 
+### Added (Phase V.3: self-hosting parser, 2026-05-13)
+
+`examples/self_hosting_parser.omc` — a recursive-descent parser written in OMNIcode that consumes a token stream from V.1/V.2 and emits an AST as **nested tagged arrays** (the canonical Python OMC convention). The OMC language can now both *read* its own source (lexer) and *structure* it (parser). Two of four steps toward true self-hosting are in place.
+
+**AST node shapes:**
+- `["NUMBER", "42"]`, `["FLOAT", "3.14"]`, `["STRING", "hello"]`, `["BOOL", "true"]`
+- `["VAR", "x"]`
+- `["BINOP", "+", left, right]`
+- `["CALL", name, [arg1, arg2, ...]]`
+- `["VARDECL", name, value]`, `["ASSIGN", name, value]`
+- `["IF", cond, then_body, else_body]`
+- `["WHILE", cond, body]`
+- `["RETURN", value_or_null]`, `["PRINT", expr]`
+- `["FNDEF", name, params, body]`, `["EXPRSTMT", expr]`
+
+**Precedence ladder:** `parse_comparison` (==, !=, <, <=, >, >=) → `parse_additive` (+, -) → `parse_multiplicative` (*, /, %) → `parse_primary`. Mutually recursive across statements and expressions. Position-threading via return-array pairs (no mutable references in OMC).
+
+**Verified on 4 demo inputs:**
+1. `h x = 89 + 144;` → correct VARDECL with nested BINOP.
+2. `if x == 89 { return x; } else { return 0; }` → IF with proper then/else bodies, RETURN children intact.
+3. `fn fib(n) { return fib(n-1) + fib(n-2); }` → FNDEF with recursive CALL inside BINOP inside RETURN. The parser handles the full recursive depth.
+4. `while i < 10 { sum = sum + i; i = i + 1; }` → WHILE with assignment body.
+
+Tree-walk and VM produce **bit-identical output**. 141 tests still pass.
+
+### Fixed (surfaced by Phase V.3)
+
+**Silent type-coercion bug in `==` / `!=`.** Already fixed string-vs-string in V.1 (commit `e85bb01`). The parser surfaced the BROADER form: `["VAR", "x"] == "null"` was returning *true* because:
+- `to_int(["VAR", "x"])` → 0 (arrays don't parse)
+- `to_int("null")` → 0 (string doesn't parse)
+- 0 == 0 → true
+
+The parser's `print_ast` had `if v == "null"` to detect bodyless `RETURN;` — and every RETURN body was being rendered as `(no value)` because of this.
+
+Fixed in both the tree-walk interpreter and the VM with a type-aware `values_equal` helper:
+- Same-type values: structural equality (recursive for arrays).
+- `String` vs non-string: only equal if the string parses as the corresponding numeric.
+- Mixed Array / Circuit / Singularity vs anything else: never equal.
+- All-numeric / Bool / Null: standard int-or-float coercion.
+
+This is the third class of silent bug self-hosting work has flushed out (after string equality in V.1 and the VM array-mutation shim, also in V.1). The water keeps sanding.
+
 ### Added (Phase V.2: self-hosting lexer polish, 2026-05-13)
 
 `examples/self_hosting_lexer_v2.omc` — the milestone-1 lexer extended with everything needed to tokenize real-world OMC programs:

@@ -413,12 +413,17 @@ fn arith_mod(l: &Value, r: &Value) -> Value {
     }
 }
 fn cmp_op(l: &Value, r: &Value, op: &Op) -> bool {
-    // String compare goes through string equality (otherwise to_int()
-    // would treat every non-numeric string as 0 and they'd all be equal).
+    // For == and != use the same type-aware equality the tree-walk
+    // interpreter does (handles array==string, etc. correctly).
+    if matches!(op, Op::Eq) {
+        return values_equal_vm(l, r);
+    }
+    if matches!(op, Op::Ne) {
+        return !values_equal_vm(l, r);
+    }
+    // Ordering on strings is lexicographic.
     if let (Value::String(a), Value::String(b)) = (l, r) {
         return match op {
-            Op::Eq => a == b,
-            Op::Ne => a != b,
             Op::Lt => a < b,
             Op::Le => a <= b,
             Op::Gt => a > b,
@@ -452,6 +457,55 @@ fn cmp_op(l: &Value, r: &Value, op: &Op) -> bool {
         }
     }
 }
+/// VM-side analogue of the interpreter's values_equal. Same rules — kept
+/// duplicated rather than pub-exported to keep the VM self-contained.
+fn values_equal_vm(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::String(x), Value::String(y)) => x == y,
+        (Value::Array(x), Value::Array(y)) => {
+            if x.items.len() != y.items.len() {
+                return false;
+            }
+            x.items
+                .iter()
+                .zip(y.items.iter())
+                .all(|(p, q)| values_equal_vm(p, q))
+        }
+        (
+            Value::Singularity {
+                numerator: na,
+                context: ca,
+                ..
+            },
+            Value::Singularity {
+                numerator: nb,
+                context: cb,
+                ..
+            },
+        ) => na == nb && ca == cb,
+        (Value::Circuit(_), _) | (_, Value::Circuit(_)) => false,
+        (Value::String(s), _) | (_, Value::String(s)) => {
+            if s.parse::<i64>().is_ok() || s.parse::<f64>().is_ok() {
+                if a.is_float() || b.is_float() {
+                    a.to_float() == b.to_float()
+                } else {
+                    a.to_int() == b.to_int()
+                }
+            } else {
+                false
+            }
+        }
+        (Value::Array(_), _) | (_, Value::Array(_)) => false,
+        _ => {
+            if a.is_float() || b.is_float() {
+                a.to_float() == b.to_float()
+            } else {
+                a.to_int() == b.to_int()
+            }
+        }
+    }
+}
+
 fn fold_to_fibonacci(n: i64) -> i64 {
     let fibs: [i64; 15] = [0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610];
     let abs_val = n.abs();

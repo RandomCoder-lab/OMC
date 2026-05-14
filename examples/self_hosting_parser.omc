@@ -1,0 +1,641 @@
+# =============================================================================
+# Self-Hosting Parser (Phase V, milestone 3)
+# =============================================================================
+# Consumes the token stream from V.1/V.2 and produces an AST as nested
+# tagged arrays. Combined with the lexer, this means OMC can now READ
+# and STRUCTURE its own source — the second of four steps toward true
+# self-hosting (lex → parse → codegen → fixpoint).
+#
+# AST shape (nested tagged arrays, the canonical Python OMC convention):
+#   ["NUMBER",  42]                          int literal
+#   ["FLOAT",   3.14]                        float literal
+#   ["STRING",  "hello"]                     string literal
+#   ["BOOL",    "true"]                      boolean literal
+#   ["VAR",     "x"]                         variable reference
+#   ["BINOP",   "+", left, right]            binary op
+#   ["CALL",    "fib", [arg1, arg2, ...]]    function call
+#   ["VARDECL", "x", value]                  h x = value;
+#   ["ASSIGN",  "x", value]                  x = value;
+#   ["IF",      cond, then_body, else_body]  if (...) {...} else {...}
+#   ["WHILE",   cond, body]                  while (...) {...}
+#   ["RETURN",  value_or_null]               return ...;
+#   ["PRINT",   expr]                        print(...);
+#   ["FNDEF",   name, params, body]          fn name(params) {...}
+#
+# Body is always an array of statements. Params is an array of names.
+#
+# Scope: parses expression-level constructs (literals, +, -, *, /, ==, !=,
+# <, <=, >, >=, calls, parens) and statements (var-decl, assignment,
+# expression, return, if/else, while, fn-def, print). Skips imports for
+# now and doesn't handle pragmas/typed-params (next milestone).
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Token helpers — operate on the [["KIND","value"], ...] stream produced
+# by the lexer. Position is the index of the current token.
+# ---------------------------------------------------------------------------
+fn tok_kind(tokens, pos) -> string {
+    h t = arr_get(tokens, pos);
+    return arr_get(t, 0);
+}
+
+fn tok_value(tokens, pos) -> string {
+    h t = arr_get(tokens, pos);
+    return arr_get(t, 1);
+}
+
+# ---------------------------------------------------------------------------
+# Expect a specific kind and advance. Returns next position. Surfaces
+# errors as "EXPECT_FAIL" tokens in the AST (no exceptions in OMC).
+# ---------------------------------------------------------------------------
+fn expect(tokens, pos, want) -> int {
+    h got = tok_kind(tokens, pos);
+    if got == want {
+        return pos + 1;
+    }
+    # In a real parser we'd surface a structured error; for the demo we
+    # print and bail to the next position so parsing can attempt to recover.
+    print(concat_many("    [parse error] expected ", want, " got ", got, " at pos ", pos));
+    return pos + 1;
+}
+
+# ===========================================================================
+# Forward declarations are implicit in OMC — call any function defined
+# later in the file. The parser is mutually recursive: expression calls
+# into statement (for blocks), statement calls into expression.
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# Primary expressions: literals, variables, parens, calls
+#
+# Returns [ast_node, next_pos].
+# ---------------------------------------------------------------------------
+fn parse_primary(tokens, pos) {
+    h kind = tok_kind(tokens, pos);
+    h value = tok_value(tokens, pos);
+
+    if kind == "NUMBER" {
+        return [["NUMBER", value], pos + 1];
+    }
+    if kind == "FLOAT" {
+        return [["FLOAT", value], pos + 1];
+    }
+    if kind == "STRING" {
+        return [["STRING", value], pos + 1];
+    }
+    if kind == "BOOL" {
+        return [["BOOL", value], pos + 1];
+    }
+    if kind == "LPAREN" {
+        h r = parse_expression(tokens, pos + 1);
+        h ast = arr_get(r, 0);
+        h np = arr_get(r, 1);
+        np = expect(tokens, np, "RPAREN");
+        return [ast, np];
+    }
+    if kind == "IDENT" {
+        # Could be a variable OR a function call. Peek the next token.
+        h next_kind = tok_kind(tokens, pos + 1);
+        if next_kind == "LPAREN" {
+            # Function call: ident ( args )
+            h args = arr_new(0, 0);
+            h np = pos + 2;
+            if tok_kind(tokens, np) == "RPAREN" {
+                return [["CALL", value, args], np + 1];
+            }
+            # Parse comma-separated args
+            h done = 0;
+            while done == 0 {
+                h r = parse_expression(tokens, np);
+                arr_push(args, arr_get(r, 0));
+                np = arr_get(r, 1);
+                if tok_kind(tokens, np) == "COMMA" {
+                    np = np + 1;
+                } else {
+                    done = 1;
+                }
+            }
+            np = expect(tokens, np, "RPAREN");
+            return [["CALL", value, args], np];
+        } else {
+            return [["VAR", value], pos + 1];
+        }
+    }
+    print(concat_many("    [parse error] unexpected primary token ", kind, " at pos ", pos));
+    return [["ERR", kind], pos + 1];
+}
+
+# ---------------------------------------------------------------------------
+# Multiplicative precedence: * / %
+# ---------------------------------------------------------------------------
+fn parse_multiplicative(tokens, pos) {
+    h left_r = parse_primary(tokens, pos);
+    h left = arr_get(left_r, 0);
+    h np = arr_get(left_r, 1);
+
+    h going = 1;
+    while going == 1 {
+        h k = tok_kind(tokens, np);
+        if k == "STAR" {
+            h r = parse_primary(tokens, np + 1);
+            left = ["BINOP", "*", left, arr_get(r, 0)];
+            np = arr_get(r, 1);
+        } else {
+            if k == "SLASH" {
+                h r = parse_primary(tokens, np + 1);
+                left = ["BINOP", "/", left, arr_get(r, 0)];
+                np = arr_get(r, 1);
+            } else {
+                if k == "PERCENT" {
+                    h r = parse_primary(tokens, np + 1);
+                    left = ["BINOP", "%", left, arr_get(r, 0)];
+                    np = arr_get(r, 1);
+                } else {
+                    going = 0;
+                }
+            }
+        }
+    }
+    return [left, np];
+}
+
+# ---------------------------------------------------------------------------
+# Additive precedence: + -
+# ---------------------------------------------------------------------------
+fn parse_additive(tokens, pos) {
+    h left_r = parse_multiplicative(tokens, pos);
+    h left = arr_get(left_r, 0);
+    h np = arr_get(left_r, 1);
+
+    h going = 1;
+    while going == 1 {
+        h k = tok_kind(tokens, np);
+        if k == "PLUS" {
+            h r = parse_multiplicative(tokens, np + 1);
+            left = ["BINOP", "+", left, arr_get(r, 0)];
+            np = arr_get(r, 1);
+        } else {
+            if k == "MINUS" {
+                h r = parse_multiplicative(tokens, np + 1);
+                left = ["BINOP", "-", left, arr_get(r, 0)];
+                np = arr_get(r, 1);
+            } else {
+                going = 0;
+            }
+        }
+    }
+    return [left, np];
+}
+
+# ---------------------------------------------------------------------------
+# Comparison precedence: == != < <= > >=
+# ---------------------------------------------------------------------------
+fn parse_comparison(tokens, pos) {
+    h left_r = parse_additive(tokens, pos);
+    h left = arr_get(left_r, 0);
+    h np = arr_get(left_r, 1);
+
+    h going = 1;
+    while going == 1 {
+        h k = tok_kind(tokens, np);
+        h op = "";
+        if k == "EQEQ" { op = "=="; }
+        if k == "NE"   { op = "!="; }
+        if k == "LT"   { op = "<"; }
+        if k == "LE"   { op = "<="; }
+        if k == "GT"   { op = ">"; }
+        if k == "GE"   { op = ">="; }
+        if str_len(op) > 0 {
+            h r = parse_additive(tokens, np + 1);
+            left = ["BINOP", op, left, arr_get(r, 0)];
+            np = arr_get(r, 1);
+        } else {
+            going = 0;
+        }
+    }
+    return [left, np];
+}
+
+# ---------------------------------------------------------------------------
+# Top-level expression dispatch. (Logical and/or live at a lower
+# precedence — we'd add parse_and / parse_or wrappers later.)
+# ---------------------------------------------------------------------------
+fn parse_expression(tokens, pos) {
+    return parse_comparison(tokens, pos);
+}
+
+# ---------------------------------------------------------------------------
+# Statement parser — dispatches on the leading token.
+# ---------------------------------------------------------------------------
+fn parse_statement(tokens, pos) {
+    h k = tok_kind(tokens, pos);
+
+    # h x = expr;
+    if k == "H" {
+        h name = tok_value(tokens, pos + 1);
+        h np = expect(tokens, pos + 2, "EQ");
+        h r = parse_expression(tokens, np);
+        np = arr_get(r, 1);
+        np = expect(tokens, np, "SEMI");
+        return [["VARDECL", name, arr_get(r, 0)], np];
+    }
+    # return expr;  or  return;
+    if k == "RETURN" {
+        if tok_kind(tokens, pos + 1) == "SEMI" {
+            return [["RETURN", "null"], pos + 2];
+        }
+        h r = parse_expression(tokens, pos + 1);
+        h np = arr_get(r, 1);
+        np = expect(tokens, np, "SEMI");
+        return [["RETURN", arr_get(r, 0)], np];
+    }
+    # print(expr);
+    if k == "PRINT" {
+        h np = expect(tokens, pos + 1, "LPAREN");
+        h r = parse_expression(tokens, np);
+        np = arr_get(r, 1);
+        np = expect(tokens, np, "RPAREN");
+        np = expect(tokens, np, "SEMI");
+        return [["PRINT", arr_get(r, 0)], np];
+    }
+    # if cond { body } [else { body }]
+    if k == "IF" {
+        h r = parse_expression(tokens, pos + 1);
+        h np = arr_get(r, 1);
+        np = expect(tokens, np, "LBRACE");
+        h then_body_r = parse_block(tokens, np);
+        np = arr_get(then_body_r, 1);
+        h else_body = arr_new(0, 0);
+        if tok_kind(tokens, np) == "ELSE" {
+            np = np + 1;
+            np = expect(tokens, np, "LBRACE");
+            h eb = parse_block(tokens, np);
+            else_body = arr_get(eb, 0);
+            np = arr_get(eb, 1);
+        }
+        return [["IF", arr_get(r, 0), arr_get(then_body_r, 0), else_body], np];
+    }
+    # while cond { body }
+    if k == "WHILE" {
+        h r = parse_expression(tokens, pos + 1);
+        h np = arr_get(r, 1);
+        np = expect(tokens, np, "LBRACE");
+        h body_r = parse_block(tokens, np);
+        np = arr_get(body_r, 1);
+        return [["WHILE", arr_get(r, 0), arr_get(body_r, 0)], np];
+    }
+    # fn name(params) { body }
+    if k == "FN" {
+        h name = tok_value(tokens, pos + 1);
+        h np = expect(tokens, pos + 2, "LPAREN");
+        h params = arr_new(0, 0);
+        if tok_kind(tokens, np) == "RPAREN" {
+            np = np + 1;
+        } else {
+            h done = 0;
+            while done == 0 {
+                arr_push(params, tok_value(tokens, np));
+                np = np + 1;
+                if tok_kind(tokens, np) == "COMMA" {
+                    np = np + 1;
+                } else {
+                    done = 1;
+                }
+            }
+            np = expect(tokens, np, "RPAREN");
+        }
+        np = expect(tokens, np, "LBRACE");
+        h body_r = parse_block(tokens, np);
+        np = arr_get(body_r, 1);
+        return [["FNDEF", name, params, arr_get(body_r, 0)], np];
+    }
+    # IDENT = expr;   or   expression statement
+    if k == "IDENT" {
+        if tok_kind(tokens, pos + 1) == "EQ" {
+            h name = tok_value(tokens, pos);
+            h r = parse_expression(tokens, pos + 2);
+            h np = arr_get(r, 1);
+            np = expect(tokens, np, "SEMI");
+            return [["ASSIGN", name, arr_get(r, 0)], np];
+        }
+    }
+    # Fallthrough: expression statement
+    h r = parse_expression(tokens, pos);
+    h np = arr_get(r, 1);
+    np = expect(tokens, np, "SEMI");
+    return [["EXPRSTMT", arr_get(r, 0)], np];
+}
+
+# ---------------------------------------------------------------------------
+# Parse a sequence of statements until we hit `}` or EOF.
+# Returns [body_array, next_pos].
+# ---------------------------------------------------------------------------
+fn parse_block(tokens, pos) {
+    h body = arr_new(0, 0);
+    h np = pos;
+    h done = 0;
+    while done == 0 {
+        h k = tok_kind(tokens, np);
+        if k == "RBRACE" {
+            np = np + 1;
+            done = 1;
+        } else {
+            if k == "EOF" {
+                done = 1;
+            } else {
+                h r = parse_statement(tokens, np);
+                arr_push(body, arr_get(r, 0));
+                np = arr_get(r, 1);
+            }
+        }
+    }
+    return [body, np];
+}
+
+# ---------------------------------------------------------------------------
+# Top-level program parser: keep parsing statements until EOF.
+# ---------------------------------------------------------------------------
+fn parse_program(tokens) {
+    h stmts = arr_new(0, 0);
+    h pos = 0;
+    h done = 0;
+    while done == 0 {
+        h k = tok_kind(tokens, pos);
+        if k == "EOF" {
+            done = 1;
+        } else {
+            h r = parse_statement(tokens, pos);
+            arr_push(stmts, arr_get(r, 0));
+            pos = arr_get(r, 1);
+        }
+    }
+    return stmts;
+}
+
+# ===========================================================================
+# Demo driver — uses a hand-written token stream so the parser can run
+# without depending on the lexer file. (Composing the two is the next
+# step; for now we just verify the parser produces the right AST shape.)
+# ===========================================================================
+
+fn print_ast(ast, indent) {
+    h tag = arr_get(ast, 0);
+    h prefix = "";
+    h i = 0;
+    while i < indent {
+        prefix = str_concat(prefix, "  ");
+        i = i + 1;
+    }
+
+    if tag == "NUMBER" {
+        print(concat_many(prefix, "NUMBER ", arr_get(ast, 1)));
+        return 0;
+    }
+    if tag == "FLOAT" {
+        print(concat_many(prefix, "FLOAT ", arr_get(ast, 1)));
+        return 0;
+    }
+    if tag == "STRING" {
+        print(concat_many(prefix, "STRING \"", arr_get(ast, 1), "\""));
+        return 0;
+    }
+    if tag == "VAR" {
+        print(concat_many(prefix, "VAR ", arr_get(ast, 1)));
+        return 0;
+    }
+    if tag == "BINOP" {
+        print(concat_many(prefix, "BINOP ", arr_get(ast, 1)));
+        print_ast(arr_get(ast, 2), indent + 1);
+        print_ast(arr_get(ast, 3), indent + 1);
+        return 0;
+    }
+    if tag == "CALL" {
+        print(concat_many(prefix, "CALL ", arr_get(ast, 1)));
+        h args = arr_get(ast, 2);
+        h j = 0;
+        while j < arr_len(args) {
+            print_ast(arr_get(args, j), indent + 1);
+            j = j + 1;
+        }
+        return 0;
+    }
+    if tag == "VARDECL" {
+        print(concat_many(prefix, "VARDECL ", arr_get(ast, 1), " ="));
+        print_ast(arr_get(ast, 2), indent + 1);
+        return 0;
+    }
+    if tag == "ASSIGN" {
+        print(concat_many(prefix, "ASSIGN ", arr_get(ast, 1), " ="));
+        print_ast(arr_get(ast, 2), indent + 1);
+        return 0;
+    }
+    if tag == "RETURN" {
+        print(concat_many(prefix, "RETURN"));
+        h v = arr_get(ast, 1);
+        if v == "null" {
+            print(concat_many(prefix, "  (no value)"));
+        } else {
+            print_ast(v, indent + 1);
+        }
+        return 0;
+    }
+    if tag == "PRINT" {
+        print(concat_many(prefix, "PRINT"));
+        print_ast(arr_get(ast, 1), indent + 1);
+        return 0;
+    }
+    if tag == "IF" {
+        print(concat_many(prefix, "IF"));
+        print_ast(arr_get(ast, 1), indent + 1);
+        print(concat_many(prefix, "  then:"));
+        h tb = arr_get(ast, 2);
+        h ti = 0;
+        while ti < arr_len(tb) {
+            print_ast(arr_get(tb, ti), indent + 2);
+            ti = ti + 1;
+        }
+        h eb = arr_get(ast, 3);
+        if arr_len(eb) > 0 {
+            print(concat_many(prefix, "  else:"));
+            h ei = 0;
+            while ei < arr_len(eb) {
+                print_ast(arr_get(eb, ei), indent + 2);
+                ei = ei + 1;
+            }
+        }
+        return 0;
+    }
+    if tag == "WHILE" {
+        print(concat_many(prefix, "WHILE"));
+        print_ast(arr_get(ast, 1), indent + 1);
+        print(concat_many(prefix, "  body:"));
+        h b = arr_get(ast, 2);
+        h bi = 0;
+        while bi < arr_len(b) {
+            print_ast(arr_get(b, bi), indent + 2);
+            bi = bi + 1;
+        }
+        return 0;
+    }
+    if tag == "FNDEF" {
+        print(concat_many(prefix, "FNDEF ", arr_get(ast, 1)));
+        h ps = arr_get(ast, 2);
+        h pi = 0;
+        while pi < arr_len(ps) {
+            print(concat_many(prefix, "  param: ", arr_get(ps, pi)));
+            pi = pi + 1;
+        }
+        print(concat_many(prefix, "  body:"));
+        h b = arr_get(ast, 3);
+        h bi = 0;
+        while bi < arr_len(b) {
+            print_ast(arr_get(b, bi), indent + 2);
+            bi = bi + 1;
+        }
+        return 0;
+    }
+    if tag == "EXPRSTMT" {
+        print(concat_many(prefix, "EXPRSTMT"));
+        print_ast(arr_get(ast, 1), indent + 1);
+        return 0;
+    }
+    print(concat_many(prefix, "UNKNOWN ", tag));
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# Hand-rolled token streams (we don't have file I/O in OMC, so we feed
+# them inline). Each token is [KIND, value].
+# ---------------------------------------------------------------------------
+print("== Self-Hosting Parser (Phase V, milestone 3) ==");
+print("");
+
+# Demo 1: `h x = 89 + 144;`
+print("--- Input 1 token stream: h x = 89 + 144; ---");
+h tok1 = [
+    ["H", "h"],
+    ["IDENT", "x"],
+    ["EQ", "="],
+    ["NUMBER", "89"],
+    ["PLUS", "+"],
+    ["NUMBER", "144"],
+    ["SEMI", ";"],
+    ["EOF", ""]
+];
+h ast1 = parse_program(tok1);
+h i = 0;
+while i < arr_len(ast1) {
+    print_ast(arr_get(ast1, i), 0);
+    i = i + 1;
+}
+print("");
+
+# Demo 2: `if x == 89 { return x; } else { return 0; }`
+print("--- Input 2 token stream: if x == 89 { return x; } else { return 0; } ---");
+h tok2 = [
+    ["IF", "if"],
+    ["IDENT", "x"],
+    ["EQEQ", "=="],
+    ["NUMBER", "89"],
+    ["LBRACE", "{"],
+    ["RETURN", "return"],
+    ["IDENT", "x"],
+    ["SEMI", ";"],
+    ["RBRACE", "}"],
+    ["ELSE", "else"],
+    ["LBRACE", "{"],
+    ["RETURN", "return"],
+    ["NUMBER", "0"],
+    ["SEMI", ";"],
+    ["RBRACE", "}"],
+    ["EOF", ""]
+];
+h ast2 = parse_program(tok2);
+h j = 0;
+while j < arr_len(ast2) {
+    print_ast(arr_get(ast2, j), 0);
+    j = j + 1;
+}
+print("");
+
+# Demo 3: `fn fib(n) { return fib(n-1) + fib(n-2); }`
+print("--- Input 3 token stream: fn fib(n) { return fib(n-1) + fib(n-2); } ---");
+h tok3 = [
+    ["FN", "fn"],
+    ["IDENT", "fib"],
+    ["LPAREN", "("],
+    ["IDENT", "n"],
+    ["RPAREN", ")"],
+    ["LBRACE", "{"],
+    ["RETURN", "return"],
+    ["IDENT", "fib"],
+    ["LPAREN", "("],
+    ["IDENT", "n"],
+    ["MINUS", "-"],
+    ["NUMBER", "1"],
+    ["RPAREN", ")"],
+    ["PLUS", "+"],
+    ["IDENT", "fib"],
+    ["LPAREN", "("],
+    ["IDENT", "n"],
+    ["MINUS", "-"],
+    ["NUMBER", "2"],
+    ["RPAREN", ")"],
+    ["SEMI", ";"],
+    ["RBRACE", "}"],
+    ["EOF", ""]
+];
+h ast3 = parse_program(tok3);
+h k = 0;
+while k < arr_len(ast3) {
+    print_ast(arr_get(ast3, k), 0);
+    k = k + 1;
+}
+print("");
+
+# Demo 4: `while i < 10 { sum = sum + i; i = i + 1; }`
+print("--- Input 4 token stream: while loop ---");
+h tok4 = [
+    ["WHILE", "while"],
+    ["IDENT", "i"],
+    ["LT", "<"],
+    ["NUMBER", "10"],
+    ["LBRACE", "{"],
+    ["IDENT", "sum"],
+    ["EQ", "="],
+    ["IDENT", "sum"],
+    ["PLUS", "+"],
+    ["IDENT", "i"],
+    ["SEMI", ";"],
+    ["IDENT", "i"],
+    ["EQ", "="],
+    ["IDENT", "i"],
+    ["PLUS", "+"],
+    ["NUMBER", "1"],
+    ["SEMI", ";"],
+    ["RBRACE", "}"],
+    ["EOF", ""]
+];
+h ast4 = parse_program(tok4);
+h m = 0;
+while m < arr_len(ast4) {
+    print_ast(arr_get(ast4, m), 0);
+    m = m + 1;
+}
+print("");
+
+print("== Observations ==");
+print("- The parser is mutually recursive: parse_statement calls parse_block");
+print("  (which calls parse_statement back), and parse_primary calls");
+print("  parse_expression (back into the precedence ladder).");
+print("- Position threading through return-array pairs is verbose but");
+print("  works without mutable references. Real-world OMC parsers in");
+print("  Rust use a mutable Parser struct; in OMC we pay for the lack of");
+print("  that with longer code.");
+print("- The AST is rendered as nested tagged arrays: every node is");
+print("  [kind, ...fields]. Matches the canonical Python OMC convention.");
+print("");
+print("Next milestones:");
+print("  V.4: codegen — turn an AST back into something runnable");
+print("       (bytecode-like text, or actual OMC source for round-tripping).");
+print("  V.5: the fixpoint — gen2 == gen3, OMC compiling its own compiler.");
