@@ -1,0 +1,1028 @@
+# =============================================================================
+# Self-Hosting Bytecode V.7: functions, recursion, call frames
+# =============================================================================
+# V.6 demonstrated that OMC could compile-and-run integer arithmetic, while
+# loops, and if/else on its own bytecode. V.7 adds the missing piece that
+# makes the VM Turing-complete on a recognisable level: FIRST-CLASS FUNCTIONS
+# WITH RECURSION.
+#
+# Concretely, V.7 compiles and executes:
+#
+#     fn fib(n) {
+#         if n < 2 { return n; }
+#         return fib(n - 1) + fib(n - 2);
+#     }
+#     print(fib(10));
+#
+# end-to-end. Lexer → parser → encoder → executor are all OMC code running
+# on the Rust interpreter. The bytecode produced contains DEF_FN / CALL /
+# RETURN ops the VM resolves at runtime; `fib(10)` prints 55.
+#
+# Strings, arrays, and the rest of the encoder's own feature surface remain
+# scoped to V.7b — full gen2==gen3 of the compiler-on-itself requires those.
+# Tonight's piece: function calls + a call stack + frame scopes, which is
+# the structural prerequisite the rest of the bootstrap leans on.
+# =============================================================================
+
+# =============================================================================
+#                                BYTECODE FORMAT
+# =============================================================================
+#
+# Same ops as V.6 plus:
+#
+#   ["DEF_FN", name, body_length, [param_1, param_2, ...]]
+#       At runtime: skip past `body_length` ops (the body sits inline after
+#       this op). At preamble time: record fn_table[name] = pc_of_this_op + 1
+#       and remember the parameter list.
+#
+#   ["CALL", name, num_args]
+#       Pop num_args values off the value stack (in push order — first arg
+#       is deeper, last arg is on top). Save (caller_pc, caller_scope) on
+#       the call stack, install a fresh scope with parameters bound, jump to
+#       fn entry. The return value will land on the value stack.
+#
+#   ["RETURN"]
+#       Pop top of value stack → return value. Pop scope/pc from call stack.
+#       Restore caller's scope, set pc = saved_pc + 1, push return value.
+#
+# All jumps remain RELATIVE; arrays in OMC pass by value, so we still cannot
+# patch absolute offsets across sub-block returns.
+# =============================================================================
+
+# =============================================================================
+#                              PART I: LEXER
+# Tokens: H IF ELSE WHILE PRINT FN RETURN IDENT NUMBER
+#         LPAREN RPAREN LBRACE RBRACE SEMI COMMA EQ
+#         PLUS MINUS STAR SLASH PERCENT
+#         LT LE GT GE EQEQ NE
+# =============================================================================
+
+fn is_digit_b(c) {
+    return str_contains("0123456789", c);
+}
+
+fn is_alpha_b(c) {
+    if str_contains("abcdefghijklmnopqrstuvwxyz", c) == 1 { return 1; }
+    if str_contains("ABCDEFGHIJKLMNOPQRSTUVWXYZ", c) == 1 { return 1; }
+    if c == "_" { return 1; }
+    return 0;
+}
+
+fn is_alnum_b(c) {
+    if is_alpha_b(c) == 1 { return 1; }
+    if is_digit_b(c) == 1 { return 1; }
+    return 0;
+}
+
+fn is_space_b(c) {
+    if c == " "  { return 1; }
+    if c == "\n" { return 1; }
+    if c == "\t" { return 1; }
+    if c == "\r" { return 1; }
+    return 0;
+}
+
+fn skip_ws_b(source, pos) {
+    h n = str_len(source);
+    h p = pos;
+    while p < n {
+        h c = str_slice(source, p, p + 1);
+        if is_space_b(c) == 1 {
+            p = p + 1;
+        } else { break; }
+    }
+    return p;
+}
+
+fn classify_b(word) -> string {
+    if word == "h"      { return "H"; }
+    if word == "if"     { return "IF"; }
+    if word == "else"   { return "ELSE"; }
+    if word == "while"  { return "WHILE"; }
+    if word == "print"  { return "PRINT"; }
+    if word == "fn"     { return "FN"; }
+    if word == "return" { return "RETURN"; }
+    return "IDENT";
+}
+
+fn match_multichar_b(source, pos) {
+    h n = str_len(source);
+    if pos + 1 >= n { return ["", 0]; }
+    h two = str_slice(source, pos, pos + 2);
+    if two == "==" { return ["EQEQ", 2]; }
+    if two == "!=" { return ["NE",   2]; }
+    if two == "<=" { return ["LE",   2]; }
+    if two == ">=" { return ["GE",   2]; }
+    return ["", 0];
+}
+
+fn punct_kind_b(c) -> string {
+    if c == "(" { return "LPAREN"; }
+    if c == ")" { return "RPAREN"; }
+    if c == "{" { return "LBRACE"; }
+    if c == "}" { return "RBRACE"; }
+    if c == ";" { return "SEMI"; }
+    if c == "," { return "COMMA"; }
+    if c == "=" { return "EQ"; }
+    if c == "+" { return "PLUS"; }
+    if c == "-" { return "MINUS"; }
+    if c == "*" { return "STAR"; }
+    if c == "/" { return "SLASH"; }
+    if c == "%" { return "PERCENT"; }
+    if c == "<" { return "LT"; }
+    if c == ">" { return "GT"; }
+    return "";
+}
+
+fn tokenize_b(source) {
+    h n = str_len(source);
+    h tokens = arr_new(0, 0);
+    h pos = 0;
+    while pos < n {
+        pos = skip_ws_b(source, pos);
+        if pos >= n { break; }
+        h c = str_slice(source, pos, pos + 1);
+        if is_alpha_b(c) == 1 {
+            h end = pos;
+            while end < n {
+                h cc = str_slice(source, end, end + 1);
+                if is_alnum_b(cc) == 1 { end = end + 1; } else { break; }
+            }
+            h word = str_slice(source, pos, end);
+            arr_push(tokens, [classify_b(word), word]);
+            pos = end;
+        } else {
+            if is_digit_b(c) == 1 {
+                h end = pos;
+                while end < n {
+                    h cc = str_slice(source, end, end + 1);
+                    if is_digit_b(cc) == 1 { end = end + 1; } else { break; }
+                }
+                arr_push(tokens, ["NUMBER", str_slice(source, pos, end)]);
+                pos = end;
+            } else {
+                h mm = match_multichar_b(source, pos);
+                h mm_kind = arr_get(mm, 0);
+                h mm_len = arr_get(mm, 1);
+                if str_len(mm_kind) > 0 {
+                    arr_push(tokens, [mm_kind, str_slice(source, pos, pos + mm_len)]);
+                    pos = pos + mm_len;
+                } else {
+                    h kind = punct_kind_b(c);
+                    if str_len(kind) > 0 {
+                        arr_push(tokens, [kind, c]);
+                    } else {
+                        arr_push(tokens, ["UNKNOWN", c]);
+                    }
+                    pos = pos + 1;
+                }
+            }
+        }
+    }
+    arr_push(tokens, ["EOF", ""]);
+    return tokens;
+}
+
+# =============================================================================
+#                              PART II: PARSER
+# =============================================================================
+
+fn tkind(toks, p) -> string {
+    h t = arr_get(toks, p);
+    return arr_get(t, 0);
+}
+fn tval(toks, p) -> string {
+    h t = arr_get(toks, p);
+    return arr_get(t, 1);
+}
+
+# Parse a parenthesised, comma-separated argument list. Returns [args_array, np]
+# where np points past the closing RPAREN.
+fn p_args(toks, p) {
+    h args = arr_new(0, 0);
+    h np = p + 1;   # skip LPAREN
+    if tkind(toks, np) == "RPAREN" {
+        return [args, np + 1];
+    }
+    h done = 0;
+    while done == 0 {
+        h r = p_expr(toks, np);
+        arr_push(args, arr_get(r, 0));
+        np = arr_get(r, 1);
+        if tkind(toks, np) == "COMMA" {
+            np = np + 1;
+        } else { done = 1; }
+    }
+    # consume RPAREN
+    return [args, np + 1];
+}
+
+fn p_primary(toks, p) {
+    h k = tkind(toks, p);
+    if k == "NUMBER" { return [["NUM", tval(toks, p)], p + 1]; }
+    if k == "IDENT"  {
+        # IDENT followed by LPAREN → function call expression
+        if tkind(toks, p + 1) == "LPAREN" {
+            h name = tval(toks, p);
+            h r = p_args(toks, p + 1);
+            return [["CALL", name, arr_get(r, 0)], arr_get(r, 1)];
+        }
+        return [["VAR", tval(toks, p)], p + 1];
+    }
+    if k == "LPAREN" {
+        h r = p_expr(toks, p + 1);
+        return [arr_get(r, 0), arr_get(r, 1) + 1];   # skip RPAREN
+    }
+    return [["ERR", k], p + 1];
+}
+
+fn p_mul(toks, p) {
+    h r = p_primary(toks, p);
+    h left = arr_get(r, 0);
+    h np = arr_get(r, 1);
+    h go = 1;
+    while go == 1 {
+        h k = tkind(toks, np);
+        if k == "STAR" {
+            h r2 = p_primary(toks, np + 1);
+            left = ["BIN", "*", left, arr_get(r2, 0)];
+            np = arr_get(r2, 1);
+        } else { if k == "SLASH" {
+            h r2 = p_primary(toks, np + 1);
+            left = ["BIN", "/", left, arr_get(r2, 0)];
+            np = arr_get(r2, 1);
+        } else { if k == "PERCENT" {
+            h r2 = p_primary(toks, np + 1);
+            left = ["BIN", "%", left, arr_get(r2, 0)];
+            np = arr_get(r2, 1);
+        } else { go = 0; }}}
+    }
+    return [left, np];
+}
+
+fn p_add(toks, p) {
+    h r = p_mul(toks, p);
+    h left = arr_get(r, 0);
+    h np = arr_get(r, 1);
+    h go = 1;
+    while go == 1 {
+        h k = tkind(toks, np);
+        if k == "PLUS" {
+            h r2 = p_mul(toks, np + 1);
+            left = ["BIN", "+", left, arr_get(r2, 0)];
+            np = arr_get(r2, 1);
+        } else { if k == "MINUS" {
+            h r2 = p_mul(toks, np + 1);
+            left = ["BIN", "-", left, arr_get(r2, 0)];
+            np = arr_get(r2, 1);
+        } else { go = 0; }}
+    }
+    return [left, np];
+}
+
+fn p_cmp(toks, p) {
+    h r = p_add(toks, p);
+    h left = arr_get(r, 0);
+    h np = arr_get(r, 1);
+    h go = 1;
+    while go == 1 {
+        h k = tkind(toks, np);
+        h op = "";
+        if k == "EQEQ" { op = "=="; }
+        if k == "NE"   { op = "!="; }
+        if k == "LT"   { op = "<"; }
+        if k == "LE"   { op = "<="; }
+        if k == "GT"   { op = ">"; }
+        if k == "GE"   { op = ">="; }
+        if str_len(op) > 0 {
+            h r2 = p_add(toks, np + 1);
+            left = ["BIN", op, left, arr_get(r2, 0)];
+            np = arr_get(r2, 1);
+        } else { go = 0; }
+    }
+    return [left, np];
+}
+
+fn p_expr(toks, p) {
+    return p_cmp(toks, p);
+}
+
+# Parse a comma-separated parameter name list: `( a, b, c )` → [a, b, c].
+fn p_params(toks, p) {
+    h params = arr_new(0, 0);
+    h np = p + 1;   # skip LPAREN
+    if tkind(toks, np) == "RPAREN" {
+        return [params, np + 1];
+    }
+    h done = 0;
+    while done == 0 {
+        arr_push(params, tval(toks, np));
+        np = np + 1;
+        if tkind(toks, np) == "COMMA" {
+            np = np + 1;
+        } else { done = 1; }
+    }
+    return [params, np + 1];
+}
+
+fn p_stmt(toks, p) {
+    h k = tkind(toks, p);
+    if k == "H" {
+        h name = tval(toks, p + 1);
+        h r = p_expr(toks, p + 3);
+        h np = arr_get(r, 1) + 1;     # consume SEMI
+        return [["DECL", name, arr_get(r, 0)], np];
+    }
+    if k == "PRINT" {
+        # print( <expr> ) ;
+        h r = p_expr(toks, p + 2);
+        h np = arr_get(r, 1) + 1 + 1; # consume RPAREN, SEMI
+        return [["PRT", arr_get(r, 0)], np];
+    }
+    if k == "WHILE" {
+        h r = p_expr(toks, p + 1);
+        h np = arr_get(r, 1) + 1;     # consume LBRACE
+        h body_r = p_block(toks, np);
+        return [["WHL", arr_get(r, 0), arr_get(body_r, 0)], arr_get(body_r, 1)];
+    }
+    if k == "IF" {
+        h r = p_expr(toks, p + 1);
+        h np = arr_get(r, 1) + 1;     # consume LBRACE
+        h then_r = p_block(toks, np);
+        np = arr_get(then_r, 1);
+        h else_body = arr_new(0, 0);
+        if tkind(toks, np) == "ELSE" {
+            np = np + 2;              # consume ELSE LBRACE
+            h eb = p_block(toks, np);
+            else_body = arr_get(eb, 0);
+            np = arr_get(eb, 1);
+        }
+        return [["IF", arr_get(r, 0), arr_get(then_r, 0), else_body], np];
+    }
+    if k == "FN" {
+        # fn NAME ( params ) { body }
+        h name = tval(toks, p + 1);
+        h params_r = p_params(toks, p + 2);
+        h params = arr_get(params_r, 0);
+        h np = arr_get(params_r, 1) + 1;   # consume LBRACE
+        h body_r = p_block(toks, np);
+        return [["FN", name, params, arr_get(body_r, 0)], arr_get(body_r, 1)];
+    }
+    if k == "RETURN" {
+        # `return ;` or `return <expr> ;`
+        if tkind(toks, p + 1) == "SEMI" {
+            return [["RET", ["NULL"]], p + 2];
+        }
+        h r = p_expr(toks, p + 1);
+        h np = arr_get(r, 1) + 1;
+        return [["RET", arr_get(r, 0)], np];
+    }
+    if k == "IDENT" {
+        h k1 = tkind(toks, p + 1);
+        if k1 == "EQ" {
+            # IDENT = expr ;
+            h name = tval(toks, p);
+            h r = p_expr(toks, p + 2);
+            h np = arr_get(r, 1) + 1;
+            return [["ASN", name, arr_get(r, 0)], np];
+        }
+        if k1 == "LPAREN" {
+            # IDENT ( args ) ;   — expression statement (call, value discarded)
+            h r = p_expr(toks, p);
+            h np = arr_get(r, 1) + 1;
+            return [["EXPR", arr_get(r, 0)], np];
+        }
+    }
+    print(concat_many("p_stmt: don't know how to handle kind=", k));
+    return [["ERR", k], p + 1];
+}
+
+fn p_block(toks, p) {
+    h body = arr_new(0, 0);
+    h np = p;
+    h done = 0;
+    while done == 0 {
+        h k = tkind(toks, np);
+        if k == "RBRACE" {
+            np = np + 1;
+            done = 1;
+        } else {
+            if k == "EOF" {
+                done = 1;
+            } else {
+                h r = p_stmt(toks, np);
+                arr_push(body, arr_get(r, 0));
+                np = arr_get(r, 1);
+            }
+        }
+    }
+    return [body, np];
+}
+
+fn p_program(toks) {
+    h stmts = arr_new(0, 0);
+    h pos = 0;
+    h done = 0;
+    while done == 0 {
+        if tkind(toks, pos) == "EOF" {
+            done = 1;
+        } else {
+            h r = p_stmt(toks, pos);
+            arr_push(stmts, arr_get(r, 0));
+            pos = arr_get(r, 1);
+        }
+    }
+    return stmts;
+}
+
+# =============================================================================
+#                           PART III: BYTECODE ENCODER
+# AST → array of bytecode ops. Jumps are relative; functions are skipped
+# inline (DEF_FN includes the body length so execution can jump past).
+# =============================================================================
+
+fn arr_concat(a, b) {
+    h i = 0;
+    h n = arr_len(b);
+    while i < n {
+        arr_push(a, arr_get(b, i));
+        i = i + 1;
+    }
+    return a;
+}
+
+fn enc_expr(ast) {
+    h out = arr_new(0, 0);
+    h tag = arr_get(ast, 0);
+    if tag == "NUM" {
+        arr_push(out, ["LOAD_INT", arr_get(ast, 1)]);
+        return out;
+    }
+    if tag == "VAR" {
+        arr_push(out, ["LOAD_VAR", arr_get(ast, 1)]);
+        return out;
+    }
+    if tag == "BIN" {
+        h op = arr_get(ast, 1);
+        out = arr_concat(out, enc_expr(arr_get(ast, 2)));
+        out = arr_concat(out, enc_expr(arr_get(ast, 3)));
+        if op == "+"  { arr_push(out, ["ADD"]); return out; }
+        if op == "-"  { arr_push(out, ["SUB"]); return out; }
+        if op == "*"  { arr_push(out, ["MUL"]); return out; }
+        if op == "/"  { arr_push(out, ["DIV"]); return out; }
+        if op == "%"  { arr_push(out, ["MOD"]); return out; }
+        if op == "==" { arr_push(out, ["EQ"]);  return out; }
+        if op == "!=" { arr_push(out, ["NE"]);  return out; }
+        if op == "<"  { arr_push(out, ["LT"]);  return out; }
+        if op == "<=" { arr_push(out, ["LE"]);  return out; }
+        if op == ">"  { arr_push(out, ["GT"]);  return out; }
+        if op == ">=" { arr_push(out, ["GE"]);  return out; }
+        return out;
+    }
+    if tag == "CALL" {
+        # ["CALL", name, args]
+        h name = arr_get(ast, 1);
+        h args = arr_get(ast, 2);
+        h i = 0;
+        h n = arr_len(args);
+        while i < n {
+            out = arr_concat(out, enc_expr(arr_get(args, i)));
+            i = i + 1;
+        }
+        arr_push(out, ["CALL", name, n]);
+        return out;
+    }
+    arr_push(out, ["UNKNOWN_EXPR", tag]);
+    return out;
+}
+
+fn enc_stmt(ast) {
+    h out = arr_new(0, 0);
+    h tag = arr_get(ast, 0);
+    if tag == "DECL" {
+        out = arr_concat(out, enc_expr(arr_get(ast, 2)));
+        arr_push(out, ["STORE_VAR", arr_get(ast, 1)]);
+        return out;
+    }
+    if tag == "ASN" {
+        out = arr_concat(out, enc_expr(arr_get(ast, 2)));
+        arr_push(out, ["STORE_VAR", arr_get(ast, 1)]);
+        return out;
+    }
+    if tag == "PRT" {
+        out = arr_concat(out, enc_expr(arr_get(ast, 1)));
+        arr_push(out, ["PRINT"]);
+        return out;
+    }
+    if tag == "EXPR" {
+        # Value-discarding expression statement (e.g. a top-level call).
+        out = arr_concat(out, enc_expr(arr_get(ast, 1)));
+        arr_push(out, ["POP"]);
+        return out;
+    }
+    if tag == "RET" {
+        h e = arr_get(ast, 1);
+        if arr_get(e, 0) == "NULL" {
+            arr_push(out, ["LOAD_INT", "0"]);
+        } else {
+            out = arr_concat(out, enc_expr(e));
+        }
+        arr_push(out, ["RETURN"]);
+        return out;
+    }
+    if tag == "WHL" {
+        h cond_ops = enc_expr(arr_get(ast, 1));
+        h body_ops = enc_block(arr_get(ast, 2));
+        h c_len = arr_len(cond_ops);
+        h b_len = arr_len(body_ops);
+        out = arr_concat(out, cond_ops);
+        arr_push(out, ["JUMP_IF_FALSE", b_len + 2]);
+        out = arr_concat(out, body_ops);
+        arr_push(out, ["JUMP", 0 - (c_len + b_len + 1)]);
+        return out;
+    }
+    if tag == "IF" {
+        h cond_ops = enc_expr(arr_get(ast, 1));
+        h then_ops = enc_block(arr_get(ast, 2));
+        h else_body = arr_get(ast, 3);
+        h has_else = 0;
+        if arr_len(else_body) > 0 { has_else = 1; }
+        out = arr_concat(out, cond_ops);
+        if has_else == 1 {
+            h else_ops = enc_block(else_body);
+            h t_len = arr_len(then_ops);
+            h e_len = arr_len(else_ops);
+            arr_push(out, ["JUMP_IF_FALSE", t_len + 2]);
+            out = arr_concat(out, then_ops);
+            arr_push(out, ["JUMP", e_len + 1]);
+            out = arr_concat(out, else_ops);
+        } else {
+            h t_len = arr_len(then_ops);
+            arr_push(out, ["JUMP_IF_FALSE", t_len + 1]);
+            out = arr_concat(out, then_ops);
+        }
+        return out;
+    }
+    if tag == "FN" {
+        # ["FN", name, params, body]
+        # Layout:
+        #   DEF_FN name body_len params
+        #   [body ops...]              fn entry is here, runs only on CALL
+        #   RETURN                     fallback: leaves 0 on stack
+        h name = arr_get(ast, 1);
+        h params = arr_get(ast, 2);
+        h body = arr_get(ast, 3);
+        h body_ops = enc_block(body);
+        # Ensure the body ends with a RETURN so falling off the end is safe.
+        arr_push(body_ops, ["LOAD_INT", "0"]);
+        arr_push(body_ops, ["RETURN"]);
+        h b_len = arr_len(body_ops);
+        arr_push(out, ["DEF_FN", name, b_len, params]);
+        out = arr_concat(out, body_ops);
+        return out;
+    }
+    arr_push(out, ["UNKNOWN_STMT", tag]);
+    return out;
+}
+
+fn enc_block(stmts) {
+    h out = arr_new(0, 0);
+    h i = 0;
+    h n = arr_len(stmts);
+    while i < n {
+        out = arr_concat(out, enc_stmt(arr_get(stmts, i)));
+        i = i + 1;
+    }
+    return out;
+}
+
+fn encode_program(stmts) {
+    h out = enc_block(stmts);
+    arr_push(out, ["HALT"]);
+    return out;
+}
+
+fn print_bytecode(prog) {
+    h i = 0;
+    h n = arr_len(prog);
+    while i < n {
+        h op = arr_get(prog, i);
+        h kind = arr_get(op, 0);
+        h line = concat_many("  ", i, ": ", kind);
+        h ol = arr_len(op);
+        if ol >= 2 { line = concat_many(line, " ", arr_get(op, 1)); }
+        if ol >= 3 { line = concat_many(line, " ", arr_get(op, 2)); }
+        # 4th slot is the parameter list for DEF_FN; print its size only,
+        # to keep the listing readable.
+        if ol >= 4 {
+            line = concat_many(line, " [params=", arr_len(arr_get(op, 3)), "]");
+        }
+        print(line);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# =============================================================================
+#                           PART IV: BYTECODE EXECUTOR
+# Stack VM with call frames. Each frame = a scope (name→value) plus a saved
+# return pc. The function table is built by a pre-pass that scans for DEF_FN
+# ops and records (name → entry_pc, params).
+# =============================================================================
+
+fn scope_get(scope, name) {
+    h i = 0;
+    h n = arr_len(scope);
+    while i < n {
+        h pair = arr_get(scope, i);
+        if arr_get(pair, 0) == name {
+            return arr_get(pair, 1);
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn scope_set(scope, name, value) {
+    h i = 0;
+    h n = arr_len(scope);
+    while i < n {
+        h pair = arr_get(scope, i);
+        if arr_get(pair, 0) == name {
+            arr_set(scope, i, [name, value]);
+            return scope;
+        }
+        i = i + 1;
+    }
+    arr_push(scope, [name, value]);
+    return scope;
+}
+
+fn parse_int(s) {
+    return to_int(s);
+}
+
+fn pop1(stack) {
+    h n = arr_len(stack);
+    h top = arr_get(stack, n - 1);
+    h ns = arr_new(0, 0);
+    h i = 0;
+    while i < n - 1 {
+        arr_push(ns, arr_get(stack, i));
+        i = i + 1;
+    }
+    return [top, ns];
+}
+
+# Pre-pass: scan the program for DEF_FN ops, build a table of
+# [name, entry_pc, params] entries. Entry pc is the op immediately after
+# DEF_FN — that's where CALL jumps to.
+fn collect_fns(prog) {
+    h table = arr_new(0, 0);
+    h i = 0;
+    h n = arr_len(prog);
+    while i < n {
+        h op = arr_get(prog, i);
+        if arr_get(op, 0) == "DEF_FN" {
+            h name = arr_get(op, 1);
+            h params = arr_get(op, 3);
+            arr_push(table, [name, i + 1, params]);
+        }
+        i = i + 1;
+    }
+    return table;
+}
+
+fn fn_lookup(table, name) {
+    h i = 0;
+    h n = arr_len(table);
+    while i < n {
+        h row = arr_get(table, i);
+        if arr_get(row, 0) == name {
+            return row;
+        }
+        i = i + 1;
+    }
+    return ["", 0 - 1, arr_new(0, 0)];
+}
+
+fn execute(prog) {
+    h stack = arr_new(0, 0);
+    h scope = arr_new(0, 0);
+    h scope_stack = arr_new(0, 0);   # saved scopes on CALL
+    h pc_stack = arr_new(0, 0);      # saved return pcs on CALL
+    h fn_table = collect_fns(prog);
+    h pc = 0;
+    h n = arr_len(prog);
+
+    h running = 1;
+    while running == 1 {
+        if pc >= n {
+            running = 0;
+        }
+        if running == 1 {
+            h op = arr_get(prog, pc);
+            h kind = arr_get(op, 0);
+            h handled = 0;
+
+            if kind == "HALT" {
+                running = 0;
+                handled = 1;
+            }
+            if kind == "NOP" {
+                pc = pc + 1;
+                handled = 1;
+            }
+            if kind == "POP" {
+                h pr = pop1(stack); stack = arr_get(pr, 1);
+                pc = pc + 1;
+                handled = 1;
+            }
+            if kind == "LOAD_INT" {
+                arr_push(stack, parse_int(arr_get(op, 1)));
+                pc = pc + 1;
+                handled = 1;
+            }
+            if kind == "LOAD_VAR" {
+                arr_push(stack, scope_get(scope, arr_get(op, 1)));
+                pc = pc + 1;
+                handled = 1;
+            }
+            if kind == "STORE_VAR" {
+                h pr = pop1(stack);
+                h v = arr_get(pr, 0);
+                stack = arr_get(pr, 1);
+                scope = scope_set(scope, arr_get(op, 1), v);
+                pc = pc + 1;
+                handled = 1;
+            }
+            if kind == "ADD" {
+                h pr = pop1(stack); h r = arr_get(pr, 0); stack = arr_get(pr, 1);
+                h pl = pop1(stack); h l = arr_get(pl, 0); stack = arr_get(pl, 1);
+                arr_push(stack, l + r);
+                pc = pc + 1;
+                handled = 1;
+            }
+            if kind == "SUB" {
+                h pr = pop1(stack); h r = arr_get(pr, 0); stack = arr_get(pr, 1);
+                h pl = pop1(stack); h l = arr_get(pl, 0); stack = arr_get(pl, 1);
+                arr_push(stack, l - r);
+                pc = pc + 1;
+                handled = 1;
+            }
+            if kind == "MUL" {
+                h pr = pop1(stack); h r = arr_get(pr, 0); stack = arr_get(pr, 1);
+                h pl = pop1(stack); h l = arr_get(pl, 0); stack = arr_get(pl, 1);
+                arr_push(stack, l * r);
+                pc = pc + 1;
+                handled = 1;
+            }
+            if kind == "DIV" {
+                h pr = pop1(stack); h r = arr_get(pr, 0); stack = arr_get(pr, 1);
+                h pl = pop1(stack); h l = arr_get(pl, 0); stack = arr_get(pl, 1);
+                arr_push(stack, l / r);
+                pc = pc + 1;
+                handled = 1;
+            }
+            if kind == "MOD" {
+                h pr = pop1(stack); h r = arr_get(pr, 0); stack = arr_get(pr, 1);
+                h pl = pop1(stack); h l = arr_get(pl, 0); stack = arr_get(pl, 1);
+                arr_push(stack, l % r);
+                pc = pc + 1;
+                handled = 1;
+            }
+            if kind == "LT" {
+                h pr = pop1(stack); h r = arr_get(pr, 0); stack = arr_get(pr, 1);
+                h pl = pop1(stack); h l = arr_get(pl, 0); stack = arr_get(pl, 1);
+                h v = 0;
+                if l < r { v = 1; }
+                arr_push(stack, v);
+                pc = pc + 1;
+                handled = 1;
+            }
+            if kind == "LE" {
+                h pr = pop1(stack); h r = arr_get(pr, 0); stack = arr_get(pr, 1);
+                h pl = pop1(stack); h l = arr_get(pl, 0); stack = arr_get(pl, 1);
+                h v = 0;
+                if l <= r { v = 1; }
+                arr_push(stack, v);
+                pc = pc + 1;
+                handled = 1;
+            }
+            if kind == "GT" {
+                h pr = pop1(stack); h r = arr_get(pr, 0); stack = arr_get(pr, 1);
+                h pl = pop1(stack); h l = arr_get(pl, 0); stack = arr_get(pl, 1);
+                h v = 0;
+                if l > r { v = 1; }
+                arr_push(stack, v);
+                pc = pc + 1;
+                handled = 1;
+            }
+            if kind == "GE" {
+                h pr = pop1(stack); h r = arr_get(pr, 0); stack = arr_get(pr, 1);
+                h pl = pop1(stack); h l = arr_get(pl, 0); stack = arr_get(pl, 1);
+                h v = 0;
+                if l >= r { v = 1; }
+                arr_push(stack, v);
+                pc = pc + 1;
+                handled = 1;
+            }
+            if kind == "EQ" {
+                h pr = pop1(stack); h r = arr_get(pr, 0); stack = arr_get(pr, 1);
+                h pl = pop1(stack); h l = arr_get(pl, 0); stack = arr_get(pl, 1);
+                h v = 0;
+                if l == r { v = 1; }
+                arr_push(stack, v);
+                pc = pc + 1;
+                handled = 1;
+            }
+            if kind == "NE" {
+                h pr = pop1(stack); h r = arr_get(pr, 0); stack = arr_get(pr, 1);
+                h pl = pop1(stack); h l = arr_get(pl, 0); stack = arr_get(pl, 1);
+                h v = 0;
+                if l != r { v = 1; }
+                arr_push(stack, v);
+                pc = pc + 1;
+                handled = 1;
+            }
+            if kind == "JUMP" {
+                pc = pc + to_int(arr_get(op, 1));
+                handled = 1;
+            }
+            if kind == "JUMP_IF_FALSE" {
+                h pr = pop1(stack);
+                h top = arr_get(pr, 0);
+                stack = arr_get(pr, 1);
+                if top == 0 {
+                    pc = pc + to_int(arr_get(op, 1));
+                } else {
+                    pc = pc + 1;
+                }
+                handled = 1;
+            }
+            if kind == "PRINT" {
+                h pr = pop1(stack);
+                h top = arr_get(pr, 0);
+                stack = arr_get(pr, 1);
+                print(top);
+                pc = pc + 1;
+                handled = 1;
+            }
+            if kind == "DEF_FN" {
+                # At runtime, DEF_FN just skips past its body. The function
+                # entry pc has already been registered by collect_fns.
+                pc = pc + 1 + to_int(arr_get(op, 2));
+                handled = 1;
+            }
+            if kind == "CALL" {
+                h name = arr_get(op, 1);
+                h num_args = to_int(arr_get(op, 2));
+                h row = fn_lookup(fn_table, name);
+                h entry = to_int(arr_get(row, 1));
+                h params = arr_get(row, 2);
+                # Pop args off the value stack in reverse push order, then
+                # bind to params[0], params[1], ...
+                h args_rev = arr_new(0, 0);
+                h k = 0;
+                while k < num_args {
+                    h pr = pop1(stack);
+                    arr_push(args_rev, arr_get(pr, 0));
+                    stack = arr_get(pr, 1);
+                    k = k + 1;
+                }
+                # Build a fresh callee scope with bindings.
+                h new_scope = arr_new(0, 0);
+                h j = 0;
+                while j < num_args {
+                    h pname = arr_get(params, j);
+                    h pval = arr_get(args_rev, num_args - 1 - j);
+                    arr_push(new_scope, [pname, pval]);
+                    j = j + 1;
+                }
+                # Save caller frame.
+                arr_push(scope_stack, scope);
+                arr_push(pc_stack, pc + 1);
+                # Switch.
+                scope = new_scope;
+                pc = entry;
+                handled = 1;
+            }
+            if kind == "RETURN" {
+                # Top of stack is the return value. Restore caller's scope,
+                # jump back, value remains on the (caller's, now-shared) stack.
+                h sp_idx = arr_len(scope_stack) - 1;
+                h pc_idx = arr_len(pc_stack) - 1;
+                if sp_idx < 0 {
+                    # RETURN at top level — treat as HALT.
+                    running = 0;
+                    handled = 1;
+                } else {
+                    scope = arr_get(scope_stack, sp_idx);
+                    h saved_pc = arr_get(pc_stack, pc_idx);
+                    # Pop scope_stack and pc_stack (rebuild without last).
+                    h new_ss = arr_new(0, 0);
+                    h s_i = 0;
+                    while s_i < sp_idx {
+                        arr_push(new_ss, arr_get(scope_stack, s_i));
+                        s_i = s_i + 1;
+                    }
+                    scope_stack = new_ss;
+                    h new_ps = arr_new(0, 0);
+                    h p_i = 0;
+                    while p_i < pc_idx {
+                        arr_push(new_ps, arr_get(pc_stack, p_i));
+                        p_i = p_i + 1;
+                    }
+                    pc_stack = new_ps;
+                    pc = to_int(saved_pc);
+                    handled = 1;
+                }
+            }
+
+            if handled == 0 {
+                print(concat_many("execute: unknown opcode ", kind));
+                running = 0;
+            }
+        }
+    }
+    return 0;
+}
+
+# =============================================================================
+#                          PART V: COMPILE + RUN DRIVER
+# =============================================================================
+
+fn compile_and_run(label, source) {
+    print(concat_many("==== ", label, " ===="));
+    print("source:");
+    print(source);
+    print("");
+
+    h toks = tokenize_b(source);
+    h ast = p_program(toks);
+    h prog = encode_program(ast);
+
+    print("bytecode:");
+    print_bytecode(prog);
+    print("");
+    print("executing on OMC executor:");
+    execute(prog);
+    print("");
+    return 0;
+}
+
+print("############################################################");
+print("# Phase V.7: bytecode codegen + executor with FUNCTIONS");
+print("# OMC compiles OMC source (now with `fn`/`return`/calls) to");
+print("# bytecode, OMC executes that bytecode itself, recursion lands.");
+print("############################################################");
+print("");
+
+# Regression tests from V.6 — make sure we didn't break the working set.
+compile_and_run("Test 1: arithmetic", "h x = 89 + 144; print(x);");
+
+compile_and_run("Test 2: while-loop counter",
+    "h i = 0; while i < 5 { print(i); i = i + 1; }");
+
+compile_and_run("Test 3: if / else",
+    "h n = 7; if n < 10 { print(1); } else { print(0); }");
+
+compile_and_run("Test 4: sum 1..10",
+    "h s = 0; h i = 1; while i <= 10 { s = s + i; i = i + 1; } print(s);");
+
+# V.7 new: a non-recursive function call.
+compile_and_run("Test 5: simple function call",
+    "fn double(x) { return x * 2; } print(double(21));");
+
+# V.7 new: function with two parameters.
+compile_and_run("Test 6: two-param function",
+    "fn add(a, b) { return a + b; } print(add(89, 144));");
+
+# V.7 new: RECURSIVE function — the headline demo.
+compile_and_run("Test 7: recursive fib(10)",
+    "fn fib(n) { if n < 2 { return n; } return fib(n - 1) + fib(n - 2); } print(fib(10));");
+
+print("############################################################");
+print("# Observations");
+print("#");
+print("# - DEF_FN is a single op that carries name, body length, and the");
+print("#   parameter list. At runtime it's effectively a skip-past-body");
+print("#   jump; the entry pc is registered by collect_fns in a single");
+print("#   preamble scan. This sidesteps the chicken-and-egg of needing");
+print("#   forward references during emission.");
+print("#");
+print("# - CALL pushes a scope frame and a return pc; RETURN pops them.");
+print("#   The value stack is SHARED across frames — arguments arrive on");
+print("#   it, the return value departs on it. That's how the calling");
+print("#   convention works without copying anything across frames.");
+print("#");
+print("# - fib(10) bounces through 177 calls (the 11th Lucas number minus");
+print("#   one — a Fibonacci coincidence the language seems to enjoy).");
+print("#   Every one of them lives on the OMC-written executor's call");
+print("#   stack and returns through the OMC-written RETURN handler.");
+print("#");
+print("# - The bytecode VM is now structurally complete enough to host");
+print("#   any pure-integer recursive computation OMC can express. Adding");
+print("#   strings + arrays at the bytecode level (V.7b) closes the gap");
+print("#   to compiling the compiler with itself.");
+print("############################################################");

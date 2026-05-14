@@ -4,6 +4,259 @@ All notable changes to OMNIcode will be documented in this file.
 
 ## [Unreleased]
 
+### Added (Phase V.8b: the fixpoint widens to the full compiler subset, 2026-05-13)
+
+🎯 **`examples/self_hosting_v8b.omc` — the OMC bytecode VM now hosts every construct the compiler source itself uses.** Two fixpoint tests reach ✓ on first clean run.
+
+#### What V.8b adds to the V.7c-in-V.8 stack
+
+Three small extensions, all in the lexer/parser/encoder:
+
+1. **`#` line comments**. `skip_ws_b` now loops over (whitespace, comment) until neither advances `pos`. A `#` consumes everything up to (not including) the next `\n`.
+
+2. **`-> type` return-type annotations** on `fn` definitions. After `RPAREN`, the parser looks for `MINUS GT IDENT` and skips it if present. Annotations carry no runtime information — they document for the reader — so the parser swallows them silently.
+
+3. **`break` inside while loops**. Lexer recognises `break` as a keyword. Parser emits `["BREAK"]`. Encoder emits `["JUMP_BREAK", 0]` as a placeholder. The enclosing while-loop encoder scans `body_ops` for `JUMP_BREAK` placeholders and rewrites each to a `["JUMP", b_len + 1 - k]` whose relative delta lands just after the trailing back-jump — i.e., immediately after the loop. **Relative jumps survive concatenation**, so patching `body_ops` in place before assembling the full while-block is sound. Nested while loops work because the inner encoder patches its body before the outer encoder sees the inner block as one opaque sub-array of ops.
+
+#### The two fixpoint demos
+
+**Test 1 — `classify_word`** uses all three new features simultaneously: `#` comment in the embedded source, `-> string` on the fn def, `break` inside a while when a vowel is found. Returns an array of 5 strings (`"alpha"`/`"beta"`); both paths produce byte-identical output.
+
+**Test 2 — `tokenize_subset`** is the headline: a small but real lexer (digits + identifiers + punctuation, enough to tokenize `"h x = 89 + fib(144)"`). Embedded as a string. Compiled through the V.8b stack to 186 bytecode ops. Executed on the OMC executor. Returns 9 tokens (`"ID:h"`, `"ID:x"`, `"PUNCT:="`, …). The tree-walked version of the same function returns the same 9 tokens. **This is gen2 == gen3 for a real compiler component** — a piece of compiler logic, written in OMC, round-trips byte-identical through the OMC compiler-in-OMC + OMC executor-in-OMC.
+
+#### One bug flushed: str_len/str_slice mismatch
+
+First V.8b run produced ✓ fixpoint on both tests but emitted a quiet `p_stmt: don't know how to handle kind=IDENT` warning during Test 2. Trace: an em-dash (`—`, 3 bytes in UTF-8) in the embedded source's prologue comment. `str_len` returns BYTE count (5 for `"a—b"`); `str_slice` is CHAR-indexed. The hand-written lexer's main loop `while pos < n` advances `pos` by 1 per char, overshooting by `bytes - chars` iterations past the real string end. `str_slice` past the end returns `""`. `is_alpha_b("")` falsely returns 1 because `str_contains("alphabet", "")` is always true (Rust's `str::contains("")`). The lexer emitted a phantom `["IDENT", ""]` token between the real source and EOF; the parser couldn't classify the empty-IDENT statement; the encoder emitted `UNKNOWN_STMT`; the executor reported the unknown opcode at runtime — but the phantom statement was downstream of all real code, so the visible output was still correct.
+
+Quick fix in V.8b: keep embedded source ASCII-only (use `-` instead of `—`). The proper fix is a host-side change adding either a char-indexed `str_chars` builtin or making `str_len` consistent with `str_slice`. Logged in memory.
+
+#### What this means architecturally
+
+Every construct the V.8b-style compiler source itself uses now round-trips through the OMC bytecode path with byte-identical output. The language can:
+- read its own source (lexer-in-OMC tokenizes OMC source)
+- structure it (parser-in-OMC builds AST)
+- emit bytecode (encoder-in-OMC produces ops)
+- execute that bytecode (executor-in-OMC stack-VM runs ops)
+
+…and the answer at the end is the same whether the host tree-walker or the OMC bytecode VM produced it. The bootstrap loop is closed at the feature-surface level.
+
+#### What V.8b doesn't do (yet)
+
+Test 2 demonstrates one compiler component round-tripping. The fully self-applied bootstrap — the V.8b compiler compiling its OWN full source via the bytecode path — is in reach but slow: the bytecode VM is itself OMC code being tree-walked, so a full self-compile would chain ~3000 bytecode ops through ~30 if-branches per dispatch. Tractable as a one-off correctness check; not interactive. The `str_chars` host builtin (or a UTF-8-safe lexer rewrite) would also need to land first if the source contains non-ASCII characters. Logged as V.9.
+
+### Added (Phase V.8: round-trip fixpoint between tree-walk and OMC bytecode VM, 2026-05-13)
+
+🎯 **`examples/self_hosting_v8.omc` — the OMC compiler-in-OMC and executor-in-OMC produce byte-identical results to the tree-walker on the same source.**
+
+The central claim of the self-hosting project, now demonstrated empirically:
+
+> Run an OMC program through the tree-walker → get answer A.
+> Compile the same OMC program to bytecode using the OMC-written compiler.
+> Execute that bytecode on the OMC-written VM → get answer B.
+> A == B.
+
+#### How the demonstration works
+
+The V.8 file contains the full V.7c stack (lex, parse, encode, execute) plus a driver that runs each test program two ways:
+- **Path A** — inline OMC function definition, evaluated directly by the tree-walker. Returns its result as an OMC array.
+- **Path B** — the same function defined inside an `EMBEDDED_SOURCE` string. The V.7c-in-V.8 stack tokenizes / parses / encodes that string to bytecode, then `execute()` runs it. The bytecode binds its answer to `__result` and `execute()` surfaces that value via a new return path.
+
+The driver then calls `arr_equal_flat(out_a, out_b)`. Both demos produce identical output:
+
+**Demo 1: `embedded_program()`** — builds a flat array of bytecode-listing strings (`"LOAD_INT 10"`, `"ADD"`, …) from a list of integers, exercising array literals, while loops, `arr_push`, conditional emission, and `concat_many` over mixed int/string args. Returns 7 elements. ✓ FIXPOINT.
+
+**Demo 2: `build_pyramid(5)`** — accumulates strings via `str_concat` in a tight nested-while inner loop. Returns 5 elements (`"*"`, `"**"`, …, `"*****"`). ✓ pyramid FIXPOINT.
+
+#### One blocker found and fixed: concat_many cosmetic divergence
+
+V.7b's CHANGELOG flagged that `concat_many(s, int_val)` rendered the int via Debug formatter (`"HInt(42, φ=…)"`) in the bytecode VM but via Display (`"42"`) in tree-walk. V.8's first run hit this exact bug in Demo 1. The fix: `call_builtin`'s `concat_many` now applies `to_string` to each arg before `str_concat`. `to_string` invokes the host's Display path for HInt, so the rendering matches tree-walk.
+
+`to_string` is also now in the bytecode-level builtin set (`is_builtin` returns true; `call_builtin` dispatches).
+
+#### What's actually proven by V.8
+
+This is the **semantic** half of the gen2 == gen3 claim. The OMC compiler-in-OMC and executor-in-OMC are correct against the host as a reference implementation: any OMC program that runs end-to-end through the bytecode path produces the same value as tree-walk.
+
+The remaining piece, byte-identical gen2 == gen3 of the *compiler* on its own source, is now structurally trivial — the bytecode VM provably executes OMC faithfully — but blocked on three small extensions to the V.7c-style lexer/parser:
+1. `#` line comments.
+2. `-> type` return type annotations on `fn` definitions.
+3. `break` inside while loops.
+
+The V.7c-style compiler source uses all three. Adding them turns the V.8 round-trip into a self-applied bootstrap. Logged as V.8b / V.9.
+
+#### What `execute()` now returns
+
+Previously `execute(prog)` returned `0`. V.8 changes it to `scope_get(scope, "__result")` at HALT. Programs that don't bind `__result` still get `0` (the scope_get fallback), so this is backward-compatible. Programs that do bind `__result` make the bytecode VM's answer available to the outer caller — which is what closed the round-trip loop here.
+
+### Added (Phase V.7c: arr_push and arr_set on the OMC bytecode VM, 2026-05-13)
+
+🎯 **`examples/self_hosting_v7c.omc` — mutating array builtins now work at the bytecode level via named-store opcodes.**
+
+This is the last structural prerequisite before full gen2 == gen3 of the compiler-on-itself. The V.7b lexer's `tokens` accumulator and the encoder's `out` buffer both rely on `arr_push` — without V.7c, bytecode versions of those would silently no-op and the bootstrap fails before it begins.
+
+#### New bytecode ops
+
+- `["ARR_PUSH_NAMED", varname]` — pop value, look up `varname` in current scope, `arr_push` to the array, write the modified array back to scope under the same name. Leaves the (mutated) array on the value stack as the expression's result.
+- `["ARR_SET_NAMED", varname]` — pop value, pop index, look up `varname`, `arr_set`, write back. Same result convention.
+
+These are the bytecode-level analogue of the Rust VM's `ArrPushNamed` / `ArrSetNamed` (see `omnimcode-core/src/vm.rs`). The architectural answer to OMC's pass-by-value arrays is the same on both sides: take the variable name out of the value stack and put it directly on the opcode.
+
+#### Encoder pattern detection
+
+When `enc_expr` sees a `CALL` with name `arr_push` and exactly 2 args, OR name `arr_set` and exactly 3 args, AND the first arg is a bare `["VAR", name]`, it emits the specialised named-store form. Anything fancier (e.g. `arr_push(arr_get(rows, 0), v)` — push into a nested array) falls through to `CALL_BUILTIN` and loses the mutation. **This matches tree-walk's pass-by-value behaviour for the same pattern** — the OMC source-level rule and the bytecode rule are the same rule.
+
+#### Tests — 8/8 pass
+
+V.7b regressions (count_vowels, sum_arr) still produce 5 and 55. New:
+- `arr_push` builds [0..9] dynamically; length 10, sum 45.
+- `build_squares(6)` inside a function — sum of 0²+1²+…+5² = 55. Uses `arr_push` on the callee's local accumulator.
+- `arr_set` replaces specific elements of a literal.
+- Array of tagged pairs (the lexer's token pattern): builds three tokens, walks them, prints `NUMBER:89`, `PLUS:+`, `NUMBER:144`.
+- **Test 7 / Test 8 contrast** — same recursive `trace_fact`, opposite outcomes. With return-and-rebind (`trace = trace_fact(5, arr_new(0,0))`), the trace populates with [5,4,3,2,1]. With return discarded (`trace_fact(5, trace);`), the trace stays empty. **Both bytecode VM and tree-walker agree on both outcomes** — the pass-by-value semantics are byte-faithful.
+
+#### Why the Test 7/8 contrast matters
+
+The lexer/parser/encoder in V.7b all use the return-and-rebind pattern for their state accumulators. If V.7c's bytecode VM diverged from tree-walk here — even subtly — gen2 == gen3 couldn't hold in principle. The agreement is empirical evidence that the calling convention, scope frames, and named-store ops compose correctly.
+
+#### V.8 is now in reach
+
+The V.7c bytecode VM supports every OMC construct the V.7b compiler itself uses: strings, arrays, function calls, recursion, mutating builtins. Next step: compile the V.7c-or-later compiler source with itself, execute the resulting bytecode on the OMC executor, feed it the same source, and verify the output bytecode is byte-identical to the first compilation. That's the full self-hosting fixpoint at the back end.
+
+### Added (Phase V.7b: strings + arrays + builtin dispatch in OMC bytecode, 2026-05-13)
+
+🎯 **`examples/self_hosting_v7b.omc` — the OMC bytecode VM now handles strings, array literals, and read-only host builtin calls.**
+
+Stretches the value space the bytecode VM understands. Without this, gen2 == gen3 of the full compiler is structurally impossible — the lexer manipulates strings, the parser builds nested arrays, the encoder iterates over both.
+
+#### New bytecode ops
+
+- `["LOAD_STR", value]` — push a string literal.
+- `["MAKE_ARR", n]` — pop n values in push order, build an array, push it.
+- `["CALL_BUILTIN", name, num_args]` — dispatch into a host-primitive switch (`arr_new`, `arr_get`, `arr_len`, `str_len`, `str_slice`, `str_contains`, `str_concat`, `concat_many`, `to_int`).
+
+A `pop_n_ordered` helper materialises args in source/push order (args[0] was pushed first, deepest on stack; args[n-1] is on top). Source `arr_get(a, i)` therefore evaluates to `arr_get(arr, idx)` in the dispatch, matching tree-walk semantics.
+
+#### Parser additions
+
+- `STRING` token with `\n \t \r \" \\` escape decoding (mirror of V.4's `escape_for_source`).
+- `LBRACKET` / `RBRACKET` punctuation.
+- `p_primary` recognises `STRING → ["STR", value]` and `[expr, ...] → ["ARR", elems]`.
+
+#### Encoder additions
+
+One line in `enc_expr`: if a CALL's name is in the builtin set, emit `CALL_BUILTIN`; else emit `CALL` as before. The dispatch lives in `call_builtin(name, args)` in the executor.
+
+#### Tests — 7/7 produce correct values
+
+- string literal round-trip
+- `concat_many("the answer is ", 21 * 2)`  (see cosmetic divergence below)
+- `count_vowels("the quick brown fox")` → 5  (uses `str_len`, `str_slice`, `str_contains`)
+- array literal walk over `[10, 20, 30, 40, 50]`
+- `sum_arr([1..10])` → 55
+- `count_long(["a", "the", "quick", "brown", "fox", "jumps", "over"], 4)` → 4
+- recursive `total(["abc", "defg", "hi"], 0, 0)` → 9 (3+4+2; strings + recursion + builtins composed)
+
+#### Known cosmetic divergence from tree-walk
+
+`concat_many("a", int_val)` renders `int_val` differently between tree-walk and V.7b: tree-walk uses HInt's Display formatter ("42"), V.7b's OMC-side `call_builtin` falls through to `str_concat` in a loop which uses HInt's Debug formatter ("HInt(42, φ=…, HIM=…)"). Functional correctness intact; cosmetic. OMC has no array-spread to call the host's variadic `concat_many` with a dynamic arg count, so the loop is the only path available from inside an OMC executor.
+
+A fix would be to special-case `concat_many` in the executor (not in `call_builtin`) and call the host directly via fixed-arity dispatch (`if n == 2 { concat_many(a, b) }` etc.) up to some reasonable max. Logged for V.7c if it bites.
+
+#### What V.7b doesn't yet do
+
+`arr_push` / `arr_set` still tree-walk only. They're mutating builtins — pass-by-value semantics mean the OMC-side `call_builtin` can't propagate the mutation back to the caller's variable. V.7c needs `ARR_PUSH_NAMED` / `ARR_SET_NAMED` ops (same shape as the Rust VM's `ArrPushNamed`/`ArrSetNamed`) which take the variable name directly and store back into the local scope. Once those land, the bytecode VM can host the V.7b compiler itself — which is the structural prerequisite for full gen2 == gen3.
+
+### Added (Phase V.7: functions, recursion, call frames in OMC bytecode, 2026-05-13)
+
+🎯 **`examples/self_hosting_v7.omc` — OMC compiles AND executes recursive functions, end-to-end, on its own bytecode VM.**
+
+The headline demo:
+
+```omnicode
+fn fib(n) {
+    if n < 2 { return n; }
+    return fib(n - 1) + fib(n - 2);
+}
+print(fib(10));   // → 55
+```
+
+Source → lex → parse → encode → execute. Every stage is OMC code running on the Rust interpreter; the bytecode itself contains `DEF_FN`, `CALL`, `RETURN` ops the OMC-written executor resolves with its own call stack and frame scopes. `fib(10)` produces 55 after 177 recursive calls (= 2·F(11) - 1; OMC has a sense of humour about Fibonacci).
+
+#### New bytecode ops
+
+- `["DEF_FN", name, body_length, [params]]` — at runtime, skips `body_length` ops past the inline body. A preamble scan (`collect_fns`) walks the program once and registers `name → entry_pc, params` into a function table.
+- `["CALL", name, num_args]` — pops `num_args` values, builds a fresh callee scope with parameters bound (in correct order — args pop off the value stack in reverse-push order), saves caller's scope and `pc + 1` to two parallel stacks, jumps to the function entry.
+- `["RETURN"]` — leaves top of value stack alone (it's the return value), pops the saved scope/pc from the call stacks, jumps back. At top level RETURN acts like HALT.
+- `["POP"]` — value-discarding for expression statements like a bare top-level call.
+
+Value stack is **shared across frames**. Arguments arrive on it from the caller; the return value departs on it for the caller. Each frame has its own scope (name→value pair-array), pushed/popped on CALL/RETURN through two side-stacks inside `execute()`.
+
+#### Parser additions
+
+- `FN` and `RETURN` keywords, `COMMA` punctuation.
+- `p_params` — parenthesised name list for function definitions.
+- `p_args` — parenthesised comma-separated expression list for calls.
+- `p_primary` recognises `IDENT (` as a call expression.
+- `p_stmt` recognises `IDENT (` at statement start as an expression statement, and `FN`/`RETURN` keywords.
+
+#### All seven tests pass
+
+V.6 regressions (arithmetic, while, if/else, sum 1..10) still produce correct output; new tests:
+- `fn double(x) { return x * 2; } print(double(21));` → 42
+- `fn add(a, b) { return a + b; } print(add(89, 144));` → 233
+- `fn fib(n) { ... } print(fib(10));` → 55
+
+#### What V.7 doesn't yet do
+
+Strings, arrays, and built-in calls (`str_len`, `arr_push`, etc.) at the bytecode level are still tree-walk only. Full gen2 == gen3 of the compiler-on-itself requires the bytecode subset to support those — the lexer manipulates strings, the parser builds nested arrays, the encoder iterates over them. That's V.7b. The structural piece tonight: **the VM hosts recursion**, which was the architectural prerequisite.
+
+### Added (Phase V.6: bytecode codegen + executor in OMNIcode, 2026-05-13)
+
+🎯 **`examples/self_hosting_bytecode.omc` — OMC compiles OMC source to bytecode and runs it, both pieces written in OMC.**
+
+A single file containing four parts:
+1. A lite lexer (the subset of tokens this milestone needs)
+2. A lite parser (decl / assign / print / while / if-else / arithmetic / comparison)
+3. **A bytecode encoder** — AST → array of tagged ops (LOAD_INT, LOAD_VAR, STORE_VAR, ADD/SUB/MUL/DIV/MOD, EQ/NE/LT/LE/GT/GE, JUMP, JUMP_IF_FALSE, PRINT, HALT)
+4. **A bytecode executor** — stack VM written in OMC. Reads the op array, dispatches via flat `if kind == "X"` chains, maintains its own value stack and name→value scope.
+
+All four demo programs run end-to-end on the OMC-written compile-and-execute loop:
+- `h x = 89 + 144; print(x);` → 233
+- `h i = 0; while i < 5 { print(i); i = i + 1; }` → 0,1,2,3,4
+- `h n = 7; if n < 10 { print(1); } else { print(0); }` → 1
+- `h s = 0; h i = 1; while i <= 10 { s = s + i; i = i + 1; } print(s);` → 55
+
+**The architectural piece is in place: the OMC compile-and-run loop is semantically faithful on the supported subset.** The Rust interpreter is running OMC code that compiles OMC source to bytecode and executes that bytecode itself.
+
+#### Discovered constraint: arrays pass by value in OMC
+
+The first encoder used `enc_expr(ast, out)` with `out` as an out-parameter. Every test emitted only HALT. Root cause: OMC functions receive arrays by value — `arr_push(out, ...)` inside a callee mutates a local copy that's discarded on return. Even top-level (global) array bindings are copied into a callee's frame.
+
+The fix shape:
+- Each `enc_*` function builds its own local ops array and returns it.
+- Callers do `out = arr_concat(out, enc_xxx(...))` (return-and-rebind).
+- **Jumps switched from absolute to RELATIVE offsets.** Absolute targets would require a fixup table to survive sub-block concatenation; relative deltas are translation-invariant, so concatenation just works.
+
+The relative-jump math for a while loop is:
+```
+[cond ops]            length C
+JUMP_IF_FALSE  B+2    skip body + back-jump + JIF itself
+[body ops]            length B
+JUMP  -(C+B+1)        return to start of cond
+```
+
+And for if/else:
+```
+[cond] JIF(T+2) [then] JUMP(E+1) [else]
+[cond] JIF(T+1) [then]                       # no-else form
+```
+
+This is a real OMC language fact, not a quirk of this demo: any future OMC-side metaprogramming that builds up arrays across function boundaries has to use the return-and-rebind pattern.
+
+#### What remains for V.7+
+
+V.6 demonstrates that OMC executes its own bytecode for a working subset. Full gen2 == gen3 of the **compiler itself on bytecode** requires the bytecode subset to support strings, arrays, and function calls — everything the encoder uses. That's iteration on a working frame, not a new architectural piece.
+
 ### Added (Phase V.5: SELF-HOSTING FIXPOINT, 2026-05-13)
 
 🎯 **`examples/self_hosting_fixpoint.omc` — OMNIcode compiles its own compiler.**
