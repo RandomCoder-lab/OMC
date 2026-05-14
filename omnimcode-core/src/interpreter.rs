@@ -1254,6 +1254,17 @@ impl Interpreter {
                 let s = self.eval_expr(&args[0])?.to_string();
                 Ok(Value::HInt(HInt::new(s.len() as i64)))
             }
+            "str_chars" => {
+                // char count (UTF-8 scalar values), matching str_slice's
+                // char-indexed slicing. Use this in hand-written lexers
+                // instead of str_len; otherwise non-ASCII source overshoots
+                // the loop bound and you read empty strings past the end.
+                if args.is_empty() {
+                    return Err("str_chars requires 1 argument".to_string());
+                }
+                let s = self.eval_expr(&args[0])?.to_string();
+                Ok(Value::HInt(HInt::new(s.chars().count() as i64)))
+            }
             "str_concat" => {
                 if args.len() < 2 {
                     return Err("str_concat requires 2 arguments".to_string());

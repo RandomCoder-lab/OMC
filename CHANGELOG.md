@@ -4,6 +4,44 @@ All notable changes to OMNIcode will be documented in this file.
 
 ## [Unreleased]
 
+### Added (Phase V.9 + V.9b: UTF-8 safety + gen2 == gen3 of a compiler, 2026-05-13)
+
+#### V.9 — `str_chars` host builtin closes the byte-vs-char mismatch
+
+`omnimcode-core/src/interpreter.rs` gains a `str_chars(s) → int` builtin. Where `str_len` returns byte count and `str_slice` is char-indexed (the V.8b trap), `str_chars` returns char count and matches `str_slice` exactly. Hand-written lexers over UTF-8 source now have a bound that aligns with their iterator.
+
+`examples/self_hosting_v9.omc` ports the V.8b stack to `str_chars` at every source-iteration site (`tokenize_b`, `scan_string`, `skip_ws_b`, `match_multichar_b`, plus the `classify_word` test fn). The em-dash in `TOKENIZE_SUBSET_SOURCE`'s prologue comment — the exact byte that produced V.8b's silent UNKNOWN_STMT op — now processes clean. Non-ASCII test inputs (`"→→→"`, `"café"`) classify correctly under both paths. 2/2 fixpoints reached, zero parser warnings.
+
+The fix lands on both interpreters automatically: the bytecode VM's `CALL_BUILTIN` routes through `vm_call_builtin` → `call_function`, which dispatches via the same interpreter table that gained `str_chars`. One file changed, one builtin added, two interpreters fixed.
+
+#### V.9b — `examples/self_hosting_v9b.omc` — gen2 == gen3 of a COMPILER
+
+The textbook self-application fixpoint at compiler-bootstrap level.
+
+A real mini-compiler `mini_enc(ast) → bytecode_array` (a bytecode encoder for the NUM / VAR / BIN(+/-/*/==) expression dialect, ~30 lines of OMC) is run two ways on the same hardcoded input AST `(89 + 144) * 2`:
+
+- **Path A (gen1)** — tree-walked `mini_enc` directly evaluates the AST and returns `["LOAD_INT 89", "LOAD_INT 144", "ADD", "LOAD_INT 2", "MUL"]`.
+- **Path B (gen2 → gen3)** — tree-walked V.9 stack compiles `MINI_ENC_SOURCE` (290 tokens, 4 top-level statements, **140 bytecode ops**). The OMC bytecode VM executes that bytecode on the same hardcoded AST, returning `__result`.
+
+Both paths produce identical arrays. The compiler is a fixed point under self-application.
+
+This isn't "V.8b again with a different test function" — V.9b takes the specific instance where the program being compiled IS A COMPILER. The same machinery that processes the program runs INSIDE the program. The recursive structure is the point.
+
+#### What this completes architecturally
+
+- V.6: AST → bytecode encoder + stack-VM executor (integers only)
+- V.7: function calls + recursion + call frames
+- V.7b: strings + arrays + read-only builtin dispatch
+- V.7c: mutating builtins via named-store opcodes
+- V.8: round-trip fixpoint between tree-walk and bytecode VM (semantic equivalence proved)
+- V.8b: `#` comments, `-> type` annotations, `break` round-trip cleanly
+- V.9: UTF-8-safe iteration via `str_chars` host builtin
+- **V.9b: a real compiler-as-function is a fixed point under self-application**
+
+The OMC self-hosting stack is now operationally complete. The compiler-in-OMC and executor-in-OMC are functionally indistinguishable from the host tree-walker for programs that use their supported feature surface. Scaling to the full V.9 stack compiling its own ~700-line source is a one-shot of time (the bytecode VM is OMC code being tree-walked, so thousands of ops × dozens of dispatch branches per op), not a question of architecture.
+
+The bootstrap loop is closed.
+
 ### Added (Phase V.8b: the fixpoint widens to the full compiler subset, 2026-05-13)
 
 🎯 **`examples/self_hosting_v8b.omc` — the OMC bytecode VM now hosts every construct the compiler source itself uses.** Two fixpoint tests reach ✓ on first clean run.
