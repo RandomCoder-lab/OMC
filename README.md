@@ -42,6 +42,7 @@ What this is **not**: a fast runtime, a production toolchain, a stable API, a de
 | Self-healing across two stages (token + AST), 5 bugs healed in one source | `examples/self_healing_h3.omc` | All four demos converge; `safe(8) → 8` on the integrated case |
 | User-declared runtime self-healing via `safe` keyword | `examples/self_healing_h4.omc` | `compute(144, 0) → 144` — runtime crash converted to finite answer on attractor |
 | Array-bounds healing — out-of-bounds reads become attractor-landing | `examples/self_healing_h5.omc` | Loop walking 8 indices off a 5-element array; every output has `φ=1.000` |
+| Host-level `safe` keyword — works in any OMC program, not just the self-healing demos | `examples/safe_keyword_host.omc` | `safe 89/0 → 89`, `safe arr_get(xs, 999) → 20`, `safe arr_set(xs, 999, 99)` mutates xs[1] |
 
 Run any of these with the binary built from this repo:
 

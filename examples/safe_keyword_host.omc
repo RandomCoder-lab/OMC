@@ -1,0 +1,38 @@
+# =============================================================================
+# Host-level `safe` keyword demo
+# =============================================================================
+# As of Phase H.5 (host-language integration), the `safe` keyword is part of
+# OMC the language — recognised by the Rust parser, AST, and interpreter
+# directly. No self-healing compiler infrastructure (H.1-H.5 OMC-written
+# demo files) is required; any OMC program can use `safe` as a one-keyword
+# opt-in to runtime self-healing semantics.
+#
+# Three supported shapes today:
+#   safe a / b              → safe_divide(a, b)
+#   safe arr_get(a, idx)    → safe_arr_get(a, idx)
+#   safe arr_set(a, idx, v) → safe_arr_set(a, idx, v)
+#
+# This file is a minimal smoke test. Run with:
+#   ./target/release/omnimcode-standalone examples/safe_keyword_host.omc
+# =============================================================================
+
+# --- safe divide ---
+
+print(safe 89 / 0);                     # 89: fold(0)=1, 89/1=89
+
+fn compute(a, b) { return safe a / b; }
+print(compute(144, 0));                 # 144: dynamic zero healed at runtime
+print(compute(144, 3));                 # 48:  in-bounds division unchanged
+
+# --- safe array read out of bounds ---
+
+h xs = [10, 20, 30];
+print(safe arr_get(xs, 999));           # 20:  fold(999)=610, 610%3=1, xs[1]
+print(safe arr_get(xs, 1));             # 20:  in-bounds, no rewrite needed
+
+# --- safe array write out of bounds ---
+
+safe arr_set(xs, 999, 99);              # writes xs[fold(999) % 3] = xs[1] = 99
+print(arr_get(xs, 0));                  # 10:  unchanged
+print(arr_get(xs, 1));                  # 99:  the write landed here
+print(arr_get(xs, 2));                  # 30:  unchanged

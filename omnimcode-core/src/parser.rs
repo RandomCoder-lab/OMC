@@ -23,7 +23,8 @@ pub enum Token {
     As,
     Res,
     Fold,
-    
+    Safe,        // H.5 host-level support: `safe <expr>` prefix
+
     // Identifiers and literals
     Ident(String),
     Number(i64),
@@ -326,6 +327,7 @@ impl Lexer {
                         "as" => Token::As,
                         "res" => Token::Res,
                         "fold" => Token::Fold,
+                        "safe" => Token::Safe,
                         "and" => Token::And,
                         "or" => Token::Or,
                         "not" => Token::Not,
@@ -968,6 +970,16 @@ impl Parser {
     }
 
     fn parse_expression(&mut self) -> Result<Expression, String> {
+        // H.5: `safe <expr>` prefix wraps the rest of the expression in
+        // self-healing semantics. The interpreter dispatches at eval time
+        // based on the inner shape (Div → safe_divide, arr_get → safe_arr_get,
+        // etc). Mirrors the OMC-written parser's behaviour in
+        // examples/self_healing_h5.omc.
+        if self.current() == Token::Safe {
+            self.advance();
+            let inner = self.parse_or()?;
+            return Ok(Expression::Safe(Box::new(inner)));
+        }
         self.parse_or()
     }
 

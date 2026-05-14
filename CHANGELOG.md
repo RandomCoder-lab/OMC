@@ -4,6 +4,47 @@ All notable changes to OMNIcode will be documented in this file.
 
 ## [Unreleased]
 
+### Added (Phase H.5 host-language integration: `safe` as a first-class keyword, 2026-05-14)
+
+🎯 **`safe` is now a host-level OMC keyword — no self-healing-demo infrastructure required.**
+
+Until now, `safe a / b` and `safe arr_get(a, idx)` only worked inside the OMC-written self-healing compiler demos (`examples/self_healing_h4.omc`, `h5.omc`), which carry their own OMC-side parser, AST, encoder, and executor. The host Rust parser/interpreter didn't know `safe` as a keyword — it would tokenize as an unknown identifier.
+
+This integration brings `safe` into the language proper:
+
+| Layer | Change |
+|---|---|
+| Lexer (`parser.rs`) | New `Token::Safe`; `"safe"` keyword recognized |
+| AST (`ast.rs`) | New `Expression::Safe(Box<Expression>)` variant |
+| Parser (`parser.rs`) | `parse_expression` peeks for `Token::Safe`, wraps the rest of the expression. Bare statements (`safe arr_set(buf, i, v);`) work via the existing expression-statement fallback |
+| Interpreter (`interpreter.rs`) | `Expression::Safe(inner)` pattern-matches the inner shape: `Div(l, r)` → `safe_divide(l, r)`, `Call("arr_get", ...)` → `safe_arr_get(...)`, `Call("arr_set", ...)` → `safe_arr_set(...)`; unknown shapes evaluate the inner directly |
+| Compiler (`compiler.rs`) | `Expression::Safe(inner)` lowers to the matching `Op::Call("safe_*", n)` for known shapes; type inference delegates to the inner expression |
+
+#### Smoke test (`examples/safe_keyword_host.omc`)
+
+Eight assertions, all pass on the host interpreter without any OMC-written self-healing wrapper:
+
+- `safe 89 / 0 → 89`
+- `compute(144, 0) → 144` (dynamic zero healed)
+- `compute(144, 3) → 48`
+- `safe arr_get([10,20,30], 999) → 20` (fold(999)=610, 610%3=1)
+- `safe arr_get([10,20,30], 1) → 20`
+- `safe arr_set(xs, 999, 99)` writes xs[1]=99; xs[0] and xs[2] unchanged
+
+The mutation case (the H.5 named-store fix in OMC bytecode) is naturally clean through tree-walk because the interpreter pattern-matches `Safe(Call("arr_set", [Variable(name), ...]))` before any synthetic-arg shim runs — `safe_arr_set` receives the actual `Expression::Variable(name)` it needs and writes back to the caller's scope.
+
+#### What still doesn't work
+
+`Safe(Call("arr_set", ...))` compiled to bytecode and run through the Rust VM lowers to `Op::Call("safe_arr_set", 3)`, which routes via `vm_call_builtin`'s synthetic-arg shim → mutation lost. This is the same gap V.7c closed for `arr_set` with `Op::ArrSetNamed`. A future `Op::SafeArrSetNamed(String)` would close it here too. Tonight's scope kept the Rust-VM bytecode path on the existing call shim — tree-walk works cleanly, the named-mutation gap is documented and bounded.
+
+#### Why this matters
+
+The H.4/H.5 OMC-written demos remain the architecturally pure proof — the bytecode VM rewrites and executes `safe` semantics end-to-end on the φ-math substrate. But for a developer who just wants the feature in their OMC code, it's now a one-keyword opt-in at the language level. The Phase H story is no longer "fork the self-healing-compiler demo file." It's "write `safe` where you'd write a runtime guard."
+
+### Added (Phase H.5.1: close the safe arr_set bytecode-VM gap, 2026-05-14)
+
+`examples/self_healing_h5.omc` — `safe arr_set(VAR, idx, val)` works through the OMC bytecode VM, not just under tree-walk. New `SAFE_ARR_SET_NAMED varname` opcode in the OMC-written executor mirrors V.7c's `ARR_SET_NAMED` pattern: the variable name rides on the opcode itself rather than going through `CALL_BUILTIN`'s synthetic-arg shim that copies array arguments. Encoder detects bare-VAR first-arg shape and emits the named form; executor pops idx/val, looks up array in scope, computes fold-and-mod healed index, mutates, writes back. Demo 4b verifies: `[55, 13, 0, 0, 34]` buffer state after four `safe arr_set` writes with `idx ∈ {0, 100, -1, 6}`. Six demos, six convergences.
+
 ### Added (Phase H.5: array-bounds healing via fold_escape on the index, 2026-05-14)
 
 🎯 **`examples/self_healing_h5.omc` — `safe arr_get(a, idx)` and `safe arr_set(a, idx, v)` make out-of-bounds accesses total.**

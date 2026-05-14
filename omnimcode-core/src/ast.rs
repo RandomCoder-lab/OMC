@@ -113,6 +113,17 @@ pub enum Expression {
     // Harmonic operations
     Resonance(Box<Expression>),
     Fold(Box<Expression>),
+
+    // H.5: user-declared runtime self-healing intent.
+    // `safe <expr>` wraps an expression in self-healing semantics.
+    // The interpreter pattern-matches the inner expression at eval
+    // time and routes to the appropriate ONN primitive:
+    //   safe a / b              → safe_divide(a, b)
+    //   safe arr_get(a, idx)    → safe_arr_get(a, idx)
+    //   safe arr_set(a, idx, v) → safe_arr_set(a, idx, v)
+    // Other shapes fall through to evaluating the inner expression
+    // directly (no-op), reserving the slot for future runtime guards.
+    Safe(Box<Expression>),
 }
 
 impl Expression {

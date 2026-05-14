@@ -517,6 +517,25 @@ impl Interpreter {
                     _ => Ok(Value::HInt(HInt::new(0))),
                 }
             }
+            Expression::Safe(inner) => {
+                // H.5: dispatch user-declared safe semantics by inner shape.
+                // Known shapes route to the matching ONN primitive; everything
+                // else is evaluated unwrapped (reserves the slot for future
+                // runtime guards on more call patterns).
+                match inner.as_ref() {
+                    Expression::Div(l, r) => {
+                        let args = vec![(**l).clone(), (**r).clone()];
+                        self.call_function("safe_divide", &args)
+                    }
+                    Expression::Call { name, args } if name == "arr_get" && args.len() == 2 => {
+                        self.call_function("safe_arr_get", args)
+                    }
+                    Expression::Call { name, args } if name == "arr_set" && args.len() == 3 => {
+                        self.call_function("safe_arr_set", args)
+                    }
+                    _ => self.eval_expr(inner),
+                }
+            }
         }
     }
 

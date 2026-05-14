@@ -134,6 +134,12 @@ impl Compiler {
                 })
             }
             Expression::Index { .. } => None,
+            // H.5: `safe <expr>` evaluates to the same type as the inner
+            // expression after self-healing dispatch. For Div the result is
+            // int-or-float same as Div itself; for arr_get/arr_set the
+            // result mirrors the wrapped call. Delegating to the inner
+            // gives the right answer in every supported shape.
+            Expression::Safe(inner) => self.infer_type(inner),
         }
     }
 
@@ -404,6 +410,40 @@ impl Compiler {
                     self.compile_expr(arg)?;
                 }
                 self.emit(Op::Call(name.clone(), args.len()));
+            }
+            Expression::Safe(inner) => {
+                // H.5 host-level: lower `safe <expr>` to the matching
+                // ONN primitive call. The host primitives (safe_divide,
+                // safe_arr_get, safe_arr_set) handle the fold-and-mod /
+                // fold-escape logic at runtime. For shapes we don't have
+                // a primitive for, just compile the inner directly.
+                //
+                // KNOWN GAP: Safe(arr_set(VAR, ...)) goes through Op::Call
+                // which routes via the vm_call_builtin shim — the mutation
+                // is lost when run through the Rust VM. Tree-walk works
+                // fine because the interpreter pattern-matches Safe before
+                // any shim. A future Op::SafeArrSetNamed would close this
+                // gap (same shape as Op::ArrSetNamed in the existing VM).
+                match inner.as_ref() {
+                    Expression::Div(l, r) => {
+                        self.compile_expr(l)?;
+                        self.compile_expr(r)?;
+                        self.emit(Op::Call("safe_divide".to_string(), 2));
+                    }
+                    Expression::Call { name, args } if name == "arr_get" && args.len() == 2 => {
+                        for arg in args {
+                            self.compile_expr(arg)?;
+                        }
+                        self.emit(Op::Call("safe_arr_get".to_string(), 2));
+                    }
+                    Expression::Call { name, args } if name == "arr_set" && args.len() == 3 => {
+                        for arg in args {
+                            self.compile_expr(arg)?;
+                        }
+                        self.emit(Op::Call("safe_arr_set".to_string(), 3));
+                    }
+                    _ => self.compile_expr(inner)?,
+                }
             }
         }
         Ok(())
