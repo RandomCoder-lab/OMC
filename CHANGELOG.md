@@ -4,6 +4,53 @@ All notable changes to OMNIcode will be documented in this file.
 
 ## [Unreleased]
 
+### Added (Standard library expansion — 16 new built-ins, 2026-05-14)
+
+🎯 **`examples/stdlib_expansion.omc` + `STDLIB.md` — OMC's standard library now covers the common workflows developers reach for instead of writing from scratch.**
+
+Before this commit OMC was Turing-complete but ergonomically narrow — basic things like splitting a string, sorting an array, or reading a file required hand-rolling them in OMC. After this commit OMC has Python-tier coverage of the common cases.
+
+#### New built-ins by category
+
+**Strings** (8): `str_split`, `str_join`, `str_trim`, `str_replace`, `str_index_of`, `str_starts_with`, `str_ends_with`, `str_repeat`. `str_index_of` returns char index (not byte) so it pairs with `str_slice`. `str_repeat` is capped at 1M chars to prevent accidental memory blow-up.
+
+**Arrays** (3): `arr_sort`, `arr_reverse`, `arr_join`. Sort is stable with a float-fallback total ordering for mixed-type arrays. Reverse is the array form (`str_reverse` exists for strings). `arr_join` is the alias-equivalent of `str_join` with arg order swap, provided because users reach for the `arr_*` prefix.
+
+**File I/O** (3): `read_file`, `write_file`, `file_exists`. Synchronous, UTF-8 for `read_file`. `file_exists` is total (never errors). `write_file` returns 1 on success.
+
+**Introspection + utility** (4): `type_of`, `gcd`, `lcm`, `now_ms`.
+- `type_of(v)` returns `"int"`, `"float"`, `"string"`, `"bool"`, `"array"`, `"null"`, or `"singularity"` — finally enabling generic OMC code that branches by type.
+- `gcd` / `lcm` via Euclidean algorithm. `gcd(89, 144) = 1` is a nice math moment (consecutive Fibonacci numbers are coprime).
+- `now_ms()` for benchmarking inside OMC programs.
+
+#### Compiler type inference
+
+`omnimcode-core/src/compiler.rs` updated to recognize the new builtins' return types for the Rust VM bytecode path. Confirmed identical output between tree-walker and `OMC_VM=1` on the full `stdlib_expansion.omc` test.
+
+#### New documentation: `STDLIB.md`
+
+A complete reference for every built-in (~100 total) organized by category: strings, arrays, numbers, harmonic primitives, self-healing primitives, file I/O, type/conversion, time. Each function has its signature, semantics, and known caveats. Replaces the previous misleading README claim of "~22 host primitives" — the real count was always closer to 100, this commit adds 16 more.
+
+The doc also has a "Missing on purpose" section flagging what's NOT in the stdlib and why (`map`/`filter`/`reduce` require first-class functions; `format` is replaced by `concat_many`; etc.).
+
+#### README + 00-START-HERE updates
+
+- "What's proven right now" table gains a stdlib row pointing at `stdlib_expansion.omc`.
+- The two stale "~22 host primitives" claims in the README are corrected.
+- `00-START-HERE.md` adds `STDLIB.md` to the developer reading path and top-level doc index.
+
+#### Verification
+
+Test file (`examples/stdlib_expansion.omc`) runs every new function with expected outputs in inline comments. Identical output under tree-walk and `OMC_VM=1`. V.9b ✓✓✓ regression check still passes — no existing surface broken.
+
+### Added (Phase H.5.2: Op::SafeArrSetNamed — Rust VM closes the `safe arr_set` mutation gap, 2026-05-14)
+
+`omnimcode-core/src/bytecode.rs`, `vm.rs`, `compiler.rs`, `disasm.rs` — new `Op::SafeArrSetNamed(String)` opcode mirrors the V.7c `ArrSetNamed` pattern: variable name on the opcode bypasses `vm_call_builtin`'s synthetic-arg shim that copies array arguments. Compiler emits the named form when `Safe(Call("arr_set", [Variable, ...]))` matches. VM dispatch pops val + raw_idx, folds raw_idx onto nearest Fibonacci attractor via `pub(crate)` `fold_to_fibonacci_const`, Euclidean-mods by `arr_len`, mutates in scope. Empty arrays silently no-op for total semantics. Verified: `OMC_DISASM=1` shows `SAFE_ARR_SET_NAMED xs` emitted; tree-walk and `OMC_VM=1` produce identical output on `examples/safe_keyword_host.omc`. Phase H is now end-to-end clean on both interpretation paths.
+
+### Added (Repo hygiene: target/ untracked, .gitignore expanded, 2026-05-14)
+
+`git rm -r --cached target/` plus a comprehensive `.gitignore` rewrite removes 1149 build-artifact files from tracking (~10K lines of churn). Subsequent diffs show only real code/doc changes instead of fingerprint files and binaries. Standard Rust-project hygiene that should have been done at project start.
+
 ### Added (Phase H.5 host-language integration: `safe` as a first-class keyword, 2026-05-14)
 
 🎯 **`safe` is now a host-level OMC keyword — no self-healing-demo infrastructure required.**

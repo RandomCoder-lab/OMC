@@ -114,7 +114,11 @@ impl Compiler {
                         | "is_singularity" | "resolve_singularity"
                         | "pow_int" | "square" | "cube" | "sign" | "to_int"
                         | "int" | "classify_resonance" | "safe_add" | "safe_sub"
-                        | "safe_mul" => Some("int"),
+                        | "safe_mul"
+                        // 2026-05-14 stdlib expansion (ints)
+                        | "str_index_of" | "str_starts_with" | "str_ends_with"
+                        | "file_exists" | "write_file" | "gcd" | "lcm"
+                        | "now_ms" => Some("int"),
                         "pow" | "sqrt" | "log" | "exp" | "sin" | "cos" | "tan"
                         | "tanh" | "erf" | "sigmoid" | "frac" | "clamp"
                         | "pi" | "e" | "phi" | "tau" | "phi_inv" | "phi_sq"
@@ -125,10 +129,15 @@ impl Compiler {
                         | "phi.fold" | "phi.him" => Some("float"),
                         "to_string" | "string" | "str_concat"
                         | "str_uppercase" | "str_lowercase" | "str_reverse"
-                        | "str_slice" | "concat_many" => Some("string"),
+                        | "str_slice" | "concat_many"
+                        // 2026-05-14 stdlib expansion (strings)
+                        | "str_trim" | "str_replace" | "str_repeat"
+                        | "str_join" | "arr_join" | "read_file" | "type_of" => Some("string"),
                         "arr_new" | "arr_from_range" | "arr_concat"
                         | "arr_slice" | "cleanup_array"
-                        | "filter_by_resonance" => Some("array"),
+                        | "filter_by_resonance"
+                        // 2026-05-14 stdlib expansion (arrays)
+                        | "str_split" | "arr_sort" | "arr_reverse" => Some("array"),
                         _ => None,
                     }
                 })

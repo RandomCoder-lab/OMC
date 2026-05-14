@@ -49,9 +49,10 @@ The original release. Genetic algorithms over Boolean and float logic circuits, 
 
 1. `README.md` → "Quick start" + "Try the language"
 2. `BUILD.md` — build flags, cross-compilation, optimization
-3. `examples/` — runnable programs covering most features
-4. `DEVELOPER.md` — extending the language host-side
-5. `BENCHMARKS.md` — performance numbers (tree-walk vs VM vs VM+opt)
+3. `STDLIB.md` — every built-in function organized by category (~100 of them)
+4. `examples/` — runnable programs covering most features
+5. `DEVELOPER.md` — extending the language host-side
+6. `BENCHMARKS.md` — performance numbers (tree-walk vs VM vs VM+opt)
 
 ### For circuit / GA work
 
@@ -101,6 +102,7 @@ Honest list:
 | `BUILD.md` | Build instructions, optimization flags, cross-compilation |
 | `BENCHMARKS.md` | Criterion benchmarks: tree-walk vs VM vs VM+optimizer |
 | `DEVELOPER.md` | Extending the host language |
+| `STDLIB.md` | Complete standard library reference — every built-in organized by category |
 | `READING_ORDER.md` | Navigation guide, multiple paths through the docs |
 | `INDEX.md` | Detailed deliverable index (v1.0.0 era; partial relevance) |
 | `RELEASE_BODY_v1.0.0.md` | v1.0.0 release notes (circuit-evolution arm) |

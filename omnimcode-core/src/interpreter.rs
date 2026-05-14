@@ -1330,6 +1330,116 @@ impl Interpreter {
                 let start = start.min(end);
                 Ok(Value::String(chars[start..end].iter().collect()))
             }
+            // String workhorse functions added for Python-tier ergonomics.
+            // None of these affect existing semantics; pure additions.
+            "str_split" => {
+                if args.len() < 2 {
+                    return Err("str_split requires (string, separator)".to_string());
+                }
+                let s = self.eval_expr(&args[0])?.to_string();
+                let sep = self.eval_expr(&args[1])?.to_string();
+                let parts: Vec<Value> = if sep.is_empty() {
+                    // Empty separator → split into individual characters
+                    // (matches Python's quirk in this corner via list(s))
+                    s.chars().map(|c| Value::String(c.to_string())).collect()
+                } else {
+                    s.split(&sep).map(|p| Value::String(p.to_string())).collect()
+                };
+                Ok(Value::Array(HArray { items: parts }))
+            }
+            "str_join" => {
+                if args.len() < 2 {
+                    return Err("str_join requires (array, separator)".to_string());
+                }
+                let arr_v = self.eval_expr(&args[0])?;
+                let sep = self.eval_expr(&args[1])?.to_string();
+                if let Value::Array(arr) = arr_v {
+                    let parts: Vec<String> = arr.items.iter().map(|v| match v {
+                        Value::HInt(h) => h.value.to_string(),
+                        Value::HFloat(f) => format!("{}", f),
+                        Value::String(s) => s.clone(),
+                        Value::Bool(b) => b.to_string(),
+                        other => other.to_string(),
+                    }).collect();
+                    Ok(Value::String(parts.join(&sep)))
+                } else {
+                    Err("str_join: first argument must be an array".to_string())
+                }
+            }
+            "str_trim" => {
+                if args.is_empty() {
+                    return Err("str_trim requires 1 argument".to_string());
+                }
+                let s = self.eval_expr(&args[0])?.to_string();
+                Ok(Value::String(s.trim().to_string()))
+            }
+            "str_replace" => {
+                if args.len() < 3 {
+                    return Err("str_replace requires (string, old, new)".to_string());
+                }
+                let s = self.eval_expr(&args[0])?.to_string();
+                let old = self.eval_expr(&args[1])?.to_string();
+                let new_s = self.eval_expr(&args[2])?.to_string();
+                if old.is_empty() {
+                    // Replacing empty string would interleave new_s between
+                    // every char — almost never the desired behaviour.
+                    // Return the original.
+                    return Ok(Value::String(s));
+                }
+                Ok(Value::String(s.replace(&old, &new_s)))
+            }
+            "str_index_of" => {
+                if args.len() < 2 {
+                    return Err("str_index_of requires (haystack, needle)".to_string());
+                }
+                let s = self.eval_expr(&args[0])?.to_string();
+                let needle = self.eval_expr(&args[1])?.to_string();
+                // Return the CHAR index (not byte) so it pairs with
+                // str_slice. -1 if not found, matching the JS / Java
+                // convention everyone reaches for.
+                let result = match s.find(&needle) {
+                    None => -1i64,
+                    Some(byte_pos) => {
+                        // Convert byte position to char position.
+                        s[..byte_pos].chars().count() as i64
+                    }
+                };
+                Ok(Value::HInt(HInt::new(result)))
+            }
+            "str_starts_with" => {
+                if args.len() < 2 {
+                    return Err("str_starts_with requires (string, prefix)".to_string());
+                }
+                let s = self.eval_expr(&args[0])?.to_string();
+                let prefix = self.eval_expr(&args[1])?.to_string();
+                Ok(Value::HInt(HInt::new(if s.starts_with(&prefix) { 1 } else { 0 })))
+            }
+            "str_ends_with" => {
+                if args.len() < 2 {
+                    return Err("str_ends_with requires (string, suffix)".to_string());
+                }
+                let s = self.eval_expr(&args[0])?.to_string();
+                let suffix = self.eval_expr(&args[1])?.to_string();
+                Ok(Value::HInt(HInt::new(if s.ends_with(&suffix) { 1 } else { 0 })))
+            }
+            "str_repeat" => {
+                if args.len() < 2 {
+                    return Err("str_repeat requires (string, count)".to_string());
+                }
+                let s = self.eval_expr(&args[0])?.to_string();
+                let n = self.eval_expr(&args[1])?.to_int();
+                let count = if n < 0 { 0 } else { n as usize };
+                // Cap at 1M chars to prevent accidental memory blow-up.
+                // Real abuse should fail loud, not silently truncate;
+                // 1M is well above any reasonable use case.
+                if s.len().saturating_mul(count) > 1_000_000 {
+                    return Err(format!(
+                        "str_repeat: result would exceed 1M chars ({} * {})",
+                        s.len(), count
+                    ));
+                }
+                Ok(Value::String(s.repeat(count)))
+            }
             // Canonical Python OMC workaround for cross-type concat (string `+` is broken there).
             // Variadic: concat_many(a, b) / concat_many(a, b, c) / concat_many(a, b, c, d).
             // Renders numerics as bare values (89, 1.5) not as HInt(...) display form.
@@ -1491,6 +1601,166 @@ impl Interpreter {
                     }
                 }
                 Err("safe_arr_set: first argument must be an array variable".to_string())
+            }
+            // Array workhorse functions added for Python-tier ergonomics.
+            "arr_sort" => {
+                if args.is_empty() {
+                    return Err("arr_sort requires 1 argument".to_string());
+                }
+                if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                    // Sort by underlying numeric/lexicographic value.
+                    // Mixed-type arrays sort by Value's natural ordering.
+                    let mut items = arr.items.clone();
+                    items.sort_by(|a, b| {
+                        match (a, b) {
+                            (Value::HInt(x), Value::HInt(y)) => x.value.cmp(&y.value),
+                            (Value::HFloat(x), Value::HFloat(y)) => {
+                                x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
+                            }
+                            (Value::String(x), Value::String(y)) => x.cmp(y),
+                            // Mixed-type fallback: compare by float
+                            // representation; keeps the sort total.
+                            _ => {
+                                let af = a.to_float();
+                                let bf = b.to_float();
+                                af.partial_cmp(&bf).unwrap_or(std::cmp::Ordering::Equal)
+                            }
+                        }
+                    });
+                    Ok(Value::Array(HArray { items }))
+                } else {
+                    Err("arr_sort: argument must be an array".to_string())
+                }
+            }
+            "arr_reverse" => {
+                // Note: str_reverse exists for strings; this is the array form.
+                if args.is_empty() {
+                    return Err("arr_reverse requires 1 argument".to_string());
+                }
+                if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                    let mut items = arr.items.clone();
+                    items.reverse();
+                    Ok(Value::Array(HArray { items }))
+                } else {
+                    Err("arr_reverse: argument must be an array".to_string())
+                }
+            }
+            "arr_join" => {
+                // Alias for str_join — accepts (array, separator) and
+                // returns a string. Provided so users who reach for the
+                // arr_* prefix find what they expect.
+                if args.len() < 2 {
+                    return Err("arr_join requires (array, separator)".to_string());
+                }
+                let arr_v = self.eval_expr(&args[0])?;
+                let sep = self.eval_expr(&args[1])?.to_string();
+                if let Value::Array(arr) = arr_v {
+                    let parts: Vec<String> = arr.items.iter().map(|v| match v {
+                        Value::HInt(h) => h.value.to_string(),
+                        Value::HFloat(f) => format!("{}", f),
+                        Value::String(s) => s.clone(),
+                        Value::Bool(b) => b.to_string(),
+                        other => other.to_string(),
+                    }).collect();
+                    Ok(Value::String(parts.join(&sep)))
+                } else {
+                    Err("arr_join: first argument must be an array".to_string())
+                }
+            }
+            // File I/O — basic synchronous reads and writes.
+            // Error semantics: read_file returns the error message as the
+            // error path so callers can pattern-match; write_file returns
+            // 1 on success and the error on failure. file_exists is total.
+            "read_file" => {
+                if args.is_empty() {
+                    return Err("read_file requires (path)".to_string());
+                }
+                let path = self.eval_expr(&args[0])?.to_string();
+                match std::fs::read_to_string(&path) {
+                    Ok(content) => Ok(Value::String(content)),
+                    Err(e) => Err(format!("read_file({}): {}", path, e)),
+                }
+            }
+            "write_file" => {
+                if args.len() < 2 {
+                    return Err("write_file requires (path, content)".to_string());
+                }
+                let path = self.eval_expr(&args[0])?.to_string();
+                let content = self.eval_expr(&args[1])?.to_string();
+                match std::fs::write(&path, &content) {
+                    Ok(_) => Ok(Value::HInt(HInt::new(1))),
+                    Err(e) => Err(format!("write_file({}): {}", path, e)),
+                }
+            }
+            "file_exists" => {
+                if args.is_empty() {
+                    return Err("file_exists requires (path)".to_string());
+                }
+                let path = self.eval_expr(&args[0])?.to_string();
+                let exists = std::path::Path::new(&path).exists();
+                Ok(Value::HInt(HInt::new(if exists { 1 } else { 0 })))
+            }
+            // Introspection and utility.
+            "type_of" => {
+                if args.is_empty() {
+                    return Err("type_of requires 1 argument".to_string());
+                }
+                let v = self.eval_expr(&args[0])?;
+                let tag = match v {
+                    Value::HInt(_) => "int",
+                    Value::HFloat(_) => "float",
+                    Value::String(_) => "string",
+                    Value::Bool(_) => "bool",
+                    Value::Array(_) => "array",
+                    Value::Null => "null",
+                    Value::Singularity { .. } => "singularity",
+                    _ => "unknown",
+                };
+                Ok(Value::String(tag.to_string()))
+            }
+            "gcd" => {
+                if args.len() < 2 {
+                    return Err("gcd requires (a, b)".to_string());
+                }
+                let a = self.eval_expr(&args[0])?.to_int().abs();
+                let b = self.eval_expr(&args[1])?.to_int().abs();
+                let mut x = a;
+                let mut y = b;
+                while y != 0 {
+                    let t = y;
+                    y = x % y;
+                    x = t;
+                }
+                Ok(Value::HInt(HInt::new(x)))
+            }
+            "lcm" => {
+                if args.len() < 2 {
+                    return Err("lcm requires (a, b)".to_string());
+                }
+                let a = self.eval_expr(&args[0])?.to_int().abs();
+                let b = self.eval_expr(&args[1])?.to_int().abs();
+                if a == 0 || b == 0 {
+                    return Ok(Value::HInt(HInt::new(0)));
+                }
+                // gcd inline to avoid recursive call_function overhead
+                let mut x = a;
+                let mut y = b;
+                while y != 0 {
+                    let t = y;
+                    y = x % y;
+                    x = t;
+                }
+                Ok(Value::HInt(HInt::new(a / x * b)))
+            }
+            "now_ms" => {
+                // Milliseconds since unix epoch. No args.
+                // Useful for benchmarking inside OMC programs.
+                use std::time::{SystemTime, UNIX_EPOCH};
+                let ms = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0);
+                Ok(Value::HInt(HInt::new(ms)))
             }
             "arr_first" => {
                 if let Value::Array(arr) = self.eval_expr(&args[0])? {
