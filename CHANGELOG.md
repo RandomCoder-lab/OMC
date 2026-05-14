@@ -4,6 +4,58 @@ All notable changes to OMNIcode will be documented in this file.
 
 ## [Unreleased]
 
+### Added (Phase H.2: autofix-and-retry loop + divide-by-singularity check, 2026-05-13)
+
+🎯 **`examples/self_healing_h2.omc` — the healer becomes iterative and gains a third diagnostic class.**
+
+H.1 was a single-pass scanner. H.2 wraps it in a convergence loop and adds runtime-singularity awareness.
+
+#### New diagnostic class: divide-by-singularity
+
+In `heal_expr`, when a `BIN /` operator's right operand is a literal `NUM`, the healer evaluates `value_danger(v)`. If the result exceeds 0.5 (fold_escape's danger threshold), the whole expression is rewritten as `CALL safe_divide(left, right)`. The host's `safe_divide` primitive does the rest — it fold_escapes the divisor at runtime, so `safe_divide(8, 0)` returns `8` (8 / fold_escape(0) → 8 / 1 → 8), not an error.
+
+The key property: **the healer turns a runtime crash into a finite answer that lands on a Fibonacci attractor**, with no special-case error-handling code anywhere. The math is the rule.
+
+#### The loop: `heal_until_fixpoint`
+
+```
+fn heal_until_fixpoint(stmts, max_iter):
+    for iter in 1..max_iter:
+        (healed, diags) = heal_program(current)
+        record (iter, |diags|) in trajectory
+        if |diags| == 0:        return ("converged", iter - 1)
+        if |diags| == prev:     return ("stuck",     iter)
+        current = healed
+    return ("exhausted", max_iter)
+```
+
+Three terminal states:
+- **converged** — diagnostics dropped to zero. Healed source stable.
+- **stuck** — same count two iterations running. Healer can't make progress.
+- **exhausted** — hit the safety bound. Likely a divergent rewrite cycle.
+
+Tonight's demos all converge cleanly. `stuck` and `exhausted` are exercised in H.3/H.4.
+
+#### Three demos, three convergences
+
+**Demo 1** (H.1 regression): `12 → 13`, `fbi → fib`. Iter 1: 2 diagnostics → Iter 2: 0. Output: `fib(13) = 233`. Verdict: converged in 1 iteration.
+
+**Demo 2** (new): `numerator / 0`. The harmonic check fires on `10 → 8`; the divide-by-singularity check rewrites the division. Healed program: `safe_divide(8, 0)` → host fold_escape's 0 to 1 → returns 8. **Runtime crash converted to finite answer on attractor.**
+
+**Demo 3** (all three): `7 → 8` (harmonic), `safef → safe` (typo), `n / 0 → safe_divide(n, 0)` (singularity). One pass through `heal_program` fans the three classes out over the AST and rewrites all three in parallel. Output: `safe(8) → 8`.
+
+#### Bytecode VM gains ONN primitives
+
+`is_builtin` and `call_builtin` in the V.7c-style executor now dispatch `safe_divide`, `fold_escape`, `value_danger`, `harmony_value`, and `is_fibonacci`. The healed programs can be executed end-to-end without falling back to tree-walk — the bytecode VM hosts the φ-math primitives the healer rewrites toward.
+
+#### Why iteration matters even when one pass suffices
+
+H.1's checks already run in parallel during one AST walk. H.2's loop is mostly empty-confirmation passes (iter 2 always shows 0 diagnostics). But the LOOP IS THE RIGHT SHAPE for upcoming additions:
+- **H.3** — parse-level recovery. A syntax error rewrite produces a new AST that needs to be re-parsed and re-healed. Naturally iterative.
+- **H.4** — runtime-guarded primitives surfaced as OMC keywords. Adding a guard around an expression changes the AST in ways that may expose new diagnostics on adjacent nodes.
+
+H.2 lands the substrate so H.3/H.4 plug in without re-architecting.
+
 ### Added (Phase H.1: Self-Healing Compiler — harmonic + typo diagnostics, 2026-05-13)
 
 🎯 **`examples/self_healing_compiler.omc` — OMC's φ-math becomes a diagnostic lattice the compiler reasons against.**

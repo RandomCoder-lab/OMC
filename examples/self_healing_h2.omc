@@ -1,0 +1,1917 @@
+# =============================================================================
+# Phase H.2: Self-Healing Compiler — autofix-and-retry loop
+# =============================================================================
+# H.1 built a single-pass scanner that catches harmonic violations and
+# identifier typos and emits a healed source. H.2 wraps that pass in a
+# convergence loop AND adds a third diagnostic class:
+#
+#   3. DIVIDE-BY-SINGULARITY — a `/` BIN expression where the right
+#      operand is a literal whose `value_danger > 0.5` (i.e. near zero).
+#      The host primitive `safe_divide` already does exactly the right
+#      thing: it fold_escape's the divisor away from the danger zone
+#      before dividing. The healer rewrites `a / 0` to `safe_divide(a, 0)`,
+#      preserving the original numerator and using the host's predictive
+#      self-healing arithmetic for the division itself.
+#
+# The autofix-and-retry loop:
+#
+#   heal_until_fixpoint(stmts, max_iter):
+#     for iter in 1..max_iter:
+#       (healed_ast, diags) = heal_program(current)
+#       record (iter, |diags|) in trajectory
+#       if |diags| == 0:  return (current, trajectory, "converged", iter-1)
+#       if |diags| == previous_count:  return (current, trajectory, "stuck", iter)
+#       current = healed_ast
+#     return (current, trajectory, "exhausted", max_iter)
+#
+# Three terminal states:
+#   * "converged"  — diagnostics dropped to zero. Healed source is stable.
+#   * "stuck"      — same diagnostic count two iterations in a row.
+#                    The healer can't make further progress; report and stop.
+#   * "exhausted"  — hit the iteration bound. Likely a divergent cycle or
+#                    a pathologically large source.
+#
+# Why iteration matters even when H.1 already runs all checks in one pass:
+# the loop is the right shape for future checks that DON'T run in parallel
+# (e.g. parse-level recovery in H.3, or runtime-guarded primitives in H.4
+# that need re-evaluation after each rewrite). H.2 lands the infrastructure
+# now so the additions in H.3/H.4 plug in cleanly.
+# =============================================================================
+
+# =============================================================================
+#                              PART I: LEXER
+# Adds STRING literals (with \n \t \r \" \\ escapes), LBRACKET, RBRACKET.
+# =============================================================================
+
+fn is_digit_b(c) {
+    return str_contains("0123456789", c);
+}
+
+fn is_alpha_b(c) {
+    if str_contains("abcdefghijklmnopqrstuvwxyz", c) == 1 { return 1; }
+    if str_contains("ABCDEFGHIJKLMNOPQRSTUVWXYZ", c) == 1 { return 1; }
+    if c == "_" { return 1; }
+    return 0;
+}
+
+fn is_alnum_b(c) {
+    if is_alpha_b(c) == 1 { return 1; }
+    if is_digit_b(c) == 1 { return 1; }
+    return 0;
+}
+
+fn is_space_b(c) {
+    if c == " "  { return 1; }
+    if c == "\n" { return 1; }
+    if c == "\t" { return 1; }
+    if c == "\r" { return 1; }
+    return 0;
+}
+
+fn skip_ws_b(source, pos) {
+    h n = str_chars(source);
+    h p = pos;
+    h moved = 1;
+    # V.8b: loop until neither whitespace nor a `#`-comment advances `p`.
+    while moved == 1 {
+        moved = 0;
+        # whitespace
+        while p < n {
+            h c = str_slice(source, p, p + 1);
+            if is_space_b(c) == 1 {
+                p = p + 1;
+                moved = 1;
+            } else { break; }
+        }
+        # line comment
+        if p < n {
+            h c2 = str_slice(source, p, p + 1);
+            if c2 == "#" {
+                while p < n {
+                    h cc = str_slice(source, p, p + 1);
+                    if cc == "\n" { break; }
+                    p = p + 1;
+                }
+                moved = 1;
+            }
+        }
+    }
+    return p;
+}
+
+fn classify_b(word) -> string {
+    if word == "h"      { return "H"; }
+    if word == "if"     { return "IF"; }
+    if word == "else"   { return "ELSE"; }
+    if word == "while"  { return "WHILE"; }
+    if word == "print"  { return "PRINT"; }
+    if word == "fn"     { return "FN"; }
+    if word == "return" { return "RETURN"; }
+    if word == "break"  { return "BREAK"; }
+    return "IDENT";
+}
+
+fn match_multichar_b(source, pos) {
+    h n = str_chars(source);
+    if pos + 1 >= n { return ["", 0]; }
+    h two = str_slice(source, pos, pos + 2);
+    if two == "==" { return ["EQEQ", 2]; }
+    if two == "!=" { return ["NE",   2]; }
+    if two == "<=" { return ["LE",   2]; }
+    if two == ">=" { return ["GE",   2]; }
+    return ["", 0];
+}
+
+fn punct_kind_b(c) -> string {
+    if c == "(" { return "LPAREN"; }
+    if c == ")" { return "RPAREN"; }
+    if c == "{" { return "LBRACE"; }
+    if c == "}" { return "RBRACE"; }
+    if c == "[" { return "LBRACKET"; }
+    if c == "]" { return "RBRACKET"; }
+    if c == ";" { return "SEMI"; }
+    if c == "," { return "COMMA"; }
+    if c == "=" { return "EQ"; }
+    if c == "+" { return "PLUS"; }
+    if c == "-" { return "MINUS"; }
+    if c == "*" { return "STAR"; }
+    if c == "/" { return "SLASH"; }
+    if c == "%" { return "PERCENT"; }
+    if c == "<" { return "LT"; }
+    if c == ">" { return "GT"; }
+    return "";
+}
+
+# Decode a single backslash-escape into its in-string character.
+fn decode_escape(nx) -> string {
+    if nx == "n"  { return "\n"; }
+    if nx == "t"  { return "\t"; }
+    if nx == "r"  { return "\r"; }
+    if nx == "\"" { return "\""; }
+    if nx == "\\" { return "\\"; }
+    return nx;
+}
+
+# Scan a `"..."` string literal starting at `pos` (which points at the
+# opening quote). Returns [decoded_string, new_pos_past_closing_quote].
+fn scan_string(source, pos) {
+    h n = str_chars(source);
+    h end = pos + 1;
+    h s = "";
+    h done = 0;
+    while done == 0 {
+        if end >= n { done = 1; }
+        if done == 0 {
+            h cc = str_slice(source, end, end + 1);
+            if cc == "\"" {
+                end = end + 1;
+                done = 1;
+            } else {
+                if cc == "\\" {
+                    if end + 1 < n {
+                        h nx = str_slice(source, end + 1, end + 2);
+                        s = str_concat(s, decode_escape(nx));
+                        end = end + 2;
+                    } else { end = end + 1; }
+                } else {
+                    s = str_concat(s, cc);
+                    end = end + 1;
+                }
+            }
+        }
+    }
+    return [s, end];
+}
+
+fn tokenize_b(source) {
+    h n = str_chars(source);
+    h tokens = arr_new(0, 0);
+    h pos = 0;
+    while pos < n {
+        pos = skip_ws_b(source, pos);
+        if pos >= n { break; }
+        h c = str_slice(source, pos, pos + 1);
+        if c == "\"" {
+            h r = scan_string(source, pos);
+            arr_push(tokens, ["STRING", arr_get(r, 0)]);
+            pos = arr_get(r, 1);
+        } else {
+            if is_alpha_b(c) == 1 {
+                h end = pos;
+                while end < n {
+                    h cc = str_slice(source, end, end + 1);
+                    if is_alnum_b(cc) == 1 { end = end + 1; } else { break; }
+                }
+                h word = str_slice(source, pos, end);
+                arr_push(tokens, [classify_b(word), word]);
+                pos = end;
+            } else {
+                if is_digit_b(c) == 1 {
+                    h end = pos;
+                    while end < n {
+                        h cc = str_slice(source, end, end + 1);
+                        if is_digit_b(cc) == 1 { end = end + 1; } else { break; }
+                    }
+                    arr_push(tokens, ["NUMBER", str_slice(source, pos, end)]);
+                    pos = end;
+                } else {
+                    h mm = match_multichar_b(source, pos);
+                    h mm_kind = arr_get(mm, 0);
+                    h mm_len = arr_get(mm, 1);
+                    if str_len(mm_kind) > 0 {
+                        arr_push(tokens, [mm_kind, str_slice(source, pos, pos + mm_len)]);
+                        pos = pos + mm_len;
+                    } else {
+                        h kind = punct_kind_b(c);
+                        if str_len(kind) > 0 {
+                            arr_push(tokens, [kind, c]);
+                        } else {
+                            arr_push(tokens, ["UNKNOWN", c]);
+                        }
+                        pos = pos + 1;
+                    }
+                }
+            }
+        }
+    }
+    arr_push(tokens, ["EOF", ""]);
+    return tokens;
+}
+
+# =============================================================================
+#                              PART II: PARSER
+# Adds STR primary, ARR primary ([a, b, c]).
+# =============================================================================
+
+fn tkind(toks, p) -> string {
+    h t = arr_get(toks, p);
+    return arr_get(t, 0);
+}
+fn tval(toks, p) -> string {
+    h t = arr_get(toks, p);
+    return arr_get(t, 1);
+}
+
+fn p_args(toks, p) {
+    h args = arr_new(0, 0);
+    h np = p + 1;   # skip LPAREN
+    if tkind(toks, np) == "RPAREN" {
+        return [args, np + 1];
+    }
+    h done = 0;
+    while done == 0 {
+        h r = p_expr(toks, np);
+        arr_push(args, arr_get(r, 0));
+        np = arr_get(r, 1);
+        if tkind(toks, np) == "COMMA" {
+            np = np + 1;
+        } else { done = 1; }
+    }
+    return [args, np + 1];
+}
+
+fn p_array_lit(toks, p) {
+    # called with p pointing at LBRACKET
+    h elems = arr_new(0, 0);
+    h np = p + 1;
+    if tkind(toks, np) == "RBRACKET" {
+        return [["ARR", elems], np + 1];
+    }
+    h done = 0;
+    while done == 0 {
+        h r = p_expr(toks, np);
+        arr_push(elems, arr_get(r, 0));
+        np = arr_get(r, 1);
+        if tkind(toks, np) == "COMMA" {
+            np = np + 1;
+        } else { done = 1; }
+    }
+    return [["ARR", elems], np + 1];   # consume RBRACKET
+}
+
+fn p_primary(toks, p) {
+    h k = tkind(toks, p);
+    if k == "NUMBER"   { return [["NUM", tval(toks, p)], p + 1]; }
+    if k == "STRING"   { return [["STR", tval(toks, p)], p + 1]; }
+    if k == "LBRACKET" { return p_array_lit(toks, p); }
+    if k == "IDENT"  {
+        if tkind(toks, p + 1) == "LPAREN" {
+            h name = tval(toks, p);
+            h r = p_args(toks, p + 1);
+            return [["CALL", name, arr_get(r, 0)], arr_get(r, 1)];
+        }
+        return [["VAR", tval(toks, p)], p + 1];
+    }
+    if k == "LPAREN" {
+        h r = p_expr(toks, p + 1);
+        return [arr_get(r, 0), arr_get(r, 1) + 1];
+    }
+    return [["ERR", k], p + 1];
+}
+
+fn p_mul(toks, p) {
+    h r = p_primary(toks, p);
+    h left = arr_get(r, 0);
+    h np = arr_get(r, 1);
+    h go = 1;
+    while go == 1 {
+        h k = tkind(toks, np);
+        if k == "STAR" {
+            h r2 = p_primary(toks, np + 1);
+            left = ["BIN", "*", left, arr_get(r2, 0)];
+            np = arr_get(r2, 1);
+        } else { if k == "SLASH" {
+            h r2 = p_primary(toks, np + 1);
+            left = ["BIN", "/", left, arr_get(r2, 0)];
+            np = arr_get(r2, 1);
+        } else { if k == "PERCENT" {
+            h r2 = p_primary(toks, np + 1);
+            left = ["BIN", "%", left, arr_get(r2, 0)];
+            np = arr_get(r2, 1);
+        } else { go = 0; }}}
+    }
+    return [left, np];
+}
+
+fn p_add(toks, p) {
+    h r = p_mul(toks, p);
+    h left = arr_get(r, 0);
+    h np = arr_get(r, 1);
+    h go = 1;
+    while go == 1 {
+        h k = tkind(toks, np);
+        if k == "PLUS" {
+            h r2 = p_mul(toks, np + 1);
+            left = ["BIN", "+", left, arr_get(r2, 0)];
+            np = arr_get(r2, 1);
+        } else { if k == "MINUS" {
+            h r2 = p_mul(toks, np + 1);
+            left = ["BIN", "-", left, arr_get(r2, 0)];
+            np = arr_get(r2, 1);
+        } else { go = 0; }}
+    }
+    return [left, np];
+}
+
+fn p_cmp(toks, p) {
+    h r = p_add(toks, p);
+    h left = arr_get(r, 0);
+    h np = arr_get(r, 1);
+    h go = 1;
+    while go == 1 {
+        h k = tkind(toks, np);
+        h op = "";
+        if k == "EQEQ" { op = "=="; }
+        if k == "NE"   { op = "!="; }
+        if k == "LT"   { op = "<"; }
+        if k == "LE"   { op = "<="; }
+        if k == "GT"   { op = ">"; }
+        if k == "GE"   { op = ">="; }
+        if str_len(op) > 0 {
+            h r2 = p_add(toks, np + 1);
+            left = ["BIN", op, left, arr_get(r2, 0)];
+            np = arr_get(r2, 1);
+        } else { go = 0; }
+    }
+    return [left, np];
+}
+
+fn p_expr(toks, p) {
+    return p_cmp(toks, p);
+}
+
+fn p_params(toks, p) {
+    h params = arr_new(0, 0);
+    h np = p + 1;
+    if tkind(toks, np) == "RPAREN" {
+        return [params, np + 1];
+    }
+    h done = 0;
+    while done == 0 {
+        arr_push(params, tval(toks, np));
+        np = np + 1;
+        if tkind(toks, np) == "COMMA" {
+            np = np + 1;
+        } else { done = 1; }
+    }
+    return [params, np + 1];
+}
+
+fn p_stmt(toks, p) {
+    h k = tkind(toks, p);
+    if k == "H" {
+        h name = tval(toks, p + 1);
+        h r = p_expr(toks, p + 3);
+        h np = arr_get(r, 1) + 1;
+        return [["DECL", name, arr_get(r, 0)], np];
+    }
+    if k == "PRINT" {
+        h r = p_expr(toks, p + 2);
+        h np = arr_get(r, 1) + 1 + 1;
+        return [["PRT", arr_get(r, 0)], np];
+    }
+    if k == "WHILE" {
+        h r = p_expr(toks, p + 1);
+        h np = arr_get(r, 1) + 1;
+        h body_r = p_block(toks, np);
+        return [["WHL", arr_get(r, 0), arr_get(body_r, 0)], arr_get(body_r, 1)];
+    }
+    if k == "IF" {
+        h r = p_expr(toks, p + 1);
+        h np = arr_get(r, 1) + 1;
+        h then_r = p_block(toks, np);
+        np = arr_get(then_r, 1);
+        h else_body = arr_new(0, 0);
+        if tkind(toks, np) == "ELSE" {
+            np = np + 2;
+            h eb = p_block(toks, np);
+            else_body = arr_get(eb, 0);
+            np = arr_get(eb, 1);
+        }
+        return [["IF", arr_get(r, 0), arr_get(then_r, 0), else_body], np];
+    }
+    if k == "FN" {
+        h name = tval(toks, p + 1);
+        h params_r = p_params(toks, p + 2);
+        h params = arr_get(params_r, 0);
+        h np = arr_get(params_r, 1);
+        # V.8b: optional `-> IDENT` return-type annotation. Tokens are
+        # MINUS GT IDENT. Annotation is documentation only — no runtime
+        # effect — so we just skip past it.
+        if tkind(toks, np) == "MINUS" {
+            if tkind(toks, np + 1) == "GT" {
+                np = np + 3;
+            }
+        }
+        np = np + 1;   # consume LBRACE
+        h body_r = p_block(toks, np);
+        return [["FN", name, params, arr_get(body_r, 0)], arr_get(body_r, 1)];
+    }
+    if k == "RETURN" {
+        if tkind(toks, p + 1) == "SEMI" {
+            return [["RET", ["NULL"]], p + 2];
+        }
+        h r = p_expr(toks, p + 1);
+        h np = arr_get(r, 1) + 1;
+        return [["RET", arr_get(r, 0)], np];
+    }
+    if k == "BREAK" {
+        # `break ;` — consumes BREAK and SEMI.
+        return [["BREAK"], p + 2];
+    }
+    if k == "IDENT" {
+        h k1 = tkind(toks, p + 1);
+        if k1 == "EQ" {
+            h name = tval(toks, p);
+            h r = p_expr(toks, p + 2);
+            h np = arr_get(r, 1) + 1;
+            return [["ASN", name, arr_get(r, 0)], np];
+        }
+        if k1 == "LPAREN" {
+            h r = p_expr(toks, p);
+            h np = arr_get(r, 1) + 1;
+            return [["EXPR", arr_get(r, 0)], np];
+        }
+    }
+    print(concat_many("p_stmt: don't know how to handle kind=", k));
+    return [["ERR", k], p + 1];
+}
+
+fn p_block(toks, p) {
+    h body = arr_new(0, 0);
+    h np = p;
+    h done = 0;
+    while done == 0 {
+        h k = tkind(toks, np);
+        if k == "RBRACE" {
+            np = np + 1;
+            done = 1;
+        } else {
+            if k == "EOF" {
+                done = 1;
+            } else {
+                h r = p_stmt(toks, np);
+                arr_push(body, arr_get(r, 0));
+                np = arr_get(r, 1);
+            }
+        }
+    }
+    return [body, np];
+}
+
+fn p_program(toks) {
+    h stmts = arr_new(0, 0);
+    h pos = 0;
+    h done = 0;
+    while done == 0 {
+        if tkind(toks, pos) == "EOF" {
+            done = 1;
+        } else {
+            h r = p_stmt(toks, pos);
+            arr_push(stmts, arr_get(r, 0));
+            pos = arr_get(r, 1);
+        }
+    }
+    return stmts;
+}
+
+# =============================================================================
+#                           PART III: BYTECODE ENCODER
+# Adds LOAD_STR, MAKE_ARR, CALL_BUILTIN (for the read-only builtin set).
+# =============================================================================
+
+fn arr_concat(a, b) {
+    h i = 0;
+    h n = arr_len(b);
+    while i < n {
+        arr_push(a, arr_get(b, i));
+        i = i + 1;
+    }
+    return a;
+}
+
+# Builtins that ride through CALL_BUILTIN (value-in, value-out only).
+fn is_builtin(name) {
+    if name == "arr_new"      { return 1; }
+    if name == "arr_get"      { return 1; }
+    if name == "arr_len"      { return 1; }
+    if name == "str_len"      { return 1; }
+    if name == "str_chars"    { return 1; }
+    if name == "str_slice"    { return 1; }
+    if name == "str_contains" { return 1; }
+    if name == "str_concat"   { return 1; }
+    if name == "concat_many"  { return 1; }
+    if name == "to_int"       { return 1; }
+    if name == "to_string"    { return 1; }
+    # H.2: ONN primitives reachable at runtime in healed code.
+    if name == "safe_divide"   { return 1; }
+    if name == "fold_escape"   { return 1; }
+    if name == "value_danger"  { return 1; }
+    if name == "harmony_value" { return 1; }
+    if name == "is_fibonacci"  { return 1; }
+    return 0;
+}
+
+fn enc_expr(ast) {
+    h out = arr_new(0, 0);
+    h tag = arr_get(ast, 0);
+    if tag == "NUM" {
+        arr_push(out, ["LOAD_INT", arr_get(ast, 1)]);
+        return out;
+    }
+    if tag == "STR" {
+        arr_push(out, ["LOAD_STR", arr_get(ast, 1)]);
+        return out;
+    }
+    if tag == "VAR" {
+        arr_push(out, ["LOAD_VAR", arr_get(ast, 1)]);
+        return out;
+    }
+    if tag == "ARR" {
+        h elems = arr_get(ast, 1);
+        h i = 0;
+        h n = arr_len(elems);
+        while i < n {
+            out = arr_concat(out, enc_expr(arr_get(elems, i)));
+            i = i + 1;
+        }
+        arr_push(out, ["MAKE_ARR", n]);
+        return out;
+    }
+    if tag == "BIN" {
+        h op = arr_get(ast, 1);
+        out = arr_concat(out, enc_expr(arr_get(ast, 2)));
+        out = arr_concat(out, enc_expr(arr_get(ast, 3)));
+        if op == "+"  { arr_push(out, ["ADD"]); return out; }
+        if op == "-"  { arr_push(out, ["SUB"]); return out; }
+        if op == "*"  { arr_push(out, ["MUL"]); return out; }
+        if op == "/"  { arr_push(out, ["DIV"]); return out; }
+        if op == "%"  { arr_push(out, ["MOD"]); return out; }
+        if op == "==" { arr_push(out, ["EQ"]);  return out; }
+        if op == "!=" { arr_push(out, ["NE"]);  return out; }
+        if op == "<"  { arr_push(out, ["LT"]);  return out; }
+        if op == "<=" { arr_push(out, ["LE"]);  return out; }
+        if op == ">"  { arr_push(out, ["GT"]);  return out; }
+        if op == ">=" { arr_push(out, ["GE"]);  return out; }
+        return out;
+    }
+    if tag == "CALL" {
+        h name = arr_get(ast, 1);
+        h args = arr_get(ast, 2);
+        # Specialised named-mutation forms — only when the first arg is a
+        # bare variable. Anything fancier (e.g. arr_push(arr_get(x,0), v))
+        # falls through to CALL_BUILTIN and loses the mutation, same as a
+        # tree-walk caller would.
+        if name == "arr_push" {
+            if arr_len(args) == 2 {
+                h target = arr_get(args, 0);
+                if arr_get(target, 0) == "VAR" {
+                    out = arr_concat(out, enc_expr(arr_get(args, 1)));
+                    arr_push(out, ["ARR_PUSH_NAMED", arr_get(target, 1)]);
+                    return out;
+                }
+            }
+        }
+        if name == "arr_set" {
+            if arr_len(args) == 3 {
+                h target = arr_get(args, 0);
+                if arr_get(target, 0) == "VAR" {
+                    out = arr_concat(out, enc_expr(arr_get(args, 1)));   # idx
+                    out = arr_concat(out, enc_expr(arr_get(args, 2)));   # value
+                    arr_push(out, ["ARR_SET_NAMED", arr_get(target, 1)]);
+                    return out;
+                }
+            }
+        }
+        h i = 0;
+        h n = arr_len(args);
+        while i < n {
+            out = arr_concat(out, enc_expr(arr_get(args, i)));
+            i = i + 1;
+        }
+        if is_builtin(name) == 1 {
+            arr_push(out, ["CALL_BUILTIN", name, n]);
+        } else {
+            arr_push(out, ["CALL", name, n]);
+        }
+        return out;
+    }
+    arr_push(out, ["UNKNOWN_EXPR", tag]);
+    return out;
+}
+
+fn enc_stmt(ast) {
+    h out = arr_new(0, 0);
+    h tag = arr_get(ast, 0);
+    if tag == "DECL" {
+        out = arr_concat(out, enc_expr(arr_get(ast, 2)));
+        arr_push(out, ["STORE_VAR", arr_get(ast, 1)]);
+        return out;
+    }
+    if tag == "ASN" {
+        out = arr_concat(out, enc_expr(arr_get(ast, 2)));
+        arr_push(out, ["STORE_VAR", arr_get(ast, 1)]);
+        return out;
+    }
+    if tag == "PRT" {
+        out = arr_concat(out, enc_expr(arr_get(ast, 1)));
+        arr_push(out, ["PRINT"]);
+        return out;
+    }
+    if tag == "EXPR" {
+        out = arr_concat(out, enc_expr(arr_get(ast, 1)));
+        arr_push(out, ["POP"]);
+        return out;
+    }
+    if tag == "RET" {
+        h e = arr_get(ast, 1);
+        if arr_get(e, 0) == "NULL" {
+            arr_push(out, ["LOAD_INT", "0"]);
+        } else {
+            out = arr_concat(out, enc_expr(e));
+        }
+        arr_push(out, ["RETURN"]);
+        return out;
+    }
+    if tag == "BREAK" {
+        # V.8b: placeholder; the enclosing WHL encoder patches the delta
+        # to land just after the trailing back-jump. A loose JUMP_BREAK
+        # (break outside any while) would never get patched and trigger
+        # an "unknown opcode" at runtime — same as tree-walk would error.
+        arr_push(out, ["JUMP_BREAK", 0]);
+        return out;
+    }
+    if tag == "WHL" {
+        h cond_ops = enc_expr(arr_get(ast, 1));
+        h body_ops = enc_block(arr_get(ast, 2));
+        h c_len = arr_len(cond_ops);
+        h b_len = arr_len(body_ops);
+        # V.8b: patch any JUMP_BREAK placeholders inside body_ops. A break
+        # at position k inside body_ops should jump to immediately AFTER
+        # the trailing back-jump — which is at the end of the assembled
+        # while block. Layout:
+        #
+        #   [cond ops]            length c_len, indices 0..c_len-1
+        #   JUMP_IF_FALSE         index c_len
+        #   [body ops]            length b_len, indices c_len+1..c_len+b_len
+        #   JUMP back             index c_len + b_len + 1
+        #   <-- break target -->  index c_len + b_len + 2
+        #
+        # A JUMP_BREAK at body_ops index k sits at absolute index c_len+1+k.
+        # Its target is c_len+b_len+2, so delta = b_len + 1 - k.
+        # Relative jumps survive concatenation, so we patch body_ops in place.
+        h k = 0;
+        while k < b_len {
+            h opk = arr_get(body_ops, k);
+            if arr_get(opk, 0) == "JUMP_BREAK" {
+                arr_set(body_ops, k, ["JUMP", b_len + 1 - k]);
+            }
+            k = k + 1;
+        }
+        out = arr_concat(out, cond_ops);
+        arr_push(out, ["JUMP_IF_FALSE", b_len + 2]);
+        out = arr_concat(out, body_ops);
+        arr_push(out, ["JUMP", 0 - (c_len + b_len + 1)]);
+        return out;
+    }
+    if tag == "IF" {
+        h cond_ops = enc_expr(arr_get(ast, 1));
+        h then_ops = enc_block(arr_get(ast, 2));
+        h else_body = arr_get(ast, 3);
+        h has_else = 0;
+        if arr_len(else_body) > 0 { has_else = 1; }
+        out = arr_concat(out, cond_ops);
+        if has_else == 1 {
+            h else_ops = enc_block(else_body);
+            h t_len = arr_len(then_ops);
+            h e_len = arr_len(else_ops);
+            arr_push(out, ["JUMP_IF_FALSE", t_len + 2]);
+            out = arr_concat(out, then_ops);
+            arr_push(out, ["JUMP", e_len + 1]);
+            out = arr_concat(out, else_ops);
+        } else {
+            h t_len = arr_len(then_ops);
+            arr_push(out, ["JUMP_IF_FALSE", t_len + 1]);
+            out = arr_concat(out, then_ops);
+        }
+        return out;
+    }
+    if tag == "FN" {
+        h name = arr_get(ast, 1);
+        h params = arr_get(ast, 2);
+        h body = arr_get(ast, 3);
+        h body_ops = enc_block(body);
+        arr_push(body_ops, ["LOAD_INT", "0"]);
+        arr_push(body_ops, ["RETURN"]);
+        h b_len = arr_len(body_ops);
+        arr_push(out, ["DEF_FN", name, b_len, params]);
+        out = arr_concat(out, body_ops);
+        return out;
+    }
+    arr_push(out, ["UNKNOWN_STMT", tag]);
+    return out;
+}
+
+fn enc_block(stmts) {
+    h out = arr_new(0, 0);
+    h i = 0;
+    h n = arr_len(stmts);
+    while i < n {
+        out = arr_concat(out, enc_stmt(arr_get(stmts, i)));
+        i = i + 1;
+    }
+    return out;
+}
+
+fn encode_program(stmts) {
+    h out = enc_block(stmts);
+    arr_push(out, ["HALT"]);
+    return out;
+}
+
+# A compact disassembler. For LOAD_STR we quote the value so embedded
+# spaces and newlines stay legible. For DEF_FN we summarise params count.
+fn print_bytecode(prog) {
+    h i = 0;
+    h n = arr_len(prog);
+    while i < n {
+        h op = arr_get(prog, i);
+        h kind = arr_get(op, 0);
+        h line = concat_many("  ", i, ": ", kind);
+        h ol = arr_len(op);
+        if kind == "LOAD_STR" {
+            line = concat_many(line, " \"", arr_get(op, 1), "\"");
+        } else {
+            if ol >= 2 { line = concat_many(line, " ", arr_get(op, 1)); }
+            if ol >= 3 { line = concat_many(line, " ", arr_get(op, 2)); }
+        }
+        if kind == "DEF_FN" {
+            if ol >= 4 {
+                line = concat_many(line, " [params=", arr_len(arr_get(op, 3)), "]");
+            }
+        }
+        print(line);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# =============================================================================
+#                           PART IV: BYTECODE EXECUTOR
+# Adds LOAD_STR, MAKE_ARR, CALL_BUILTIN.
+# =============================================================================
+
+fn scope_get(scope, name) {
+    h i = 0;
+    h n = arr_len(scope);
+    while i < n {
+        h pair = arr_get(scope, i);
+        if arr_get(pair, 0) == name {
+            return arr_get(pair, 1);
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn scope_set(scope, name, value) {
+    h i = 0;
+    h n = arr_len(scope);
+    while i < n {
+        h pair = arr_get(scope, i);
+        if arr_get(pair, 0) == name {
+            arr_set(scope, i, [name, value]);
+            return scope;
+        }
+        i = i + 1;
+    }
+    arr_push(scope, [name, value]);
+    return scope;
+}
+
+fn parse_int(s) {
+    return to_int(s);
+}
+
+fn pop1(stack) {
+    h n = arr_len(stack);
+    h top = arr_get(stack, n - 1);
+    h ns = arr_new(0, 0);
+    h i = 0;
+    while i < n - 1 {
+        arr_push(ns, arr_get(stack, i));
+        i = i + 1;
+    }
+    return [top, ns];
+}
+
+# Pop `n` values from the stack, returning [values_in_push_order, new_stack].
+# Push order means: args[0] was pushed first (deepest), args[n-1] was pushed
+# last (top). This matches the order in the source-level argument list.
+fn pop_n_ordered(stack, n) {
+    h reverse = arr_new(0, 0);
+    h s = stack;
+    h k = 0;
+    while k < n {
+        h pr = pop1(s);
+        arr_push(reverse, arr_get(pr, 0));
+        s = arr_get(pr, 1);
+        k = k + 1;
+    }
+    h ordered = arr_new(0, 0);
+    h j = n - 1;
+    while j >= 0 {
+        arr_push(ordered, arr_get(reverse, j));
+        j = j - 1;
+    }
+    return [ordered, s];
+}
+
+# Dispatch a host builtin. Returns the value to push onto the value stack.
+fn call_builtin(name, args) {
+    if name == "arr_new" {
+        if arr_len(args) >= 2 {
+            return arr_new(arr_get(args, 0), arr_get(args, 1));
+        }
+        return arr_new(0, 0);
+    }
+    if name == "arr_get" {
+        return arr_get(arr_get(args, 0), arr_get(args, 1));
+    }
+    if name == "arr_len" {
+        return arr_len(arr_get(args, 0));
+    }
+    if name == "str_len" {
+        return str_len(arr_get(args, 0));
+    }
+    if name == "str_chars" {
+        return str_chars(arr_get(args, 0));
+    }
+    if name == "str_slice" {
+        return str_slice(arr_get(args, 0), arr_get(args, 1), arr_get(args, 2));
+    }
+    if name == "str_contains" {
+        return str_contains(arr_get(args, 0), arr_get(args, 1));
+    }
+    if name == "str_concat" {
+        return str_concat(arr_get(args, 0), arr_get(args, 1));
+    }
+    if name == "concat_many" {
+        # Use to_string per arg so ints render via Display ("42") not Debug
+        # ("HInt(42, φ=…)"). Without this, bytecode-VM output for the same
+        # expression diverges cosmetically from tree-walk — which broke the
+        # V.7b cosmetic-only test and was the only blocker on the V.8
+        # round-trip for embedded_program.
+        h n = arr_len(args);
+        if n == 0 { return ""; }
+        h s = to_string(arr_get(args, 0));
+        h i = 1;
+        while i < n {
+            s = str_concat(s, to_string(arr_get(args, i)));
+            i = i + 1;
+        }
+        return s;
+    }
+    if name == "to_int" {
+        return to_int(arr_get(args, 0));
+    }
+    if name == "to_string" {
+        return to_string(arr_get(args, 0));
+    }
+    if name == "safe_divide" {
+        return safe_divide(arr_get(args, 0), arr_get(args, 1));
+    }
+    if name == "fold_escape" {
+        return fold_escape(arr_get(args, 0));
+    }
+    if name == "value_danger" {
+        return value_danger(arr_get(args, 0));
+    }
+    if name == "harmony_value" {
+        return harmony_value(arr_get(args, 0));
+    }
+    if name == "is_fibonacci" {
+        return is_fibonacci(arr_get(args, 0));
+    }
+    print(concat_many("call_builtin: unknown builtin ", name));
+    return 0;
+}
+
+fn collect_fns(prog) {
+    h table = arr_new(0, 0);
+    h i = 0;
+    h n = arr_len(prog);
+    while i < n {
+        h op = arr_get(prog, i);
+        if arr_get(op, 0) == "DEF_FN" {
+            h name = arr_get(op, 1);
+            h params = arr_get(op, 3);
+            arr_push(table, [name, i + 1, params]);
+        }
+        i = i + 1;
+    }
+    return table;
+}
+
+fn fn_lookup(table, name) {
+    h i = 0;
+    h n = arr_len(table);
+    while i < n {
+        h row = arr_get(table, i);
+        if arr_get(row, 0) == name {
+            return row;
+        }
+        i = i + 1;
+    }
+    return ["", 0 - 1, arr_new(0, 0)];
+}
+
+fn execute(prog) {
+    h stack = arr_new(0, 0);
+    h scope = arr_new(0, 0);
+    h scope_stack = arr_new(0, 0);
+    h pc_stack = arr_new(0, 0);
+    h fn_table = collect_fns(prog);
+    h pc = 0;
+    h n = arr_len(prog);
+
+    h running = 1;
+    while running == 1 {
+        if pc >= n {
+            running = 0;
+        }
+        if running == 1 {
+            h op = arr_get(prog, pc);
+            h kind = arr_get(op, 0);
+            h handled = 0;
+
+            if kind == "HALT" {
+                running = 0;
+                handled = 1;
+            }
+            if kind == "NOP" {
+                pc = pc + 1;
+                handled = 1;
+            }
+            if kind == "POP" {
+                h pr = pop1(stack); stack = arr_get(pr, 1);
+                pc = pc + 1;
+                handled = 1;
+            }
+            if kind == "LOAD_INT" {
+                arr_push(stack, parse_int(arr_get(op, 1)));
+                pc = pc + 1;
+                handled = 1;
+            }
+            if kind == "LOAD_STR" {
+                arr_push(stack, arr_get(op, 1));
+                pc = pc + 1;
+                handled = 1;
+            }
+            if kind == "LOAD_VAR" {
+                arr_push(stack, scope_get(scope, arr_get(op, 1)));
+                pc = pc + 1;
+                handled = 1;
+            }
+            if kind == "STORE_VAR" {
+                h pr = pop1(stack);
+                h v = arr_get(pr, 0);
+                stack = arr_get(pr, 1);
+                scope = scope_set(scope, arr_get(op, 1), v);
+                pc = pc + 1;
+                handled = 1;
+            }
+            if kind == "ARR_PUSH_NAMED" {
+                # Pop the value, look up the named array in current scope,
+                # arr_push, store back. Leaves the (mutated) array on the
+                # stack as the expression's result.
+                h pr = pop1(stack); h val = arr_get(pr, 0); stack = arr_get(pr, 1);
+                h name = arr_get(op, 1);
+                h arr = scope_get(scope, name);
+                arr_push(arr, val);
+                scope = scope_set(scope, name, arr);
+                arr_push(stack, arr);
+                pc = pc + 1;
+                handled = 1;
+            }
+            if kind == "ARR_SET_NAMED" {
+                # Pop value, then index. Look up named array, arr_set,
+                # store back. Same convention as ARR_PUSH_NAMED.
+                h pr1 = pop1(stack); h val = arr_get(pr1, 0); stack = arr_get(pr1, 1);
+                h pr2 = pop1(stack); h idx = arr_get(pr2, 0); stack = arr_get(pr2, 1);
+                h name = arr_get(op, 1);
+                h arr = scope_get(scope, name);
+                arr_set(arr, idx, val);
+                scope = scope_set(scope, name, arr);
+                arr_push(stack, arr);
+                pc = pc + 1;
+                handled = 1;
+            }
+            if kind == "MAKE_ARR" {
+                h len = to_int(arr_get(op, 1));
+                h pr = pop_n_ordered(stack, len);
+                h elems = arr_get(pr, 0);
+                stack = arr_get(pr, 1);
+                # Materialise as a real array by copying elements over.
+                h arr = arr_new(0, 0);
+                h i = 0;
+                while i < len {
+                    arr_push(arr, arr_get(elems, i));
+                    i = i + 1;
+                }
+                arr_push(stack, arr);
+                pc = pc + 1;
+                handled = 1;
+            }
+            if kind == "ADD" {
+                h pr = pop1(stack); h r = arr_get(pr, 0); stack = arr_get(pr, 1);
+                h pl = pop1(stack); h l = arr_get(pl, 0); stack = arr_get(pl, 1);
+                arr_push(stack, l + r);
+                pc = pc + 1;
+                handled = 1;
+            }
+            if kind == "SUB" {
+                h pr = pop1(stack); h r = arr_get(pr, 0); stack = arr_get(pr, 1);
+                h pl = pop1(stack); h l = arr_get(pl, 0); stack = arr_get(pl, 1);
+                arr_push(stack, l - r);
+                pc = pc + 1;
+                handled = 1;
+            }
+            if kind == "MUL" {
+                h pr = pop1(stack); h r = arr_get(pr, 0); stack = arr_get(pr, 1);
+                h pl = pop1(stack); h l = arr_get(pl, 0); stack = arr_get(pl, 1);
+                arr_push(stack, l * r);
+                pc = pc + 1;
+                handled = 1;
+            }
+            if kind == "DIV" {
+                h pr = pop1(stack); h r = arr_get(pr, 0); stack = arr_get(pr, 1);
+                h pl = pop1(stack); h l = arr_get(pl, 0); stack = arr_get(pl, 1);
+                arr_push(stack, l / r);
+                pc = pc + 1;
+                handled = 1;
+            }
+            if kind == "MOD" {
+                h pr = pop1(stack); h r = arr_get(pr, 0); stack = arr_get(pr, 1);
+                h pl = pop1(stack); h l = arr_get(pl, 0); stack = arr_get(pl, 1);
+                arr_push(stack, l % r);
+                pc = pc + 1;
+                handled = 1;
+            }
+            if kind == "LT" {
+                h pr = pop1(stack); h r = arr_get(pr, 0); stack = arr_get(pr, 1);
+                h pl = pop1(stack); h l = arr_get(pl, 0); stack = arr_get(pl, 1);
+                h v = 0;
+                if l < r { v = 1; }
+                arr_push(stack, v);
+                pc = pc + 1;
+                handled = 1;
+            }
+            if kind == "LE" {
+                h pr = pop1(stack); h r = arr_get(pr, 0); stack = arr_get(pr, 1);
+                h pl = pop1(stack); h l = arr_get(pl, 0); stack = arr_get(pl, 1);
+                h v = 0;
+                if l <= r { v = 1; }
+                arr_push(stack, v);
+                pc = pc + 1;
+                handled = 1;
+            }
+            if kind == "GT" {
+                h pr = pop1(stack); h r = arr_get(pr, 0); stack = arr_get(pr, 1);
+                h pl = pop1(stack); h l = arr_get(pl, 0); stack = arr_get(pl, 1);
+                h v = 0;
+                if l > r { v = 1; }
+                arr_push(stack, v);
+                pc = pc + 1;
+                handled = 1;
+            }
+            if kind == "GE" {
+                h pr = pop1(stack); h r = arr_get(pr, 0); stack = arr_get(pr, 1);
+                h pl = pop1(stack); h l = arr_get(pl, 0); stack = arr_get(pl, 1);
+                h v = 0;
+                if l >= r { v = 1; }
+                arr_push(stack, v);
+                pc = pc + 1;
+                handled = 1;
+            }
+            if kind == "EQ" {
+                h pr = pop1(stack); h r = arr_get(pr, 0); stack = arr_get(pr, 1);
+                h pl = pop1(stack); h l = arr_get(pl, 0); stack = arr_get(pl, 1);
+                h v = 0;
+                if l == r { v = 1; }
+                arr_push(stack, v);
+                pc = pc + 1;
+                handled = 1;
+            }
+            if kind == "NE" {
+                h pr = pop1(stack); h r = arr_get(pr, 0); stack = arr_get(pr, 1);
+                h pl = pop1(stack); h l = arr_get(pl, 0); stack = arr_get(pl, 1);
+                h v = 0;
+                if l != r { v = 1; }
+                arr_push(stack, v);
+                pc = pc + 1;
+                handled = 1;
+            }
+            if kind == "JUMP" {
+                pc = pc + to_int(arr_get(op, 1));
+                handled = 1;
+            }
+            if kind == "JUMP_IF_FALSE" {
+                h pr = pop1(stack);
+                h top = arr_get(pr, 0);
+                stack = arr_get(pr, 1);
+                if top == 0 {
+                    pc = pc + to_int(arr_get(op, 1));
+                } else {
+                    pc = pc + 1;
+                }
+                handled = 1;
+            }
+            if kind == "PRINT" {
+                h pr = pop1(stack);
+                h top = arr_get(pr, 0);
+                stack = arr_get(pr, 1);
+                print(top);
+                pc = pc + 1;
+                handled = 1;
+            }
+            if kind == "DEF_FN" {
+                pc = pc + 1 + to_int(arr_get(op, 2));
+                handled = 1;
+            }
+            if kind == "CALL_BUILTIN" {
+                h name = arr_get(op, 1);
+                h num_args = to_int(arr_get(op, 2));
+                h pr = pop_n_ordered(stack, num_args);
+                h args = arr_get(pr, 0);
+                stack = arr_get(pr, 1);
+                h result = call_builtin(name, args);
+                arr_push(stack, result);
+                pc = pc + 1;
+                handled = 1;
+            }
+            if kind == "CALL" {
+                h name = arr_get(op, 1);
+                h num_args = to_int(arr_get(op, 2));
+                h row = fn_lookup(fn_table, name);
+                h entry = to_int(arr_get(row, 1));
+                h params = arr_get(row, 2);
+                h pr = pop_n_ordered(stack, num_args);
+                h args = arr_get(pr, 0);
+                stack = arr_get(pr, 1);
+                h new_scope = arr_new(0, 0);
+                h j = 0;
+                while j < num_args {
+                    h pname = arr_get(params, j);
+                    h pval = arr_get(args, j);
+                    arr_push(new_scope, [pname, pval]);
+                    j = j + 1;
+                }
+                arr_push(scope_stack, scope);
+                arr_push(pc_stack, pc + 1);
+                scope = new_scope;
+                pc = entry;
+                handled = 1;
+            }
+            if kind == "RETURN" {
+                h sp_idx = arr_len(scope_stack) - 1;
+                h pc_idx = arr_len(pc_stack) - 1;
+                if sp_idx < 0 {
+                    running = 0;
+                    handled = 1;
+                } else {
+                    scope = arr_get(scope_stack, sp_idx);
+                    h saved_pc = arr_get(pc_stack, pc_idx);
+                    h new_ss = arr_new(0, 0);
+                    h s_i = 0;
+                    while s_i < sp_idx {
+                        arr_push(new_ss, arr_get(scope_stack, s_i));
+                        s_i = s_i + 1;
+                    }
+                    scope_stack = new_ss;
+                    h new_ps = arr_new(0, 0);
+                    h p_i = 0;
+                    while p_i < pc_idx {
+                        arr_push(new_ps, arr_get(pc_stack, p_i));
+                        p_i = p_i + 1;
+                    }
+                    pc_stack = new_ps;
+                    pc = to_int(saved_pc);
+                    handled = 1;
+                }
+            }
+
+            if handled == 0 {
+                print(concat_many("execute: unknown opcode ", kind));
+                running = 0;
+            }
+        }
+    }
+    # V.8: surface the bytecode VM's answer to the outer driver by
+    # returning the value bound to __result in the final scope. Programs
+    # that don't bind __result get 0 (the scope_get fallback).
+    return scope_get(scope, "__result");
+}
+
+# =============================================================================
+#               PART V: ONN HEALING — harmony scoring + typo fix
+# =============================================================================
+# All of Part V is NEW for Phase H.1. It reuses the V.9 lex+parse machinery
+# above to obtain an AST, then walks the AST applying healing transforms.
+# Two healing passes:
+#
+#   * harmonic-literal healing — numeric literals scored via the host
+#     `harmony_value(n)` (HInt resonance). Low scores get folded to the
+#     nearest Fibonacci attractor; the original and the suggestion are
+#     recorded in a diagnostics array.
+#
+#   * identifier-typo healing — VAR / CALL references checked against a
+#     defined-name table (collected from FN, DECL, and parameter binds).
+#     Unknown names are matched by Levenshtein distance to the closest
+#     defined name; threshold 2 to avoid wild guesses.
+#
+# The walk returns [healed_ast, diagnostics]. A second pass emits the
+# healed AST back to source via emit_source. The healed source is re-
+# tokenized and re-parsed as a sanity check.
+# =============================================================================
+
+# ---- Fibonacci attractor table (matches fold_escape in interpreter.rs) -----
+fn fib_table() {
+    return [0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610];
+}
+
+# Nearest Fibonacci to |n|, preserving sign. The "no fold to zero" rule
+# from fold_escape is applied so n=0 doesn't trap as 0.
+fn nearest_fib(n) {
+    h fibs = fib_table();
+    h abs_n = n;
+    if abs_n < 0 { abs_n = 0 - abs_n; }
+    h nearest = arr_get(fibs, 0);
+    h min_dist = abs_n;
+    h i = 0;
+    while i < arr_len(fibs) {
+        h f = arr_get(fibs, i);
+        h d = f - abs_n;
+        if d < 0 { d = 0 - d; }
+        if d < min_dist {
+            min_dist = d;
+            nearest = f;
+        }
+        i = i + 1;
+    }
+    h result = nearest;
+    if n < 0 { result = 0 - nearest; }
+    if result == 0 { result = 1; }
+    return result;
+}
+
+# ---- Levenshtein edit distance --------------------------------------------
+# Iterative DP, O(|a|*|b|) space via two rolling rows. OMC arrays as rows.
+fn min2(a, b) { if a < b { return a; } return b; }
+fn min3(a, b, c) { return min2(min2(a, b), c); }
+
+fn edit_distance(a, b) {
+    h la = str_chars(a);
+    h lb = str_chars(b);
+    # Row of length lb+1, initialised to [0, 1, 2, ..., lb].
+    h prev = arr_new(0, 0);
+    h k = 0;
+    while k <= lb {
+        arr_push(prev, k);
+        k = k + 1;
+    }
+    h i = 1;
+    while i <= la {
+        h curr = arr_new(0, 0);
+        arr_push(curr, i);
+        h ca = str_slice(a, i - 1, i);
+        h j = 1;
+        while j <= lb {
+            h cb = str_slice(b, j - 1, j);
+            h cost = 1;
+            if ca == cb { cost = 0; }
+            h del  = arr_get(prev, j) + 1;
+            h ins  = arr_get(curr, j - 1) + 1;
+            h subs = arr_get(prev, j - 1) + cost;
+            arr_push(curr, min3(del, ins, subs));
+            j = j + 1;
+        }
+        prev = curr;
+        i = i + 1;
+    }
+    return arr_get(prev, lb);
+}
+
+# ---- Name table helpers ----------------------------------------------------
+# defined_names is a flat array of strings: function names + var names +
+# parameter names already seen at the point of the lookup.
+
+fn names_contains(table, name) {
+    h i = 0;
+    while i < arr_len(table) {
+        if arr_get(table, i) == name { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Return best match in `table` for `name` if edit_distance <= 2. Else "".
+fn closest_name(name, table) {
+    h best = "";
+    h best_d = 3;
+    h i = 0;
+    while i < arr_len(table) {
+        h cand = arr_get(table, i);
+        h d = edit_distance(name, cand);
+        if d < best_d {
+            best_d = d;
+            best = cand;
+        }
+        i = i + 1;
+    }
+    return best;
+}
+
+# Collect all top-level defined names from a program AST (FNs and DECLs).
+# This is a single pass; nested scopes are handled at walk-time by extending
+# the table with parameter names temporarily.
+fn collect_defined(stmts) {
+    h names = arr_new(0, 0);
+    # Built-ins are always in scope.
+    arr_push(names, "print");
+    arr_push(names, "arr_new");
+    arr_push(names, "arr_get");
+    arr_push(names, "arr_set");
+    arr_push(names, "arr_push");
+    arr_push(names, "arr_len");
+    arr_push(names, "str_len");
+    arr_push(names, "str_chars");
+    arr_push(names, "str_slice");
+    arr_push(names, "str_concat");
+    arr_push(names, "str_contains");
+    arr_push(names, "concat_many");
+    arr_push(names, "to_int");
+    arr_push(names, "to_string");
+    arr_push(names, "harmony_value");
+    arr_push(names, "fold_escape");
+    arr_push(names, "value_danger");
+    arr_push(names, "safe_divide");
+    arr_push(names, "is_fibonacci");
+    h i = 0;
+    while i < arr_len(stmts) {
+        h s = arr_get(stmts, i);
+        h tag = arr_get(s, 0);
+        if tag == "FN"   { arr_push(names, arr_get(s, 1)); }
+        if tag == "DECL" { arr_push(names, arr_get(s, 1)); }
+        i = i + 1;
+    }
+    return names;
+}
+
+# ---- The walker -----------------------------------------------------------
+# Returns [healed_ast, diagnostics] where diagnostics is an array of
+# human-readable strings. The walker is recursive over BIN/CALL/etc; each
+# recursive call returns the (possibly rewritten) sub-AST.
+
+fn heal_expr(ast, names, diags) {
+    h tag = arr_get(ast, 0);
+    if tag == "NUM" {
+        h raw = arr_get(ast, 1);
+        h n = to_int(raw);
+        # Two-stage check:
+        #   (a) is_fibonacci(n) == 1 → already on the φ-geodesic, ignore.
+        #   (b) else, compute nearest Fibonacci and the distance. If the
+        #       distance is small (≤ 3), this is a close-miss typo —
+        #       flag it. If the distance is large, the value is probably
+        #       intentional and not a typo, so leave it.
+        #
+        # harmony_value's gradient is too gentle to distinguish 144 from
+        # 145 alone (0.99 vs 1.00). Pairing is_fibonacci with a hard
+        # proximity threshold catches off-by-one / transposition typos
+        # without flagging arbitrary off-Fibonacci constants.
+        if is_fibonacci(n) == 0 {
+            h suggest = nearest_fib(n);
+            h delta = suggest - n;
+            if delta < 0 { delta = 0 - delta; }
+            if delta <= 3 {
+                h score = harmony_value(n);
+                h sscore = harmony_value(suggest);
+                arr_push(diags, concat_many(
+                    "  harmonic: ", n, " (harmony ", score,
+                    ", not Fibonacci) → ", suggest,
+                    " (harmony ", sscore, ", Fibonacci attractor; |Δ|=",
+                    delta, ")"));
+                return [["NUM", to_string(suggest)], diags];
+            }
+        }
+        return [ast, diags];
+    }
+    if tag == "VAR" {
+        h name = arr_get(ast, 1);
+        if names_contains(names, name) == 1 {
+            return [ast, diags];
+        }
+        h sugg = closest_name(name, names);
+        if str_chars(sugg) > 0 {
+            h d = edit_distance(name, sugg);
+            arr_push(diags, concat_many(
+                "  identifier: '", name, "' unknown → '", sugg,
+                "' (edit distance ", d, ")"));
+            return [["VAR", sugg], diags];
+        }
+        return [ast, diags];
+    }
+    if tag == "STR" { return [ast, diags]; }
+    if tag == "ARR" {
+        h elems = arr_get(ast, 1);
+        h new_elems = arr_new(0, 0);
+        h i = 0;
+        while i < arr_len(elems) {
+            h r = heal_expr(arr_get(elems, i), names, diags);
+            arr_push(new_elems, arr_get(r, 0));
+            diags = arr_get(r, 1);
+            i = i + 1;
+        }
+        return [["ARR", new_elems], diags];
+    }
+    if tag == "BIN" {
+        h op = arr_get(ast, 1);
+        h r1 = heal_expr(arr_get(ast, 2), names, diags);
+        h left = arr_get(r1, 0);
+        diags = arr_get(r1, 1);
+        h r2 = heal_expr(arr_get(ast, 3), names, diags);
+        h right = arr_get(r2, 0);
+        diags = arr_get(r2, 1);
+        # H.2: divide-by-singularity check.
+        # Only fires when the right operand is a literal NUM whose
+        # value_danger exceeds fold_escape's 0.5 threshold (i.e. very near
+        # zero on the danger curve exp(-|x|)). Rewrites a / b to
+        # safe_divide(a, b), which fold_escapes b away from zero before
+        # dividing. The host's `safe_divide` is exactly this primitive.
+        if op == "/" {
+            if arr_get(right, 0) == "NUM" {
+                h v = to_int(arr_get(right, 1));
+                h danger = value_danger(v);
+                if danger > 0.5 {
+                    arr_push(diags, concat_many(
+                        "  divide-by-singularity: x / ", v,
+                        " (value_danger ", danger,
+                        ") → safe_divide(x, ", v, ")"));
+                    return [["CALL", "safe_divide", [left, right]], diags];
+                }
+            }
+        }
+        return [["BIN", op, left, right], diags];
+    }
+    if tag == "CALL" {
+        h name = arr_get(ast, 1);
+        h args = arr_get(ast, 2);
+        h fixed_name = name;
+        if names_contains(names, name) == 0 {
+            h sugg = closest_name(name, names);
+            if str_chars(sugg) > 0 {
+                h d = edit_distance(name, sugg);
+                arr_push(diags, concat_many(
+                    "  call: '", name, "(...)' unknown → '", sugg,
+                    "(...)' (edit distance ", d, ")"));
+                fixed_name = sugg;
+            }
+        }
+        h new_args = arr_new(0, 0);
+        h i = 0;
+        while i < arr_len(args) {
+            h r = heal_expr(arr_get(args, i), names, diags);
+            arr_push(new_args, arr_get(r, 0));
+            diags = arr_get(r, 1);
+            i = i + 1;
+        }
+        return [["CALL", fixed_name, new_args], diags];
+    }
+    return [ast, diags];
+}
+
+fn heal_stmt(ast, names, diags) {
+    h tag = arr_get(ast, 0);
+    if tag == "DECL" {
+        h r = heal_expr(arr_get(ast, 2), names, diags);
+        return [["DECL", arr_get(ast, 1), arr_get(r, 0)], arr_get(r, 1)];
+    }
+    if tag == "ASN" {
+        h r = heal_expr(arr_get(ast, 2), names, diags);
+        return [["ASN", arr_get(ast, 1), arr_get(r, 0)], arr_get(r, 1)];
+    }
+    if tag == "PRT" {
+        h r = heal_expr(arr_get(ast, 1), names, diags);
+        return [["PRT", arr_get(r, 0)], arr_get(r, 1)];
+    }
+    if tag == "EXPR" {
+        h r = heal_expr(arr_get(ast, 1), names, diags);
+        return [["EXPR", arr_get(r, 0)], arr_get(r, 1)];
+    }
+    if tag == "RET" {
+        h e = arr_get(ast, 1);
+        if arr_get(e, 0) == "NULL" {
+            return [ast, diags];
+        }
+        h r = heal_expr(e, names, diags);
+        return [["RET", arr_get(r, 0)], arr_get(r, 1)];
+    }
+    if tag == "WHL" {
+        h rc = heal_expr(arr_get(ast, 1), names, diags);
+        diags = arr_get(rc, 1);
+        h rb = heal_block(arr_get(ast, 2), names, diags);
+        return [["WHL", arr_get(rc, 0), arr_get(rb, 0)], arr_get(rb, 1)];
+    }
+    if tag == "IF" {
+        h rc = heal_expr(arr_get(ast, 1), names, diags);
+        diags = arr_get(rc, 1);
+        h rt = heal_block(arr_get(ast, 2), names, diags);
+        diags = arr_get(rt, 1);
+        h re = heal_block(arr_get(ast, 3), names, diags);
+        return [["IF", arr_get(rc, 0), arr_get(rt, 0), arr_get(re, 0)],
+                arr_get(re, 1)];
+    }
+    if tag == "FN" {
+        # Extend the names table with the function's parameters for the
+        # duration of the body walk.
+        h params = arr_get(ast, 2);
+        h local_names = arr_new(0, 0);
+        h k = 0;
+        while k < arr_len(names) {
+            arr_push(local_names, arr_get(names, k));
+            k = k + 1;
+        }
+        h pk = 0;
+        while pk < arr_len(params) {
+            arr_push(local_names, arr_get(params, pk));
+            pk = pk + 1;
+        }
+        h rb = heal_block(arr_get(ast, 3), local_names, diags);
+        return [["FN", arr_get(ast, 1), params, arr_get(rb, 0)],
+                arr_get(rb, 1)];
+    }
+    if tag == "BREAK" { return [ast, diags]; }
+    return [ast, diags];
+}
+
+fn heal_block(stmts, names, diags) {
+    h out = arr_new(0, 0);
+    # Inside a block, DECLs of new vars also extend the visible names so
+    # later statements can reference them without a typo flag. This is the
+    # "names visible at point of use" rule, single-pass.
+    h local_names = arr_new(0, 0);
+    h k = 0;
+    while k < arr_len(names) {
+        arr_push(local_names, arr_get(names, k));
+        k = k + 1;
+    }
+    h i = 0;
+    while i < arr_len(stmts) {
+        h s = arr_get(stmts, i);
+        if arr_get(s, 0) == "DECL" {
+            arr_push(local_names, arr_get(s, 1));
+        }
+        if arr_get(s, 0) == "FN" {
+            arr_push(local_names, arr_get(s, 1));
+        }
+        h r = heal_stmt(s, local_names, diags);
+        arr_push(out, arr_get(r, 0));
+        diags = arr_get(r, 1);
+        i = i + 1;
+    }
+    return [out, diags];
+}
+
+fn heal_program(stmts) {
+    h names = collect_defined(stmts);
+    h diags = arr_new(0, 0);
+    h r = heal_block(stmts, names, diags);
+    return [arr_get(r, 0), arr_get(r, 1)];
+}
+
+# H.2: iterate heal_program until convergence, exhaustion, or stuck.
+# Returns [final_ast, trajectory_lines, outcome, iterations_used].
+fn heal_until_fixpoint(stmts, max_iter) {
+    h current = stmts;
+    h trajectory = arr_new(0, 0);
+    h prev_count = 0 - 1;
+    h iter = 0;
+    while iter < max_iter {
+        h hr = heal_program(current);
+        h healed = arr_get(hr, 0);
+        h diags = arr_get(hr, 1);
+        h count = arr_len(diags);
+        arr_push(trajectory, concat_many(
+            "  iter ", iter + 1, ": ", count, " diagnostics"));
+        if count == 0 {
+            return [current, trajectory, "converged", iter];
+        }
+        if count == prev_count {
+            # Same count two iterations in a row — the healer can't make
+            # further progress on what's left. Stop and surface to caller.
+            return [healed, trajectory, "stuck", iter + 1];
+        }
+        prev_count = count;
+        current = healed;
+        iter = iter + 1;
+    }
+    return [current, trajectory, "exhausted", max_iter];
+}
+
+# =============================================================================
+#                  PART VI: SOURCE EMITTER (AST → OMC source)
+# =============================================================================
+# A pretty-printer that mirrors V.4's emitter, adjusted for the V.9 AST shape.
+# Returns a string with the AST laid out as legible OMC. Used to write the
+# healed program back out so the user can see what changed.
+
+fn indent_of_h(level) {
+    h s = "";
+    h i = 0;
+    while i < level {
+        s = str_concat(s, "    ");
+        i = i + 1;
+    }
+    return s;
+}
+
+fn emit_expr_h(ast) {
+    h tag = arr_get(ast, 0);
+    if tag == "NUM" { return arr_get(ast, 1); }
+    if tag == "STR" { return concat_many("\"", arr_get(ast, 1), "\""); }
+    if tag == "VAR" { return arr_get(ast, 1); }
+    if tag == "BIN" {
+        h op = arr_get(ast, 1);
+        h left = emit_expr_h(arr_get(ast, 2));
+        h right = emit_expr_h(arr_get(ast, 3));
+        return concat_many("(", left, " ", op, " ", right, ")");
+    }
+    if tag == "CALL" {
+        h name = arr_get(ast, 1);
+        h args = arr_get(ast, 2);
+        h out = concat_many(name, "(");
+        h i = 0;
+        while i < arr_len(args) {
+            if i > 0 { out = str_concat(out, ", "); }
+            out = str_concat(out, emit_expr_h(arr_get(args, i)));
+            i = i + 1;
+        }
+        return str_concat(out, ")");
+    }
+    if tag == "ARR" {
+        h elems = arr_get(ast, 1);
+        h out = "[";
+        h i = 0;
+        while i < arr_len(elems) {
+            if i > 0 { out = str_concat(out, ", "); }
+            out = str_concat(out, emit_expr_h(arr_get(elems, i)));
+            i = i + 1;
+        }
+        return str_concat(out, "]");
+    }
+    return concat_many("/* UNKNOWN_EXPR ", tag, " */");
+}
+
+fn emit_stmt_h(ast, level) {
+    h pad = indent_of_h(level);
+    h tag = arr_get(ast, 0);
+    if tag == "DECL" {
+        return concat_many(pad, "h ", arr_get(ast, 1), " = ",
+                           emit_expr_h(arr_get(ast, 2)), ";\n");
+    }
+    if tag == "ASN" {
+        return concat_many(pad, arr_get(ast, 1), " = ",
+                           emit_expr_h(arr_get(ast, 2)), ";\n");
+    }
+    if tag == "PRT" {
+        return concat_many(pad, "print(",
+                           emit_expr_h(arr_get(ast, 1)), ");\n");
+    }
+    if tag == "EXPR" {
+        return concat_many(pad, emit_expr_h(arr_get(ast, 1)), ";\n");
+    }
+    if tag == "RET" {
+        h e = arr_get(ast, 1);
+        if arr_get(e, 0) == "NULL" {
+            return concat_many(pad, "return;\n");
+        }
+        return concat_many(pad, "return ", emit_expr_h(e), ";\n");
+    }
+    if tag == "BREAK" {
+        return concat_many(pad, "break;\n");
+    }
+    if tag == "WHL" {
+        h cond = emit_expr_h(arr_get(ast, 1));
+        h body = emit_block_h(arr_get(ast, 2), level + 1);
+        return concat_many(pad, "while ", cond, " {\n", body, pad, "}\n");
+    }
+    if tag == "IF" {
+        h cond = emit_expr_h(arr_get(ast, 1));
+        h then_b = emit_block_h(arr_get(ast, 2), level + 1);
+        h else_body = arr_get(ast, 3);
+        h out = concat_many(pad, "if ", cond, " {\n", then_b, pad, "}");
+        if arr_len(else_body) > 0 {
+            h eb = emit_block_h(else_body, level + 1);
+            out = concat_many(out, " else {\n", eb, pad, "}");
+        }
+        return str_concat(out, "\n");
+    }
+    if tag == "FN" {
+        h name = arr_get(ast, 1);
+        h params = arr_get(ast, 2);
+        h body = emit_block_h(arr_get(ast, 3), level + 1);
+        h plist = "";
+        h i = 0;
+        while i < arr_len(params) {
+            if i > 0 { plist = str_concat(plist, ", "); }
+            plist = str_concat(plist, arr_get(params, i));
+            i = i + 1;
+        }
+        return concat_many(pad, "fn ", name, "(", plist, ") {\n",
+                           body, pad, "}\n");
+    }
+    return concat_many(pad, "/* UNKNOWN_STMT ", tag, " */\n");
+}
+
+fn emit_block_h(stmts, level) {
+    h out = "";
+    h i = 0;
+    while i < arr_len(stmts) {
+        out = str_concat(out, emit_stmt_h(arr_get(stmts, i), level));
+        i = i + 1;
+    }
+    return out;
+}
+
+fn emit_source(stmts) {
+    return emit_block_h(stmts, 0);
+}
+
+# =============================================================================
+#                          PART VII: H.2 DRIVER
+# =============================================================================
+# Two demos exercise the autofix-and-retry loop:
+#   1. H.1's broken source — converges in 1 iteration. The trajectory print
+#      shows the iteration explicitly, even though the count is small.
+#   2. A divide-by-singularity case — exercises the new H.2 check class
+#      and demonstrates that all three classes co-exist in the loop.
+
+fn run_h2(label, source, max_iter) {
+    print(concat_many("==== ", label, " ===="));
+    print("--- BROKEN SOURCE ---");
+    print(source);
+    print("");
+    print("--- Lex + parse ---");
+    h toks = tokenize_b(source);
+    h ast = p_program(toks);
+    print(concat_many("  tokens=", arr_len(toks),
+                      "  stmts=", arr_len(ast)));
+    print("");
+    print(concat_many("--- heal_until_fixpoint (max_iter=", max_iter, ") ---"));
+    h r = heal_until_fixpoint(ast, max_iter);
+    h final_ast = arr_get(r, 0);
+    h trajectory = arr_get(r, 1);
+    h outcome = arr_get(r, 2);
+    h iters = arr_get(r, 3);
+    h ti = 0;
+    while ti < arr_len(trajectory) {
+        print(arr_get(trajectory, ti));
+        ti = ti + 1;
+    }
+    print(concat_many("  outcome: ", outcome,
+                      " (after ", iters, " iterations)"));
+    print("");
+    print("--- HEALED SOURCE ---");
+    h healed_source = emit_source(final_ast);
+    print(healed_source);
+    print("--- execute healed via the OMC bytecode VM ---");
+    h prog = encode_program(final_ast);
+    print(concat_many("  bytecode ops: ", arr_len(prog)));
+    print("  output:");
+    execute(prog);
+    print("");
+    return outcome;
+}
+
+print("############################################################");
+print("# Phase H.2: Self-Healing Compiler — autofix-and-retry loop");
+print("# Three diagnostic classes flow through heal_until_fixpoint.");
+print("# Each demo prints its iteration trajectory + final outcome.");
+print("############################################################");
+print("");
+
+# -------- Demo 1: H.1 regression — harmonic + identifier typo --------------
+# Same broken source from H.1. Converges in 1 iteration. The trajectory
+# print makes the loop visible even when only one pass is needed.
+
+h H1_REGRESSION = "fn fib(n) {
+    if n < 2 { return n; }
+    return fib(n - 1) + fib(n - 2);
+}
+h target = 12;
+print(fbi(target));";
+
+h outcome_1 = run_h2("Demo 1 (regression): harmonic + typo",
+                     H1_REGRESSION, 5);
+
+# -------- Demo 2: H.2 new — divide-by-singularity --------------------------
+# `n / 0` is statically a division-by-zero. value_danger(0) = 1.0,
+# well above the 0.5 threshold. The healer rewrites the BIN expression
+# to a CALL of safe_divide, which fold_escape's the divisor at runtime.
+# safe_divide(10, 0) folds 0 → 1 (the special-case in fold_escape that
+# avoids healing back to a singularity), then divides: 10 / 1 = 10.
+
+h DIVIDE_BUG = "h numerator = 10;
+h r = numerator / 0;
+print(r);";
+
+h outcome_2 = run_h2("Demo 2 (new): divide-by-singularity",
+                     DIVIDE_BUG, 5);
+
+# -------- Demo 3: all three classes in one source --------------------------
+# Harmonic violation + typo + divide-by-singularity. Convergence in one
+# iteration — H.1's checks and H.2's new check fan out over the AST in
+# a single walk; the loop simply confirms no second-pass diagnostics.
+
+h MIXED_BUGS = "fn safe(n) {
+    if n < 2 { return n; }
+    return n / 0;
+}
+h target = 7;
+print(safef(target));";
+
+h outcome_3 = run_h2("Demo 3 (all three): harmonic + typo + divide",
+                     MIXED_BUGS, 5);
+
+print("############################################################");
+print("# Verdict");
+print("############################################################");
+print(concat_many("  Demo 1: ", outcome_1));
+print(concat_many("  Demo 2: ", outcome_2));
+print(concat_many("  Demo 3: ", outcome_3));
+print("");
+print("# Observations");
+print("#");
+print("# - heal_until_fixpoint trajectory: every demo converges in ≤2");
+print("#   iterations on the current diagnostic set. The 2nd iteration");
+print("#   when present is just the empty-confirmation pass after the");
+print("#   first one rewrote everything.");
+print("#");
+print("# - Demo 3 fires all three classes from a single source: 7 is");
+print("#   close-miss Fibonacci (→8), `safef` is an edit-distance typo");
+print("#   (→safe), and `n / 0` is a divide-by-singularity (→safe_divide).");
+print("#   One pass through heal_program rewrites all three.");
+print("#");
+print("# - The 'stuck' outcome is reserved for cases where the count of");
+print("#   diagnostics plateaus above zero — meaning the healer keeps");
+print("#   detecting an issue but can't actually rewrite to remove it.");
+print("#   None of tonight's demos hit it; H.3 (parse-level recovery)");
+print("#   is where that path becomes exercised: a syntax error that the");
+print("#   parser can't recover from leaves a stable failure flag.");
+print("#");
+print("# - The 'exhausted' outcome is the safety bound — protects against");
+print("#   pathological divergent rewrites that introduce new bugs as");
+print("#   they fix others. None tonight; logged for H.4.");
+print("############################################################");
+
+
