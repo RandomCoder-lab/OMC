@@ -4,6 +4,69 @@ All notable changes to OMNIcode will be documented in this file.
 
 ## [Unreleased]
 
+### Added (Phase H.4: `safe` keyword — runtime self-healing as user syntax, 2026-05-14)
+
+🎯 **`examples/self_healing_h4.omc` — the user can now DECLARE self-healing intent in source code, not just rely on the compiler to detect it.**
+
+H.1–H.3 all worked on STATIC bugs: things the compiler could detect by inspecting tokens or AST nodes without running the program. The hard case in real code is **dynamic singularities** — `x / count` where `count` could be zero at runtime for inputs the author didn't anticipate. The static healer's divide-by-singularity check (H.2) only fires when the divisor is a literal. Variables don't trigger it. The bug ships.
+
+H.4 surfaces a new keyword `safe` that lets the user opt expressions into runtime self-healing semantics:
+
+```omc
+fn compute(count, mod) {
+    return safe count / mod;
+}
+print(compute(144, 3));   // 48  — normal division
+print(compute(144, 0));   // 144 — fold_escape catches the zero divisor
+```
+
+The parser recognises `safe EXPR` and wraps it as `["SAFE_EXPR", inner]`. The encoder rewrites `SAFE_EXPR` containing a `BIN /` to a `CALL_BUILTIN safe_divide` **unconditionally** — regardless of whether the divisor is a literal or a variable. The compile-time healer (H.2) and the runtime user-intent declaration (H.4) are complementary:
+
+| Trigger | Active when | Catches |
+|---------|-------------|---------|
+| H.2 static healer | divisor is a literal `0` (or near-zero) | Obvious compile-time bugs |
+| H.4 `safe` keyword | user explicitly wrote `safe` | Dynamic divisors at runtime |
+
+Both rewrite to the same primitive (`safe_divide`). The difference is the trigger.
+
+#### Four demos
+
+**Demo 1** (H.2 regression) — `89 / 0`. Static healer fires (literal `0`). Rewritten to `safe_divide(89, 0)`. Output: 89. Unchanged from H.2.
+
+**Demo 2** (baseline, no `safe`) — `return count / mod;` with mod variable. Compiles to bare `/`. Runs with `mod = 3` so no crash, but the bug is shipping. Output: 48.
+
+**Demo 3** (**the headline**) — same shape as Demo 2 but with `safe count / mod`. Compiler unconditionally rewrites to `safe_divide(count, mod)`. Two calls:
+- `compute(144, 3) → 48` (normal division)
+- `compute(144, 0) → 144` (**runtime crash converted to finite answer on attractor**)
+
+The one-keyword annotation flipped a runtime crash into a working program. No `if mod == 0` boilerplate.
+
+**Demo 4** (integrated) — five things in one source:
+- Token-level: missing SEMI between `h target = 7` and `print(...)`.
+- AST-level (H.1): `compue` typo → `compute` (edit distance 1).
+- AST-level (H.1): `7` close-miss Fibonacci → `8` (|Δ|=1).
+- AST-level (H.2): the `numerator / divisor` is dynamic, so H.2's static check DOESN'T fire (correctly — no compile-time signal).
+- H.4: the user wrote `safe`, so the division is rewritten to `safe_divide` at encode time.
+
+Final: `compute(8, 0) → safe_divide(8, 0) → fold_escape(0)=1 → 8/1 → 8`. All three Phase H stages contributed; all converged; the program lands on a Fibonacci attractor.
+
+#### The bigger picture (LLM-generated code)
+
+For language-model-generated programs, the failures cluster around three classes:
+1. Typos and naming drift (variables, function names).
+2. Off-by-one numeric constants (loop bounds, array sizes).
+3. Unguarded edge cases (division, indexing, null derefs).
+
+Phase H handles all three. A self-healing target language reduces the burden on the generator: it doesn't have to write defensive boilerplate because the language's compiler does the defense automatically — partly at compile time (static healer), partly at user-declared opt-in (`safe`), partly with primitive operations that fold_escape singularities at runtime (`safe_divide`).
+
+This is a real architectural difference from conventional target languages. Most existing autocomplete/heal tooling lives OUTSIDE the language (IDE plugins, linters in a different language). H.1–H.4 live INSIDE OMC, reusing the same lex/parse/encode/execute machinery the rest of the language uses, all sitting on the Phase O φ-math substrate.
+
+#### What still isn't done
+
+- `safe` currently only meaningfully rewrites BIN `/`. Other expressions wrapped in `safe` encode as their inner form (no-op), reserving the slot for future runtime guards (fold_escape on function-call return values, value_danger threshold on arithmetic chains).
+- Indentation-aware brace placement (H.3.1) — still naive append-at-EOF.
+- The `stuck` and `exhausted` outcomes of the iteration loop remain unexercised. Designing a demo that hits them in a meaningful way is future work.
+
 ### Added (Phase H.3: parse-level recovery — token-stream healing, 2026-05-13)
 
 🎯 **`examples/self_healing_h3.omc` — the healer gains a stage BELOW the parser.**
