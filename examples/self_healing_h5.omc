@@ -811,6 +811,21 @@ fn enc_expr(ast) {
             }
             if name == "arr_set" {
                 if arr_len(args) == 3 {
+                    # H.5.1: when the array argument is a bare VAR, emit
+                    # SAFE_ARR_SET_NAMED so the mutation propagates back
+                    # through the bytecode VM's scope (same trick V.7c
+                    # used for ARR_SET_NAMED). Without this, CALL_BUILTIN
+                    # routes through a synthetic-scope shim that copies
+                    # the array argument and loses the write.
+                    h target = arr_get(args, 0);
+                    if arr_get(target, 0) == "VAR" {
+                        out = arr_concat(out, enc_expr(arr_get(args, 1)));  # idx
+                        out = arr_concat(out, enc_expr(arr_get(args, 2)));  # val
+                        arr_push(out, ["SAFE_ARR_SET_NAMED", arr_get(target, 1)]);
+                        return out;
+                    }
+                    # Fallback: not a bare VAR (e.g. nested array). Goes
+                    # through CALL_BUILTIN — works under tree-walk only.
                     out = arr_concat(out, enc_expr(arr_get(args, 0)));
                     out = arr_concat(out, enc_expr(arr_get(args, 1)));
                     out = arr_concat(out, enc_expr(arr_get(args, 2)));
@@ -1240,6 +1255,31 @@ fn execute(prog) {
                 h arr = scope_get(scope, name);
                 arr_set(arr, idx, val);
                 scope = scope_set(scope, name, arr);
+                arr_push(stack, arr);
+                pc = pc + 1;
+                handled = 1;
+            }
+            if kind == "SAFE_ARR_SET_NAMED" {
+                # H.5.1: like ARR_SET_NAMED but fold-and-mod the index so
+                # an out-of-bounds write becomes an in-bounds write at the
+                # nearest Fibonacci-attractor position. The named-store
+                # form is required (vs CALL_BUILTIN safe_arr_set) because
+                # the bytecode VM's CALL_BUILTIN shim copies array args
+                # and loses the mutation.
+                h pr1 = pop1(stack); h val = arr_get(pr1, 0); stack = arr_get(pr1, 1);
+                h pr2 = pop1(stack); h raw_idx = arr_get(pr2, 0); stack = arr_get(pr2, 1);
+                h name = arr_get(op, 1);
+                h arr = scope_get(scope, name);
+                h len = arr_len(arr);
+                if len > 0 {
+                    h folded = nearest_fib(raw_idx);
+                    # Euclidean mod — OMC's % can return negatives for
+                    # negative operands; this normalises into [0, len).
+                    h healed = folded - (folded / len) * len;
+                    if healed < 0 { healed = healed + len; }
+                    arr_set(arr, healed, val);
+                    scope = scope_set(scope, name, arr);
+                }
                 arr_push(stack, arr);
                 pc = pc + 1;
                 handled = 1;
@@ -2246,12 +2286,10 @@ print(lookup(xs, 7));";
 h outcome_3 = run_h3("Demo 3 (with safe): arr_get with various OOB indices",
                      GUARDED_ARRAY, 5);
 
-# -------- Demo 4: safe arr_get inside a loop walking off the end -----------
-# Walk indices 0 through 9 against a 5-element array. Without `safe`, the
-# loop crashes at idx=5. With `safe`, every iteration produces a finite
-# value via fold-and-mod. The wrap is deterministic, so the second pass
-# (idx=5..9) traces a pattern through the array driven by the Fibonacci
-# attractor structure.
+# -------- Demo 4a: safe arr_get inside a loop walking off the end ----------
+# Walk indices 0 through 9 against a 5-element array via safe arr_get.
+# Every iteration produces a finite, attractor-landing value via fold-
+# and-mod. Confirms reads compose cleanly via the bytecode VM.
 
 h SAFE_WALK = "fn read(xs, idx) {
     return safe arr_get(xs, idx);
@@ -2263,8 +2301,35 @@ while i < 10 {
     i = i + 1;
 }";
 
-h outcome_4 = run_h3("Demo 4: safe arr_get walking off the end",
+h outcome_4 = run_h3("Demo 4a: safe arr_get walking off the end",
                      SAFE_WALK, 5);
+
+# -------- Demo 4b: safe arr_set with H.5.1 named-store op ------------------
+# Treat a 5-element buffer as a circular write target. Each `safe arr_set`
+# call folds the index onto the nearest Fibonacci attractor and modulos
+# by arr_len, then mutates. The encoder emits SAFE_ARR_SET_NAMED (not
+# CALL_BUILTIN safe_arr_set) when the first arg is a bare VAR, so the
+# mutation propagates back through the bytecode VM's scope.
+#   idx=0   → fold to 0 → 1 (no-zero rule) → buf[1] = 11.
+#       But fold_to_fibonacci_const(0) returns 0; nearest_fib in OMC has
+#       the no-zero rule which makes it 1. So writes target index 1.
+#   idx=100 → fold to 89 → 89 % 5 = 4 → buf[4] = 22.
+#   idx=-1  → fold to -1 → fold inside nearest_fib gives -1; (-1 - (-1/5)*5) = -1; +5 = 4 → buf[4] = 33 (overwrites).
+#   idx=6   → fold to 5 → 5 % 5 = 0 → buf[0] = 55 (matches the 55 in original list, harmonic).
+
+h SAFE_SET = "h buf = [0, 0, 0, 0, 0];
+safe arr_set(buf, 0, 11);
+safe arr_set(buf, 100, 22);
+safe arr_set(buf, 0 - 1, 33);
+safe arr_set(buf, 6, 55);
+h i = 0;
+while i < arr_len(buf) {
+    print(arr_get(buf, i));
+    i = i + 1;
+}";
+
+h outcome_4b = run_h3("Demo 4b: safe arr_set (H.5.1 named-store op)",
+                      SAFE_SET, 5);
 
 # -------- Demo 5: composed with H.4 in one program -------------------------
 # Both `safe a/b` and `safe arr_get(a, i)` in the same function. The
@@ -2288,8 +2353,9 @@ print("############################################################");
 print(concat_many("  Demo 1 (H.4 regression):       ", outcome_1));
 print(concat_many("  Demo 2 (no safe arr_get):      ", outcome_2));
 print(concat_many("  Demo 3 (safe arr_get OOB):     ", outcome_3));
-print(concat_many("  Demo 4 (safe arr_get loop):    ", outcome_4));
-print(concat_many("  Demo 5 (H.4 + H.5 composed):   ", outcome_5));
+print(concat_many("  Demo 4a (safe arr_get loop):   ", outcome_4));
+print(concat_many("  Demo 4b (safe arr_set H.5.1):  ", outcome_4b));
+print(concat_many("  Demo 5  (H.4 + H.5 composed):  ", outcome_5));
 print("");
 print("# Observations");
 print("#");
@@ -2311,14 +2377,12 @@ print("#   in call_builtin, extend the SAFE_EXPR rewrite to recognize the");
 print("#   call shape. The substrate carries the heavy semantics; H.5 is");
 print("#   structural composition, not new invention.");
 print("#");
-print("# - Known limit: `safe arr_set(VAR, ...)` works under tree-walk but");
-print("#   not via the OMC bytecode VM. The bytecode VM routes CALL_BUILTIN");
-print("#   through a synthetic-scope shim that copies array arguments,");
-print("#   losing the mutation back to the caller's variable. The Rust VM");
-print("#   solved this with ARR_SET_NAMED opcodes; H.5.1 would add an");
-print("#   SAFE_ARR_SET_NAMED variant. Reads (safe arr_get) compose cleanly");
-print("#   through either path because they return a value rather than");
-print("#   mutating a binding.");
+print("# - H.5.1 closed the named-write gap. `safe arr_set(VAR, idx, val)`");
+print("#   now emits SAFE_ARR_SET_NAMED (not CALL_BUILTIN), bypassing the");
+print("#   synthetic-scope shim that lost the mutation. Demo 4b verifies");
+print("#   this end-to-end through the OMC bytecode VM. The pattern is the");
+print("#   exact same one V.7c used for ARR_SET_NAMED: take the variable");
+print("#   name out of the value stack and put it on the opcode.");
 print("############################################################");
 
 
