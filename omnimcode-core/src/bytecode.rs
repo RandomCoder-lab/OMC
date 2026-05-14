@@ -109,6 +109,13 @@ pub enum Op {
     /// Mutating array store: pop value, pop index, store at named array's
     /// index. Same rationale as ArrPushNamed.
     ArrSetNamed(String),
+    /// H.5.2: self-healing mutating array store. Pop value, pop raw_idx,
+    /// fold raw_idx onto the nearest Fibonacci attractor, Euclidean-mod by
+    /// arr_len, then store at the healed index. Out-of-bounds writes
+    /// become attractor-landing in-bounds writes. Same name-on-opcode trick
+    /// as ArrSetNamed — required so the mutation propagates back through
+    /// the VM scope instead of getting lost in vm_call_builtin's shim.
+    SafeArrSetNamed(String),
 
     // Special harmonic operations (short-circuit to built-in semantics
     // without the call overhead — these are the hot ones).

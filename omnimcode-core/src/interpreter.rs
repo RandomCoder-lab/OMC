@@ -1843,7 +1843,7 @@ fn values_equal(a: &Value, b: &Value) -> bool {
 
 // Free function reused by quantize / quantization_ratio / mean_omni_weight.
 // Snap |n| to the nearest Fibonacci attractor, preserving sign.
-fn fold_to_fibonacci_const(n: i64) -> i64 {
+pub(crate) fn fold_to_fibonacci_const(n: i64) -> i64 {
     let fibs: [i64; 15] = [0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610];
     let abs_val = n.abs();
     let mut nearest = fibs[0];

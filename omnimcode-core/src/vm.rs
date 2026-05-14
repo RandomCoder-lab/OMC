@@ -289,6 +289,32 @@ impl Vm {
                         ));
                     }
                 }
+                Op::SafeArrSetNamed(name) => {
+                    let val = stack.pop().ok_or("stack underflow")?;
+                    let raw_idx = stack.pop().ok_or("stack underflow")?.to_int();
+                    if let Some(Value::Array(mut a)) = self.interp.vm_get_var(name) {
+                        let len = a.items.len();
+                        if len > 0 {
+                            // Fold onto nearest Fibonacci attractor, then
+                            // Euclidean mod by len.
+                            let folded = crate::interpreter::fold_to_fibonacci_const(raw_idx);
+                            let len_i = len as i64;
+                            let mut healed = folded % len_i;
+                            if healed < 0 {
+                                healed += len_i;
+                            }
+                            a.items[healed as usize] = val;
+                            self.interp.vm_set_local(name, Value::Array(a));
+                        }
+                        // Empty arrays: silently drop the write (total
+                        // semantics — never errors).
+                    } else {
+                        return Err(format!(
+                            "SafeArrSetNamed: {} is not an array variable",
+                            name
+                        ));
+                    }
+                }
                 Op::ArrayIndexAssign(name) => {
                     let idx = stack.pop().ok_or("stack underflow")?.to_int() as usize;
                     let val = stack.pop().ok_or("stack underflow")?;

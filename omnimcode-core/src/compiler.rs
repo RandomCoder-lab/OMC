@@ -437,10 +437,22 @@ impl Compiler {
                         self.emit(Op::Call("safe_arr_get".to_string(), 2));
                     }
                     Expression::Call { name, args } if name == "arr_set" && args.len() == 3 => {
-                        for arg in args {
-                            self.compile_expr(arg)?;
+                        // H.5.2: bare-VAR first arg → emit SafeArrSetNamed
+                        // so the mutation propagates back through VM scope.
+                        // Non-VAR shapes (e.g. nested array) fall through
+                        // to the synthetic-arg call shim, which loses the
+                        // mutation (same semantics as plain arr_set on a
+                        // non-VAR).
+                        if let Expression::Variable(arr_name) = &args[0] {
+                            self.compile_expr(&args[1])?; // index
+                            self.compile_expr(&args[2])?; // value
+                            self.emit(Op::SafeArrSetNamed(arr_name.clone()));
+                        } else {
+                            for arg in args {
+                                self.compile_expr(arg)?;
+                            }
+                            self.emit(Op::Call("safe_arr_set".to_string(), 3));
                         }
-                        self.emit(Op::Call("safe_arr_set".to_string(), 3));
                     }
                     _ => self.compile_expr(inner)?,
                 }
