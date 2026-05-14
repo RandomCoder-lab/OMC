@@ -23,6 +23,13 @@ impl Vm {
         }
     }
 
+    /// Mutable access to the internal Interpreter — used by main.rs to
+    /// pre-register user function definitions before the VM runs, so
+    /// first-class function dispatch can resolve them.
+    pub fn interp_mut(&mut self) -> &mut Interpreter {
+        &mut self.interp
+    }
+
     pub fn run_module(&mut self, module: &Module) -> Result<Value, String> {
         self.run_function(&module.main, &[], module)
     }
@@ -59,10 +66,19 @@ impl Vm {
                     stack.pop();
                 }
                 Op::LoadVar(name) => {
-                    let v = self
-                        .interp
-                        .vm_get_var(name)
-                        .ok_or_else(|| format!("Undefined variable: {}", name))?;
+                    // First try the interpreter's variable lookup (with
+                    // its own function-table fallback). If nothing found,
+                    // check the Module's function table — that's where
+                    // VM-compiled user functions live, and supporting
+                    // first-class function values means they need to
+                    // resolve as Value::Function here too.
+                    let v = if let Some(v) = self.interp.vm_get_var(name) {
+                        v
+                    } else if module.functions.contains_key(name) {
+                        Value::Function { name: name.clone(), captured: None }
+                    } else {
+                        return Err(format!("Undefined variable: {}", name));
+                    };
                     stack.push(v);
                 }
                 Op::StoreVar(name) => {

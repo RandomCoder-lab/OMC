@@ -1,0 +1,151 @@
+# =============================================================================
+# OMC Benchmark Suite
+# =============================================================================
+# Times common operations and reports per-op nanoseconds. Run both ways
+# to compare the tree-walker vs the bytecode VM:
+#
+#   ./target/release/omnimcode-standalone examples/benchmarks.omc           # tree-walk
+#   OMC_VM=1 ./target/release/omnimcode-standalone examples/benchmarks.omc  # Rust VM
+#
+# Tweak the `iters` constants at the top to scale up/down for your hardware.
+# The default settings put each benchmark in roughly the 100ms-1s range
+# under tree-walk on a modern laptop — short enough to iterate, long enough
+# for `now_ms()` resolution.
+# =============================================================================
+
+# --- Benchmark configuration -----------------------------------------------
+
+h N_INT_OPS    = 200000;   # tight integer arithmetic
+h N_STR_OPS    = 20000;    # string operations (slower per-op)
+h N_ARR_OPS    = 5000;     # array allocations + access
+h N_FIB        = 22;       # recursive fib depth (exponential — keep small)
+h N_RESONANCE  = 50000;    # is_fibonacci / harmony_value calls
+
+# --- Bench harness ---------------------------------------------------------
+# Run a function, time it, return ms elapsed. Uses `call(fn, args_array)`
+# for dispatch (so we can iterate over a list of benchmarks generically).
+
+fn run_bench(label, fn_value, iters) {
+    h start = now_ms();
+    call(fn_value, [iters]);
+    h elapsed_ms = now_ms() - start;
+    # ns per op = ms * 1e6 / iters
+    h ns_per_op = elapsed_ms * 1000000 / iters;
+    println(concat_many(
+        str_pad_right(label, 32, " "),
+        str_pad_left(to_string(iters), 8, " "), " iters  ",
+        str_pad_left(to_string(elapsed_ms), 6, " "), " ms  ",
+        str_pad_left(to_string(ns_per_op), 8, " "), " ns/op"
+    ));
+    return elapsed_ms;
+}
+
+# --- Benchmark bodies ------------------------------------------------------
+
+fn bench_int_add(n) {
+    h i = 0;
+    h sum = 0;
+    while i < n {
+        sum = sum + i;
+        i = i + 1;
+    }
+    return sum;
+}
+
+fn bench_int_mul(n) {
+    h i = 0;
+    h prod = 1;
+    while i < n {
+        prod = prod + (i * 3);
+        i = i + 1;
+    }
+    return prod;
+}
+
+fn bench_str_concat(n) {
+    h s = "";
+    h i = 0;
+    while i < n {
+        s = str_concat(s, "a");
+        i = i + 1;
+    }
+    return str_len(s);
+}
+
+fn bench_str_split_join(n) {
+    h base = "the quick brown fox jumps over the lazy dog";
+    h i = 0;
+    while i < n {
+        h parts = str_split(base, " ");
+        h joined = str_join(parts, ",");
+        i = i + 1;
+    }
+    return n;
+}
+
+fn bench_arr_push_walk(n) {
+    h arr = arr_new(0, 0);
+    h i = 0;
+    while i < n {
+        arr_push(arr, i);
+        i = i + 1;
+    }
+    h sum = 0;
+    h j = 0;
+    while j < arr_len(arr) {
+        sum = sum + arr_get(arr, j);
+        j = j + 1;
+    }
+    return sum;
+}
+
+fn fib(n) {
+    if n < 2 { return n; }
+    return fib(n - 1) + fib(n - 2);
+}
+
+fn bench_recursive_fib(n) {
+    return fib(n);
+}
+
+fn bench_is_fibonacci(n) {
+    h hits = 0;
+    h i = 0;
+    while i < n {
+        if is_fibonacci(i) {
+            hits = hits + 1;
+        }
+        i = i + 1;
+    }
+    return hits;
+}
+
+fn bench_harmony_value(n) {
+    h total = 0;
+    h i = 0;
+    while i < n {
+        h r = harmony_value(i);
+        i = i + 1;
+    }
+    return total;
+}
+
+# --- Run them all ----------------------------------------------------------
+
+println("");
+println(str_repeat("=", 70));
+println("OMC Benchmark Suite — N ops, ms total, ns per op");
+println(str_repeat("=", 70));
+
+run_bench("int_add (sum 0..N)",       bench_int_add,        N_INT_OPS);
+run_bench("int_mul (sum i*3 0..N)",   bench_int_mul,        N_INT_OPS);
+run_bench("str_concat (build N a's)", bench_str_concat,     N_STR_OPS);
+run_bench("str_split + str_join",     bench_str_split_join, N_STR_OPS);
+run_bench("arr_push + arr_get walk",  bench_arr_push_walk,  N_ARR_OPS);
+run_bench("is_fibonacci 0..N",        bench_is_fibonacci,   N_RESONANCE);
+run_bench("harmony_value 0..N",       bench_harmony_value,  N_RESONANCE);
+run_bench("recursive fib(N)",         bench_recursive_fib,  N_FIB);
+
+println(str_repeat("=", 70));
+println("Done. Run with OMC_VM=1 to compare against the Rust bytecode VM.");
+println(str_repeat("=", 70));

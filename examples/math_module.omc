@@ -1,0 +1,57 @@
+# =============================================================================
+# Example module — Fibonacci utilities
+# =============================================================================
+# This file is meant to be imported, not run directly.
+# Use as:
+#   import "examples/math_module.omc" as math;
+#   println(arr_join(math.fib_up_to(100), ","));
+# =============================================================================
+
+# Generate the Fibonacci sequence up to and including the largest value ≤ n.
+fn fib_up_to(n) {
+    h out = arr_new(0, 0);
+    h a = 0;
+    h b = 1;
+    while a <= n {
+        arr_push(out, a);
+        h t = a + b;
+        a = b;
+        b = t;
+    }
+    return out;
+}
+
+# Newton-Raphson cube root. Integer-aligned; precision falls off for
+# non-cubes due to OMC's integer-division semantics, but useful as a
+# demo of how a module exposes mathematical utility functions.
+fn cube_root(x) {
+    h r = x / 3;
+    h i = 0;
+    while i < 8 {
+        r = r - (r * r * r - x) / (3 * r * r);
+        i = i + 1;
+    }
+    return r;
+}
+
+# Sum the elements of an integer range [lo, hi] inclusive.
+fn sum_range(lo, hi) {
+    h total = 0;
+    h k = lo;
+    while k <= hi {
+        total = total + k;
+        k = k + 1;
+    }
+    return total;
+}
+
+# Greatest common divisor — already a built-in in core, but useful as a
+# pedagogical example for how a module reimplements / overrides.
+fn euclid_gcd(a, b) {
+    while b != 0 {
+        h t = b;
+        b = a % b;
+        a = t;
+    }
+    return a;
+}

@@ -201,7 +201,12 @@ pub enum Value {
     /// classic counter pattern) require shared refs and are future work.
     Function {
         name: String,
-        captured: Option<std::collections::HashMap<String, Value>>,
+        /// Captured environment for closures, by reference (Rc<RefCell>)
+        /// so mutations to captured variables propagate across multiple
+        /// invocations. `None` means a plain function reference, not a
+        /// closure. The `Rc` lets Value::Function be `Clone` while still
+        /// sharing the captured state.
+        captured: Option<std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, Value>>>>,
     },
     Null,
 }

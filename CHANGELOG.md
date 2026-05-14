@@ -4,6 +4,97 @@ All notable changes to OMNIcode will be documented in this file.
 
 ## [Unreleased]
 
+### Added (Mutable closures + module aliasing + benchmark suite, 2026-05-14)
+
+🎯 **Three more architectural moves: closures gain shared mutable state, the module system gets namespaced imports, and OMC has its first benchmark suite.**
+
+#### Track 1 — Mutable closures (Rc<RefCell> capture)
+
+The closure model went from snapshot-by-value to shared-reference. The bank-account pattern now works correctly:
+
+```omc
+fn make_account(balance) {
+    h deposit  = fn(amount) { balance = balance + amount; return balance; };
+    h withdraw = fn(amount) { balance = balance - amount; return balance; };
+    h bal      = fn() { return balance; };
+    return [deposit, withdraw, bal];
+}
+
+h acct = make_account(100);
+println(arr_get(acct, 0)(50));   # deposit: 150
+println(arr_get(acct, 1)(30));   # withdraw: 120
+println(arr_get(acct, 2)());     # balance:  120
+```
+
+Architecture changes:
+- `Value::Function.captured`: `Option<HashMap>` → `Option<Rc<RefCell<HashMap>>>`.
+- `Interpreter.locals`: `Vec<HashMap>` → `Vec<Rc<RefCell<HashMap>>>`. Each scope frame is a shareable Rc.
+- Lambda evaluation clones the Rc of the current scope frame (instead of taking a HashMap snapshot). Sibling closures created in the same enclosing call see the SAME underlying map; mutations propagate.
+- New `assign_var` method on Interpreter: walks locals from inner to outer looking for an existing binding; if found, mutates in-place. `Statement::Assignment` now routes through `assign_var` instead of `set_var`. `h x = ...` (declaration) keeps using `set_var` to always create a fresh innermost binding.
+- `call_first_class_function` pushes the captured env Rc as a scope frame BEFORE the args frame, so lookups via lexical chain hit the captured bindings naturally.
+
+The single-closure case (counter pattern) and multi-closure-shared-state (bank account) both work. Refactor touched 9 scope-access sites in `interpreter.rs`. Verified end-to-end with `examples/test_runner.omc` (which uses lambdas internally) and a counter/bank-account smoke test.
+
+#### Track 2 — Module aliasing (`import "path" as alias`)
+
+`import` already parsed an optional `as` clause but the alias was ignored. Now it's wired through:
+
+```omc
+import "examples/math_module.omc" as math;
+println(arr_join(math.fib_up_to(100), ", "));   # 0, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89
+println(math.euclid_gcd(89, 144));               # 1 (consecutive Fibonacci → coprime)
+```
+
+When an import has an alias, every function the module DEFINES gets renamed to `alias.fname` in the function table. Top-level statements still execute against the global namespace. Re-importing the same path is idempotent (deduped on path, not on alias).
+
+The module resolver gained literal-path support — `import "/abs/path.omc"` and `import "./local.omc"` now work without `OMC_STDLIB_PATH` setup. Still falls back to search-path resolution for short names like `import core` or `import std/io`.
+
+The dotted-call dispatch in `call_module_function` now checks for the full `module.fname` in the user function table BEFORE splitting at `.` and delegating. Otherwise we'd infinite-loop: `call_function("math.fib") → call_module_function("math", "fib") → call_function("math.fib") → …`. Fixed at the entry to `call_function` (check exact name before splitting).
+
+Two new example files:
+- `examples/math_module.omc` — a reusable utility module with `fib_up_to`, `cube_root`, `sum_range`, `euclid_gcd`.
+- `examples/module_demo.omc` — demonstrates `import as` usage and idempotent re-import.
+
+#### Track 3 — Benchmark suite (`examples/benchmarks.omc`)
+
+OMC's first benchmark suite. Times common operations with `now_ms()` and reports per-operation nanoseconds. Run both ways:
+
+```sh
+./target/release/omnimcode-standalone examples/benchmarks.omc           # tree-walk
+OMC_VM=1 ./target/release/omnimcode-standalone examples/benchmarks.omc  # Rust VM
+```
+
+Sample output (tree-walk on a modern laptop):
+
+```
+======================================================================
+OMC Benchmark Suite — N ops, ms total, ns per op
+======================================================================
+int_add (sum 0..N)                200000 iters    89 ms      445 ns/op
+int_mul (sum i*3 0..N)            200000 iters   104 ms      520 ns/op
+str_concat (build N a's)           20000 iters    24 ms     1200 ns/op
+str_split + str_join               20000 iters    28 ms     1400 ns/op
+arr_push + arr_get walk             5000 iters   523 ms   104600 ns/op
+is_fibonacci 0..N                  50000 iters    19 ms      380 ns/op
+harmony_value 0..N                 50000 iters    20 ms      400 ns/op
+recursive fib(N)                      22 iters    53 ms  2409090 ns/op
+======================================================================
+```
+
+**Honest finding** revealed by the benchmark: `OMC_VM=1` produces nearly-identical numbers to tree-walk on this suite. Reason: benchmarks dispatch their bodies via the new `call(fn, args)` primitive, which routes user-function calls through `invoke_user_function` (tree-walk semantics). The VM advantage applies to **direct** `Op::Call` dispatch, not to reflective `call(...)` dispatch.
+
+That's exactly the kind of signal a benchmark suite should produce — concrete data about where the VM helps and where it doesn't. Future work could add a direct-call variant of the suite to isolate the VM hot path.
+
+#### VM gains a first-class-function-value fallback
+
+`Op::LoadVar` in the bytecode VM now falls back to checking `module.functions` AND the interpreter's function table when a name isn't a variable. This makes `arr_map(xs, bench_int_add)` work under `OMC_VM=1` — `bench_int_add` resolves as `Value::Function`. Tree-walk had this fallback already; the VM was missing it.
+
+Also: `main.rs` now calls `vm.interp_mut().register_user_functions(&statements)` before `vm.run_module(...)`, pre-populating the interpreter's function table with user-defined fn bodies so reflective dispatch (`call(name, args)`) can resolve them at runtime.
+
+#### Regression
+
+V.9b: ✓✓✓. H.5: 6/6 demos converge. test_runner: 5/6 (1 intentional failure). safe_keyword_host on both tree-walk and OMC_VM=1: identical output. The 9-site `locals` refactor touched a lot of code but no surface broke.
+
 ### Added (Closures + harmonic_hash/diff/dedupe + test runner — 15 new builtins, 2026-05-14)
 
 🎯 **Three more tracks land: closures over local scope, three new harmonic variants, and a built-in test runner.**

@@ -48,6 +48,9 @@ What this is **not**: a fast runtime, a production toolchain, a stable API, a de
 | OMNIcode harmonic variants — operations that USE the φ-math substrate | `examples/harmonic_variants.omc` | `harmonic_write_file` gates writes by resonance ≥ 0.5; `harmonic_sort` puts Fibonacci values first; `harmonic_split` chunks strings at φ-aligned word boundaries; `harmonic_partition` buckets by nearest attractor |
 | Closures over local scope (snapshot capture) | `examples/test_runner.omc` | `fn make_adder(n) { return fn(x) { return x + n; }; }` — partial application, currying, captured-state patterns |
 | Built-in test runner | `examples/test_runner.omc` | `fn test_*()` functions auto-discovered via `defined_functions()` and dispatched via `call(name, args)`. `assert_eq` / `assert_array_eq` etc. record failures in host-side state |
+| Mutable closures (Rc<RefCell> shared capture) | `examples/test_runner.omc` | Bank-account pattern: multiple closures from `make_account(100)` share the same `balance` binding; mutations propagate across all of them |
+| Module system with namespace aliasing | `examples/module_demo.omc` | `import "math_module.omc" as math` then `math.fib_up_to(100)` → `0,1,1,2,3,5,8,13,21,34,55,89`. Idempotent re-import; literal-path resolution |
+| Benchmark suite | `examples/benchmarks.omc` | Times `int_add` / `str_concat` / `arr_push` / `recursive fib(22)` / `is_fibonacci` etc. with per-op ns. Run with `OMC_VM=1` to compare against the bytecode VM |
 
 Run any of these with the binary built from this repo:
 

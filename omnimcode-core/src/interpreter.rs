@@ -7,7 +7,11 @@ use std::collections::{HashMap, HashSet};
 pub struct Interpreter {
     globals: HashMap<String, Value>,
     functions: HashMap<String, (Vec<String>, Vec<Statement>)>,
-    locals: Vec<HashMap<String, Value>>,
+    /// Local scope stack. Each frame is `Rc<RefCell<HashMap>>` so that
+    /// closures can capture the frame by reference (shared mutation
+    /// across sibling closures created in the same scope) and so that
+    /// captured frames stay alive after the enclosing function returns.
+    locals: Vec<std::rc::Rc<std::cell::RefCell<HashMap<String, Value>>>>,
     return_value: Option<Value>,
     break_flag: bool,
     continue_flag: bool,
@@ -44,7 +48,7 @@ impl Interpreter {
         Interpreter {
             globals: HashMap::new(),
             functions: HashMap::new(),
-            locals: vec![HashMap::new()],
+            locals: vec![std::rc::Rc::new(std::cell::RefCell::new(HashMap::new()))],
             return_value: None,
             break_flag: false,
             continue_flag: false,
@@ -94,7 +98,21 @@ impl Interpreter {
     }
 
     fn resolve_module(name: &str) -> Option<std::path::PathBuf> {
-        // Try each search dir with a few naming variants.
+        // 1. Literal path — if the argument looks like a file path
+        //    (absolute, or starts with `./` or `../`, or already ends
+        //    in `.omc`), try it directly. Lets `import "/abs/path.omc"`
+        //    and `import "./local.omc"` work without search-path setup.
+        let looks_like_path = name.starts_with('/')
+            || name.starts_with("./")
+            || name.starts_with("../")
+            || name.ends_with(".omc");
+        if looks_like_path {
+            let path = std::path::PathBuf::from(name);
+            if path.is_file() {
+                return Some(path);
+            }
+        }
+        // 2. Try each search dir with a few naming variants.
         // For `import std/core;` allow the slashed form too.
         for dir in Self::module_search_path() {
             for variant in [
@@ -112,6 +130,21 @@ impl Interpreter {
     }
 
     fn import_module(&mut self, name: &str) -> Result<(), String> {
+        self.import_module_with_alias(name, None)
+    }
+
+    /// Load a module from disk. If `alias` is `Some(prefix)`, every
+    /// function the module DEFINES gets renamed to `prefix.fname` so
+    /// the importer reaches it via dotted-call syntax. Top-level
+    /// statements still execute against the global namespace (any
+    /// `h x = ...` declarations remain unprefixed) — only function
+    /// definitions get namespaced.
+    ///
+    /// Idempotent on `name` regardless of alias — re-importing the
+    /// same module with a different alias would re-execute. The
+    /// dedup key is the module name; rename to a fresh module name
+    /// if you want a second copy.
+    fn import_module_with_alias(&mut self, name: &str, alias: Option<&str>) -> Result<(), String> {
         if self.imported_modules.contains(name) {
             return Ok(()); // Already loaded.
         }
@@ -130,12 +163,28 @@ impl Interpreter {
         let stmts = parser
             .parse()
             .map_err(|e| format!("import {}: parse error: {}", name, e))?;
+        // Snapshot which function names exist before module exec so we can
+        // identify the ones the module introduces. Anything new gets the
+        // alias prefix when `alias` is set.
+        let pre_fns: HashSet<String> = self.functions.keys().cloned().collect();
         for stmt in &stmts {
             self.execute_stmt(stmt)?;
-            // Don't propagate `return` / `break` / `continue` past module boundary.
             self.return_value = None;
             self.break_flag = false;
             self.continue_flag = false;
+        }
+        if let Some(prefix) = alias {
+            // Rename newly-defined functions to alias.name.
+            let new_names: Vec<String> = self.functions.keys()
+                .filter(|k| !pre_fns.contains(*k))
+                .cloned()
+                .collect();
+            for original in new_names {
+                if let Some(def) = self.functions.remove(&original) {
+                    let aliased = format!("{}.{}", prefix, original);
+                    self.functions.insert(aliased, def);
+                }
+            }
         }
         Ok(())
     }
@@ -177,7 +226,11 @@ impl Interpreter {
             }
             Statement::Assignment { name, value } => {
                 let val = self.eval_expr(value)?;
-                self.set_var(name.clone(), val);
+                // Assignment walks outward — finds existing binding in
+                // outer locals, captured closure envs, or globals. This
+                // is what makes `n = n + 1` inside a closure mutate the
+                // captured `n` instead of shadowing it.
+                self.assign_var(name.clone(), val);
                 Ok(())
             }
             Statement::IndexAssignment {
@@ -312,10 +365,12 @@ impl Interpreter {
                 self.continue_flag = true;
                 Ok(())
             }
-            Statement::Import { module, alias: _ } => {
-                // Alias is currently informational only — imports merge into a
-                // flat function namespace (matching canonical Python OMC).
-                self.import_module(module)
+            Statement::Import { module, alias } => {
+                // `import "foo"` flat-merges the module's functions into
+                // the global namespace.
+                // `import "foo" as math` namespaces them as math.fname so
+                // the caller reaches them via dotted-call syntax.
+                self.import_module_with_alias(module, alias.as_deref())
             }
             _ => Ok(()),
         }
@@ -598,6 +653,12 @@ impl Interpreter {
                 // that name in self.functions, return a Value::Function
                 // carrying both the name and the captured environment.
                 //
+                // The captured env is Rc<RefCell> so:
+                //   - mutations inside the closure persist across calls
+                //   - cloning the Value::Function shares the same env
+                //     (multiple references to the same closure see the
+                //     same mutable state)
+                //
                 // Anonymous-name collision avoidance is just a monotonic
                 // counter — single-threaded interpreter, so it's fine.
                 self.lambda_counter += 1;
@@ -606,16 +667,19 @@ impl Interpreter {
                     fn_name.clone(),
                     (params.clone(), body.clone()),
                 );
-                // Snapshot the *current* local scope. This is read-only
-                // closure semantics — captures values at lambda-creation
-                // time, mutations inside the closure don't leak.
-                let captured = self.locals
+                // Capture by REFERENCE — clone the Rc so the closure
+                // and the enclosing scope point to the same RefCell.
+                // Sibling closures in the same scope share state; mutations
+                // through any of them propagate to all. This is what makes
+                // the bank-account pattern (multiple methods over shared
+                // private state) work.
+                let env = self.locals
                     .last()
                     .cloned()
-                    .unwrap_or_default();
+                    .unwrap_or_else(|| std::rc::Rc::new(std::cell::RefCell::new(HashMap::new())));
                 Ok(Value::Function {
                     name: fn_name,
-                    captured: Some(captured),
+                    captured: Some(env),
                 })
             }
         }
@@ -688,10 +752,12 @@ impl Interpreter {
     /// hand as Values rather than Expressions.
     ///
     /// If the function value is a closure (carries a captured environment),
-    /// the captured scope is pushed BEFORE the args. The function body
-    /// will see captured bindings as free variables — that's the closure
-    /// semantics. Capture is read-only (snapshot); mutations inside the
-    /// closure don't leak back to the original scope.
+    /// the captured env is ATTACHED to the new scope frame via the
+    /// `closure_captures` parallel stack. Lookups for free variables
+    /// inside the body fall through to the env; assignments to captured
+    /// names mutate through the Rc<RefCell>. Mutations persist across
+    /// invocations of the same closure, and across multiple clones of
+    /// the same Value::Function (they share the Rc).
     fn call_first_class_function(&mut self, fn_value: &Value, args: Vec<Value>) -> Result<Value, String> {
         let (fn_name, captured) = match fn_value {
             Value::Function { name, captured } => (name.clone(), captured.clone()),
@@ -700,17 +766,14 @@ impl Interpreter {
                 "call_first_class_function: not a callable ({:?})", other
             )),
         };
-        // Stash args under synthetic names, then dispatch via call_function
-        // with Expression::Variable refs — mirrors vm_call_builtin's pattern.
-        // The captured scope (if any) is pushed first so its bindings sit
-        // under the synthetic-arg scope. Inside the fn body, locals from
-        // the args shadow any name conflict with the captured environment.
-        self.vm_push_scope();
-        if let Some(env) = captured {
-            for (k, v) in env {
-                self.vm_set_local(&k, v);
-            }
+        // Push the captured env as a frame FIRST (so it sits underneath
+        // the args/locals). Then push the args frame on top. Sibling
+        // closures share the same Rc → mutations propagate.
+        let pushed_env = captured.is_some();
+        if let Some(env_rc) = captured {
+            self.vm_push_closure_env(env_rc);
         }
+        self.vm_push_scope();
         let mut expr_args = Vec::with_capacity(args.len());
         for (i, v) in args.into_iter().enumerate() {
             let key = format!("__hof_arg_{}", i);
@@ -719,19 +782,25 @@ impl Interpreter {
         }
         let result = self.call_function(&fn_name, &expr_args);
         self.vm_pop_scope();
+        if pushed_env {
+            // Pop the closure env frame we pushed (must not let it grow
+            // unbounded across nested HOF calls).
+            self.locals.pop();
+        }
         result
     }
 
     fn call_function(&mut self, name: &str, args: &[Expression]) -> Result<Value, String> {
+        // Aliased imports register functions as literal "module.fname"
+        // keys in self.functions. Check that BEFORE the dot-split below,
+        // otherwise call_module_function would dispatch back here and
+        // infinite-loop on the same name.
+        if let Some((params, body)) = self.functions.get(name).cloned() {
+            return self.invoke_user_function(name, &params, &body, args);
+        }
         // Module-qualified calls (e.g., "phi.fold", "phi.res", "core.fib")
         if let Some((module, func)) = name.split_once('.') {
             return self.call_module_function(module, func, args);
-        }
-        // User-defined functions win over built-ins so that `import core;`
-        // can override built-in implementations with the canonical Phase 6
-        // versions. Match Python OMC behavior.
-        if let Some((params, body)) = self.functions.get(name).cloned() {
-            return self.invoke_user_function(name, &params, &body, args);
         }
         // Built-in functions
         match name {
@@ -2769,7 +2838,7 @@ impl Interpreter {
             ));
         }
 
-        self.locals.push(HashMap::new());
+        self.locals.push(std::rc::Rc::new(std::cell::RefCell::new(HashMap::new())));
         for (param, arg) in params.iter().zip(eval_args) {
             self.set_var(param.clone(), arg);
         }
@@ -2787,12 +2856,43 @@ impl Interpreter {
     }
 
     fn get_var(&self, name: &str) -> Option<Value> {
-        for scope in self.locals.iter().rev() {
-            if let Some(v) = scope.get(name) {
+        // Walk locals from inner to outer. Closure capture is achieved by
+        // pushing the captured env Rc as a frame in `call_first_class_function`,
+        // so the same walk handles both regular lexical lookup and closure
+        // free-variable resolution.
+        for scope_rc in self.locals.iter().rev() {
+            if let Some(v) = scope_rc.borrow().get(name) {
                 return Some(v.clone());
             }
         }
+        // Globals as last resort.
         self.globals.get(name).cloned()
+    }
+
+    /// Assignment semantics: walk outward looking for an EXISTING binding.
+    /// Found in any local frame → mutate there (which for a closure-shared
+    /// frame propagates to all holders of the Rc). Found in globals →
+    /// write there. Not found anywhere → write to innermost local
+    /// (implicit declaration).
+    ///
+    /// `h x = ...` (Statement::VarDecl) keeps using `set_var` directly so
+    /// declarations always create a new innermost-local binding.
+    fn assign_var(&mut self, name: String, value: Value) {
+        for scope_rc in self.locals.iter().rev() {
+            if scope_rc.borrow().contains_key(&name) {
+                scope_rc.borrow_mut().insert(name, value);
+                return;
+            }
+        }
+        if self.globals.contains_key(&name) {
+            self.globals.insert(name, value);
+            return;
+        }
+        // Fallback: write to innermost local (creates an implicit decl).
+        // OMC programs in the wild may rely on this; don't tighten.
+        if let Some(scope_rc) = self.locals.last() {
+            scope_rc.borrow_mut().insert(name, value);
+        }
     }
 
     /// Test helper: read a variable from outside the interpreter.
@@ -2806,7 +2906,7 @@ impl Interpreter {
     // Interpreter's scope stack + built-in stdlib without duplication.
 
     pub fn vm_push_scope(&mut self) {
-        self.locals.push(HashMap::new());
+        self.locals.push(std::rc::Rc::new(std::cell::RefCell::new(HashMap::new())));
     }
 
     pub fn vm_pop_scope(&mut self) {
@@ -2815,12 +2915,49 @@ impl Interpreter {
         }
     }
 
+    /// Push a captured closure environment as the next scope frame.
+    /// Multiple closures created in the same scope share the same Rc
+    /// so mutations propagate. Used by `call_first_class_function` to
+    /// install the closure's environment before binding args.
+    pub(crate) fn vm_push_closure_env(
+        &mut self,
+        env: std::rc::Rc<std::cell::RefCell<HashMap<String, Value>>>,
+    ) {
+        self.locals.push(env);
+    }
+
     pub fn vm_set_local(&mut self, name: &str, value: Value) {
         self.set_var(name.to_string(), value);
     }
 
+    /// Pre-register user function definitions into the interpreter's
+    /// function table. Used by the VM driver in main.rs when running
+    /// with OMC_VM=1: the VM has its own compiled function table in
+    /// the Module, but first-class function dispatch (via the `call`
+    /// builtin) routes through the interpreter, which needs to see
+    /// the same function bodies. Tree-walks the body if reached this
+    /// way; the user pays a slight cost for reflective dispatch in
+    /// VM mode, but the regular Op::Call path stays bytecode-fast.
+    pub fn register_user_functions(&mut self, statements: &[Statement]) {
+        for stmt in statements {
+            if let Statement::FunctionDef { name, params, body, .. } = stmt {
+                self.functions.insert(name.clone(), (params.clone(), body.clone()));
+            }
+        }
+    }
+
     pub fn vm_get_var(&self, name: &str) -> Option<Value> {
-        self.get_var(name)
+        // Variable lookup with function-table fallback — mirrors the
+        // tree-walker's Expression::Variable handling. Lets the bytecode
+        // VM resolve bare names as Value::Function for first-class
+        // function support (passing `bench_int_add` as a value, etc.).
+        if let Some(v) = self.get_var(name) {
+            return Some(v);
+        }
+        if self.functions.contains_key(name) || self.is_known_builtin(name) {
+            return Some(Value::Function { name: name.to_string(), captured: None });
+        }
+        None
     }
 
     /// Call a built-in (or user-defined) function with already-evaluated args.
@@ -2847,8 +2984,8 @@ impl Interpreter {
     }
 
     fn set_var(&mut self, name: String, value: Value) {
-        if let Some(scope) = self.locals.last_mut() {
-            scope.insert(name, value);
+        if let Some(scope_rc) = self.locals.last() {
+            scope_rc.borrow_mut().insert(name, value);
         }
     }
 
@@ -2891,9 +3028,19 @@ impl Interpreter {
                 let n = self.eval_expr(&args[0])?.to_int();
                 Ok(Value::HFloat(HInt::compute_him(n)))
             }
-            // Unknown module: fall through to the unqualified name.
-            // Lets `core.fib(n)` work after `import core;` without explicit module setup.
-            _ => self.call_function(func, args),
+            // Unknown module path. Try the dotted form as a literal
+            // user-function name FIRST — that's where aliased imports
+            // live (`import "math" as math` creates `math.fib` in
+            // self.functions). Fall through to unqualified `func` as a
+            // last resort so legacy `core.fib(...)` after a plain
+            // `import core;` still works.
+            _ => {
+                let full = format!("{}.{}", module, func);
+                if self.functions.contains_key(&full) {
+                    return self.call_function(&full, args);
+                }
+                self.call_function(func, args)
+            }
         }
     }
 

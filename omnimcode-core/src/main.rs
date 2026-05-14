@@ -71,6 +71,12 @@ fn execute_program(source: &str) -> Result<(), String> {
             eprint!("{}", omnimcode_core::disasm::disassemble_module(&module));
         }
         let mut vm = omnimcode_core::vm::Vm::new();
+        // Pre-register user function definitions into the VM's internal
+        // interpreter so the `call(fn, args)` builtin and other dynamic
+        // dispatch paths can resolve them. The VM still uses its own
+        // compiled function table for direct Op::Call dispatch; this
+        // duplication only kicks in for first-class function reflection.
+        vm.interp_mut().register_user_functions(&statements);
         vm.run_module(&module)?;
         return Ok(());
     }

@@ -1,0 +1,27 @@
+# =============================================================================
+# Module system demo — import-with-alias
+# =============================================================================
+# Run as:
+#   ./target/release/omnimcode-standalone examples/module_demo.omc
+# =============================================================================
+
+# Plain `import "path"` merges the module's functions into the global namespace.
+# `import "path" as alias` registers them as `alias.fname` so they're reached
+# via dotted-call syntax. Re-importing the same path is a no-op (idempotent).
+
+import "examples/math_module.omc" as math;
+
+# Every defined function in the module is reachable under `math.`:
+println(concat_many("First 100 Fibonacci numbers <= 100: ",
+                    arr_join(math.fib_up_to(100), ", ")));
+
+println(concat_many("sum_range(1, 10) = ", math.sum_range(1, 10)));
+println(concat_many("euclid_gcd(89, 144) = ", math.euclid_gcd(89, 144)));
+println(concat_many("cube_root(27) ≈ ", math.cube_root(27)));
+
+# Re-importing the same module is idempotent — no double-execute, no
+# namespace conflict, no extra cost. The dedup key is the module path
+# (not the alias), so a second import call returns immediately. If you
+# need two namespaces over the same code, point them at different files.
+import "examples/math_module.omc" as math;
+println("re-import was idempotent (no-op)");

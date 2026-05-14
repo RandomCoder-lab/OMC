@@ -305,15 +305,31 @@ These take ordinary operations and route them through the φ-math substrate. Any
 | `call(fn, args_arr)` | `function, array -> T` | Dispatch a function value (or function-name string) with an arbitrary argument list unpacked from an array. Lets the test runner invoke zero-arg tests; lets user code do dynamic-arity dispatch. |
 | `defined_functions()` | `-> array<string>` | Sorted array of all user-defined function names. Auto-generated `__lambda_N` anonymous functions are excluded. Used by the test runner to discover `test_*` functions. |
 
-Lambdas — `fn(params) { body }` expression form — capture the current local scope by VALUE (snapshot, not reference). Read-only closures over their environment. Mutable closures require shared refs and are future work.
+Lambdas — `fn(params) { body }` expression form — capture the enclosing local scope by REFERENCE (shared `Rc<RefCell>`). Multiple closures created in the same scope share state, and assignments to captured names propagate. Read-and-write closures.
 
 ```omc
-fn make_adder(n) {
-    return fn(x) { return x + n; };
+fn make_counter() {
+    h n = 0;
+    return fn() {
+        n = n + 1;
+        return n;
+    };
 }
-h add5 = make_adder(5);
-println(add5(10));    # 15
+h c = make_counter();
+println(c());    # 1
+println(c());    # 2
+println(c());    # 3
+
+# Multiple closures over shared state — bank account pattern:
+fn make_account(balance) {
+    h deposit  = fn(amount) { balance = balance + amount; return balance; };
+    h withdraw = fn(amount) { balance = balance - amount; return balance; };
+    h bal      = fn() { return balance; };
+    return [deposit, withdraw, bal];
+}
 ```
+
+VM caveat: lambdas execute via tree-walk, not the Rust bytecode VM. The VM's `OMC_VM=1` path bails with an error on `Expression::Lambda` because the bytecode VM has no captured-scope plumbing. Tree-walk works cleanly.
 
 ---
 
