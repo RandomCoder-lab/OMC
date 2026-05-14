@@ -189,6 +189,13 @@ pub enum Value {
         denominator: i64,
         context: String,
     },
+    /// First-class function reference (by name). Created when a Variable
+    /// expression resolves to a known function rather than a value binding.
+    /// Higher-order builtins (arr_map, arr_filter, arr_reduce) accept this
+    /// as their function argument; the interpreter calls back via the
+    /// function name. Closures over local scope are not yet supported —
+    /// the captured "function" is just its definition.
+    Function(String),
     Null,
 }
 
@@ -228,6 +235,9 @@ impl Value {
             // A singularity is truthy in the same sense as Python OMNIcode treats it:
             // `if is_singularity(result) == 1` is the standard test, not `if result`.
             Value::Singularity { .. } => true,
+            // A function reference is truthy — it represents a callable
+            // entity, like Python's `bool(some_fn)` returning True.
+            Value::Function(_) => true,
             Value::Null => false,
         }
     }
@@ -258,6 +268,7 @@ impl Value {
                     )
                 }
             }
+            Value::Function(name) => format!("<fn {}>", name),
         }
     }
 

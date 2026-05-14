@@ -4,6 +4,78 @@ All notable changes to OMNIcode will be documented in this file.
 
 ## [Unreleased]
 
+### Added (First-class functions + OMNIcode harmonic variants + polish round — 28 new built-ins, 2026-05-14)
+
+🎯 **Three coherent additions: language-level first-class function values, OMNIcode-flavored harmonic operations, and a polish round.**
+
+#### Track 1 — First-class functions
+
+`Value::Function(String)` is now a real Value variant. Bare function names in expression context resolve to a function-value (instead of erroring as undefined variable). The `is_known_builtin` set + `self.functions` HashMap handle the resolution; `call_first_class_function` dispatches a callable value back through `call_function` using synthetic-arg variables (same pattern as `vm_call_builtin`).
+
+Six higher-order array operations:
+
+| Function | Behavior |
+|---|---|
+| `arr_map(arr, fn)` | Apply fn to every element, collect results |
+| `arr_filter(arr, pred)` | Keep elements where pred is truthy |
+| `arr_reduce(arr, fn, init)` | Left fold: `fn(acc, elem) -> acc` |
+| `arr_any(arr, pred)` | 1 if any element passes; short-circuits |
+| `arr_all(arr, pred)` | 1 if every element passes; short-circuits |
+| `arr_find(arr, pred)` | First element passing pred, else `null` |
+
+Both user-defined functions AND built-ins work as callable values:
+
+```omc
+fn double(x) { return x * 2; }
+print(arr_join(arr_map(xs, double), ","));        # 2,4,6,10,16
+
+# Pass a built-in by name:
+print(arr_join(arr_map(fibs, is_fibonacci), ","));    # 1,0,1,0,1,1
+```
+
+The captured "function" is its definition, not a closure over local scope — proper closures are future work. Acceptable trade for the win in expressiveness.
+
+#### Track 2 — OMNIcode harmonic variants
+
+The architecturally distinctive piece. **Anyone can write a file; these write harmonically** — operations that route through the φ-math substrate to make decisions ordinary versions handle naively.
+
+- **`harmonic_checksum(s)`** — resonance signature of a string. Sum over each char's codepoint resonance. Two strings with the same checksum are harmonically equivalent.
+- **`harmonic_write_file(path, content)`** — atomic write with a resonance gate. Computes content's mean per-char resonance; commits via tmp+rename if score ≥ 0.5; rejects (returns negative score) below the gate. The 0.5 threshold matches `value_danger`'s danger boundary — below that, content is "dangerous" by the substrate's own definition.
+- **`harmonic_read_file(path)`** — returns `[content, mean_resonance]` so callers can see the harmonic score alongside content and decide whether to trust it.
+- **`harmonic_sort(arr)`** — sort by `harmony_value` of each element **descending**. Pure Fibonacci values lead; off-grid sinks. Different from `arr_sort` which orders by NATURAL value. Demo: `[100, 89, 50, 144, 7, 233, 99] → [89, 144, 233, 50, 99, 100, 7]`.
+- **`harmonic_split(s)`** — chunk a string at Fibonacci-aligned word boundaries. Splits a 65-char string into `[57 chars, 8 chars]` (close to 55+8 with word-boundary walk). Useful for φ-aligned line wrapping and packet sizing.
+- **`harmonic_partition(arr)`** — group elements by nearest Fibonacci attractor. Returns outer array of buckets in attractor order. Use for distribution analysis along the φ-grid.
+
+#### Track 3 — Polish round
+
+Eight workhorse additions every Python user reaches for:
+
+- `random_int(lo, hi)`, `random_float()`, `random_seed(s)` — xorshift64* PRNG, deterministic with `random_seed`. Not cryptographic.
+- `println(x)` — like `print` but uses Display formatting (no `HInt(...)` scaffolding). The original `print` is preserved for debug-format introspection.
+- `print_raw(x)` — same as `println` but no trailing newline. Pairs for progress-line patterns.
+- `str_pad_left(s, width, ch)` / `str_pad_right(s, width, ch)` — table formatting.
+- `arr_zip(a, b)` — pair elements positionally as `[a_i, b_i]`; shorter array sets length.
+- `arr_unique(arr)` — dedupe preserving first-occurrence order. Type-aware equality via the existing `values_equal` helper.
+
+#### Documentation
+
+- `STDLIB.md` — comprehensive reference for every built-in is now updated with the 28 new functions across all three tracks. Total stdlib surface is now ~135 named builtins plus `print` as a statement keyword.
+- Three new test files: `examples/harmonic_variants.omc`, `examples/polish_round.omc`, plus updates to the existing patterns. Each test exercises its track's surface with expected outputs in inline comments.
+
+#### Architectural note: Interpreter state grows
+
+Adding random required interior state on the Interpreter struct (`rng_state: Cell<u64>`, xorshift64*, seeded from system nanos at construction). This is the **first** mutable-but-non-scope state we've added since Phase O. Kept it minimal — `Cell<u64>` not `Mutex` because the interpreter is single-threaded.
+
+#### Verification
+
+All existing demos pass without regression:
+- V.9b: ✓✓✓ ALL THREE FIXPOINTS REACHED
+- H.5: 6/6 demos converge
+- safe_keyword_host.omc: identical on tree-walk and OMC_VM=1
+- stdlib_expansion.omc: identical on tree-walk and OMC_VM=1
+- harmonic_variants.omc: all sections produce expected outputs
+- polish_round.omc: `random_seed(42)` produces identical sequence across reseeds (determinism verified)
+
 ### Added (Standard library expansion — 16 new built-ins, 2026-05-14)
 
 🎯 **`examples/stdlib_expansion.omc` + `STDLIB.md` — OMC's standard library now covers the common workflows developers reach for instead of writing from scratch.**

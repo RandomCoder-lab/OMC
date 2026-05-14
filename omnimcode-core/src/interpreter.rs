@@ -13,10 +13,20 @@ pub struct Interpreter {
     continue_flag: bool,
     /// Names of modules already imported (idempotent re-import).
     imported_modules: HashSet<String>,
+    /// xorshift64* RNG state for random_* builtins. Seeded from system
+    /// time at construction; `random_seed(s)` overrides for deterministic
+    /// runs. State is never 0 (xorshift degenerates at 0).
+    rng_state: std::cell::Cell<u64>,
 }
 
 impl Interpreter {
     pub fn new() -> Self {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let seed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0x9E3779B97F4A7C15);  // golden-ratio constant fallback
+        let initial = if seed == 0 { 0x9E3779B97F4A7C15 } else { seed };
         Interpreter {
             globals: HashMap::new(),
             functions: HashMap::new(),
@@ -25,7 +35,19 @@ impl Interpreter {
             break_flag: false,
             continue_flag: false,
             imported_modules: HashSet::new(),
+            rng_state: std::cell::Cell::new(initial),
         }
+    }
+
+    /// xorshift64* — fast and tiny, sufficient for OMC scripting needs.
+    /// Not cryptographic. Returns a non-zero u64.
+    fn rng_next(&self) -> u64 {
+        let mut x = self.rng_state.get();
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.rng_state.set(x);
+        x.wrapping_mul(0x2545F4914F6CDD1D)
     }
 
     /// Module search path used by `import NAME;`.
@@ -305,7 +327,24 @@ impl Interpreter {
                 }
                 Ok(Value::Array(HArray { items }))
             }
-            Expression::Variable(name) => self.get_var(name).ok_or_else(|| format!("Undefined variable: {}", name)),
+            Expression::Variable(name) => {
+                // First try variable lookup. If missing, fall back to the
+                // function table — bare function names become first-class
+                // values (Value::Function) so they can be passed to
+                // higher-order builtins like arr_map / arr_filter / arr_reduce.
+                // Built-ins are also reachable this way; the dispatch in
+                // call_first_class_function tries user fns first, then
+                // routes anything else through call_function.
+                if let Some(v) = self.get_var(name) {
+                    Ok(v)
+                } else if self.functions.contains_key(name) {
+                    Ok(Value::Function(name.clone()))
+                } else if self.is_known_builtin(name) {
+                    Ok(Value::Function(name.clone()))
+                } else {
+                    Err(format!("Undefined variable: {}", name))
+                }
+            }
             Expression::Index { name, index } => {
                 let idx = self.eval_expr(index)?.to_int() as usize;
                 if let Some(Value::Array(arr)) = self.get_var(name) {
@@ -537,6 +576,87 @@ impl Interpreter {
                 }
             }
         }
+    }
+
+    /// First-class function support — quick membership test against the
+    /// known builtin name set. Used by Expression::Variable evaluation to
+    /// decide whether a bare name should resolve to Value::Function rather
+    /// than erroring with "Undefined variable".
+    ///
+    /// Kept as a static match rather than a HashSet so the compiler can
+    /// fold the lookup into a single jump table. Add new builtins here
+    /// when you add them to the call_function dispatch.
+    fn is_known_builtin(&self, name: &str) -> bool {
+        matches!(name,
+            // Numbers & math
+            "abs" | "min" | "max" | "sign" | "floor" | "ceil" | "round" | "frac"
+            | "gcd" | "lcm" | "square" | "cube" | "pow" | "pow_int" | "sqrt"
+            | "factorial" | "is_even" | "even" | "is_odd" | "odd" | "is_prime"
+            | "sin" | "cos" | "tan" | "tanh" | "exp" | "log" | "erf" | "sigmoid"
+            | "clamp" | "pi" | "tau" | "e" | "phi" | "phi_inv" | "phi_sq"
+            | "phi_squared" | "sqrt_2" | "sqrt_5" | "ln_2"
+            // Strings
+            | "str_len" | "str_chars" | "str_slice" | "str_concat" | "concat_many"
+            | "str_split" | "str_join" | "str_trim" | "str_replace"
+            | "str_index_of" | "str_contains" | "str_starts_with" | "str_ends_with"
+            | "str_repeat" | "str_reverse" | "str_uppercase" | "str_lowercase"
+            // Arrays
+            | "arr_new" | "arr_from_range" | "arr_len" | "arr_get" | "arr_set"
+            | "arr_push" | "arr_first" | "arr_last" | "arr_slice" | "arr_concat"
+            | "arr_contains" | "arr_index_of" | "arr_sort" | "arr_reverse" | "arr_join"
+            | "arr_min" | "arr_max" | "arr_sum" | "arr_fold_elements"
+            | "arr_resonance" | "filter_by_resonance" | "cleanup_array"
+            | "arr_map" | "arr_filter" | "arr_reduce"
+            | "arr_any" | "arr_all" | "arr_find"
+            // Harmonic primitives
+            | "fib" | "fibonacci" | "is_fibonacci" | "harmony_value" | "fold"
+            | "fold_escape" | "value_danger" | "classify_resonance"
+            | "harmonic_interfere" | "interfere" | "measure_coherence"
+            | "mean_omni_weight" | "boundary" | "res"
+            // OMNIcode harmonic variants
+            | "harmonic_checksum" | "harmonic_write_file" | "harmonic_read_file"
+            | "harmonic_sort" | "harmonic_split" | "harmonic_partition"
+            // Self-healing
+            | "safe_divide" | "safe_arr_get" | "safe_arr_set"
+            | "safe_add" | "safe_sub" | "safe_mul" | "resolve_singularity"
+            | "is_singularity" | "ensure_clean" | "collapse" | "invert"
+            | "quantize" | "quantization_ratio"
+            // I/O
+            | "read_file" | "write_file" | "file_exists" | "print"
+            | "println" | "print_raw"
+            // Time, conversion, introspection
+            | "now_ms" | "to_int" | "int" | "to_float" | "float"
+            | "to_string" | "string" | "len" | "type_of"
+            // Random
+            | "random_int" | "random_float" | "random_seed"
+            // Polish round
+            | "str_pad_left" | "str_pad_right" | "arr_zip" | "arr_unique"
+        )
+    }
+
+    /// Invoke a Value::Function with already-evaluated argument values.
+    /// Used by higher-order builtins (arr_map etc.) that have the args in
+    /// hand as Values rather than Expressions.
+    fn call_first_class_function(&mut self, fn_value: &Value, args: Vec<Value>) -> Result<Value, String> {
+        let fn_name = match fn_value {
+            Value::Function(name) => name.clone(),
+            Value::String(name) => name.clone(),  // accept string form too
+            other => return Err(format!(
+                "call_first_class_function: not a callable ({:?})", other
+            )),
+        };
+        // Stash args under synthetic names, then dispatch via call_function
+        // with Expression::Variable refs — mirrors vm_call_builtin's pattern.
+        self.vm_push_scope();
+        let mut expr_args = Vec::with_capacity(args.len());
+        for (i, v) in args.into_iter().enumerate() {
+            let key = format!("__hof_arg_{}", i);
+            self.vm_set_local(&key, v);
+            expr_args.push(Expression::Variable(key));
+        }
+        let result = self.call_function(&fn_name, &expr_args);
+        self.vm_pop_scope();
+        result
     }
 
     fn call_function(&mut self, name: &str, args: &[Expression]) -> Result<Value, String> {
@@ -1667,6 +1787,120 @@ impl Interpreter {
                     Err("arr_join: first argument must be an array".to_string())
                 }
             }
+            // Higher-order array operations — require first-class function
+            // values. Pass a function name as a bare identifier (preferred)
+            // or as a string literal:
+            //   arr_map(xs, double)        — bare name (Value::Function)
+            //   arr_map(xs, "double")      — string form, also works
+            // The function is invoked once per element; results collected.
+            "arr_map" => {
+                if args.len() < 2 {
+                    return Err("arr_map requires (array, function)".to_string());
+                }
+                let arr_v = self.eval_expr(&args[0])?;
+                let fn_v = self.eval_expr(&args[1])?;
+                if let Value::Array(arr) = arr_v {
+                    let mut out = Vec::with_capacity(arr.items.len());
+                    for item in arr.items {
+                        let mapped = self.call_first_class_function(&fn_v, vec![item])?;
+                        out.push(mapped);
+                    }
+                    Ok(Value::Array(HArray { items: out }))
+                } else {
+                    Err("arr_map: first argument must be an array".to_string())
+                }
+            }
+            "arr_filter" => {
+                if args.len() < 2 {
+                    return Err("arr_filter requires (array, predicate)".to_string());
+                }
+                let arr_v = self.eval_expr(&args[0])?;
+                let fn_v = self.eval_expr(&args[1])?;
+                if let Value::Array(arr) = arr_v {
+                    let mut out = Vec::new();
+                    for item in arr.items {
+                        let kept = self.call_first_class_function(&fn_v, vec![item.clone()])?;
+                        if kept.to_bool() {
+                            out.push(item);
+                        }
+                    }
+                    Ok(Value::Array(HArray { items: out }))
+                } else {
+                    Err("arr_filter: first argument must be an array".to_string())
+                }
+            }
+            "arr_reduce" => {
+                // reduce(arr, fn, init) — function receives (accumulator, item)
+                // and returns the new accumulator. Left fold.
+                if args.len() < 3 {
+                    return Err("arr_reduce requires (array, function, initial)".to_string());
+                }
+                let arr_v = self.eval_expr(&args[0])?;
+                let fn_v = self.eval_expr(&args[1])?;
+                let mut acc = self.eval_expr(&args[2])?;
+                if let Value::Array(arr) = arr_v {
+                    for item in arr.items {
+                        acc = self.call_first_class_function(&fn_v, vec![acc, item])?;
+                    }
+                    Ok(acc)
+                } else {
+                    Err("arr_reduce: first argument must be an array".to_string())
+                }
+            }
+            "arr_any" => {
+                // Returns 1 if predicate is truthy for any element, else 0.
+                // Short-circuits on first true.
+                if args.len() < 2 {
+                    return Err("arr_any requires (array, predicate)".to_string());
+                }
+                let arr_v = self.eval_expr(&args[0])?;
+                let fn_v = self.eval_expr(&args[1])?;
+                if let Value::Array(arr) = arr_v {
+                    for item in arr.items {
+                        if self.call_first_class_function(&fn_v, vec![item])?.to_bool() {
+                            return Ok(Value::HInt(HInt::new(1)));
+                        }
+                    }
+                    Ok(Value::HInt(HInt::new(0)))
+                } else {
+                    Err("arr_any: first argument must be an array".to_string())
+                }
+            }
+            "arr_all" => {
+                if args.len() < 2 {
+                    return Err("arr_all requires (array, predicate)".to_string());
+                }
+                let arr_v = self.eval_expr(&args[0])?;
+                let fn_v = self.eval_expr(&args[1])?;
+                if let Value::Array(arr) = arr_v {
+                    for item in arr.items {
+                        if !self.call_first_class_function(&fn_v, vec![item])?.to_bool() {
+                            return Ok(Value::HInt(HInt::new(0)));
+                        }
+                    }
+                    Ok(Value::HInt(HInt::new(1)))
+                } else {
+                    Err("arr_all: first argument must be an array".to_string())
+                }
+            }
+            "arr_find" => {
+                // Returns the first element where predicate is true, else Null.
+                if args.len() < 2 {
+                    return Err("arr_find requires (array, predicate)".to_string());
+                }
+                let arr_v = self.eval_expr(&args[0])?;
+                let fn_v = self.eval_expr(&args[1])?;
+                if let Value::Array(arr) = arr_v {
+                    for item in arr.items {
+                        if self.call_first_class_function(&fn_v, vec![item.clone()])?.to_bool() {
+                            return Ok(item);
+                        }
+                    }
+                    Ok(Value::Null)
+                } else {
+                    Err("arr_find: first argument must be an array".to_string())
+                }
+            }
             // File I/O — basic synchronous reads and writes.
             // Error semantics: read_file returns the error message as the
             // error path so callers can pattern-match; write_file returns
@@ -1761,6 +1995,365 @@ impl Interpreter {
                     .map(|d| d.as_millis() as i64)
                     .unwrap_or(0);
                 Ok(Value::HInt(HInt::new(ms)))
+            }
+            // Random — xorshift64* via the interpreter's RNG state.
+            // random_seed(s) for deterministic runs; otherwise seeded from
+            // system nanos at interpreter construction.
+            "random_int" => {
+                // random_int(lo, hi) — inclusive on both ends. Returns lo
+                // if hi <= lo (graceful fallback rather than error).
+                if args.len() < 2 {
+                    return Err("random_int requires (lo, hi)".to_string());
+                }
+                let lo = self.eval_expr(&args[0])?.to_int();
+                let hi = self.eval_expr(&args[1])?.to_int();
+                if hi <= lo {
+                    return Ok(Value::HInt(HInt::new(lo)));
+                }
+                let range = (hi - lo + 1) as u64;
+                let r = self.rng_next() % range;
+                Ok(Value::HInt(HInt::new(lo + r as i64)))
+            }
+            "random_float" => {
+                // Uniform float in [0.0, 1.0). No args.
+                let r = self.rng_next();
+                let f = (r >> 11) as f64 / (1u64 << 53) as f64;
+                Ok(Value::HFloat(f))
+            }
+            "random_seed" => {
+                if args.is_empty() {
+                    return Err("random_seed requires (seed)".to_string());
+                }
+                let seed = self.eval_expr(&args[0])?.to_int() as u64;
+                let initial = if seed == 0 { 0x9E3779B97F4A7C15 } else { seed };
+                self.rng_state.set(initial);
+                Ok(Value::HInt(HInt::new(seed as i64)))
+            }
+            // String padding — common formatting workhorses.
+            "str_pad_left" => {
+                if args.len() < 3 {
+                    return Err("str_pad_left requires (string, width, pad_char)".to_string());
+                }
+                let s = self.eval_expr(&args[0])?.to_string();
+                let width = self.eval_expr(&args[1])?.to_int().max(0) as usize;
+                let pad = self.eval_expr(&args[2])?.to_string();
+                let pad_char = pad.chars().next().unwrap_or(' ');
+                let len = s.chars().count();
+                if len >= width {
+                    return Ok(Value::String(s));
+                }
+                let padding: String = std::iter::repeat(pad_char).take(width - len).collect();
+                Ok(Value::String(format!("{}{}", padding, s)))
+            }
+            "str_pad_right" => {
+                if args.len() < 3 {
+                    return Err("str_pad_right requires (string, width, pad_char)".to_string());
+                }
+                let s = self.eval_expr(&args[0])?.to_string();
+                let width = self.eval_expr(&args[1])?.to_int().max(0) as usize;
+                let pad = self.eval_expr(&args[2])?.to_string();
+                let pad_char = pad.chars().next().unwrap_or(' ');
+                let len = s.chars().count();
+                if len >= width {
+                    return Ok(Value::String(s));
+                }
+                let padding: String = std::iter::repeat(pad_char).take(width - len).collect();
+                Ok(Value::String(format!("{}{}", s, padding)))
+            }
+            // arr_zip — pair elements positionally. Returns array of
+            // [a_i, b_i] pairs; shorter array determines length.
+            "arr_zip" => {
+                if args.len() < 2 {
+                    return Err("arr_zip requires (array_a, array_b)".to_string());
+                }
+                let a = self.eval_expr(&args[0])?;
+                let b = self.eval_expr(&args[1])?;
+                match (a, b) {
+                    (Value::Array(aa), Value::Array(bb)) => {
+                        let len = aa.items.len().min(bb.items.len());
+                        let pairs: Vec<Value> = (0..len).map(|i| {
+                            Value::Array(HArray {
+                                items: vec![aa.items[i].clone(), bb.items[i].clone()],
+                            })
+                        }).collect();
+                        Ok(Value::Array(HArray { items: pairs }))
+                    }
+                    _ => Err("arr_zip: both arguments must be arrays".to_string()),
+                }
+            }
+            // arr_unique — dedupe preserving first occurrence order.
+            // Equality follows the existing values_equal helper used by
+            // arr_contains, so it's type-aware.
+            "arr_unique" => {
+                if args.is_empty() {
+                    return Err("arr_unique requires (array)".to_string());
+                }
+                if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                    let mut seen: Vec<Value> = Vec::new();
+                    for v in arr.items {
+                        let dup = seen.iter().any(|s| values_equal(s, &v));
+                        if !dup {
+                            seen.push(v);
+                        }
+                    }
+                    Ok(Value::Array(HArray { items: seen }))
+                } else {
+                    Err("arr_unique: argument must be an array".to_string())
+                }
+            }
+            // println — like print but uses display formatting for HInt
+            // (no φ/HIM scaffolding). Closer to what most users want when
+            // they reach for "print" in a Python/JS-shaped mental model.
+            // The original `print` is preserved as a statement keyword for
+            // debug-format introspection.
+            "println" => {
+                if args.is_empty() {
+                    println!();
+                    return Ok(Value::Null);
+                }
+                let v = self.eval_expr(&args[0])?;
+                let s = match &v {
+                    Value::HInt(h) => h.value.to_string(),
+                    Value::HFloat(f) => format!("{}", f),
+                    Value::String(s) => s.clone(),
+                    Value::Bool(b) => b.to_string(),
+                    other => other.to_string(),
+                };
+                println!("{}", s);
+                Ok(Value::Null)
+            }
+            // print_raw — same as println but no trailing newline. Pairs.
+            "print_raw" => {
+                if args.is_empty() {
+                    return Ok(Value::Null);
+                }
+                let v = self.eval_expr(&args[0])?;
+                let s = match &v {
+                    Value::HInt(h) => h.value.to_string(),
+                    Value::HFloat(f) => format!("{}", f),
+                    Value::String(s) => s.clone(),
+                    Value::Bool(b) => b.to_string(),
+                    other => other.to_string(),
+                };
+                use std::io::Write;
+                print!("{}", s);
+                let _ = std::io::stdout().flush();
+                Ok(Value::Null)
+            }
+            // =================================================================
+            // OMNIcode harmonic variants — operations that USE the φ-math
+            // substrate to make decisions ordinary versions handle naively.
+            // Anyone can write a file; these write harmonically.
+            // =================================================================
+            "harmonic_checksum" => {
+                // Resonance signature of a string. Sum over each char's
+                // codepoint resonance — a scalar that's stable under
+                // character-set-equivalent rewrites and useful for
+                // dedup/diff at the harmonic level rather than byte level.
+                if args.is_empty() {
+                    return Err("harmonic_checksum requires 1 argument".to_string());
+                }
+                let s = self.eval_expr(&args[0])?.to_string();
+                let total: f64 = s.chars()
+                    .map(|c| HInt::compute_resonance(c as i64))
+                    .sum();
+                Ok(Value::HFloat(total))
+            }
+            "harmonic_write_file" => {
+                // Atomic write with a resonance gate. Writes content to
+                // a sibling temp path, computes the content's harmonic
+                // checksum (mean per-char resonance), and rename-commits
+                // only if the score clears 0.5 — the same threshold
+                // value_danger uses. Below that, the write is rolled
+                // back: the temp file is removed and the original target
+                // (if any) is untouched.
+                //
+                // Returns the harmonic score (HFloat) on success. On
+                // disharmonic content, returns negative score to signal
+                // rejection — callers can check `if score < 0`.
+                //
+                // The threshold floor (0.5) matches fold_escape's
+                // danger boundary. Below it, content is "dangerous" by
+                // the substrate's own definition.
+                if args.len() < 2 {
+                    return Err("harmonic_write_file requires (path, content)".to_string());
+                }
+                let path = self.eval_expr(&args[0])?.to_string();
+                let content = self.eval_expr(&args[1])?.to_string();
+                let chars: Vec<char> = content.chars().collect();
+                let n = chars.len();
+                let mean_resonance = if n == 0 {
+                    0.0
+                } else {
+                    let total: f64 = chars.iter()
+                        .map(|c| HInt::compute_resonance(*c as i64))
+                        .sum();
+                    total / (n as f64)
+                };
+                if mean_resonance < 0.5 {
+                    // Disharmonic content rejected — return negative
+                    // score so callers can detect.
+                    return Ok(Value::HFloat(-mean_resonance));
+                }
+                // Atomic commit via temp + rename.
+                let tmp_path = format!("{}.tmp.{}", path, std::process::id());
+                if let Err(e) = std::fs::write(&tmp_path, &content) {
+                    return Err(format!("harmonic_write_file({}): tmp write failed: {}", path, e));
+                }
+                if let Err(e) = std::fs::rename(&tmp_path, &path) {
+                    let _ = std::fs::remove_file(&tmp_path);
+                    return Err(format!("harmonic_write_file({}): rename failed: {}", path, e));
+                }
+                Ok(Value::HFloat(mean_resonance))
+            }
+            "harmonic_read_file" => {
+                // Read a file and return [content, mean_resonance] so the
+                // caller can see the harmonic score alongside the content
+                // and decide whether to trust it. The mean resonance is
+                // computed the same way harmonic_write_file gates writes,
+                // so the contract is symmetric.
+                if args.is_empty() {
+                    return Err("harmonic_read_file requires (path)".to_string());
+                }
+                let path = self.eval_expr(&args[0])?.to_string();
+                let content = std::fs::read_to_string(&path)
+                    .map_err(|e| format!("harmonic_read_file({}): {}", path, e))?;
+                let chars: Vec<char> = content.chars().collect();
+                let n = chars.len();
+                let mean = if n == 0 {
+                    0.0
+                } else {
+                    let total: f64 = chars.iter()
+                        .map(|c| HInt::compute_resonance(*c as i64))
+                        .sum();
+                    total / (n as f64)
+                };
+                Ok(Value::Array(HArray {
+                    items: vec![Value::String(content), Value::HFloat(mean)],
+                }))
+            }
+            "harmonic_sort" => {
+                // Sort by harmony_value (φ-resonance) descending — highest
+                // resonance bubbles to the front. Strings sort by mean
+                // char-resonance. Non-numeric, non-string values sink to
+                // the end via 0.0 score (still total ordering).
+                //
+                // This is genuinely different from arr_sort: arr_sort
+                // orders by NATURAL value (1 < 2 < 3); harmonic_sort
+                // orders by φ-alignment (89 outranks 90 outranks 100).
+                if args.is_empty() {
+                    return Err("harmonic_sort requires 1 argument".to_string());
+                }
+                if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                    let scored: Vec<(f64, Value)> = arr.items.into_iter().map(|v| {
+                        let score = match &v {
+                            Value::HInt(h) => h.resonance,
+                            Value::HFloat(f) => HInt::compute_resonance(*f as i64),
+                            Value::String(s) => {
+                                let chars: Vec<char> = s.chars().collect();
+                                if chars.is_empty() { 0.0 } else {
+                                    let total: f64 = chars.iter()
+                                        .map(|c| HInt::compute_resonance(*c as i64))
+                                        .sum();
+                                    total / (chars.len() as f64)
+                                }
+                            }
+                            _ => 0.0,
+                        };
+                        (score, v)
+                    }).collect();
+                    let mut items_scored = scored;
+                    items_scored.sort_by(|a, b| {
+                        b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    Ok(Value::Array(HArray {
+                        items: items_scored.into_iter().map(|(_, v)| v).collect(),
+                    }))
+                } else {
+                    Err("harmonic_sort: argument must be an array".to_string())
+                }
+            }
+            "harmonic_split" => {
+                // Split a string into chunks whose sizes are nearest-
+                // Fibonacci to a natural division at word boundaries.
+                // For a string of length N, the chunk sizes are chosen
+                // greedily: take the largest Fibonacci ≤ remaining-chars,
+                // walk forward to find the nearest word boundary (space),
+                // emit that chunk, continue from there.
+                //
+                // Useful for layout: line-wrap at φ-aligned widths;
+                // chunked transmission with harmonic packet sizes; etc.
+                if args.is_empty() {
+                    return Err("harmonic_split requires (string)".to_string());
+                }
+                let s = self.eval_expr(&args[0])?.to_string();
+                let chars: Vec<char> = s.chars().collect();
+                let n = chars.len();
+                let fibs: [usize; 14] = [1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610];
+                let mut chunks: Vec<Value> = Vec::new();
+                let mut pos = 0;
+                while pos < n {
+                    let remaining = n - pos;
+                    // Largest Fibonacci ≤ remaining
+                    let target = fibs.iter().rev().find(|&&f| f <= remaining).copied().unwrap_or(1);
+                    let mut end = (pos + target).min(n);
+                    // Walk to nearest word boundary if mid-word and not at EOS
+                    if end < n {
+                        // Search forward up to +5 chars for a space
+                        let mut e = end;
+                        while e < n && e < end + 5 && chars[e] != ' ' && chars[e] != '\n' {
+                            e += 1;
+                        }
+                        if e < n && (chars[e] == ' ' || chars[e] == '\n') {
+                            end = e;
+                        }
+                    }
+                    let chunk: String = chars[pos..end].iter().collect();
+                    chunks.push(Value::String(chunk));
+                    pos = end;
+                    // Skip the boundary space so it doesn't open the next chunk
+                    if pos < n && (chars[pos] == ' ' || chars[pos] == '\n') {
+                        pos += 1;
+                    }
+                }
+                Ok(Value::Array(HArray { items: chunks }))
+            }
+            "harmonic_partition" => {
+                // Group array elements by the Fibonacci attractor nearest
+                // their value. Returns an array of arrays — one bucket
+                // per attractor that received any elements, in attractor
+                // order. Each bucket holds the original elements (not
+                // their attractor labels).
+                //
+                // Use for: distribution analysis ("how clumpy is this
+                // dataset around the Fibonacci spine?"), histogramming
+                // along the φ-grid, generative composition partitioning.
+                if args.is_empty() {
+                    return Err("harmonic_partition requires (array)".to_string());
+                }
+                if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                    let fibs: [i64; 15] = [
+                        0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610,
+                    ];
+                    use std::collections::BTreeMap;
+                    let mut buckets: BTreeMap<i64, Vec<Value>> = BTreeMap::new();
+                    for v in arr.items {
+                        let n = v.to_int();
+                        let abs_n = n.abs();
+                        let nearest = fibs.iter()
+                            .min_by_key(|f| (**f - abs_n).abs())
+                            .copied()
+                            .unwrap_or(0);
+                        let key = if n < 0 { -nearest } else { nearest };
+                        buckets.entry(key).or_insert_with(Vec::new).push(v);
+                    }
+                    let outer: Vec<Value> = buckets.into_iter().map(|(_, items)| {
+                        Value::Array(HArray { items })
+                    }).collect();
+                    Ok(Value::Array(HArray { items: outer }))
+                } else {
+                    Err("harmonic_partition: argument must be an array".to_string())
+                }
             }
             "arr_first" => {
                 if let Value::Array(arr) = self.eval_expr(&args[0])? {

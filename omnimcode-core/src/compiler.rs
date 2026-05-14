@@ -118,7 +118,9 @@ impl Compiler {
                         // 2026-05-14 stdlib expansion (ints)
                         | "str_index_of" | "str_starts_with" | "str_ends_with"
                         | "file_exists" | "write_file" | "gcd" | "lcm"
-                        | "now_ms" => Some("int"),
+                        | "now_ms"
+                        // polish round (ints)
+                        | "random_int" | "random_seed" => Some("int"),
                         "pow" | "sqrt" | "log" | "exp" | "sin" | "cos" | "tan"
                         | "tanh" | "erf" | "sigmoid" | "frac" | "clamp"
                         | "pi" | "e" | "phi" | "tau" | "phi_inv" | "phi_sq"
@@ -126,18 +128,31 @@ impl Compiler {
                         | "to_float" | "float" | "interfere"
                         | "harmonic_interfere" | "measure_coherence"
                         | "arr_resonance" | "collapse" | "res" | "phi.res"
-                        | "phi.fold" | "phi.him" => Some("float"),
+                        | "phi.fold" | "phi.him"
+                        // polish round (floats)
+                        | "random_float" => Some("float"),
                         "to_string" | "string" | "str_concat"
                         | "str_uppercase" | "str_lowercase" | "str_reverse"
                         | "str_slice" | "concat_many"
                         // 2026-05-14 stdlib expansion (strings)
                         | "str_trim" | "str_replace" | "str_repeat"
-                        | "str_join" | "arr_join" | "read_file" | "type_of" => Some("string"),
+                        | "str_join" | "arr_join" | "read_file" | "type_of"
+                        // polish round (strings)
+                        | "str_pad_left" | "str_pad_right" => Some("string"),
+                        // Float returns
+                        "harmonic_checksum" | "harmonic_write_file" => Some("float"),
                         "arr_new" | "arr_from_range" | "arr_concat"
                         | "arr_slice" | "cleanup_array"
                         | "filter_by_resonance"
                         // 2026-05-14 stdlib expansion (arrays)
-                        | "str_split" | "arr_sort" | "arr_reverse" => Some("array"),
+                        | "str_split" | "arr_sort" | "arr_reverse"
+                        // First-class higher-order returns array of mapped items
+                        | "arr_map" | "arr_filter"
+                        // Harmonic variants returning arrays
+                        | "harmonic_read_file" | "harmonic_sort"
+                        | "harmonic_split" | "harmonic_partition"
+                        // polish round (arrays)
+                        | "arr_zip" | "arr_unique" => Some("array"),
                         _ => None,
                     }
                 })

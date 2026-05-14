@@ -25,7 +25,7 @@ The math is documented in `PHI_PI_FIB_ALGORITHM.md` and the type system in `ARCH
 
 What you can do with OMC right now, with the binary in this repo:
 
-- **Run a Turing-complete language.** Recursion, functions, strings, arrays, mutating builtins, while loops, if/else. ~100 host primitives across strings, arrays, file I/O, type introspection, math, harmonic-math, and self-healing — full reference in `STDLIB.md`. See `examples/fibonacci.omc`, `array_ops.omc`, `strings.omc`, `stdlib_expansion.omc`.
+- **Run a Turing-complete language.** Recursion, functions, strings, arrays, mutating builtins, while loops, if/else. ~135 host primitives across strings, arrays, file I/O, type introspection, math, harmonic-math, and self-healing — full reference in `STDLIB.md`. See `examples/fibonacci.omc`, `array_ops.omc`, `strings.omc`, `stdlib_expansion.omc`.
 - **Compile OMC to bytecode AND execute that bytecode** — both stages of which can be written in OMC. The bytecode VM is faithful to the tree-walker: byte-identical output across both paths for any program in the supported feature surface.
 - **Feed broken code into a self-healing compiler.** A program with a missing semicolon, a missing `}`, a typo'd function name, an off-by-one Fibonacci constant, and a `/0` runtime crash will be **rewritten and executed to a finite answer** — no try/catch, no defensive guards. The math is the error handling.
 
@@ -44,6 +44,8 @@ What this is **not**: a fast runtime, a production toolchain, a stable API, a de
 | Array-bounds healing — out-of-bounds reads become attractor-landing | `examples/self_healing_h5.omc` | Loop walking 8 indices off a 5-element array; every output has `φ=1.000` |
 | Host-level `safe` keyword — works in any OMC program, not just the self-healing demos | `examples/safe_keyword_host.omc` | `safe 89/0 → 89`, `safe arr_get(xs, 999) → 20`, `safe arr_set(xs, 999, 99)` mutates xs[1] |
 | Python-tier standard library: 16 new built-ins added 2026-05-14 | `examples/stdlib_expansion.omc` | `str_split`, `arr_sort`, `read_file`/`write_file`, `type_of`, `gcd`, `now_ms` and more — see `STDLIB.md` for the full reference |
+| First-class functions + higher-order array ops | `examples/harmonic_variants.omc` | `arr_map(xs, double)`, `arr_filter(xs, gt_5)`, `arr_reduce(xs, add, 0)`, plus `arr_any/all/find` |
+| OMNIcode harmonic variants — operations that USE the φ-math substrate | `examples/harmonic_variants.omc` | `harmonic_write_file` gates writes by resonance ≥ 0.5; `harmonic_sort` puts Fibonacci values first; `harmonic_split` chunks strings at φ-aligned word boundaries; `harmonic_partition` buckets by nearest attractor |
 
 Run any of these with the binary built from this repo:
 
@@ -145,7 +147,7 @@ cargo build --release
 
 ## Try the language
 
-A taste of OMC syntax. The grammar is defined in `omnimcode-core/src/parser.rs`. The complete standard library — ~100 host primitives organized by category — is in `STDLIB.md`.
+A taste of OMC syntax. The grammar is defined in `omnimcode-core/src/parser.rs`. The complete standard library — ~135 host primitives organized by category — is in `STDLIB.md`.
 
 ### Hello world
 
@@ -193,7 +195,7 @@ This is a research codebase. Honest list of things that are NOT done:
   - Naive brace placement in token-level repair appends missing `}` at EOF — fine for end-of-file mistakes, will fold mid-source statements into function bodies if the missing brace is conceptually mid-source. Indentation-aware repair (H.3.1) is logged.
   - The healer's identifier-correction has no semantic check beyond edit-distance. A typo that resolves to ANOTHER typo would stabilize but not be correct.
   - The `stuck` and `exhausted` outcomes of `heal_until_fixpoint` are designed but unexercised — no current demo triggers them.
-- **No production deployment target.** No package manager. No formatter. No LSP. No debugger. The standard library is real (~100 host primitives covering strings, arrays, file I/O, type introspection, math, φ-math, and self-healing — see `STDLIB.md`), but it's not Python-tier — no first-class functions, no formatters, no module ecosystem.
+- **No production deployment target.** No package manager. No formatter. No LSP. No debugger. The standard library is real (~135 host primitives covering strings, arrays, file I/O, type introspection, math, φ-math, and self-healing — see `STDLIB.md`), but it's not Python-tier — no first-class functions, no formatters, no module ecosystem.
 - **Adversarial cases untested.** The healer's correctness has been demonstrated on the demo inputs in `examples/self_healing_*.omc`. Fuzz testing, malicious inputs, and pathological edge cases have not been done.
 - **Single-developer experiment.** The codebase has not had external review. There are likely bugs we don't know about.
 

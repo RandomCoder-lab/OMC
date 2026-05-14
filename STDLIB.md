@@ -13,36 +13,56 @@ Every built-in function available in OMNIcode, organized by category. Function s
 For "I know the name, what does it do" lookups. Skip to the category sections for "I want to do X, what should I reach for".
 
 ```
-abs              arr_concat       arr_contains     arr_first
-arr_fold_elements  arr_from_range  arr_get          arr_index_of
-arr_join         arr_last         arr_len          arr_max
-arr_min          arr_new          arr_push         arr_resonance
-arr_reverse      arr_set          arr_slice        arr_sort
-arr_sum          boundary         ceil             classify_resonance
-cleanup_array    collapse         concat_many      cos
-cube             e                ensure_clean     erf
-even             exp              factorial        fib
-fibonacci        file_exists      filter_by_resonance  float
-floor            fold             fold_escape      frac
-gcd              harmonic_interfere  harmony_value  int
-interfere        invert           is_even          is_fibonacci
-is_odd           is_prime         is_singularity   lcm
-len              log              max              mean_omni_weight
-measure_coherence  min            now_ms           odd
-phi              phi_inv          phi_sq           phi_squared
-pi               pow              pow_int          print
-quantization_ratio  quantize      read_file        res
-resolve_singularity  round        safe_add         safe_arr_get
-safe_arr_set     safe_divide      safe_mul         safe_sub
-sigmoid          sign             sin              sqrt
-square           str_chars        str_concat       str_contains
-str_ends_with    str_index_of     str_join         str_len
-str_lowercase    str_repeat       str_replace      str_reverse
-str_slice        str_split        str_starts_with  str_trim
-str_uppercase    string           tan              tanh
-tau              to_float         to_int           to_string
-type_of          value_danger     write_file
+abs                  arr_filter           arr_set
+arr_all              arr_find             arr_slice
+arr_any              arr_first            arr_sort
+arr_concat           arr_fold_elements    arr_sum
+arr_contains         arr_from_range       arr_unique
+arr_get              arr_index_of         arr_zip
+arr_join             arr_last             boundary
+arr_len              arr_map              ceil
+arr_max              arr_min              clamp
+arr_new              arr_push             classify_resonance
+arr_reduce           arr_resonance        cleanup_array
+arr_reverse          collapse             concat_many
+cos                  cube                 e
+ensure_clean         erf                  even
+exp                  factorial            fib
+fibonacci            file_exists          filter_by_resonance
+float                floor                fold
+fold_escape          frac                 gcd
+harmonic_checksum    harmonic_interfere   harmonic_partition
+harmonic_read_file   harmonic_sort        harmonic_split
+harmonic_write_file  harmony_value        int
+interfere            invert               is_even
+is_fibonacci         is_odd               is_prime
+is_singularity       lcm                  len
+ln_2                 log                  max
+mean_omni_weight     measure_coherence    min
+now_ms               odd                  phi
+phi_inv              phi_sq               phi_squared
+pi                   pow                  pow_int
+println              print_raw            quantization_ratio
+quantize             random_float         random_int
+random_seed          read_file            res
+resolve_singularity  round                safe_add
+safe_arr_get         safe_arr_set         safe_divide
+safe_mul             safe_sub             sigmoid
+sign                 sin                  sqrt
+sqrt_2               sqrt_5               square
+str_chars            str_concat           str_contains
+str_ends_with        str_index_of         str_join
+str_len              str_lowercase        str_pad_left
+str_pad_right        str_repeat           str_replace
+str_reverse          str_slice            str_split
+str_starts_with      str_trim             str_uppercase
+string               tan                  tanh
+tau                  to_float             to_int
+to_string            type_of              value_danger
+write_file
 ```
+
+Total: ~135 named builtins, plus `print` as a statement keyword.
 
 ---
 
@@ -214,6 +234,69 @@ Compose with the substrate above. These are what the `safe` keyword desugars to 
 
 ---
 
+## Random
+
+xorshift64* PRNG seeded from system nanoseconds at interpreter construction. Not cryptographic. Use `random_seed(n)` for deterministic runs.
+
+| Function | Signature | Notes |
+|---|---|---|
+| `random_int(lo, hi)` | `int, int -> int` | Inclusive on both ends. `hi <= lo` returns `lo` (graceful fallback). |
+| `random_float()` | `-> float` | Uniform in `[0.0, 1.0)`. |
+| `random_seed(s)` | `int -> int` | Deterministic seed; returns the seed value. `s == 0` substituted with the golden-ratio constant `0x9E3779B97F4A7C15`. |
+
+---
+
+## Higher-order array operations
+
+These require first-class function values. Pass a function name as a bare identifier (preferred) or as a string literal:
+
+```omc
+fn double(x) { return x * 2; }
+arr_map(xs, double)     # bare name → Value::Function
+arr_map(xs, "double")   # string form also works
+```
+
+User-defined functions and built-ins both work. The captured function is its **definition**, not a closure over local scope — closures are future work.
+
+| Function | Signature | Notes |
+|---|---|---|
+| `arr_map(arr, f)` | `array, function -> array` | Calls `f(elem)` per element; collects results. |
+| `arr_filter(arr, pred)` | `array, function -> array` | Keeps elements where `pred(elem)` is truthy. |
+| `arr_reduce(arr, f, init)` | `array, function, T -> T` | Left fold; `f(acc, elem) -> acc`. |
+| `arr_any(arr, pred)` | `array, function -> int` | `1` if any element satisfies `pred`; short-circuits. |
+| `arr_all(arr, pred)` | `array, function -> int` | `1` if every element satisfies `pred`; short-circuits. |
+| `arr_find(arr, pred)` | `array, function -> T \| null` | First element where `pred(elem)` is truthy, else `null`. |
+
+Polish-round additions:
+
+| Function | Signature | Notes |
+|---|---|---|
+| `arr_zip(a, b)` | `array, array -> array` | Pairs elements positionally as `[a_i, b_i]`; shorter array sets length. |
+| `arr_unique(arr)` | `array -> array` | Dedupe preserving first-occurrence order. Type-aware equality. |
+| `str_pad_left(s, width, ch)` | `string, int, string -> string` | Pads `s` on the left to `width` chars using first char of `ch`. |
+| `str_pad_right(s, width, ch)` | `string, int, string -> string` | Pads on the right. |
+| `println(x)` | `T -> null` | Like `print` but uses Display formatting (no HInt scaffolding). |
+| `print_raw(x)` | `T -> null` | Like `println` but no trailing newline. Pairs for progress lines. |
+
+---
+
+## OMNIcode harmonic variants
+
+These take ordinary operations and route them through the φ-math substrate. Anyone can write a file; these write **harmonically** — aware of resonance, attractor geometry, harmonic checksum signatures.
+
+| Function | Signature | Notes |
+|---|---|---|
+| `harmonic_checksum(s)` | `string -> float` | Resonance signature: sum over each char's codepoint resonance. Two strings with the same checksum are harmonically equivalent. |
+| `harmonic_write_file(path, content)` | `string, string -> float` | Atomic write with a resonance gate. Computes the content's mean per-char resonance; commits via tmp+rename if score ≥ 0.5; rejects (returns negative score) below the gate. The original target is untouched on rejection. |
+| `harmonic_read_file(path)` | `string -> array<string, float>` | Returns `[content, mean_resonance]` so callers can decide whether to trust low-coherence content. Errors on read failure (use `file_exists` first if uncertain). |
+| `harmonic_sort(arr)` | `array -> array` | Sort by `harmony_value` of each element **descending**. Pure Fibonacci values lead; off-grid values sink. For strings, sorts by mean char-resonance. **Different from `arr_sort`**: that orders by NATURAL value (1<2<3), this by φ-alignment (89 outranks 100). |
+| `harmonic_split(s)` | `string -> array<string>` | Split into chunks whose sizes are nearest-Fibonacci at word boundaries. For a 100-char string: chunk sizes from {89, 55+34, 89+8, ...} respecting whitespace. Useful for φ-aligned line wrapping and packet sizing. |
+| `harmonic_partition(arr)` | `array -> array<array>` | Group elements by nearest Fibonacci attractor. Returns outer array of buckets (one per occupied attractor, in attractor order); inner arrays hold original elements. Use for distribution analysis along the φ-grid. |
+
+---
+
+---
+
 ## Statements (not functions)
 
 These are language keywords, not functions, but bear mentioning here:
@@ -231,8 +314,8 @@ These are language keywords, not functions, but bear mentioning here:
 
 The following common builtins are **deliberately not in the standard library** today, in most cases because they conflict with the φ-math substrate or require language-level changes:
 
-- **`map(f, arr)` / `filter(p, arr)` / `reduce(f, arr, init)`** — Higher-order functions over arrays require first-class function values, which OMC doesn't have yet. Use `while` loops over `arr_len`.
-- **`println(x)` / `print_no_newline(x)`** — `print` always emits a newline; for raw byte output use `write_file("/dev/stdout", x)`.
+- **`map(f, arr)` / `filter(p, arr)` / `reduce(f, arr, init)`** — These exist as `arr_map` / `arr_filter` / `arr_reduce` (see *Higher-order array operations*). The standalone short names aren't aliased because they're too common to risk shadowing user-defined helpers.
+- **`println(x)` and `print_raw(x)`** — Both now exist (see *Higher-order array operations* table). `println` uses Display formatting (no HInt scaffolding); `print_raw` is the same with no trailing newline. The original `print` is preserved for debug-format introspection.
 - **`assert(cond)`** — Use `if cond == 0 { return; }` and check return values.
 - **`format(fmt, ...)`** — Use `concat_many(...)` instead. The `concat_many` variadic handles type coercion.
 
@@ -244,7 +327,7 @@ If you reach for one of these and find it actually exists, this doc is stale —
 
 Categories under active design (see `OMC_STRATEGIC_PLAN.md`):
 
-- First-class functions and closures (would unlock `map`/`filter`/`reduce`).
+- **Closures over local scope.** First-class function references work today (named function passed as value); proper closures that capture local bindings are the next step.
 - A bytecode-VM-fast subset of common primitives (currently the VM and tree-walker share the same primitive table; faster inlining is possible).
 - Module system beyond the current `load`-by-path approach.
-- A real `random()` family — there's a `fastrand` dependency but it's not yet exposed as built-ins.
+- More OMNIcode harmonic variants — natural next candidates: `harmonic_hash(s)` (collision-resistant resonance hash), `harmonic_diff(a, b)` (file diff weighted by resonance), `harmonic_dedupe(arr, threshold)` (cluster-then-collapse by resonance band).

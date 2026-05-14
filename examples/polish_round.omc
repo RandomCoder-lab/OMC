@@ -1,0 +1,65 @@
+# =============================================================================
+# Polish round — random, padding, zip, unique, println / print_raw
+# =============================================================================
+
+print("=== println vs print ===");
+# println uses Display formatting — no HInt(value, φ=..., HIM=...) scaffolding.
+# The original `print` is preserved for debug-format introspection.
+println("just the text");                    # just the text
+println(42);                                 # 42  (not HInt(42, ...))
+println(3.14);                               # 3.14
+
+# print_raw: no trailing newline. Useful for progress bars etc.
+print_raw("loading");
+print_raw("..");
+print_raw(".");
+println("done");                             # loading...done
+
+print("");
+println("=== random ===");
+# Seeded for deterministic output here. xorshift64*; sufficient for
+# OMC scripting needs. Not cryptographic.
+random_seed(42);
+println(random_int(1, 6));                   # dice roll
+println(random_int(1, 6));
+println(random_int(1, 6));
+println(random_float());                     # [0, 1)
+println(random_float());
+
+# Same seed → same sequence (verify determinism)
+random_seed(42);
+println(random_int(1, 6));                   # same as first dice above
+
+println("");
+println("=== padding ===");
+# str_pad_left / str_pad_right — useful for tabular output
+println(str_pad_left("89", 6, "0"));         # 000089
+println(str_pad_right("89", 6, "."));        # 89....
+println(str_pad_left("hello", 10, " "));     # "     hello"
+
+println("");
+println("=== arr_zip ===");
+# Pair elements positionally; shorter array sets length.
+h names = ["alice", "bob", "carol"];
+h scores = [89, 144, 233];
+h pairs = arr_zip(names, scores);
+println(arr_len(pairs));                     # 3
+h i = 0;
+while i < arr_len(pairs) {
+    h pair = arr_get(pairs, i);
+    println(concat_many(arr_get(pair, 0), " = ", arr_get(pair, 1)));
+    i = i + 1;
+}
+
+println("");
+println("=== arr_unique ===");
+# Dedupe preserving first-occurrence order. Type-aware equality.
+h dupes = [1, 2, 2, 3, 1, 4, 3];
+println(arr_join(arr_unique(dupes), ","));   # 1,2,3,4
+
+# Strings too
+h words = ["a", "b", "a", "c", "b"];
+println(arr_join(arr_unique(words), ","));   # a,b,c
+
+println("");
+println("=== Done ===");

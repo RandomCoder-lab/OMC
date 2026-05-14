@@ -1,0 +1,78 @@
+# =============================================================================
+# OMNIcode harmonic variants — operations that USE the φ-math substrate
+# =============================================================================
+# These functions take ordinary operations (write a file, sort an array,
+# split a string) and route them through the harmonic-resonance substrate
+# already in the language. The result is an operation aware of φ-alignment,
+# not just byte-level correctness.
+#
+# Anyone can write a file. These write harmonically.
+# =============================================================================
+
+print("=== harmonic_checksum ===");
+# Resonance signature of a string. Two strings with the same checksum
+# are harmonically equivalent even if not byte-equal.
+print(harmonic_checksum("89"));            # high (Fibonacci digits)
+print(harmonic_checksum("90"));            # lower
+print(harmonic_checksum("hello world"));   # somewhere in the middle
+
+print("");
+print("=== harmonic_write_file ===");
+# Atomic write with a resonance gate. Below mean-resonance 0.5 the
+# content is rejected; the temp file is removed; original target untouched.
+h path = "/tmp/omc_harmonic_test.txt";
+
+# Fibonacci-rich content — should pass the gate.
+h score1 = harmonic_write_file(path, "89 144 233");
+print(score1);   # positive: clean write
+print(file_exists(path));   # 1
+
+# Read it back via the harmonic reader.
+h read1 = harmonic_read_file(path);
+print(arr_get(read1, 0));   # the content
+print(arr_get(read1, 1));   # the mean resonance
+
+print("");
+print("=== harmonic_sort ===");
+# Sort by φ-resonance descending — high-harmony elements bubble forward.
+# Pure Fibonacci values (1, 2, 3, 5, 8, 13, ...) have φ=1.0; near-attractors
+# rank just under; off-grid values sink.
+h mixed = [100, 89, 50, 144, 7, 233, 99];
+h sorted = harmonic_sort(mixed);
+print(arr_join(sorted, ","));   # Fibonacci-aligned values first
+
+print("");
+print("=== harmonic_split ===");
+# Chunk a string at Fibonacci-aligned word boundaries.
+h text = "the quick brown fox jumps over the lazy dog and runs fast home now";
+h chunks = harmonic_split(text);
+print(arr_len(chunks));
+h i = 0;
+while i < arr_len(chunks) {
+    print(concat_many("  [", str_chars(arr_get(chunks, i)), " chars] ", arr_get(chunks, i)));
+    i = i + 1;
+}
+
+print("");
+print("=== harmonic_partition ===");
+# Group elements by nearest Fibonacci attractor.
+h values = [1, 2, 4, 8, 9, 13, 14, 21, 22, 88, 89, 90];
+h groups = harmonic_partition(values);
+print(arr_len(groups));   # number of distinct attractors hit
+h j = 0;
+while j < arr_len(groups) {
+    h grp = arr_get(groups, j);
+    print(concat_many("  group ", j, ": ", arr_join(grp, ",")));
+    j = j + 1;
+}
+
+print("");
+print("=== Composing with first-class functions ===");
+# All Phase H + first-class function machinery composes naturally.
+fn near_fib(n) { return is_fibonacci(n); }
+h candidates = [13, 14, 21, 22, 34, 35, 55, 56, 89];
+h fibs_only = arr_filter(candidates, near_fib);
+print(arr_join(fibs_only, ","));   # 13,21,34,55,89
+
+print("");
+print("=== Done ===");
