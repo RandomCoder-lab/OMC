@@ -4,6 +4,20 @@ All notable changes to OMNIcode will be documented in this file.
 
 ## [Unreleased]
 
+### Added (Phase K: bytecode optimizer, 2026-05-13)
+New module `omnimcode-core/src/bytecode_opt.rs`. Runs after compile, before VM execution. On by default in VM mode; disable with `OMC_OPT=0`. Show stats with `OMC_OPT_STATS=1`.
+
+**Passes (iterated to fixpoint):**
+- **Constant folding** — `LoadConst a; LoadConst b; <op>` triples reduced to `Nop; Nop; LoadConst(c)` where c is the precomputed result. Covers all arithmetic (`+`, `-`, `*`, `/`, `%`), comparisons (`==`, `!=`, `<`, `<=`, `>`, `>=`), and bitwise (`&`, `|`, `^`, `<<`, `>>`). Int and float, with int→float promotion. **Refuses to fold `n / 0`** — that produces a Singularity at runtime, not a compile-time number.
+- **Dead-load elimination** — `LoadConst N; Pop` pairs become `Nop; Nop` (loaded only to be discarded — e.g. expression statements with constant values).
+- **Double-unary collapse** — `Not; Not` and `Neg; Neg` become `Nop; Nop`.
+
+**Design choice:** removed ops are replaced with `Op::Nop` rather than shrinking the op-vector. This keeps existing jump offsets valid without a re-emit pass; the VM's Nop arm is a free no-op. For the kind of programs OMNIcode runs (small kernels + recursion, not megaword loops), the simplicity wins over the slightly tighter loop a re-emit pass would buy.
+
+**Observed:** chained arithmetic `1 + 2 + 3 + 4` folds to a single constant (3 folds). `255 & 15` → 15. `1 << 8` → 256. `1.5 + 2.5` → 4.0 (float arithmetic). `10 < 20` → `Bool(true)`. fib(28) reports 0 folds (everything's runtime variables) as expected; doesn't slow it down either.
+
+**Tests:** 7 new unit tests in `bytecode_opt::tests` covering int/float/bitwise/shift/comparison folding, chained simplification, and the explicit "don't fold div-by-zero" guarantee. **118 total tests now passing.**
+
 ### Added (Phase I + J: bitwise ops + VM coverage push, 2026-05-13)
 
 **Phase I — Bitwise operators**

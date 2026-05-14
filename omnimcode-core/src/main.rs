@@ -48,7 +48,21 @@ fn execute_program(source: &str) -> Result<(), String> {
     // (full language coverage); the VM is a faster dispatch for the subset of
     // programs whose ASTs the compiler currently supports.
     if std::env::var("OMC_VM").as_deref() == Ok("1") {
-        let module = omnimcode_core::compiler::compile_program(&statements)?;
+        let mut module = omnimcode_core::compiler::compile_program(&statements)?;
+        // OMC_OPT=0 disables the optimizer (handy for debugging). On by default.
+        if std::env::var("OMC_OPT").as_deref() != Ok("0") {
+            let stats = omnimcode_core::bytecode_opt::optimize_module(&mut module);
+            if std::env::var("OMC_OPT_STATS").as_deref() == Ok("1") {
+                eprintln!(
+                    "[opt] folded={} dead_loads={} not={} neg={} (total {})",
+                    stats.constants_folded,
+                    stats.dead_loads_removed,
+                    stats.double_nots_collapsed,
+                    stats.double_negs_collapsed,
+                    stats.total()
+                );
+            }
+        }
         let mut vm = omnimcode_core::vm::Vm::new();
         vm.run_module(&module)?;
         return Ok(());
