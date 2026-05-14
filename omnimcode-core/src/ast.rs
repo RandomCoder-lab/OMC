@@ -95,6 +95,14 @@ pub enum Expression {
     And(Box<Expression>, Box<Expression>),
     Or(Box<Expression>, Box<Expression>),
     Not(Box<Expression>),
+
+    // Bitwise
+    BitAnd(Box<Expression>, Box<Expression>),
+    BitOr(Box<Expression>, Box<Expression>),
+    BitXor(Box<Expression>, Box<Expression>),
+    BitNot(Box<Expression>),
+    Shl(Box<Expression>, Box<Expression>),
+    Shr(Box<Expression>, Box<Expression>),
     
     // Function call
     Call {

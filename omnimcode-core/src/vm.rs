@@ -114,6 +114,35 @@ impl Vm {
                     let v = stack.pop().ok_or("stack underflow")?;
                     stack.push(Value::Bool(!v.to_bool()));
                 }
+                Op::BitAnd => {
+                    let r = stack.pop().ok_or("stack underflow")?.to_int();
+                    let l = stack.pop().ok_or("stack underflow")?.to_int();
+                    stack.push(Value::HInt(HInt::new(l & r)));
+                }
+                Op::BitOr => {
+                    let r = stack.pop().ok_or("stack underflow")?.to_int();
+                    let l = stack.pop().ok_or("stack underflow")?.to_int();
+                    stack.push(Value::HInt(HInt::new(l | r)));
+                }
+                Op::BitXor => {
+                    let r = stack.pop().ok_or("stack underflow")?.to_int();
+                    let l = stack.pop().ok_or("stack underflow")?.to_int();
+                    stack.push(Value::HInt(HInt::new(l ^ r)));
+                }
+                Op::BitNot => {
+                    let v = stack.pop().ok_or("stack underflow")?.to_int();
+                    stack.push(Value::HInt(HInt::new(!v)));
+                }
+                Op::Shl => {
+                    let r = stack.pop().ok_or("stack underflow")?.to_int();
+                    let l = stack.pop().ok_or("stack underflow")?.to_int();
+                    stack.push(Value::HInt(HInt::new(l.wrapping_shl((r & 63) as u32))));
+                }
+                Op::Shr => {
+                    let r = stack.pop().ok_or("stack underflow")?.to_int();
+                    let l = stack.pop().ok_or("stack underflow")?.to_int();
+                    stack.push(Value::HInt(HInt::new(l.wrapping_shr((r & 63) as u32))));
+                }
                 Op::Jump(offset) => {
                     ip = ((ip as i32) + offset) as usize;
                 }
@@ -209,6 +238,30 @@ impl Vm {
                         _ => 0,
                     };
                     stack.push(Value::HInt(HInt::new(folded)));
+                }
+                Op::IsFibonacci => {
+                    let v = stack.pop().ok_or("stack underflow")?;
+                    let n = v.to_int();
+                    let is_fib = crate::value::is_fibonacci(n);
+                    stack.push(Value::HInt(HInt::new(if is_fib { 1 } else { 0 })));
+                }
+                Op::Fibonacci => {
+                    let v = stack.pop().ok_or("stack underflow")?;
+                    let n = v.to_int();
+                    stack.push(Value::HInt(HInt::new(crate::value::fibonacci(n))));
+                }
+                Op::ArrayLen => {
+                    let v = stack.pop().ok_or("stack underflow")?;
+                    let n = match v {
+                        Value::Array(a) => a.items.len() as i64,
+                        Value::String(s) => s.chars().count() as i64,
+                        _ => 0,
+                    };
+                    stack.push(Value::HInt(HInt::new(n)));
+                }
+                Op::HimScore => {
+                    let v = stack.pop().ok_or("stack underflow")?;
+                    stack.push(Value::HFloat(HInt::compute_him(v.to_int())));
                 }
                 Op::Print => {
                     let v = stack.pop().ok_or("stack underflow")?;

@@ -4,6 +4,24 @@ All notable changes to OMNIcode will be documented in this file.
 
 ## [Unreleased]
 
+### Added (Phase I + J: bitwise ops + VM coverage push, 2026-05-13)
+
+**Phase I — Bitwise operators**
+New tokens: `&`, `|`, `^`, `~`, `<<`, `>>`. New AST: `BitAnd`, `BitOr`, `BitXor`, `BitNot`, `Shl`, `Shr`. Parser precedence layered between logical (`and`/`or`) and comparison ops, with shifts above additive. Wired into both the tree-walk interpreter and the VM. Shift counts masked to `0..63` for safe i64 operation.
+
+Unblocked **`crypto.omc`** (uses `byte_val & bit_mask`). Canonical sweep: 21 → **22 of 30 passing**.
+
+**Phase J — VM coverage parity with tree-walk**
+- `break` and `continue` in compiled loops. `LoopFrame` stack tracks each loop's continue target and break-jump patch list; ranges and array-iteration both support both.
+- `for x in arr { body }` (was: error). Desugars to a synthetic-index while loop emitting `Op::ArrayLen` for the bound check and `Op::ArrayIndex` for the element load.
+- New opcodes for hot harmonic ops, with safe inlining: `Op::IsFibonacci`, `Op::Fibonacci`, `Op::ArrayLen`, `Op::HimScore` (plus the existing `Op::Resonance` and `Op::Fold1`). The compiler emits them in place of `Op::Call(name, n)` ONLY when the user hasn't redefined the name — a pre-pass collects user-defined function names into a `HashSet<String>` so canonical idioms like recursive `fn fib(n) { ... }` keep their semantics. **This caught a real bug**: an earlier draft would have silently replaced user-defined recursive `fib` with the iterative built-in, producing right answers via the wrong code path.
+
+**Performance:**
+- Recursive user `fib(28)`: VM 424ms vs tree-walk 940ms (2.2× speedup, unchanged from Phase H — proves the inlining doesn't accidentally swap in built-ins).
+- Tight `res()` loop (100,000 iterations): VM and tree-walk essentially equal — `res` was already special-cased on both paths.
+
+**Tests:** 111 still pass. Canonical sweep: **VM now matches tree-walk at 22/30** — full feature parity for the supported subset.
+
 ### Added (Phase H: bytecode VM, 2026-05-13)
 Optional faster execution path. The tree-walk interpreter remains the default and language source-of-truth; the VM is selectable per-run via `OMC_VM=1` env var.
 

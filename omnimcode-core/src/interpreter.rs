@@ -461,6 +461,37 @@ impl Interpreter {
                 let v = self.eval_expr(e)?.to_bool();
                 Ok(Value::Bool(!v))
             }
+            // Bitwise ops — always operate on i64 representations.
+            Expression::BitAnd(l, r) => {
+                let lv = self.eval_expr(l)?.to_int();
+                let rv = self.eval_expr(r)?.to_int();
+                Ok(Value::HInt(HInt::new(lv & rv)))
+            }
+            Expression::BitOr(l, r) => {
+                let lv = self.eval_expr(l)?.to_int();
+                let rv = self.eval_expr(r)?.to_int();
+                Ok(Value::HInt(HInt::new(lv | rv)))
+            }
+            Expression::BitXor(l, r) => {
+                let lv = self.eval_expr(l)?.to_int();
+                let rv = self.eval_expr(r)?.to_int();
+                Ok(Value::HInt(HInt::new(lv ^ rv)))
+            }
+            Expression::BitNot(e) => {
+                let v = self.eval_expr(e)?.to_int();
+                Ok(Value::HInt(HInt::new(!v)))
+            }
+            Expression::Shl(l, r) => {
+                let lv = self.eval_expr(l)?.to_int();
+                let rv = self.eval_expr(r)?.to_int();
+                // Mask shift amount to a safe 0-63 range to match Rust's panic-free i64 shifts.
+                Ok(Value::HInt(HInt::new(lv.wrapping_shl((rv & 63) as u32))))
+            }
+            Expression::Shr(l, r) => {
+                let lv = self.eval_expr(l)?.to_int();
+                let rv = self.eval_expr(r)?.to_int();
+                Ok(Value::HInt(HInt::new(lv.wrapping_shr((rv & 63) as u32))))
+            }
             Expression::Call { name, args } => {
                 self.call_function(name, args)
             }

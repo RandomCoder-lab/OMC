@@ -63,6 +63,14 @@ pub enum Op {
     Or,
     Not,
 
+    // Bitwise (operate on integer values; floats are truncated to i64)
+    BitAnd,
+    BitOr,
+    BitXor,
+    BitNot,
+    Shl,
+    Shr,
+
     // Control flow
     Jump(i32),             // relative jump
     JumpIfFalse(i32),
@@ -87,6 +95,10 @@ pub enum Op {
     // without the call overhead — these are the hot ones).
     Resonance,             // pop x, push res(x) as HFloat
     Fold1,                 // pop x, push fold(x) as HInt (Fibonacci snap)
+    IsFibonacci,           // pop x, push 1/0 (HInt) if x is Fibonacci
+    Fibonacci,             // pop n, push fibonacci(n) as HInt
+    ArrayLen,              // pop array, push HInt(len)
+    HimScore,              // pop x, push HInt's HIM score as HFloat
 
     // Print (statement form)
     Print,                 // pop and println

@@ -60,6 +60,13 @@ pub enum Token {
     Dot,
     Colon,
     At,
+    // Bitwise
+    BitAnd,
+    BitOr,
+    BitXor,
+    BitNot,
+    Shl,
+    Shr,
 
     // Special
     Eof,
@@ -331,6 +338,10 @@ impl Lexer {
                         self.advance();
                         return Token::Le;
                     }
+                    if self.current() == Some('<') {
+                        self.advance();
+                        return Token::Shl;
+                    }
                     return Token::Lt;
                 }
                 Some('>') => {
@@ -339,7 +350,27 @@ impl Lexer {
                         self.advance();
                         return Token::Ge;
                     }
+                    if self.current() == Some('>') {
+                        self.advance();
+                        return Token::Shr;
+                    }
                     return Token::Gt;
+                }
+                Some('&') => {
+                    self.advance();
+                    return Token::BitAnd;
+                }
+                Some('|') => {
+                    self.advance();
+                    return Token::BitOr;
+                }
+                Some('^') => {
+                    self.advance();
+                    return Token::BitXor;
+                }
+                Some('~') => {
+                    self.advance();
+                    return Token::BitNot;
                 }
                 Some('(') => {
                     self.advance();
@@ -853,43 +884,73 @@ impl Parser {
             let expr = self.parse_not()?;
             Ok(Expression::Not(Box::new(expr)))
         } else {
-            self.parse_comparison()
+            self.parse_bit_or()
         }
     }
 
+    fn parse_bit_or(&mut self) -> Result<Expression, String> {
+        let mut left = self.parse_bit_xor()?;
+        while self.current() == Token::BitOr {
+            self.advance();
+            let right = self.parse_bit_xor()?;
+            left = Expression::BitOr(Box::new(left), Box::new(right));
+        }
+        Ok(left)
+    }
+
+    fn parse_bit_xor(&mut self) -> Result<Expression, String> {
+        let mut left = self.parse_bit_and()?;
+        while self.current() == Token::BitXor {
+            self.advance();
+            let right = self.parse_bit_and()?;
+            left = Expression::BitXor(Box::new(left), Box::new(right));
+        }
+        Ok(left)
+    }
+
+    fn parse_bit_and(&mut self) -> Result<Expression, String> {
+        let mut left = self.parse_comparison()?;
+        while self.current() == Token::BitAnd {
+            self.advance();
+            let right = self.parse_comparison()?;
+            left = Expression::BitAnd(Box::new(left), Box::new(right));
+        }
+        Ok(left)
+    }
+
     fn parse_comparison(&mut self) -> Result<Expression, String> {
-        let mut left = self.parse_additive()?;
+        let mut left = self.parse_shift()?;
 
         loop {
             let expr = match self.current() {
                 Token::EqEq => {
                     self.advance();
-                    let right = self.parse_additive()?;
+                    let right = self.parse_shift()?;
                     Expression::Eq(Box::new(left), Box::new(right))
                 }
                 Token::Ne => {
                     self.advance();
-                    let right = self.parse_additive()?;
+                    let right = self.parse_shift()?;
                     Expression::Ne(Box::new(left), Box::new(right))
                 }
                 Token::Lt => {
                     self.advance();
-                    let right = self.parse_additive()?;
+                    let right = self.parse_shift()?;
                     Expression::Lt(Box::new(left), Box::new(right))
                 }
                 Token::Le => {
                     self.advance();
-                    let right = self.parse_additive()?;
+                    let right = self.parse_shift()?;
                     Expression::Le(Box::new(left), Box::new(right))
                 }
                 Token::Gt => {
                     self.advance();
-                    let right = self.parse_additive()?;
+                    let right = self.parse_shift()?;
                     Expression::Gt(Box::new(left), Box::new(right))
                 }
                 Token::Ge => {
                     self.advance();
-                    let right = self.parse_additive()?;
+                    let right = self.parse_shift()?;
                     Expression::Ge(Box::new(left), Box::new(right))
                 }
                 _ => break,
@@ -897,6 +958,27 @@ impl Parser {
             left = expr;
         }
 
+        Ok(left)
+    }
+
+    fn parse_shift(&mut self) -> Result<Expression, String> {
+        let mut left = self.parse_additive()?;
+        loop {
+            let expr = match self.current() {
+                Token::Shl => {
+                    self.advance();
+                    let right = self.parse_additive()?;
+                    Expression::Shl(Box::new(left), Box::new(right))
+                }
+                Token::Shr => {
+                    self.advance();
+                    let right = self.parse_additive()?;
+                    Expression::Shr(Box::new(left), Box::new(right))
+                }
+                _ => break,
+            };
+            left = expr;
+        }
         Ok(left)
     }
 
@@ -952,6 +1034,12 @@ impl Parser {
     }
 
     fn parse_primary(&mut self) -> Result<Expression, String> {
+        // Unary bitwise NOT: `~x`
+        if self.current() == Token::BitNot {
+            self.advance();
+            let inner = self.parse_primary()?;
+            return Ok(Expression::BitNot(Box::new(inner)));
+        }
         // Unary minus: `-x` becomes `0 - x` (cheap, no new AST variant needed)
         if self.current() == Token::Minus {
             self.advance();
