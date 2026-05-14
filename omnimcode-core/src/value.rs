@@ -181,6 +181,14 @@ pub enum Value {
     Bool(bool),
     Array(HArray),
     Circuit(crate::circuits::Circuit),
+    /// Portal value from undefined operations (e.g. division by zero).
+    /// Carries the numerator that produced the singularity so
+    /// `resolve_singularity(v, mode)` can recover a meaningful value.
+    Singularity {
+        numerator: i64,
+        denominator: i64,
+        context: String,
+    },
     Null,
 }
 
@@ -191,6 +199,7 @@ impl Value {
             Value::HFloat(f) => *f as i64,
             Value::String(s) => s.parse().unwrap_or(0),
             Value::Bool(b) => if *b { 1 } else { 0 },
+            Value::Singularity { numerator, .. } => *numerator,
             Value::Null => 0,
             _ => 0,
         }
@@ -202,6 +211,7 @@ impl Value {
             Value::HFloat(f) => *f,
             Value::String(s) => s.parse().unwrap_or(0.0),
             Value::Bool(b) => if *b { 1.0 } else { 0.0 },
+            Value::Singularity { numerator, .. } => *numerator as f64,
             Value::Null => 0.0,
             _ => 0.0,
         }
@@ -215,6 +225,9 @@ impl Value {
             Value::Bool(b) => *b,
             Value::Array(a) => !a.items.is_empty(),
             Value::Circuit(_) => true,
+            // A singularity is truthy in the same sense as Python OMNIcode treats it:
+            // `if is_singularity(result) == 1` is the standard test, not `if result`.
+            Value::Singularity { .. } => true,
             Value::Null => false,
         }
     }
@@ -231,6 +244,20 @@ impl Value {
                 let items: Vec<String> = a.items.iter().map(|v| v.to_string()).collect();
                 format!("[{}]", items.join(", "))
             }
+            Value::Singularity {
+                numerator,
+                denominator,
+                context,
+            } => {
+                if context.is_empty() {
+                    format!("Singularity({}/{})", numerator, denominator)
+                } else {
+                    format!(
+                        "Singularity({}/{}, ctx={})",
+                        numerator, denominator, context
+                    )
+                }
+            }
         }
     }
 
@@ -240,6 +267,12 @@ impl Value {
 
     pub fn is_numeric(&self) -> bool {
         matches!(self, Value::HInt(_) | Value::HFloat(_))
+    }
+
+    pub fn is_singularity(&self) -> bool {
+        matches!(self, Value::Singularity { .. })
+            // Backward compat: HInt with the old flag set still counts.
+            || matches!(self, Value::HInt(h) if h.is_singularity)
     }
 }
 

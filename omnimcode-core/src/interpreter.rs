@@ -266,14 +266,22 @@ impl Interpreter {
                 if lv.is_float() || rv.is_float() {
                     let r_f = rv.to_float();
                     if r_f == 0.0 {
-                        Ok(Value::HInt(HInt::singularity()))
+                        Ok(Value::Singularity {
+                            numerator: lv.to_int(),
+                            denominator: 0,
+                            context: "div".to_string(),
+                        })
                     } else {
                         Ok(Value::HFloat(lv.to_float() / r_f))
                     }
                 } else {
                     let divisor = rv.to_int();
                     if divisor == 0 {
-                        Ok(Value::HInt(HInt::singularity()))
+                        Ok(Value::Singularity {
+                            numerator: lv.to_int(),
+                            denominator: 0,
+                            context: "div".to_string(),
+                        })
                     } else {
                         Ok(Value::HInt(HInt::new(lv.to_int() / divisor)))
                     }
@@ -458,6 +466,65 @@ impl Interpreter {
                 }
                 let n = self.eval_expr(&args[0])?.to_int();
                 Ok(Value::Bool(is_fibonacci(n)))
+            }
+            // Portal / Singularity handling — canonical OMNIcode idiom.
+            // Python returns 0/1 so `if is_singularity(result) == 1` works.
+            "is_singularity" => {
+                if args.is_empty() {
+                    return Err("is_singularity requires 1 argument".to_string());
+                }
+                let v = self.eval_expr(&args[0])?;
+                Ok(Value::HInt(HInt::new(if v.is_singularity() { 1 } else { 0 })))
+            }
+            // resolve_singularity(portal, mode) → int
+            // Modes: "fold" snap-to-Fibonacci; "invert" → 1/n style;
+            // "boundary" → numerator unchanged (passthrough).
+            "resolve_singularity" => {
+                if args.len() < 2 {
+                    return Err(
+                        "resolve_singularity requires (value, mode_string)".to_string(),
+                    );
+                }
+                let v = self.eval_expr(&args[0])?;
+                let mode = self.eval_expr(&args[1])?.to_string();
+                let numerator = match &v {
+                    Value::Singularity { numerator, .. } => *numerator,
+                    Value::HInt(h) => h.value,
+                    _ => v.to_int(),
+                };
+                let resolved = match mode.as_str() {
+                    "fold" => {
+                        // Snap |numerator| to nearest Fibonacci, preserve sign.
+                        let fibs: [i64; 15] = [
+                            0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610,
+                        ];
+                        let abs_n = numerator.abs();
+                        let mut nearest = fibs[0];
+                        let mut min_dist = abs_n;
+                        for &fib in &fibs {
+                            let d = (fib - abs_n).abs();
+                            if d < min_dist {
+                                min_dist = d;
+                                nearest = fib;
+                            }
+                        }
+                        if numerator < 0 { -nearest } else { nearest }
+                    }
+                    "invert" => {
+                        // 1/n style: return signed inverse magnitude.
+                        // For integer mode we use 1 as the multiplicative identity
+                        // when |n| < 1 (i.e. n == 0); otherwise return ±1.
+                        if numerator == 0 { 1 } else if numerator > 0 { 1 } else { -1 }
+                    }
+                    "boundary" => numerator,
+                    other => {
+                        return Err(format!(
+                            "resolve_singularity: unknown mode {:?} (expected \"fold\", \"invert\", or \"boundary\")",
+                            other
+                        ))
+                    }
+                };
+                Ok(Value::HInt(HInt::new(resolved)))
             }
             // String functions
             "str_len" => {
@@ -803,5 +870,73 @@ __result__ = add(89, 144);
         let src = "fn id(x: int, y: string) -> int { return x; } __result__ = id(42, \"hi\");";
         let v = run(src).unwrap();
         assert_eq!(v.to_int(), 42);
+    }
+
+    // Phase C: HSingularity
+
+    #[test]
+    fn test_div_by_zero_returns_singularity_value() {
+        let src = "h x = 89 / 0; __result__ = x;";
+        let v = run(src).unwrap();
+        assert!(
+            matches!(v, Value::Singularity { numerator: 89, .. }),
+            "expected Singularity(89/...), got {:?}",
+            v
+        );
+    }
+
+    #[test]
+    fn test_is_singularity_returns_one_or_zero() {
+        let v = run("h p = 7 / 0; __result__ = is_singularity(p);").unwrap();
+        assert_eq!(v.to_int(), 1);
+
+        let v = run("__result__ = is_singularity(42);").unwrap();
+        assert_eq!(v.to_int(), 0);
+    }
+
+    #[test]
+    fn test_resolve_singularity_fold_snaps_to_fibonacci() {
+        // 89 is already Fibonacci -> folds to itself
+        let v = run("h p = 89 / 0; __result__ = resolve_singularity(p, \"fold\");").unwrap();
+        assert_eq!(v.to_int(), 89);
+
+        // 90 -> nearest Fibonacci is 89
+        let v = run("h p = 90 / 0; __result__ = resolve_singularity(p, \"fold\");").unwrap();
+        assert_eq!(v.to_int(), 89);
+    }
+
+    #[test]
+    fn test_resolve_singularity_invert_returns_sign_unit() {
+        let v = run("h p = 89 / 0; __result__ = resolve_singularity(p, \"invert\");").unwrap();
+        assert_eq!(v.to_int(), 1);
+    }
+
+    #[test]
+    fn test_resolve_singularity_unknown_mode_errors() {
+        let err = run("h p = 7 / 0; __result__ = resolve_singularity(p, \"bogus\");");
+        assert!(err.is_err(), "expected error for unknown mode");
+    }
+
+    #[test]
+    fn test_canonical_smart_divide_pattern() {
+        // From test_phase7_integration.omc — the canonical Python OMC idiom
+        let src = r#"
+            fn smart_divide(numerator, denominator) {
+                h result = numerator / denominator;
+                if is_singularity(result) == 1 {
+                    h num_res = res(numerator);
+                    if num_res >= 0.7 {
+                        return resolve_singularity(result, "fold");
+                    } else {
+                        return resolve_singularity(result, "invert");
+                    }
+                } else {
+                    return result;
+                }
+            }
+            __result__ = smart_divide(89, 0);
+        "#;
+        let v = run(src).unwrap();
+        assert_eq!(v.to_int(), 89, "89/0 with high res should fold to 89");
     }
 }

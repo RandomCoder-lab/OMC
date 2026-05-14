@@ -4,6 +4,17 @@ All notable changes to OMNIcode will be documented in this file.
 
 ## [Unreleased]
 
+### Added (Phase C: HSingularity as a first-class Value, 2026-05-13)
+- **`Value::Singularity { numerator, denominator, context }`** — division by zero now produces a printable, first-class portal value instead of an `HInt` with a side-flag. `89 / 0` prints as `Singularity(89/0, ctx=div)`.
+- **`is_singularity(v) -> int`** — returns `1` for any Singularity value, `0` otherwise. Returns int (not bool) to match the canonical Python idiom `if is_singularity(result) == 1`.
+- **`resolve_singularity(v, mode) -> int`** with three string modes:
+  - `"fold"` — snap |numerator| to nearest Fibonacci, preserve sign.
+  - `"invert"` — return ±1 based on numerator sign (multiplicative-identity recovery).
+  - `"boundary"` — pass the numerator through unchanged.
+  Unknown modes raise an error.
+- `Value::to_string()` and `Display` render Singularity values nicely. `to_int()`/`to_float()`/`to_bool()` all handle the new variant; `Value::is_singularity()` helper added.
+- **Canonical `smart_divide` pattern from `test_phase7_integration.omc` now runs** on Rust OMC — locked in as a unit test.
+
 ### Added (Phase A + B: type system parity with canonical Python omnicc, 2026-05-13)
 - **`Value::HFloat(f64)`** variant in the runtime. Float literals (`1.5`) now stay as floats instead of being truncated to `HInt`. Arithmetic and comparisons auto-promote when either operand is `HFloat`. Adds `Value::to_float()` and `Value::is_float()` / `Value::is_numeric()` helpers.
 - **`Statement::Parameter`** AST variant + interpreter handler — needed for the Python-canonical parser model where function parameters bind through a separate AST node.
