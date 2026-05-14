@@ -35,6 +35,12 @@ pub struct Interpreter {
     /// reason as test_failures: a plain OMC global wouldn't propagate
     /// to nested assertion calls.
     test_current_name: std::cell::RefCell<String>,
+    /// Names of currently-executing user functions, innermost-last.
+    /// Pushed at the entry of invoke_user_function, popped on exit
+    /// (success OR failure). Used to render call traces on errors —
+    /// future work will also attach source line numbers via per-op
+    /// metadata in CompiledFunction.
+    call_stack: Vec<String>,
 }
 
 impl Interpreter {
@@ -57,6 +63,7 @@ impl Interpreter {
             lambda_counter: 0,
             test_failures: std::cell::RefCell::new(Vec::new()),
             test_current_name: std::cell::RefCell::new(String::new()),
+            call_stack: Vec::new(),
         }
     }
 
@@ -3337,15 +3344,34 @@ impl Interpreter {
             self.set_var(param.clone(), arg);
         }
 
+        // Push a call-stack frame so error messages can show
+        // who-called-whom. The frame is popped in BOTH the success
+        // and error paths so the trace doesn't leak across calls.
+        self.call_stack.push(name.to_string());
+
+        let mut exec_err: Option<String> = None;
         for stmt in body {
-            self.execute_stmt(stmt)?;
+            if let Err(e) = self.execute_stmt(stmt) {
+                exec_err = Some(e);
+                break;
+            }
             if self.return_value.is_some() {
                 break;
             }
         }
 
-        let result = self.return_value.take().unwrap_or(Value::Null);
+        self.call_stack.pop();
         self.locals.pop();
+
+        if let Some(e) = exec_err {
+            // Append our own frame and rethrow. Each invoke_user_function
+            // up the stack does the same, so the final message lists
+            // every frame innermost-first. Mirrors VM run_function's
+            // error-path formatting.
+            return Err(format!("{}\n  at {}", e, name));
+        }
+
+        let result = self.return_value.take().unwrap_or(Value::Null);
         Ok(result)
     }
 
@@ -3455,6 +3481,41 @@ impl Interpreter {
     /// after every Op::ExecStmt and propagate via its own return path.
     pub fn vm_take_return(&mut self) -> Option<Value> {
         self.return_value.take()
+    }
+
+    /// Push a call-stack frame (function name only for now). The VM
+    /// calls this at the entry of run_function so error traces work
+    /// for VM-dispatched calls too, not just tree-walk.
+    pub fn push_call_frame(&mut self, name: &str) {
+        self.call_stack.push(name.to_string());
+    }
+
+    /// REPL-facing: evaluate a single expression in the current
+    /// interpreter state. Used to implement Python-style
+    /// "type-an-expression-and-see-the-value" at the prompt.
+    pub fn eval_for_repl(&mut self, expr: &Expression) -> Result<Value, String> {
+        self.eval_expr(expr)
+    }
+
+    /// Pop a call-stack frame. Counterpart to push_call_frame; called
+    /// in BOTH the success and error paths so the trace can't leak
+    /// across calls.
+    pub fn pop_call_frame(&mut self) {
+        self.call_stack.pop();
+    }
+
+    /// Format an error message with the current call stack appended.
+    /// Used by VM run_function on its error-return path to give the
+    /// same kind of trace tree-walk produces. Innermost frame first.
+    pub fn format_error_with_trace(&self, msg: &str) -> String {
+        if msg.contains("\n  at ") {
+            return msg.to_string();
+        }
+        let mut out = msg.to_string();
+        for fname in self.call_stack.iter().rev() {
+            out.push_str(&format!("\n  at {}", fname));
+        }
+        out
     }
 
     /// VM-facing: same idea for break/continue flags. Returns and

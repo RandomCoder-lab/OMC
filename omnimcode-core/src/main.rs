@@ -254,56 +254,176 @@ fn execute_program(source: &str) -> Result<(), String> {
 }
 
 fn repl() {
-    println!("═══════════════════════════════════════════════════════════════");
-    println!("         OMNIcode Interactive Shell (v1.0.0-standalone)         ");
-    println!("═══════════════════════════════════════════════════════════════");
-    println!();
-    println!("Type OMNIcode statements. Press Ctrl+C to exit.");
+    println!("OMNIcode interactive shell");
+    println!("Type :help for commands, :quit to exit. Statements end with ;");
     println!();
 
     let stdin = io::stdin();
     let mut interpreter = Interpreter::new();
-    let mut input_buffer = String::new();
+    let mut buffer = String::new();
+    let mut continuing = false;
 
     loop {
-        print!("omc> ");
+        print!("{}", if continuing { "...> " } else { "omc> " });
         io::stdout().flush().unwrap();
 
-        input_buffer.clear();
-        match stdin.read_line(&mut input_buffer) {
-            Ok(0) => break, // EOF
-            Ok(_) => {
-                if input_buffer.trim().is_empty() {
+        let mut line = String::new();
+        match stdin.read_line(&mut line) {
+            Ok(0) => { println!(); break; }
+            Err(e) => { eprintln!("Error reading input: {}", e); break; }
+            Ok(_) => {}
+        }
+
+        let trimmed = line.trim();
+
+        // REPL meta-commands (only at the start of a fresh input).
+        if !continuing {
+            match trimmed {
+                "" => continue,
+                ":quit" | ":q" | ":exit" => break,
+                ":help" | ":h" | ":?" => {
+                    repl_print_help();
                     continue;
                 }
+                ":reset" => {
+                    interpreter = Interpreter::new();
+                    println!("interpreter state reset");
+                    continue;
+                }
+                _ => {}
+            }
+        }
 
-                // Try to parse and execute
-                let trimmed = input_buffer.trim();
-                let mut parser = Parser::new(trimmed);
-                
-                match parser.parse() {
+        buffer.push_str(&line);
+
+        // Heuristic for multi-line input: count unmatched braces/parens/brackets.
+        // If they're unbalanced (more openers than closers), keep reading.
+        // Skips characters inside string literals so `"{"` doesn't confuse us.
+        if !is_balanced(&buffer) {
+            continuing = true;
+            continue;
+        }
+
+        // First attempt: parse as-typed.
+        let trimmed_buffer = buffer.trim().to_string();
+        let mut parser = Parser::new(&trimmed_buffer);
+        match parser.parse() {
+            Ok(statements) => {
+                continuing = false;
+                let to_run = buffer.clone();
+                buffer.clear();
+                repl_execute(&mut interpreter, &to_run, statements);
+            }
+            Err(msg) if msg.contains("Semicolon") && !trimmed_buffer.ends_with(';') => {
+                // Bare-expression mode: parser wanted a `;` but the
+                // user hit enter without one. Try parsing with `;`
+                // appended; if that yields a single Expression
+                // statement, evaluate it and print the result. This
+                // is what makes `1 + 2` (no semicolon) print 3.
+                let with_semi = format!("{};", trimmed_buffer);
+                let mut p2 = Parser::new(&with_semi);
+                match p2.parse() {
                     Ok(statements) => {
-                        match interpreter.execute(statements) {
-                            Ok(()) => {},
-                            Err(e) => eprintln!("Error: {}", e),
-                        }
+                        continuing = false;
+                        let to_run = buffer.clone();
+                        buffer.clear();
+                        repl_execute(&mut interpreter, &to_run, statements);
                     }
-                    Err(e) => {
-                        eprintln!("Parse error: {}", e);
+                    Err(msg2) => {
+                        eprintln!("Parse error: {}", msg2);
+                        continuing = false;
+                        buffer.clear();
                     }
                 }
             }
-            Err(e) => {
-                eprintln!("Error reading input: {}", e);
-                break;
+            Err(msg) => {
+                // Other parse errors that look like "needs more input"
+                // (unterminated string, missing closing brace not caught
+                // by is_balanced) → ask for another line. Otherwise
+                // show the error and reset.
+                if msg.contains("Eof") || msg.contains("end of") {
+                    continuing = true;
+                } else {
+                    eprintln!("Parse error: {}", msg);
+                    continuing = false;
+                    buffer.clear();
+                }
             }
         }
     }
 
+    println!("bye");
+}
+
+fn repl_print_help() {
+    println!("REPL commands:");
+    println!("  :help, :h, :?   show this message");
+    println!("  :quit, :q       exit the REPL");
+    println!("  :reset          discard all defined variables and functions");
     println!();
-    println!("═══════════════════════════════════════════════════════════════");
-    println!("Thank you for using OMNIcode!");
-    println!("═══════════════════════════════════════════════════════════════");
+    println!("Tips:");
+    println!("  Statements need a trailing `;`. Multi-line input continues");
+    println!("  while braces/parens are unbalanced (use a closing `}}` or");
+    println!("  `)` to finish). Type a bare expression with `;` to see its");
+    println!("  result via println().");
+}
+
+/// Run a parsed REPL input. If the input is a single expression
+/// statement (with no trailing semicolon in the source), evaluate it
+/// and print the result — Python REPL style. Otherwise execute as
+/// normal statements.
+fn repl_execute(
+    interp: &mut Interpreter,
+    raw_source: &str,
+    statements: Vec<omnimcode_core::ast::Statement>,
+) {
+    use omnimcode_core::ast::Statement;
+    // Detect implicit-print case: exactly one Expression statement
+    // and the source has no trailing `;`. This makes `1 + 2` (no
+    // semicolon) print `3`, while `1 + 2;` runs silently.
+    let trimmed = raw_source.trim();
+    let is_bare_expr = !trimmed.ends_with(';')
+        && statements.len() == 1
+        && matches!(&statements[0], Statement::Expression(_));
+
+    if is_bare_expr {
+        if let Statement::Expression(e) = &statements[0] {
+            match interp.eval_for_repl(e) {
+                Ok(v) => println!("{}", v.to_display_string()),
+                Err(msg) => eprintln!("Error: {}", msg),
+            }
+            return;
+        }
+    }
+
+    if let Err(e) = interp.execute(statements) {
+        eprintln!("Error: {}", e);
+    }
+}
+
+/// Counts unmatched openers in `s`, ignoring contents of string
+/// literals. Returns true when all brackets/parens/braces are balanced
+/// — i.e. when the REPL can attempt to parse the input.
+fn is_balanced(s: &str) -> bool {
+    let mut depth: i32 = 0;
+    let mut in_str = false;
+    let mut prev = '\0';
+    for c in s.chars() {
+        if in_str {
+            // Honor backslash escapes so `"\""` doesn't end the string early.
+            if c == '"' && prev != '\\' { in_str = false; }
+            prev = c;
+            continue;
+        }
+        match c {
+            '"' => in_str = true,
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            _ => {}
+        }
+        prev = c;
+    }
+    depth <= 0 && !in_str
 }
 
 #[cfg(test)]

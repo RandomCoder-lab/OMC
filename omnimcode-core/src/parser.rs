@@ -779,17 +779,33 @@ impl Parser {
                         })
                     }
                     Token::LBracket => {
+                        // Could be `arr[idx] = value;` (IndexAssignment) or
+                        // `arr[idx];` / `arr[idx] + 1;` (expression statement).
+                        // Distinguish by what follows the `]`. If `=`, it's
+                        // an assignment; otherwise rewind and re-parse as
+                        // an expression statement so dict / array indexing
+                        // works in expression position too.
+                        let pre_lbracket = checkpoint.clone();
                         self.advance();
                         let index = self.parse_expression()?;
                         self.expect(Token::RBracket)?;
-                        self.expect(Token::Eq)?;
-                        let value = self.parse_expression()?;
-                        self.expect(Token::Semicolon)?;
-                        Ok(Statement::IndexAssignment {
-                            name: ident,
-                            index,
-                            value,
-                        })
+                        if self.current() == Token::Eq {
+                            self.advance();
+                            let value = self.parse_expression()?;
+                            self.expect(Token::Semicolon)?;
+                            Ok(Statement::IndexAssignment {
+                                name: ident,
+                                index,
+                                value,
+                            })
+                        } else {
+                            // Rewind and treat the whole thing as an
+                            // expression statement.
+                            self.tokens = pre_lbracket;
+                            let expr = self.parse_expression()?;
+                            self.expect(Token::Semicolon)?;
+                            Ok(Statement::Expression(expr))
+                        }
                     }
                     _ => {
                         // Parse as expression statement

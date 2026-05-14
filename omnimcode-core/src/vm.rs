@@ -34,7 +34,45 @@ impl Vm {
         self.run_function(&module.main, &[], module)
     }
 
+    /// Public wrapper around the bytecode interpreter loop. Adds
+    /// call-stack tracking and error-trace formatting on top of the
+    /// raw `run_function_inner` so VM-thrown errors get a "call at X"
+    /// trace just like tree-walk's invoke_user_function does.
+    /// Also rescues the operand-stack scope on error (the inner loop
+    /// uses `?` extensively, which would otherwise leak a scope frame).
     fn run_function(
+        &mut self,
+        func: &CompiledFunction,
+        args: &[Value],
+        module: &Module,
+    ) -> Result<Value, String> {
+        // Skip stack-frame tracking for __main__ — "in __main__" is
+        // noise; the top-level module isn't a user-issued call.
+        let track_frame = func.name != "__main__";
+        if track_frame {
+            self.interp.push_call_frame(&func.name);
+        }
+        let result = self.run_function_inner(func, args, module);
+        if track_frame {
+            self.interp.pop_call_frame();
+        }
+        match result {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                // The inner loop's `?` skipped vm_pop_scope on error;
+                // restore balance here so subsequent calls don't see
+                // a leaked scope frame.
+                self.interp.vm_pop_scope();
+                if track_frame {
+                    Err(format!("{}\n  at {}", e, func.name))
+                } else {
+                    Err(e)
+                }
+            }
+        }
+    }
+
+    fn run_function_inner(
         &mut self,
         func: &CompiledFunction,
         args: &[Value],
