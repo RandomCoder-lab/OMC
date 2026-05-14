@@ -285,54 +285,30 @@ impl Vm {
                         }
                     } else if name == "call" && argvals.len() == 2 {
                         // VM-native dispatch for reflective `call(fn, args)`.
-                        // Without this special case, every reflective call
-                        // routes through vm_call_builtin → tree-walk and
-                        // loses the bytecode-VM hot-path advantage. With
-                        // it, `call(test_name, args)` in the test runner
-                        // and `call(fn, args)` everywhere else execute the
-                        // body via run_function. Real ~2.4× speedup on
-                        // call-heavy workloads (verified on recursive fib
-                        // dispatched through `call`).
-                        //
-                        // Falls through to vm_call_builtin if the target
-                        // isn't a VM-compiled function (e.g. tree-walk
-                        // builtin called via reflection — rare but valid).
+                        // Routes through vm_invoke_callable so the body runs
+                        // as bytecode rather than tree-walk. ~2.4× speedup on
+                        // call-heavy workloads (verified: recursive fib via
+                        // `call`).
                         let fn_v = &argvals[0];
-                        let args_v = &argvals[1];
-                        let target_name = match fn_v {
-                            Value::Function { name, .. } => Some(name.clone()),
-                            Value::String(s) => Some(s.clone()),
-                            _ => None,
-                        };
-                        let unpacked_args = match args_v {
+                        let unpacked = match &argvals[1] {
                             Value::Array(a) => Some(a.items.clone()),
                             _ => None,
                         };
-                        match (target_name, unpacked_args) {
-                            (Some(tname), Some(arg_list)) if module.functions.contains_key(&tname) => {
-                                // VM-native dispatch path.
-                                let captured = if let Value::Function { captured, .. } = fn_v {
-                                    captured.clone()
-                                } else {
-                                    None
-                                };
-                                let pushed = captured.is_some();
-                                if let Some(env) = captured {
-                                    self.interp.vm_push_closure_env(env);
-                                }
-                                let callee = module.functions.get(&tname).expect("checked above");
-                                let r = self.run_function(callee, &arg_list, module);
-                                if pushed {
-                                    // Drop the captured env frame we pushed.
-                                    // Use a small helper rather than poking
-                                    // interp.locals directly so the VM
-                                    // doesn't reach into Interpreter internals.
-                                    self.interp.vm_pop_closure_env();
-                                }
-                                r?
-                            }
-                            _ => self.interp.vm_call_builtin(name, &argvals)?,
+                        match unpacked {
+                            Some(arg_list) => match self.vm_invoke_callable(fn_v, &arg_list, module) {
+                                Some(r) => r?,
+                                None => self.interp.vm_call_builtin(name, &argvals)?,
+                            },
+                            None => self.interp.vm_call_builtin(name, &argvals)?,
                         }
+                    } else if let Some(v) = self.try_dispatch_vm_hof(name, &argvals, module)? {
+                        // VM-native higher-order builtins (arr_map / arr_filter /
+                        // arr_reduce / arr_any / arr_all / arr_find). When the
+                        // callable is a VM-compiled function, each per-element
+                        // invocation runs through run_function — closing the
+                        // last gap where compiled bytecode was being driven by
+                        // tree-walk just to satisfy a HOF iteration loop.
+                        v
                     } else {
                         self.interp.vm_call_builtin(name, &argvals)?
                     };
@@ -512,6 +488,147 @@ impl Vm {
         }
         self.interp.vm_pop_scope();
         Ok(stack.pop().unwrap_or(Value::Null))
+    }
+
+    /// Invoke a Value::Function (or string naming a function) via the
+    /// VM's bytecode hot path when possible. Returns None when the
+    /// callee has no compiled body in module.functions — caller should
+    /// fall back to tree-walk dispatch.
+    ///
+    /// Centralizes the captured-env push/pop bookkeeping that was
+    /// previously inlined at every Op::Call intercept site.
+    fn vm_invoke_callable(
+        &mut self,
+        fn_v: &Value,
+        args: &[Value],
+        module: &Module,
+    ) -> Option<Result<Value, String>> {
+        let (name, captured) = match fn_v {
+            Value::Function { name, captured } => (name.clone(), captured.clone()),
+            Value::String(s) => (s.clone(), None),
+            _ => return None,
+        };
+        // Borrow the CompiledFunction directly out of module — its
+        // lifetime is tied to the &Module we pass through to
+        // run_function, so the immutable borrow stays valid through
+        // the call. Avoids cloning the (Vec<Op>, Vec<Const>, ...)
+        // payload on every HOF iteration.
+        let callee = module.functions.get(&name)?;
+        let pushed = captured.is_some();
+        if let Some(env) = captured {
+            self.interp.vm_push_closure_env(env);
+        }
+        let r = self.run_function(callee, args, module);
+        if pushed {
+            self.interp.vm_pop_closure_env();
+        }
+        Some(r)
+    }
+
+    /// VM-native dispatch for the higher-order array builtins. Replaces
+    /// the otherwise tree-walk path where arr_map et al. invoke
+    /// `call_first_class_function → invoke_user_function`, which runs
+    /// the callable's body via the AST walker. With this helper, when
+    /// the callable is a VM-compiled function (which is the common
+    /// case), every per-element invocation hits run_function instead.
+    ///
+    /// Returns:
+    ///   Ok(Some(v)) — handled; v is the result the VM should push
+    ///   Ok(None)    — not a HOF or no VM-native body, fall back to
+    ///                 vm_call_builtin
+    ///   Err         — dispatched but the body errored
+    fn try_dispatch_vm_hof(
+        &mut self,
+        name: &str,
+        argvals: &[Value],
+        module: &Module,
+    ) -> Result<Option<Value>, String> {
+        // All HOFs in OMC take the array first, the callable second.
+        // arr_reduce additionally takes an initial-accumulator value.
+        if argvals.len() < 2 {
+            return Ok(None);
+        }
+        let fn_v = &argvals[1];
+        // Cheap pre-flight: require the callable to resolve to a
+        // VM-compiled function before we take over. Otherwise we'd
+        // duplicate the fallback work vm_call_builtin already handles.
+        let target_name = match fn_v {
+            Value::Function { name, .. } => name.clone(),
+            Value::String(s) => s.clone(),
+            _ => return Ok(None),
+        };
+        if !module.functions.contains_key(&target_name) {
+            return Ok(None);
+        }
+        let arr_items: Vec<Value> = match &argvals[0] {
+            Value::Array(a) => a.items.clone(),
+            _ => return Ok(None),
+        };
+
+        match name {
+            "arr_map" => {
+                let mut out = Vec::with_capacity(arr_items.len());
+                for item in arr_items {
+                    let r = self.vm_invoke_callable(fn_v, &[item], module)
+                        .expect("checked target above");
+                    out.push(r?);
+                }
+                Ok(Some(Value::Array(HArray { items: out })))
+            }
+            "arr_filter" => {
+                let mut out = Vec::new();
+                for item in arr_items {
+                    let r = self.vm_invoke_callable(fn_v, &[item.clone()], module)
+                        .expect("checked target above")?;
+                    if r.to_bool() {
+                        out.push(item);
+                    }
+                }
+                Ok(Some(Value::Array(HArray { items: out })))
+            }
+            "arr_reduce" => {
+                if argvals.len() < 3 {
+                    return Ok(None);
+                }
+                let mut acc = argvals[2].clone();
+                for item in arr_items {
+                    acc = self.vm_invoke_callable(fn_v, &[acc, item], module)
+                        .expect("checked target above")?;
+                }
+                Ok(Some(acc))
+            }
+            "arr_any" => {
+                for item in arr_items {
+                    let r = self.vm_invoke_callable(fn_v, &[item], module)
+                        .expect("checked target above")?;
+                    if r.to_bool() {
+                        return Ok(Some(Value::HInt(HInt::new(1))));
+                    }
+                }
+                Ok(Some(Value::HInt(HInt::new(0))))
+            }
+            "arr_all" => {
+                for item in arr_items {
+                    let r = self.vm_invoke_callable(fn_v, &[item], module)
+                        .expect("checked target above")?;
+                    if !r.to_bool() {
+                        return Ok(Some(Value::HInt(HInt::new(0))));
+                    }
+                }
+                Ok(Some(Value::HInt(HInt::new(1))))
+            }
+            "arr_find" => {
+                for item in arr_items {
+                    let r = self.vm_invoke_callable(fn_v, &[item.clone()], module)
+                        .expect("checked target above")?;
+                    if r.to_bool() {
+                        return Ok(Some(item));
+                    }
+                }
+                Ok(Some(Value::Null))
+            }
+            _ => Ok(None),
+        }
     }
 }
 

@@ -182,6 +182,66 @@ time_direct("is_fibonacci",  N_RESONANCE);
 time_direct("harmony_value", N_RESONANCE);
 time_direct("recursive_fib", N_FIB);
 
+# --- Higher-order builtin benchmarks ---------------------------------------
+# Tests arr_map / arr_filter / arr_reduce with a user-defined callable.
+# Pre VM-native HOF dispatch, the per-element body invocation routed through
+# tree-walk (call_first_class_function → invoke_user_function) even under
+# OMC_VM=1. After: every body invocation hits run_function directly. The
+# delta here is the cost of the body × N — small bodies still show ~1.4×
+# because the per-call overhead dominates them.
+
+println("");
+println(str_repeat("=", 70));
+println("Higher-order builtins (arr_map/filter/reduce, VM-native dispatch)");
+println(str_repeat("=", 70));
+
+h N_HOF       = 200;     # reps over a 1000-element array
+h N_HOF_INNER = 1000;    # array size
+
+fn _hof_double(x) { return x * 2; }
+fn _hof_is_even(x) { return x % 2 == 0; }
+fn _hof_add(a, b) { return a + b; }
+
+fn _hof_build_xs(n) {
+    h xs = [];
+    h i = 0;
+    while i < n { arr_push(xs, i); i = i + 1; }
+    return xs;
+}
+
+h _hof_xs = _hof_build_xs(N_HOF_INNER);
+
+fn bench_hof_map(reps) {
+    h i = 0;
+    while i < reps {
+        h ys = arr_map(_hof_xs, _hof_double);
+        i = i + 1;
+    }
+    return reps;
+}
+
+fn bench_hof_filter(reps) {
+    h i = 0;
+    while i < reps {
+        h ys = arr_filter(_hof_xs, _hof_is_even);
+        i = i + 1;
+    }
+    return reps;
+}
+
+fn bench_hof_reduce(reps) {
+    h i = 0;
+    while i < reps {
+        h s = arr_reduce(_hof_xs, _hof_add, 0);
+        i = i + 1;
+    }
+    return reps;
+}
+
+run_bench("arr_map(double)",     bench_hof_map,    N_HOF);
+run_bench("arr_filter(is_even)", bench_hof_filter, N_HOF);
+run_bench("arr_reduce(add)",     bench_hof_reduce, N_HOF);
+
 println(str_repeat("=", 70));
 println("Done. Run with OMC_VM=1 to compare against the Rust bytecode VM.");
 println(str_repeat("=", 70));
