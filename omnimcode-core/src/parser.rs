@@ -125,6 +125,30 @@ impl Lexer {
         }
     }
 
+    fn read_triple_quoted_string(&mut self) -> String {
+        // Caller has verified the three opening `"` chars.
+        let mut result = String::new();
+        self.advance();
+        self.advance();
+        self.advance();
+        loop {
+            match self.current() {
+                None => break,
+                Some('"') if self.peek(1) == Some('"') && self.peek(2) == Some('"') => {
+                    self.advance();
+                    self.advance();
+                    self.advance();
+                    break;
+                }
+                Some(c) => {
+                    result.push(c);
+                    self.advance();
+                }
+            }
+        }
+        result
+    }
+
     fn read_string(&mut self, quote: char) -> String {
         let mut result = String::new();
         self.advance(); // Skip opening quote
@@ -199,10 +223,40 @@ impl Lexer {
                 self.skip_comment();
                 continue;
             }
+            // C-style `// line comment` (used by some canonical .omc files alongside `#`).
+            if self.current() == Some('/') && self.peek(1) == Some('/') {
+                while let Some(c) = self.current() {
+                    if c == '\n' {
+                        break;
+                    }
+                    self.advance();
+                }
+                continue;
+            }
+            // C-style `/* block comment */`
+            if self.current() == Some('/') && self.peek(1) == Some('*') {
+                self.advance();
+                self.advance();
+                while let Some(c) = self.current() {
+                    if c == '*' && self.peek(1) == Some('/') {
+                        self.advance();
+                        self.advance();
+                        break;
+                    }
+                    self.advance();
+                }
+                continue;
+            }
 
             match self.current() {
                 None => return Token::Eof,
-                Some('"') => return Token::String(self.read_string('"')),
+                Some('"') => {
+                    // Triple-quoted """multi-line""" docstring detection.
+                    if self.peek(1) == Some('"') && self.peek(2) == Some('"') {
+                        return Token::String(self.read_triple_quoted_string());
+                    }
+                    return Token::String(self.read_string('"'));
+                }
                 Some('\'') => return Token::String(self.read_string('\'')),
                 Some(c) if c.is_ascii_digit() => return self.read_number(),
                 Some(c) if c.is_alphabetic() || c == '_' => {
@@ -453,9 +507,36 @@ impl Parser {
             }
         }
 
+        // Docstring statement: bare string at statement position, optional `;`.
+        // Canonical Python OMC uses `"""docstring"""` at top of fn body without
+        // a trailing semicolon. Treat it as an expression statement.
+        if let Token::String(_) = self.current() {
+            let expr = self.parse_expression()?;
+            if self.current() == Token::Semicolon {
+                self.advance();
+            }
+            return Ok(Statement::Expression(expr));
+        }
+
         match self.current() {
             Token::Harmonic => {
                 self.advance();
+                // Fixed-size array form: `h[N] name;` => `h name = arr_new(N, 0);`
+                if self.current() == Token::LBracket {
+                    self.advance();
+                    let size_expr = self.parse_expression()?;
+                    self.expect(Token::RBracket)?;
+                    let name = self.parse_ident()?;
+                    self.expect(Token::Semicolon)?;
+                    return Ok(Statement::VarDecl {
+                        name,
+                        value: Expression::Call {
+                            name: "arr_new".to_string(),
+                            args: vec![size_expr, Expression::Number(0)],
+                        },
+                        is_harmonic: true,
+                    });
+                }
                 let name = self.parse_ident()?;
                 self.expect(Token::Eq)?;
                 let value = self.parse_expression()?;
@@ -470,6 +551,34 @@ impl Parser {
             Token::While => self.parse_while_stmt(),
             Token::For => self.parse_for_stmt(),
             Token::Fn => self.parse_function_def(),
+            // `import core;` or `import core as c;` or `load "path";`
+            Token::Import | Token::Load => {
+                self.advance();
+                let module = match self.current() {
+                    Token::Ident(s) => {
+                        self.advance();
+                        s
+                    }
+                    Token::String(s) => {
+                        self.advance();
+                        s
+                    }
+                    other => {
+                        return Err(format!(
+                            "Expected module name (ident or string) after import/load, got {:?}",
+                            other
+                        ))
+                    }
+                };
+                let alias = if self.current() == Token::As {
+                    self.advance();
+                    Some(self.parse_ident()?)
+                } else {
+                    None
+                };
+                self.expect(Token::Semicolon)?;
+                Ok(Statement::Import { module, alias })
+            }
             Token::Return => {
                 self.advance();
                 if self.current() == Token::Semicolon {
@@ -649,20 +758,41 @@ impl Parser {
             None
         };
 
-        // Postfix annotations after return type: `-> int @hbit @register`
+        // Postfix annotations after return type:
+        //   `-> int @hbit @register`
+        //   `-> int @unroll:16 @avx512`  (parameterized)
         let mut pragmas: Vec<String> = Vec::new();
         while self.current() == Token::At {
             self.advance();
-            // `@hbit` form
-            if let Token::Ident(_) = self.current() {
-                let p = self.parse_ident()?;
-                pragmas.push(p);
-            } else {
-                return Err(format!(
-                    "Expected pragma name after '@', got {:?}",
-                    self.current()
-                ));
+            let mut name = match self.current() {
+                Token::Ident(_) => self.parse_ident()?,
+                other => {
+                    return Err(format!(
+                        "Expected pragma name after '@', got {:?}",
+                        other
+                    ))
+                }
+            };
+            // Optional `:value` parameter on a pragma. Capture as suffix on the name.
+            if self.current() == Token::Colon {
+                self.advance();
+                let val = match self.current() {
+                    Token::Number(n) => {
+                        self.advance();
+                        n.to_string()
+                    }
+                    Token::Ident(_) => self.parse_ident()?,
+                    other => {
+                        return Err(format!(
+                            "Expected pragma value after ':', got {:?}",
+                            other
+                        ))
+                    }
+                };
+                name.push(':');
+                name.push_str(&val);
             }
+            pragmas.push(name);
         }
 
         self.expect(Token::LBrace)?;

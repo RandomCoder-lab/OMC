@@ -534,6 +534,323 @@ impl Interpreter {
             "pi" => Ok(Value::HFloat(std::f64::consts::PI)),
             "e" => Ok(Value::HFloat(std::f64::consts::E)),
             "phi" => Ok(Value::HFloat(crate::value::PHI)),
+            "tau" => Ok(Value::HFloat(std::f64::consts::TAU)),
+            "phi_inv" => Ok(Value::HFloat(crate::value::PHI_INV)),
+            "phi_sq" => Ok(Value::HFloat(crate::value::PHI_SQ)),
+            "phi_squared" => Ok(Value::HFloat(crate::value::PHI_SQ)),
+            "factorial" => {
+                // Lenient like canonical Python OMC: negative -> 1 (identity).
+                let n = self.eval_expr(&args[0])?.to_int();
+                let mut result: i64 = 1;
+                for i in 1..=n.max(0) {
+                    result = result.wrapping_mul(i);
+                }
+                Ok(Value::HInt(HInt::new(result)))
+            }
+            "square" => {
+                let v = self.eval_expr(&args[0])?;
+                if v.is_float() {
+                    let f = v.to_float();
+                    Ok(Value::HFloat(f * f))
+                } else {
+                    let n = v.to_int();
+                    Ok(Value::HInt(HInt::new(n.wrapping_mul(n))))
+                }
+            }
+            "cube" => {
+                let v = self.eval_expr(&args[0])?;
+                if v.is_float() {
+                    let f = v.to_float();
+                    Ok(Value::HFloat(f * f * f))
+                } else {
+                    let n = v.to_int();
+                    Ok(Value::HInt(HInt::new(n.wrapping_mul(n).wrapping_mul(n))))
+                }
+            }
+            "sqrt_2" => Ok(Value::HFloat(std::f64::consts::SQRT_2)),
+            "sqrt_5" => Ok(Value::HFloat(5.0_f64.sqrt())),
+            "ln_2" => Ok(Value::HFloat(std::f64::consts::LN_2)),
+            // harmonic_interfere(a, b) — Phase 6 std/wave.omc; harmonic mean of magnitudes.
+            "harmonic_interfere" => {
+                let a = self.eval_expr(&args[0])?.to_float();
+                let b = self.eval_expr(&args[1])?.to_float();
+                if a + b == 0.0 {
+                    Ok(Value::HFloat(0.0))
+                } else {
+                    Ok(Value::HFloat(2.0 * a * b / (a + b)))
+                }
+            }
+            // measure_coherence(a, b) — Phase 6 std/wave.omc; resonance-based coherence.
+            "measure_coherence" => {
+                let a = self.eval_expr(&args[0])?.to_int();
+                let b = self.eval_expr(&args[1])?.to_int();
+                let ra = HInt::compute_resonance(a);
+                let rb = HInt::compute_resonance(b);
+                Ok(Value::HFloat((ra - rb).abs()))
+            }
+            // Polymorphic min/max — accept either (a, b) or a single array.
+            "min" => {
+                if args.is_empty() {
+                    return Err("min requires at least 1 argument".to_string());
+                }
+                if args.len() == 1 {
+                    // Array form: forward to arr_min behavior
+                    if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                        if arr.items.is_empty() {
+                            return Err("min: empty array".to_string());
+                        }
+                        return Ok(Value::HInt(HInt::new(
+                            arr.items.iter().map(|v| v.to_int()).min().unwrap(),
+                        )));
+                    }
+                    return Err("min(x): single arg must be an array".to_string());
+                }
+                let a = self.eval_expr(&args[0])?;
+                let b = self.eval_expr(&args[1])?;
+                if a.is_float() || b.is_float() {
+                    Ok(Value::HFloat(a.to_float().min(b.to_float())))
+                } else {
+                    Ok(Value::HInt(HInt::new(a.to_int().min(b.to_int()))))
+                }
+            }
+            "max" => {
+                if args.is_empty() {
+                    return Err("max requires at least 1 argument".to_string());
+                }
+                if args.len() == 1 {
+                    if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                        if arr.items.is_empty() {
+                            return Err("max: empty array".to_string());
+                        }
+                        return Ok(Value::HInt(HInt::new(
+                            arr.items.iter().map(|v| v.to_int()).max().unwrap(),
+                        )));
+                    }
+                    return Err("max(x): single arg must be an array".to_string());
+                }
+                let a = self.eval_expr(&args[0])?;
+                let b = self.eval_expr(&args[1])?;
+                if a.is_float() || b.is_float() {
+                    Ok(Value::HFloat(a.to_float().max(b.to_float())))
+                } else {
+                    Ok(Value::HInt(HInt::new(a.to_int().max(b.to_int()))))
+                }
+            }
+            // safe_add: addition that folds singularity inputs first.
+            "safe_add" => {
+                let a = self.eval_expr(&args[0])?;
+                let b = self.eval_expr(&args[1])?;
+                let a_clean = if a.is_singularity() { self.phi_fold_n(a, 1) } else { a };
+                let b_clean = if b.is_singularity() { self.phi_fold_n(b, 1) } else { b };
+                Ok(Value::HInt(HInt::new(
+                    a_clean.to_int().wrapping_add(b_clean.to_int()),
+                )))
+            }
+            "safe_sub" => {
+                let a = self.eval_expr(&args[0])?;
+                let b = self.eval_expr(&args[1])?;
+                let a_clean = if a.is_singularity() { self.phi_fold_n(a, 1) } else { a };
+                let b_clean = if b.is_singularity() { self.phi_fold_n(b, 1) } else { b };
+                Ok(Value::HInt(HInt::new(
+                    a_clean.to_int().wrapping_sub(b_clean.to_int()),
+                )))
+            }
+            "safe_mul" => {
+                let a = self.eval_expr(&args[0])?;
+                let b = self.eval_expr(&args[1])?;
+                let a_clean = if a.is_singularity() { self.phi_fold_n(a, 1) } else { a };
+                let b_clean = if b.is_singularity() { self.phi_fold_n(b, 1) } else { b };
+                Ok(Value::HInt(HInt::new(
+                    a_clean.to_int().wrapping_mul(b_clean.to_int()),
+                )))
+            }
+            // sign(n) -> -1, 0, or 1
+            "sign" => {
+                let v = self.eval_expr(&args[0])?;
+                let s = if v.is_float() {
+                    let f = v.to_float();
+                    if f > 0.0 { 1 } else if f < 0.0 { -1 } else { 0 }
+                } else {
+                    let n = v.to_int();
+                    if n > 0 { 1 } else if n < 0 { -1 } else { 0 }
+                };
+                Ok(Value::HInt(HInt::new(s)))
+            }
+            // Primality check using 6k±1 trial division.
+            "is_prime" => {
+                let n = self.eval_expr(&args[0])?.to_int();
+                let prime = if n < 2 {
+                    false
+                } else if n < 4 {
+                    true
+                } else if n % 2 == 0 || n % 3 == 0 {
+                    false
+                } else {
+                    let mut i: i64 = 5;
+                    let mut is_p = true;
+                    while i.saturating_mul(i) <= n {
+                        if n % i == 0 || n % (i + 2) == 0 {
+                            is_p = false;
+                            break;
+                        }
+                        i += 6;
+                    }
+                    is_p
+                };
+                Ok(Value::HInt(HInt::new(if prime { 1 } else { 0 })))
+            }
+            // From Phase 6 std/core.omc:
+            //   ensure_clean(v) — return v if not a Singularity; else fold to nearest Fibonacci.
+            "ensure_clean" => {
+                let v = self.eval_expr(&args[0])?;
+                if v.is_singularity() {
+                    Ok(self.phi_fold_n(v, 1))
+                } else {
+                    Ok(v)
+                }
+            }
+            // Drop any Singularity elements from an array (Phase 6 idiom).
+            "cleanup_array" => {
+                if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                    let kept: Vec<Value> =
+                        arr.items.into_iter().filter(|v| !v.is_singularity()).collect();
+                    Ok(Value::Array(HArray { items: kept }))
+                } else {
+                    Err("cleanup_array: requires an array".to_string())
+                }
+            }
+            // collapse(amp, phase) — wave collapse to a scalar magnitude.
+            "collapse" => {
+                let amp = self.eval_expr(&args[0])?.to_float();
+                let phase = if args.len() >= 2 {
+                    self.eval_expr(&args[1])?.to_float()
+                } else {
+                    0.0
+                };
+                Ok(Value::HFloat(amp * phase.cos()))
+            }
+            // Integer power (separate from `pow` which returns float).
+            "pow_int" => {
+                if args.len() < 2 {
+                    return Err("pow_int requires (base, exp)".to_string());
+                }
+                let b = self.eval_expr(&args[0])?.to_int();
+                let e = self.eval_expr(&args[1])?.to_int();
+                let mut result: i64 = 1;
+                let mut base = b;
+                let mut exp = e.max(0) as u32;
+                while exp > 0 {
+                    if exp & 1 == 1 {
+                        result = result.wrapping_mul(base);
+                    }
+                    base = base.wrapping_mul(base);
+                    exp >>= 1;
+                }
+                Ok(Value::HInt(HInt::new(result)))
+            }
+            // is_even / is_odd predicates
+            "even" => {
+                let n = self.eval_expr(&args[0])?.to_int();
+                Ok(Value::HInt(HInt::new(if n % 2 == 0 { 1 } else { 0 })))
+            }
+            "is_even" => {
+                let n = self.eval_expr(&args[0])?.to_int();
+                Ok(Value::HInt(HInt::new(if n % 2 == 0 { 1 } else { 0 })))
+            }
+            "odd" => {
+                let n = self.eval_expr(&args[0])?.to_int();
+                Ok(Value::HInt(HInt::new(if n % 2 != 0 { 1 } else { 0 })))
+            }
+            "is_odd" => {
+                let n = self.eval_expr(&args[0])?.to_int();
+                Ok(Value::HInt(HInt::new(if n % 2 != 0 { 1 } else { 0 })))
+            }
+            // Short alias used in Phase 6 stdlib for `fibonacci`.
+            "fib" => {
+                if args.is_empty() {
+                    return Err("fib requires 1 argument".to_string());
+                }
+                let n = self.eval_expr(&args[0])?.to_int();
+                Ok(Value::HInt(HInt::new(fibonacci(n))))
+            }
+            // From Phase 6 std/core.omc: bucket a value's resonance into a label.
+            // Returns an int code: 3 = high (>=0.7), 2 = medium (>=0.5), 1 = low (>=0.3), 0 = dissonant.
+            // (Python returns a string but Rust callers use it numerically in if-cascades.)
+            "classify_resonance" => {
+                let n = self.eval_expr(&args[0])?.to_int();
+                let r = HInt::compute_resonance(n);
+                let code = if r >= 0.7 {
+                    3
+                } else if r >= 0.5 {
+                    2
+                } else if r >= 0.3 {
+                    1
+                } else {
+                    0
+                };
+                Ok(Value::HInt(HInt::new(code)))
+            }
+            // From Phase 6 std/core.omc: filter array, keep elements with res >= threshold.
+            "filter_by_resonance" => {
+                if args.len() < 2 {
+                    return Err("filter_by_resonance requires (array, threshold)".to_string());
+                }
+                let arr_v = self.eval_expr(&args[0])?;
+                let threshold = self.eval_expr(&args[1])?.to_float();
+                if let Value::Array(arr) = arr_v {
+                    let kept: Vec<Value> = arr
+                        .items
+                        .into_iter()
+                        .filter(|v| HInt::compute_resonance(v.to_int()) >= threshold)
+                        .collect();
+                    Ok(Value::Array(HArray { items: kept }))
+                } else {
+                    Err("filter_by_resonance: first argument must be an array".to_string())
+                }
+            }
+            // From Phase 6 std/wave.omc: simple wave interference between two values.
+            // Returns the harmonic mean of the magnitudes.
+            "interfere" => {
+                if args.len() < 2 {
+                    return Err("interfere requires (a, b)".to_string());
+                }
+                let a = self.eval_expr(&args[0])?.to_float();
+                let b = self.eval_expr(&args[1])?.to_float();
+                if a + b == 0.0 {
+                    Ok(Value::HFloat(0.0))
+                } else {
+                    Ok(Value::HFloat(2.0 * a * b / (a + b)))
+                }
+            }
+            // Variadic "fold across an array with a mode string". From Phase 6 stdlib.
+            "arr_fold_elements" => {
+                if args.is_empty() {
+                    return Err("arr_fold_elements requires (array[, mode])".to_string());
+                }
+                let arr_v = self.eval_expr(&args[0])?;
+                if let Value::Array(arr) = arr_v {
+                    let mut acc = 0i64;
+                    for v in &arr.items {
+                        let n = v.to_int().abs();
+                        let fibs: [i64; 15] = [
+                            0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610,
+                        ];
+                        let mut nearest = fibs[0];
+                        let mut min_dist = n;
+                        for &f in &fibs {
+                            let d = (f - n).abs();
+                            if d < min_dist {
+                                min_dist = d;
+                                nearest = f;
+                            }
+                        }
+                        acc = acc.wrapping_add(nearest);
+                    }
+                    Ok(Value::HInt(HInt::new(acc)))
+                } else {
+                    Err("arr_fold_elements: first argument must be an array".to_string())
+                }
+            }
             // --- Type coercion ---
             "to_int" => Ok(Value::HInt(HInt::new(self.eval_expr(&args[0])?.to_int()))),
             "to_float" => Ok(Value::HFloat(self.eval_expr(&args[0])?.to_float())),
