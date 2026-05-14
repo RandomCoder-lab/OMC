@@ -58,7 +58,9 @@ pub enum Token {
     Comma,
     Arrow,
     Dot,
-    
+    Colon,
+    At,
+
     // Special
     Eof,
 }
@@ -321,6 +323,14 @@ impl Lexer {
                     self.advance();
                     return Token::Dot;
                 }
+                Some(':') => {
+                    self.advance();
+                    return Token::Colon;
+                }
+                Some('@') => {
+                    self.advance();
+                    return Token::At;
+                }
                 Some(_c) => {
                     self.advance();
                     // Skip unknown characters
@@ -384,6 +394,65 @@ impl Parser {
     }
 
     fn parse_statement(&mut self) -> Result<Statement, String> {
+        // Collect any line-prefix pragmas: @pragma[name] above a fn
+        let mut prefix_pragmas: Vec<String> = Vec::new();
+        while self.current() == Token::At {
+            self.advance();
+            // Expect 'pragma' ident
+            match self.current() {
+                Token::Ident(ref s) if s == "pragma" => {
+                    self.advance();
+                    self.expect(Token::LBracket)?;
+                    let name = match self.current() {
+                        Token::Ident(s) => {
+                            self.advance();
+                            s
+                        }
+                        other => {
+                            return Err(format!(
+                                "Expected pragma name in @pragma[...], got {:?}",
+                                other
+                            ))
+                        }
+                    };
+                    self.expect(Token::RBracket)?;
+                    prefix_pragmas.push(name);
+                }
+                other => {
+                    return Err(format!(
+                        "Expected 'pragma' after '@' at line-prefix, got {:?}",
+                        other
+                    ))
+                }
+            }
+        }
+
+        // If we collected pragmas, the next statement must be a fn def — attach them.
+        if !prefix_pragmas.is_empty() {
+            let stmt = self.parse_statement()?;
+            if let Statement::FunctionDef {
+                name,
+                params,
+                param_types,
+                body,
+                return_type,
+                mut pragmas,
+            } = stmt
+            {
+                pragmas.splice(0..0, prefix_pragmas);
+                return Ok(Statement::FunctionDef {
+                    name,
+                    params,
+                    param_types,
+                    body,
+                    return_type,
+                    pragmas,
+                });
+            } else {
+                return Err("@pragma[...] must be followed by a function definition".to_string());
+            }
+        }
+
         match self.current() {
             Token::Harmonic => {
                 self.advance();
@@ -546,8 +615,18 @@ impl Parser {
         self.expect(Token::LParen)?;
 
         let mut params = Vec::new();
+        let mut param_types: Vec<Option<String>> = Vec::new();
         while self.current() != Token::RParen {
-            params.push(self.parse_ident()?);
+            let pname = self.parse_ident()?;
+            // Optional `: type` annotation
+            let ptype = if self.current() == Token::Colon {
+                self.advance();
+                Some(self.parse_ident()?)
+            } else {
+                None
+            };
+            params.push(pname);
+            param_types.push(ptype);
             if self.current() == Token::Comma {
                 self.advance();
             }
@@ -561,14 +640,32 @@ impl Parser {
             None
         };
 
+        // Postfix annotations after return type: `-> int @hbit @register`
+        let mut pragmas: Vec<String> = Vec::new();
+        while self.current() == Token::At {
+            self.advance();
+            // `@hbit` form
+            if let Token::Ident(_) = self.current() {
+                let p = self.parse_ident()?;
+                pragmas.push(p);
+            } else {
+                return Err(format!(
+                    "Expected pragma name after '@', got {:?}",
+                    self.current()
+                ));
+            }
+        }
+
         self.expect(Token::LBrace)?;
         let body = self.parse_block()?;
 
         Ok(Statement::FunctionDef {
             name,
             params,
+            param_types,
             body,
             return_type,
+            pragmas,
         })
     }
 
@@ -725,7 +822,7 @@ impl Parser {
             Token::Float(f) => {
                 let val = f;
                 self.advance();
-                Ok(Expression::Number(val as i64))
+                Ok(Expression::Float(val))
             }
             Token::String(s) => {
                 let val = s;
@@ -742,16 +839,36 @@ impl Parser {
             Token::Res => {
                 self.advance();
                 self.expect(Token::LParen)?;
-                let arg = self.parse_expression()?;
+                let mut args = Vec::new();
+                while self.current() != Token::RParen {
+                    args.push(self.parse_expression()?);
+                    if self.current() == Token::Comma {
+                        self.advance();
+                    }
+                }
                 self.expect(Token::RParen)?;
-                Ok(Expression::Resonance(Box::new(arg)))
+                if args.len() == 1 {
+                    Ok(Expression::Resonance(Box::new(args.into_iter().next().unwrap())))
+                } else {
+                    Ok(Expression::Call { name: "res".to_string(), args })
+                }
             }
             Token::Fold => {
                 self.advance();
                 self.expect(Token::LParen)?;
-                let arg = self.parse_expression()?;
+                let mut args = Vec::new();
+                while self.current() != Token::RParen {
+                    args.push(self.parse_expression()?);
+                    if self.current() == Token::Comma {
+                        self.advance();
+                    }
+                }
                 self.expect(Token::RParen)?;
-                Ok(Expression::Fold(Box::new(arg)))
+                if args.len() == 1 {
+                    Ok(Expression::Fold(Box::new(args.into_iter().next().unwrap())))
+                } else {
+                    Ok(Expression::Call { name: "fold".to_string(), args })
+                }
             }
             Token::Ident(_) => self.parse_ident_expr(),
             _ => Err(format!("Unexpected token in expression: {:?}", self.current())),
@@ -759,7 +876,37 @@ impl Parser {
     }
 
     fn parse_ident_expr(&mut self) -> Result<Expression, String> {
-        let name = self.parse_ident()?;
+        let mut name = self.parse_ident()?;
+
+        // Handle module-qualified calls: phi.fold, core.fib, phi.res, etc.
+        // Lexer emits Token::Dot; we join into a single name like "phi.fold"
+        // to keep AST simple. Interpreter dispatches on the dotted name.
+        // After a dot, accept keywords like `res`/`fold` as method names too.
+        while self.current() == Token::Dot {
+            self.advance();
+            let part = match self.current() {
+                Token::Ident(s) => {
+                    self.advance();
+                    s
+                }
+                Token::Res => {
+                    self.advance();
+                    "res".to_string()
+                }
+                Token::Fold => {
+                    self.advance();
+                    "fold".to_string()
+                }
+                other => {
+                    return Err(format!(
+                        "Expected method name after '.', got {:?}",
+                        other
+                    ))
+                }
+            };
+            name.push('.');
+            name.push_str(&part);
+        }
 
         match self.current() {
             Token::LParen => {

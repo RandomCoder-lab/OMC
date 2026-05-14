@@ -9,6 +9,10 @@ pub enum Statement {
         value: Expression,
         is_harmonic: bool,
     },
+    Parameter {
+        name: String,
+        value: Expression,
+    },
     Assignment {
         name: String,
         value: Expression,
@@ -36,8 +40,10 @@ pub enum Statement {
     FunctionDef {
         name: String,
         params: Vec<String>,
+        param_types: Vec<Option<String>>,
         body: Vec<Statement>,
         return_type: Option<String>,
+        pragmas: Vec<String>,
     },
     Return(Option<Expression>),
     Break,

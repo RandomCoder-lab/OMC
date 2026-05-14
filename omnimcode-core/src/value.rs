@@ -172,14 +172,15 @@ impl HArray {
     }
 }
 
-/// Runtime value - Can be HInt, String, Boolean, Array, etc.
+/// Runtime value - Can be HInt, HFloat, String, Boolean, Array, etc.
 #[derive(Clone, Debug)]
 pub enum Value {
     HInt(HInt),
+    HFloat(f64),
     String(String),
     Bool(bool),
     Array(HArray),
-    Circuit(crate::circuits::Circuit),  // NEW: Genetic logic circuits
+    Circuit(crate::circuits::Circuit),
     Null,
 }
 
@@ -187,6 +188,7 @@ impl Value {
     pub fn to_int(&self) -> i64 {
         match self {
             Value::HInt(h) => h.value,
+            Value::HFloat(f) => *f as i64,
             Value::String(s) => s.parse().unwrap_or(0),
             Value::Bool(b) => if *b { 1 } else { 0 },
             Value::Null => 0,
@@ -194,13 +196,25 @@ impl Value {
         }
     }
 
+    pub fn to_float(&self) -> f64 {
+        match self {
+            Value::HInt(h) => h.value as f64,
+            Value::HFloat(f) => *f,
+            Value::String(s) => s.parse().unwrap_or(0.0),
+            Value::Bool(b) => if *b { 1.0 } else { 0.0 },
+            Value::Null => 0.0,
+            _ => 0.0,
+        }
+    }
+
     pub fn to_bool(&self) -> bool {
         match self {
             Value::HInt(h) => h.value != 0,
+            Value::HFloat(f) => *f != 0.0,
             Value::String(s) => !s.is_empty(),
             Value::Bool(b) => *b,
             Value::Array(a) => !a.items.is_empty(),
-            Value::Circuit(_) => true, // Circuits are always "truthy"
+            Value::Circuit(_) => true,
             Value::Null => false,
         }
     }
@@ -208,6 +222,7 @@ impl Value {
     pub fn to_string(&self) -> String {
         match self {
             Value::HInt(h) => h.to_string(),
+            Value::HFloat(f) => format!("{}", f),
             Value::String(s) => s.clone(),
             Value::Bool(b) => b.to_string(),
             Value::Circuit(c) => c.to_string(),
@@ -217,6 +232,14 @@ impl Value {
                 format!("[{}]", items.join(", "))
             }
         }
+    }
+
+    pub fn is_float(&self) -> bool {
+        matches!(self, Value::HFloat(_))
+    }
+
+    pub fn is_numeric(&self) -> bool {
+        matches!(self, Value::HInt(_) | Value::HFloat(_))
     }
 }
 

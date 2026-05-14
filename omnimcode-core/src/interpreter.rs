@@ -55,6 +55,11 @@ impl Interpreter {
                 self.set_var(name.clone(), val);
                 Ok(())
             }
+            Statement::Parameter { name, value } => {
+                let val = self.eval_expr(value)?;
+                self.set_var(name.clone(), val);
+                Ok(())
+            }
             Statement::Assignment { name, value } => {
                 let val = self.eval_expr(value)?;
                 self.set_var(name.clone(), val);
@@ -209,7 +214,7 @@ impl Interpreter {
     fn eval_expr(&mut self, expr: &Expression) -> Result<Value, String> {
         match expr {
             Expression::Number(n) => Ok(Value::HInt(HInt::new(*n))),
-            Expression::Float(f) => Ok(Value::HInt(HInt::new(*f as i64))),
+            Expression::Float(f) => Ok(Value::HFloat(*f)),
             Expression::String(s) => Ok(Value::String(s.clone())),
             Expression::Boolean(b) => Ok(Value::Bool(*b)),
             Expression::Array(exprs) => {
@@ -231,67 +236,121 @@ impl Interpreter {
             Expression::Add(l, r) => {
                 let lv = self.eval_expr(l)?;
                 let rv = self.eval_expr(r)?;
-                Ok(Value::HInt(HInt::new(lv.to_int() + rv.to_int())))
+                if lv.is_float() || rv.is_float() {
+                    Ok(Value::HFloat(lv.to_float() + rv.to_float()))
+                } else {
+                    Ok(Value::HInt(HInt::new(lv.to_int() + rv.to_int())))
+                }
             }
             Expression::Sub(l, r) => {
                 let lv = self.eval_expr(l)?;
                 let rv = self.eval_expr(r)?;
-                Ok(Value::HInt(HInt::new(lv.to_int() - rv.to_int())))
+                if lv.is_float() || rv.is_float() {
+                    Ok(Value::HFloat(lv.to_float() - rv.to_float()))
+                } else {
+                    Ok(Value::HInt(HInt::new(lv.to_int() - rv.to_int())))
+                }
             }
             Expression::Mul(l, r) => {
                 let lv = self.eval_expr(l)?;
                 let rv = self.eval_expr(r)?;
-                Ok(Value::HInt(HInt::new(lv.to_int() * rv.to_int())))
+                if lv.is_float() || rv.is_float() {
+                    Ok(Value::HFloat(lv.to_float() * rv.to_float()))
+                } else {
+                    Ok(Value::HInt(HInt::new(lv.to_int() * rv.to_int())))
+                }
             }
             Expression::Div(l, r) => {
                 let lv = self.eval_expr(l)?;
                 let rv = self.eval_expr(r)?;
-                let divisor = rv.to_int();
-                if divisor == 0 {
-                    Ok(Value::HInt(HInt::singularity()))
+                if lv.is_float() || rv.is_float() {
+                    let r_f = rv.to_float();
+                    if r_f == 0.0 {
+                        Ok(Value::HInt(HInt::singularity()))
+                    } else {
+                        Ok(Value::HFloat(lv.to_float() / r_f))
+                    }
                 } else {
-                    Ok(Value::HInt(HInt::new(lv.to_int() / divisor)))
+                    let divisor = rv.to_int();
+                    if divisor == 0 {
+                        Ok(Value::HInt(HInt::singularity()))
+                    } else {
+                        Ok(Value::HInt(HInt::new(lv.to_int() / divisor)))
+                    }
                 }
             }
             Expression::Mod(l, r) => {
                 let lv = self.eval_expr(l)?;
                 let rv = self.eval_expr(r)?;
-                let divisor = rv.to_int();
-                if divisor == 0 {
-                    Ok(Value::HInt(HInt::new(0)))
+                if lv.is_float() || rv.is_float() {
+                    let r_f = rv.to_float();
+                    if r_f == 0.0 {
+                        Ok(Value::HFloat(0.0))
+                    } else {
+                        Ok(Value::HFloat(lv.to_float() % r_f))
+                    }
                 } else {
-                    Ok(Value::HInt(HInt::new(lv.to_int() % divisor)))
+                    let divisor = rv.to_int();
+                    if divisor == 0 {
+                        Ok(Value::HInt(HInt::new(0)))
+                    } else {
+                        Ok(Value::HInt(HInt::new(lv.to_int() % divisor)))
+                    }
                 }
             }
             Expression::Eq(l, r) => {
-                let lv = self.eval_expr(l)?.to_int();
-                let rv = self.eval_expr(r)?.to_int();
-                Ok(Value::Bool(lv == rv))
+                let lv = self.eval_expr(l)?;
+                let rv = self.eval_expr(r)?;
+                if lv.is_float() || rv.is_float() {
+                    Ok(Value::Bool(lv.to_float() == rv.to_float()))
+                } else {
+                    Ok(Value::Bool(lv.to_int() == rv.to_int()))
+                }
             }
             Expression::Ne(l, r) => {
-                let lv = self.eval_expr(l)?.to_int();
-                let rv = self.eval_expr(r)?.to_int();
-                Ok(Value::Bool(lv != rv))
+                let lv = self.eval_expr(l)?;
+                let rv = self.eval_expr(r)?;
+                if lv.is_float() || rv.is_float() {
+                    Ok(Value::Bool(lv.to_float() != rv.to_float()))
+                } else {
+                    Ok(Value::Bool(lv.to_int() != rv.to_int()))
+                }
             }
             Expression::Lt(l, r) => {
-                let lv = self.eval_expr(l)?.to_int();
-                let rv = self.eval_expr(r)?.to_int();
-                Ok(Value::Bool(lv < rv))
+                let lv = self.eval_expr(l)?;
+                let rv = self.eval_expr(r)?;
+                if lv.is_float() || rv.is_float() {
+                    Ok(Value::Bool(lv.to_float() < rv.to_float()))
+                } else {
+                    Ok(Value::Bool(lv.to_int() < rv.to_int()))
+                }
             }
             Expression::Le(l, r) => {
-                let lv = self.eval_expr(l)?.to_int();
-                let rv = self.eval_expr(r)?.to_int();
-                Ok(Value::Bool(lv <= rv))
+                let lv = self.eval_expr(l)?;
+                let rv = self.eval_expr(r)?;
+                if lv.is_float() || rv.is_float() {
+                    Ok(Value::Bool(lv.to_float() <= rv.to_float()))
+                } else {
+                    Ok(Value::Bool(lv.to_int() <= rv.to_int()))
+                }
             }
             Expression::Gt(l, r) => {
-                let lv = self.eval_expr(l)?.to_int();
-                let rv = self.eval_expr(r)?.to_int();
-                Ok(Value::Bool(lv > rv))
+                let lv = self.eval_expr(l)?;
+                let rv = self.eval_expr(r)?;
+                if lv.is_float() || rv.is_float() {
+                    Ok(Value::Bool(lv.to_float() > rv.to_float()))
+                } else {
+                    Ok(Value::Bool(lv.to_int() > rv.to_int()))
+                }
             }
             Expression::Ge(l, r) => {
-                let lv = self.eval_expr(l)?.to_int();
-                let rv = self.eval_expr(r)?.to_int();
-                Ok(Value::Bool(lv >= rv))
+                let lv = self.eval_expr(l)?;
+                let rv = self.eval_expr(r)?;
+                if lv.is_float() || rv.is_float() {
+                    Ok(Value::Bool(lv.to_float() >= rv.to_float()))
+                } else {
+                    Ok(Value::Bool(lv.to_int() >= rv.to_int()))
+                }
             }
             Expression::And(l, r) => {
                 let lv = self.eval_expr(l)?.to_bool();
@@ -348,8 +407,44 @@ impl Interpreter {
     }
 
     fn call_function(&mut self, name: &str, args: &[Expression]) -> Result<Value, String> {
+        // Module-qualified calls (e.g., "phi.fold", "phi.res", "core.fib")
+        if let Some((module, func)) = name.split_once('.') {
+            return self.call_module_function(module, func, args);
+        }
         // Built-in functions
         match name {
+            "fold" => {
+                // Variadic: fold(x), fold(x, depth_int), fold(x, "fibonacci")
+                if args.is_empty() {
+                    return Err("fold requires at least 1 argument".to_string());
+                }
+                let v = self.eval_expr(&args[0])?;
+                let depth = if args.len() >= 2 {
+                    let mode_v = self.eval_expr(&args[1])?;
+                    // String mode → depth 1 (snap to Fibonacci); int mode → use as depth
+                    match mode_v {
+                        Value::HInt(h) => h.value.max(1) as usize,
+                        Value::HFloat(_) => mode_v.to_int().max(1) as usize,
+                        _ => 1,
+                    }
+                } else {
+                    1
+                };
+                Ok(self.phi_fold_n(v, depth))
+            }
+            "res" => {
+                if args.is_empty() {
+                    return Err("res requires 1 argument".to_string());
+                }
+                let v = self.eval_expr(&args[0])?;
+                match v {
+                    Value::HInt(h) => Ok(Value::HFloat(h.resonance)),
+                    Value::HFloat(f) => {
+                        Ok(Value::HFloat(HInt::compute_resonance(f as i64)))
+                    }
+                    _ => Ok(Value::HFloat(0.0)),
+                }
+            }
             "fibonacci" => {
                 if args.is_empty() {
                     return Err("fibonacci requires 1 argument".to_string());
@@ -505,6 +600,84 @@ impl Interpreter {
             scope.insert(name, value);
         }
     }
+
+    fn call_module_function(
+        &mut self,
+        module: &str,
+        func: &str,
+        args: &[Expression],
+    ) -> Result<Value, String> {
+        match (module, func) {
+            ("phi", "fold") => {
+                if args.is_empty() {
+                    return Err("phi.fold requires at least 1 argument".to_string());
+                }
+                let v = self.eval_expr(&args[0])?;
+                let depth = if args.len() >= 2 {
+                    self.eval_expr(&args[1])?.to_int().max(1) as usize
+                } else {
+                    1
+                };
+                Ok(self.phi_fold_n(v, depth))
+            }
+            ("phi", "res") => {
+                if args.is_empty() {
+                    return Err("phi.res requires 1 argument".to_string());
+                }
+                let v = self.eval_expr(&args[0])?;
+                match v {
+                    Value::HInt(h) => Ok(Value::HFloat(h.resonance)),
+                    Value::HFloat(f) => {
+                        Ok(Value::HFloat(HInt::compute_resonance(f as i64)))
+                    }
+                    _ => Ok(Value::HFloat(0.0)),
+                }
+            }
+            ("phi", "him") => {
+                if args.is_empty() {
+                    return Err("phi.him requires 1 argument".to_string());
+                }
+                let n = self.eval_expr(&args[0])?.to_int();
+                Ok(Value::HFloat(HInt::compute_him(n)))
+            }
+            // Unknown module: fall through to the unqualified name.
+            // Lets `core.fib(n)` work after `import core;` without explicit module setup.
+            _ => self.call_function(func, args),
+        }
+    }
+
+    fn phi_fold_n(&self, v: Value, depth: usize) -> Value {
+        match v {
+            Value::HInt(h) => {
+                let mut current = h.value;
+                let fibs: [i64; 15] = [
+                    0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610,
+                ];
+                for _ in 0..depth.max(1) {
+                    let abs_val = current.abs();
+                    let mut nearest = fibs[0];
+                    let mut min_dist = abs_val;
+                    for &fib in &fibs {
+                        let d = (fib - abs_val).abs();
+                        if d < min_dist {
+                            min_dist = d;
+                            nearest = fib;
+                        }
+                    }
+                    current = if current < 0 { -nearest } else { nearest };
+                }
+                Value::HInt(HInt::new(current))
+            }
+            Value::HFloat(f) => {
+                let mut current = f;
+                for _ in 0..depth.max(1) {
+                    current = (current * crate::value::PHI).fract();
+                }
+                Value::HFloat(current)
+            }
+            _ => Value::HInt(HInt::new(0)),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -514,5 +687,121 @@ mod tests {
     #[test]
     fn test_interpreter_simple() {
         // Basic tests would go here
+    }
+
+    fn run(source: &str) -> Result<Value, String> {
+        use crate::parser::Parser;
+        let mut parser = Parser::new(source);
+        let stmts = parser.parse()?;
+        let mut interp = Interpreter::new();
+        let mut last = Value::Null;
+        for stmt in &stmts {
+            interp.execute_stmt(stmt)?;
+            if let Statement::Expression(e) = stmt {
+                last = interp.eval_expr(e)?;
+            }
+        }
+        if let Some(v) = interp.get_var("__result__") {
+            return Ok(v);
+        }
+        Ok(last)
+    }
+
+    #[test]
+    fn test_hfloat_literal() {
+        let src = "h x = 1.5; __result__ = x;";
+        let v = run(src).unwrap();
+        assert!(matches!(v, Value::HFloat(_)));
+        assert_eq!(v.to_float(), 1.5);
+    }
+
+    #[test]
+    fn test_float_arithmetic_promotes() {
+        let src = "h x = 1.5; h y = 2; __result__ = x + y;";
+        let v = run(src).unwrap();
+        assert!(matches!(v, Value::HFloat(_)));
+        assert_eq!(v.to_float(), 3.5);
+    }
+
+    #[test]
+    fn test_int_arithmetic_stays_int() {
+        let src = "h x = 5; h y = 3; __result__ = x * y;";
+        let v = run(src).unwrap();
+        assert!(matches!(v, Value::HInt(_)));
+        assert_eq!(v.to_int(), 15);
+    }
+
+    #[test]
+    fn test_phi_fold_module_call() {
+        let src = "__result__ = phi.fold(90);";
+        let v = run(src).unwrap();
+        assert_eq!(v.to_int(), 89, "phi.fold(90) should snap to Fibonacci 89");
+    }
+
+    #[test]
+    fn test_phi_fold_dynamic_depth() {
+        let src = "h d = 2; __result__ = phi.fold(0.5, d);";
+        let v = run(src).unwrap();
+        assert!(matches!(v, Value::HFloat(_)));
+        // Two iterations of frac(x * phi) starting from 0.5 — just verify it stays in [0,1)
+        let f = v.to_float();
+        assert!(f >= 0.0 && f < 1.0);
+    }
+
+    #[test]
+    fn test_phi_res_returns_float() {
+        let src = "__result__ = phi.res(89);";
+        let v = run(src).unwrap();
+        assert!(matches!(v, Value::HFloat(_)));
+        // 89 is Fibonacci, resonance should be ~1.0
+        assert!((v.to_float() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_float_comparison() {
+        let src = "h a = 1.5; h b = 1.6; __result__ = a < b;";
+        let v = run(src).unwrap();
+        assert!(matches!(v, Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_pragma_prefix_parses() {
+        let src = r#"
+@pragma[hbit]
+@pragma[avx512]
+fn doit(x) {
+    return x + 1;
+}
+__result__ = doit(88);
+"#;
+        let v = run(src).unwrap();
+        assert_eq!(v.to_int(), 89);
+    }
+
+    #[test]
+    fn test_pragma_postfix_parses() {
+        let src = r#"
+fn add(x: int, y: int) -> int @harmony @predict {
+    return x + y;
+}
+__result__ = add(89, 144);
+"#;
+        let v = run(src).unwrap();
+        assert_eq!(v.to_int(), 233);
+    }
+
+    #[test]
+    fn test_fold_two_arg_canonical() {
+        // Canonical Python OMC uses fold(x, "fibonacci") — string mode
+        let src = "__result__ = fold(90, \"fibonacci\");";
+        let v = run(src).unwrap();
+        assert_eq!(v.to_int(), 89);
+    }
+
+    #[test]
+    fn test_param_type_annotations_ignored_but_parse() {
+        let src = "fn id(x: int, y: string) -> int { return x; } __result__ = id(42, \"hi\");";
+        let v = run(src).unwrap();
+        assert_eq!(v.to_int(), 42);
     }
 }
