@@ -1,0 +1,215 @@
+# =============================================================================
+# Web log analyzer — a non-trivial OMC program
+# =============================================================================
+# Reads a CSV access log, computes standard summary statistics, then runs
+# OMC-distinctive harmonic analyses (Fibonacci-attractor partitioning of
+# latencies, harmonic_sort by HIM, attractor-grouped outlier detection).
+#
+# Demonstrates: file I/O, CSV parsing, first-class functions (arr_map /
+# arr_filter / arr_reduce), HOF composition, mutable closures for stats
+# accumulators, and the harmonic_* builtins as the OMC-native pivot.
+#
+# Run:
+#   ./target/release/omnimcode-standalone examples/log_analyzer.omc
+#   OMC_VM=1 ./target/release/omnimcode-standalone examples/log_analyzer.omc
+# =============================================================================
+
+# ---- 1. Generate sample log ------------------------------------------------
+# We embed the sample directly so the demo is self-contained — no
+# external file needed. 24 fake requests across four endpoints. The
+# `/api/search` endpoint deliberately has heavier-tailed latencies so
+# the harmonic-partition step has something interesting to show.
+
+h log_lines = [
+    "1715000001,/api/users,200,12",
+    "1715000002,/api/users,200,8",
+    "1715000003,/api/users,200,15",
+    "1715000004,/api/orders,200,22",
+    "1715000005,/api/orders,200,19",
+    "1715000006,/api/orders,500,2100",
+    "1715000007,/api/orders,200,21",
+    "1715000008,/api/search,200,89",
+    "1715000009,/api/search,200,144",
+    "1715000010,/api/search,200,55",
+    "1715000011,/api/search,200,233",
+    "1715000012,/api/search,200,90",
+    "1715000013,/api/search,500,3400",
+    "1715000014,/api/login,200,34",
+    "1715000015,/api/login,401,55",
+    "1715000016,/api/login,200,21",
+    "1715000017,/api/login,200,13",
+    "1715000018,/api/orders,200,17",
+    "1715000019,/api/users,200,9",
+    "1715000020,/api/users,200,11",
+    "1715000021,/api/search,200,87",
+    "1715000022,/api/search,500,2900",
+    "1715000023,/api/login,200,28",
+    "1715000024,/api/orders,200,18"
+];
+h sample = str_join(log_lines, "\n");
+
+write_file("/tmp/access.log", sample);
+
+# ---- 2. Read + parse -------------------------------------------------------
+
+h raw = read_file("/tmp/access.log");
+h lines = str_split(raw, "\n");
+
+# Each line → array [ts, endpoint, status, latency_ms]. We carry latency
+# as HInt so resonance / HIM math works on it downstream.
+fn parse_line(ln) {
+    h parts = str_split(ln, ",");
+    return [
+        to_int(arr_get(parts, 0)),
+        arr_get(parts, 1),
+        to_int(arr_get(parts, 2)),
+        to_int(arr_get(parts, 3))
+    ];
+}
+
+h rows = arr_map(lines, parse_line);
+
+# ---- 3. Standard summary stats --------------------------------------------
+
+fn get_status(row)   { return arr_get(row, 2); }
+fn get_latency(row)  { return arr_get(row, 3); }
+fn get_endpoint(row) { return arr_get(row, 1); }
+
+fn is_error(row) {
+    return get_status(row) >= 400;
+}
+
+h total = arr_len(rows);
+h errors = arr_filter(rows, is_error);
+h error_count = arr_len(errors);
+
+# Sum-of-latencies via reduce — exercises first-class fn closure
+fn add_latency(acc, row) { return acc + get_latency(row); }
+h total_latency = arr_reduce(rows, add_latency, 0);
+h mean_latency = total_latency / total;
+
+# Max via reduce
+fn max_latency(acc, row) {
+    h l = get_latency(row);
+    if l > acc { return l; }
+    return acc;
+}
+h peak_latency = arr_reduce(rows, max_latency, 0);
+
+println("=== Standard summary =====================================");
+println(concat_many("  total requests: ", total));
+println(concat_many("  errors (>=400): ", error_count));
+println(concat_many("  mean latency:   ", mean_latency, " ms"));
+println(concat_many("  peak latency:   ", peak_latency, " ms"));
+println("");
+
+# ---- 4. Per-endpoint breakdown via mutable-closure accumulator ------------
+# Build an endpoint→count map by hand (OMC has no dict yet, so we use two
+# parallel arrays and a small helper). The accumulator is a closure that
+# captures the parallel arrays — sibling closures share state, which is
+# exactly the mutable-closure case our recent VM work fixed.
+
+fn make_counter_table() {
+    h keys = [];
+    h vals = [];
+
+    h bump = fn(k) {
+        h i = 0;
+        while i < arr_len(keys) {
+            if arr_get(keys, i) == k {
+                arr_set(vals, i, arr_get(vals, i) + 1);
+                return 0;
+            }
+            i = i + 1;
+        }
+        # First time seeing this key — append.
+        arr_push(keys, k);
+        arr_push(vals, 1);
+        return 0;
+    };
+
+    h dump = fn() {
+        return [keys, vals];
+    };
+
+    return [bump, dump];
+}
+
+h tbl = make_counter_table();
+h bump = arr_get(tbl, 0);
+h dump = arr_get(tbl, 1);
+
+fn count_endpoint(row) {
+    bump(get_endpoint(row));
+    return 0;
+}
+arr_map(rows, count_endpoint);
+
+h pair = dump();
+h endpoints = arr_get(pair, 0);
+h counts = arr_get(pair, 1);
+
+println("=== Per-endpoint counts (via mutable closures) ============");
+h i = 0;
+while i < arr_len(endpoints) {
+    println(concat_many("  ", arr_get(endpoints, i), " : ", arr_get(counts, i)));
+    i = i + 1;
+}
+println("");
+
+# ---- 5. Harmonic statistics ------------------------------------------------
+# This is the OMC-distinctive part. We pull out just the latencies and
+# feed them through the harmonic_* builtins. The Fibonacci-attractor
+# partitioning gives us a free, semantically-meaningful histogram —
+# /api/search clumps near 89/144/233 (its natural latency band), while
+# the 500-error rows land in the 2300+ outlier bucket all by themselves.
+
+h latencies = arr_map(rows, get_latency);
+h harmonic_sorted = harmonic_sort(latencies);
+
+println("=== Harmonic-sort (by HIM score) ==========================");
+println("  Top 5 by harmonic dominance:");
+h j = 0;
+while j < 5 {
+    println(concat_many("    ", arr_get(harmonic_sorted, j), " ms"));
+    j = j + 1;
+}
+println("");
+
+h partitioned = harmonic_partition(latencies);
+
+println("=== Latency clustering on Fibonacci attractors ============");
+h k = 0;
+while k < arr_len(partitioned) {
+    h bucket = arr_get(partitioned, k);
+    h bucket_len = arr_len(bucket);
+    # Attractor-id = fold(first element) — cheap label.
+    h label = fold(arr_get(bucket, 0));
+    println(concat_many("  attractor ~", label, " : ", bucket_len, " request(s)"));
+    k = k + 1;
+}
+println("");
+
+# ---- 6. Outlier detection: high-attractor latencies -----------------------
+# An outlier is any latency landing on a Fibonacci attractor >= 377
+# (one φ-octave above the natural search-endpoint band). The 500-error
+# rows at 2100 / 2900 / 3400 ms all fold onto the 610 attractor, so
+# this surfaces them cleanly without arbitrary z-score thresholds.
+
+fn is_outlier(lat) {
+    if fold(lat) >= 377 { return 1; }
+    return 0;
+}
+
+h spikes = arr_filter(latencies, is_outlier);
+
+println("=== Outliers (latency >= 377-attractor) ===================");
+h m = 0;
+while m < arr_len(spikes) {
+    h s = arr_get(spikes, m);
+    println(concat_many("  spike: ", s, " ms (folds to attractor ", fold(s), ")"));
+    m = m + 1;
+}
+
+println("");
+println("=== Done ==================================================");

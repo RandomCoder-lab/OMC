@@ -595,7 +595,7 @@ impl Compiler {
                     self.var_types.insert(name.clone(), t);
                 }
                 self.compile_expr(value)?;
-                self.emit(Op::StoreVar(name.clone()));
+                self.emit(Op::AssignVar(name.clone()));
             }
             Statement::IndexAssignment { name, index, value } => {
                 self.compile_expr(value)?;

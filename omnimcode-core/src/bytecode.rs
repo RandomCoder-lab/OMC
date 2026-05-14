@@ -127,6 +127,17 @@ pub enum Op {
     /// call_first_class_function → tree-walk semantics for the body.
     /// Fast bytecode-VM execution of closure bodies is future work.
     Lambda(String),
+    /// Assignment to an EXISTING binding. Walks scopes from inner to
+    /// outer looking for the name; mutates in-place where found.
+    /// Falls back to innermost on miss (implicit declaration).
+    ///
+    /// Distinguishes `x = ...` (assignment) from `h x = ...`
+    /// (declaration via StoreVar). Without this distinction the VM
+    /// couldn't support mutable closures — `balance = balance + n`
+    /// inside a closure would shadow rather than mutate the captured
+    /// `balance`. Tree-walk has the same split via `assign_var` vs
+    /// `set_var`.
+    AssignVar(String),
 
     // Special harmonic operations (short-circuit to built-in semantics
     // without the call overhead — these are the hot ones).

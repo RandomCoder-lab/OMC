@@ -85,6 +85,15 @@ impl Vm {
                     let v = stack.pop().ok_or("stack underflow")?;
                     self.interp.vm_set_local(name, v);
                 }
+                Op::AssignVar(name) => {
+                    // Walks scopes outward for an existing binding —
+                    // mirrors tree-walk's Statement::Assignment via
+                    // assign_var. Required for mutable closures: an
+                    // `x = ...` inside a closure body should mutate
+                    // the captured `x`, not shadow it.
+                    let v = stack.pop().ok_or("stack underflow")?;
+                    self.interp.vm_assign_var(name, v);
+                }
                 Op::LoadParam(_) => {
                     // params are stored as locals; LoadVar is equivalent.
                     return Err("LoadParam not yet implemented".to_string());
@@ -237,6 +246,43 @@ impl Vm {
                         // Safe: we already proved this key exists.
                         let callee = module.functions.get(name).expect("inline cache lied");
                         self.run_function(callee, &argvals, module)?
+                    } else if let Some(Value::Function { name: fn_name, captured }) =
+                        self.interp.vm_get_var_local_only(name)
+                    {
+                        // VM-native dispatch for `add5(10)`-style calls
+                        // where `add5` is a LOCAL VARIABLE holding a
+                        // closure value (not a name in module.functions).
+                        // Without this branch, every closure invocation
+                        // from VM-compiled code routes through tree-walk
+                        // via call_first_class_function. With it, calls
+                        // hit the same run_function hot path as direct
+                        // user-fn calls.
+                        //
+                        // We use vm_get_var_local_only (no function-table
+                        // fallback) to avoid recursion: if `name` is
+                        // already known to be a user fn, the `is_user`
+                        // branch above would have caught it.
+                        //
+                        // Only takes the fast path if the closure's body
+                        // is in module.functions — otherwise the body
+                        // doesn't exist as bytecode and we have to
+                        // tree-walk (e.g. a closure created via a
+                        // runtime Lambda eval that wasn't compile-time).
+                        if module.functions.contains_key(&fn_name) {
+                            let pushed_env = captured.is_some();
+                            if let Some(env) = captured {
+                                self.interp.vm_push_closure_env(env);
+                            }
+                            let callee = module.functions.get(&fn_name)
+                                .expect("checked above");
+                            let r = self.run_function(callee, &argvals, module);
+                            if pushed_env {
+                                self.interp.vm_pop_closure_env();
+                            }
+                            r?
+                        } else {
+                            self.interp.vm_call_builtin(name, &argvals)?
+                        }
                     } else if name == "call" && argvals.len() == 2 {
                         // VM-native dispatch for reflective `call(fn, args)`.
                         // Without this special case, every reflective call
@@ -324,10 +370,14 @@ impl Vm {
                     }
                 }
                 Op::ArrPushNamed(name) => {
+                    // assign_var (walks outward) — not set_local — so pushes
+                    // from inside a closure body land in the captured env
+                    // where the array actually lives, not the closure's call
+                    // scope. Same rationale as tree-walk arr_push.
                     let val = stack.pop().ok_or("stack underflow")?;
                     if let Some(Value::Array(mut a)) = self.interp.vm_get_var(name) {
                         a.items.push(val);
-                        self.interp.vm_set_local(name, Value::Array(a));
+                        self.interp.vm_assign_var(name, Value::Array(a));
                     } else {
                         return Err(format!(
                             "ArrPushNamed: {} is not an array variable",
@@ -347,7 +397,8 @@ impl Vm {
                             ));
                         }
                         a.items[idx] = val;
-                        self.interp.vm_set_local(name, Value::Array(a));
+                        // assign_var (walks outward) — see ArrPushNamed above.
+                        self.interp.vm_assign_var(name, Value::Array(a));
                     } else {
                         return Err(format!(
                             "ArrSetNamed: {} is not an array variable",
@@ -384,7 +435,7 @@ impl Vm {
                                 healed += len_i;
                             }
                             a.items[healed as usize] = val;
-                            self.interp.vm_set_local(name, Value::Array(a));
+                            self.interp.vm_assign_var(name, Value::Array(a));
                         }
                         // Empty arrays: silently drop the write (total
                         // semantics — never errors).
@@ -401,7 +452,9 @@ impl Vm {
                     if let Some(Value::Array(mut a)) = self.interp.vm_get_var(name) {
                         if idx < a.items.len() {
                             a.items[idx] = val;
-                            self.interp.vm_set_local(name, Value::Array(a));
+                            // assign_var so the mutation hits the outer
+                            // binding when this runs inside a closure body.
+                            self.interp.vm_assign_var(name, Value::Array(a));
                         } else {
                             return Err(format!("array {} index {} out of bounds", name, idx));
                         }

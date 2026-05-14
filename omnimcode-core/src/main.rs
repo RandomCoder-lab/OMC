@@ -192,6 +192,13 @@ fn execute_program(source: &str) -> Result<(), String> {
         // dispatch paths can resolve them. The VM still uses its own
         // compiled function table for direct Op::Call dispatch; this
         // duplication only kicks in for first-class function reflection.
+        // Imports are no-ops in the bytecode compiler, so the VM
+        // never wires up `math.fib_up_to`-style aliased calls on its
+        // own. Run a pre-pass that walks top-level Statement::Import
+        // and merges each module's functions into interp.functions.
+        // Dot-namespaced calls then route through call_module_function
+        // and resolve normally.
+        vm.interp_mut().process_imports(&statements)?;
         vm.interp_mut().register_user_functions(&statements);
         // Also register every lambda body the compiler collected. Lambda
         // invocation routes through call_first_class_function → the

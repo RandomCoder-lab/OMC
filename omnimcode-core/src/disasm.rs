@@ -77,6 +77,7 @@ fn op_mnemonic(op: &Op, ip: usize, constants: &[Const]) -> String {
         Op::ArrSetNamed(name) => format!("ARR_SET_NAMED   {}", name),
         Op::SafeArrSetNamed(name) => format!("SAFE_ARR_SET_NAMED {}", name),
         Op::Lambda(name) => format!("LAMBDA          {}", name),
+        Op::AssignVar(name) => format!("ASSIGN_VAR      {}", name),
 
         Op::Resonance => "RESONANCE".to_string(),
         Op::Fold1 => "FOLD".to_string(),

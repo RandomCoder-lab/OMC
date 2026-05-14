@@ -2066,11 +2066,16 @@ impl Interpreter {
                     return Err("arr_push requires (array_name, value)".to_string());
                 }
                 // Mutates by name. First arg must be a Variable reference so we can write back.
+                // Use assign_var (walks outward for existing binding) instead of
+                // set_var (always innermost) — otherwise pushes inside a closure
+                // body would land in the closure's call scope, not the captured
+                // env where the array actually lives, and the mutation would be
+                // discarded on return.
                 let val = self.eval_expr(&args[1])?;
                 if let Expression::Variable(name) = &args[0] {
                     if let Some(Value::Array(mut arr)) = self.get_var(name) {
                         arr.items.push(val);
-                        self.set_var(name.clone(), Value::Array(arr));
+                        self.assign_var(name.clone(), Value::Array(arr));
                         return Ok(Value::Null);
                     }
                 }
@@ -2108,7 +2113,10 @@ impl Interpreter {
                             ));
                         }
                         arr.items[idx] = val;
-                        self.set_var(name.clone(), Value::Array(arr));
+                        // assign_var (not set_var) so mutations from inside a
+                        // closure body propagate into the captured env. Same
+                        // rationale as arr_push above.
+                        self.assign_var(name.clone(), Value::Array(arr));
                         return Ok(Value::Null);
                     }
                 }
@@ -3245,6 +3253,14 @@ impl Interpreter {
         self.set_var(name.to_string(), value);
     }
 
+    /// VM-facing wrapper around assign_var — walks scopes outward for
+    /// an existing binding, mutates there. See `assign_var` for the
+    /// rules. Used by Op::AssignVar (introduced for mutable closure
+    /// support).
+    pub fn vm_assign_var(&mut self, name: &str, value: Value) {
+        self.assign_var(name.to_string(), value);
+    }
+
     /// Return an Rc clone of the topmost local scope frame, for closure
     /// capture in Op::Lambda. The Rc is shared — multiple lambdas in
     /// the same scope get the same underlying RefCell, so mutations
@@ -3261,6 +3277,27 @@ impl Interpreter {
     /// the same function bodies. Tree-walks the body if reached this
     /// way; the user pays a slight cost for reflective dispatch in
     /// VM mode, but the regular Op::Call path stays bytecode-fast.
+    /// Process every top-level `Statement::Import` in `statements`,
+    /// registering the imported module's functions into self.functions.
+    /// Used by main.rs under OMC_VM=1, since the bytecode compiler
+    /// treats imports as no-ops and the VM never enters `execute_stmt`
+    /// for top-level statements (its execution model is bytecode, not
+    /// AST). Without this pre-pass, `math.fib_up_to(...)` calls in VM
+    /// mode would fail with "Undefined function" even though the
+    /// import line is there.
+    ///
+    /// Imports are deduplicated via `imported_modules`, so calling
+    /// this twice (e.g. once during pre-pass, once via execute) is
+    /// safe — the second call is a no-op.
+    pub fn process_imports(&mut self, statements: &[Statement]) -> Result<(), String> {
+        for stmt in statements {
+            if let Statement::Import { module, alias } = stmt {
+                self.import_module_with_alias(module, alias.as_deref())?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn register_user_functions(&mut self, statements: &[Statement]) {
         // Walks every FunctionDef anywhere in the AST — including those
         // nested inside other fn bodies, if-branches, while bodies, etc.
@@ -3310,6 +3347,15 @@ impl Interpreter {
             return Some(Value::Function { name: name.to_string(), captured: None });
         }
         None
+    }
+
+    /// Same as vm_get_var but WITHOUT the function-table fallback. The VM's
+    /// Op::Call dispatch uses this to check "is `name` a variable holding
+    /// a Value::Function" — without falling back to a Function-ref from
+    /// the function table itself (which would be redundant; the is_user
+    /// branch above already handles that).
+    pub fn vm_get_var_local_only(&self, name: &str) -> Option<Value> {
+        self.get_var(name)
     }
 
     /// Call a built-in (or user-defined) function with already-evaluated args.
