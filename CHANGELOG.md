@@ -4,6 +4,26 @@ All notable changes to OMNIcode will be documented in this file.
 
 ## [Unreleased]
 
+### Added (Phase N: Phi-Field LLM kernel demo, 2026-05-13)
+
+`examples/phi_field_llm_demo.omc` — a working "language model" written in pure OMNIcode that demonstrates the harmonic computing thesis end-to-end. No transformer. No matrix multiply. No learned weights. Decisions are made by walking phi-space geodesics, with each step scored by OmniWeight `w = φ^(-|e|)` — the canonical formula from `omninet_phi/resonance.py`.
+
+**Pipeline:**
+1. **ENCODE** — character codes → Fibonacci attractors via `phi.fold(code + position * 7)`. Every input lands on a φ-aligned bucket.
+2. **ATTEND** — for each position, compute the "state" as the **harmonic mean** of the previous and current encoded values (`harmonic_interfere`, the Phase 6 `std/wave.omc` function — really used, via `import wave;`). Score every candidate in a 12-entry Fibonacci vocabulary by `omni_weight(state, candidate) = φ^(-|state-candidate|/max(|candidate|,1))`. Pick the max.
+3. **REFLECT** — emit chosen attractor + OmniWeight per step, plus mean coherence across the sequence.
+
+**Real exercise:**
+- Imports `core`, `wave`, `portal` from the canonical Phase 6 stdlib via the Phase G module resolver.
+- Uses `harmonic_interfere`, `phi.fold`, `pow`, `to_float`, `concat_many` — all real stdlib functions.
+- Tree-walk and VM produce **bit-identical output** (verified via `diff`).
+
+**Observed results:**
+- ASCII "Hello" input: mean OmniWeight = 0.956. The phi-encoder lands close enough to attractors that the geodesic step is almost free.
+- Pure Fibonacci input `[13, 21, 34, 55, 89]`: mean OmniWeight = 0.925. The harmonic interferences between consecutive Fibonacci numbers land slightly off-attractor (since `2ab/(a+b)` of consecutive Fibs isn't itself Fibonacci) — and that drop is exactly the geodesic distance the OmniWeight reports.
+
+This is the harmonic computing thesis in miniature: any decision can be made by computing OmniWeights against a small attractor vocabulary and picking the max. No backprop, no gradients — just `φ^(-|e|)` geodesics through phi-space. The Rust OMC now runs this end-to-end.
+
 ### Added (Phase L + M: resonance caching + typed HIR, 2026-05-13)
 
 **Phase L — Resonance / portal caching**

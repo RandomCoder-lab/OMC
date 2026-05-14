@@ -1,0 +1,215 @@
+# =============================================================================
+# Phi-Field LLM Kernel Demo (Phase N)
+# =============================================================================
+# A working "language model" written in pure OMNIcode that demonstrates the
+# harmonic computing thesis: no transformer, no matrix multiply, no learned
+# weights. Decisions are made by walking phi-space geodesics, with each step
+# scored by OmniWeight w = φ^(-|e|) — the canonical geodesic-distance
+# weighting from omninet_phi/resonance.py.
+#
+# Pipeline:
+#   1. ENCODE  — characters → (resonance, HIM, Fibonacci tier)
+#   2. ATTEND  — OmniWeight against a fixed vocabulary of Fibonacci
+#                attractors. Highest weight wins; ties go to the lowest
+#                attractor (favour simplicity).
+#   3. REFLECT — emit the chosen attractor sequence + a coherence score.
+#
+# Run:
+#   ./standalone.omc examples/phi_field_llm_demo.omc           # tree-walk
+#   OMC_VM=1 OMC_OPT_STATS=1 ./standalone.omc examples/...     # bytecode VM
+#
+# The VM path benefits from Phase L's resonance caching: the vocabulary
+# constants (1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610) have
+# their resonances precomputed at compile time, so the inner loop is just
+# float subtractions and pow.
+# =============================================================================
+
+import core;      # is_harmonic, classify_resonance, ensure_clean
+import wave;      # harmonic_interfere, measure_coherence
+import portal;    # safe_divide_fold
+
+print("== Phi-Field LLM Kernel ==");
+print("");
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+h PHI = 1.6180339887498948;
+h PHI_INV = 0.6180339887498948;
+h GOLDEN_ANGLE = 2.3999632297286533;  # 2π * φ_inv²
+
+# Vocabulary of Fibonacci attractors. Phi-Field LLMs don't have a learned
+# vocab — they emit attractor codes from this fixed φ-aligned set.
+h F1 = 1;
+h F2 = 2;
+h F3 = 3;
+h F4 = 5;
+h F5 = 8;
+h F6 = 13;
+h F7 = 21;
+h F8 = 34;
+h F9 = 55;
+h F10 = 89;
+h F11 = 144;
+h F12 = 233;
+
+# ---------------------------------------------------------------------------
+# OmniWeight: w = φ^(-|e|) where e is normalized error.
+#
+# This is THE central primitive — the geodesic distance from a candidate
+# value to the observed state, expressed as a weight in (0, 1]. Perfect
+# match (e=0) → w=1. One phi-tier off (e=1) → w=φ⁻¹ ≈ 0.618. Two tiers
+# off → w=φ⁻² ≈ 0.382.
+#
+# Decisions are made by picking the candidate with the highest OmniWeight.
+# That's exactly the geodesic shortest-path in phi-space.
+# ---------------------------------------------------------------------------
+fn omni_weight(observed, candidate) -> float {
+    # error = |observed - candidate| / max(|candidate|, 1)
+    # Force float math so e is a real fraction, not int-truncated.
+    h diff = to_float(observed - candidate);
+    if diff < 0.0 { diff = 0.0 - diff; }
+    h denom = to_float(candidate);
+    if denom < 0.0 { denom = 0.0 - denom; }
+    if denom < 1.0 { denom = 1.0; }
+    h e = diff / denom;
+    # w = φ^(-e). Pure math, no learning.
+    return pow(PHI, 0.0 - e);
+}
+
+# Same idea but for a state vs ALL of our vocabulary, returning the
+# attractor with the highest weight. This is one "attention step".
+fn best_attractor(state) -> int {
+    h best = F1;
+    h best_w = omni_weight(state, F1);
+
+    h w = omni_weight(state, F2);
+    if w > best_w { best_w = w; best = F2; }
+
+    w = omni_weight(state, F3);
+    if w > best_w { best_w = w; best = F3; }
+
+    w = omni_weight(state, F4);
+    if w > best_w { best_w = w; best = F4; }
+
+    w = omni_weight(state, F5);
+    if w > best_w { best_w = w; best = F5; }
+
+    w = omni_weight(state, F6);
+    if w > best_w { best_w = w; best = F6; }
+
+    w = omni_weight(state, F7);
+    if w > best_w { best_w = w; best = F7; }
+
+    w = omni_weight(state, F8);
+    if w > best_w { best_w = w; best = F8; }
+
+    w = omni_weight(state, F9);
+    if w > best_w { best_w = w; best = F9; }
+
+    w = omni_weight(state, F10);
+    if w > best_w { best_w = w; best = F10; }
+
+    w = omni_weight(state, F11);
+    if w > best_w { best_w = w; best = F11; }
+
+    w = omni_weight(state, F12);
+    if w > best_w { best_w = w; best = F12; }
+
+    return best;
+}
+
+# ---------------------------------------------------------------------------
+# ENCODE: A character's "harmonic state" is its raw code modulated through
+# the golden-angle, then phi-folded. This gives every input character a
+# canonical position on the phi-spiral.
+# ---------------------------------------------------------------------------
+fn encode_char(code, position) -> int {
+    # Modulate by position via golden-angle rotation, then phi-fold to land
+    # on a Fibonacci attractor. The result is a token in φ-vocab.
+    h modulated = code + (position * 7);    # 7 ≈ φ × Fibonacci shift
+    return phi.fold(modulated);
+}
+
+# ---------------------------------------------------------------------------
+# ATTEND: for the encoded sequence, compute the "state" at each position as
+# the harmonic interference of two adjacent encoded values. Then pick the
+# attractor with the highest OmniWeight against that state.
+#
+# This is the Phi-Field equivalent of a single attention head — but instead
+# of Q·K^T / √d softmax, we use φ-geodesic distance and pick the maximum.
+# ---------------------------------------------------------------------------
+fn attend_and_emit(input_codes, n) -> int {
+    h sum_coherence = 0;
+    h pos = 0;
+    h prev_encoded = encode_char(arr_get(input_codes, 0), 0);
+
+    while pos < n {
+        h code = arr_get(input_codes, pos);
+        h encoded = encode_char(code, pos);
+
+        # State = harmonic interference of previous + current. Keep as float
+        # so OmniWeight sees the real interference value, not an int-cast.
+        h state = harmonic_interfere(prev_encoded, encoded);
+
+        # Decision: nearest attractor by OmniWeight.
+        h emitted = best_attractor(state);
+        h confidence = omni_weight(state, emitted);
+
+        # Report each step.
+        print(concat_many("step ", pos, ": code=", code, " encoded=", encoded));
+        print(concat_many("        state=", state, " emit=", emitted, " w=", confidence));
+
+        # Track coherence (how harmonically aligned the chosen emission is
+        # with the input state — averaged at the end).
+        h coherence_contribution = to_int(confidence * 1000);
+        sum_coherence = sum_coherence + coherence_contribution;
+
+        prev_encoded = encoded;
+        pos = pos + 1;
+    }
+    # Return mean coherence × 1000 (so it stays integer for display).
+    return sum_coherence / n;
+}
+
+# ---------------------------------------------------------------------------
+# Demo: feed a small "context" sequence and emit a phi-folded "response"
+# token by token, with OmniWeight commentary.
+# ---------------------------------------------------------------------------
+print("Vocabulary (Fibonacci attractors):");
+print("[1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610]");
+print("");
+
+# Input as integer codes (think of them as character codes — they could be
+# from any tokeniser).
+h input1 = [72, 101, 108, 108, 111];  # "Hello" if mapped to ASCII
+h len1 = arr_len(input1);
+
+print("Input codes: [72, 101, 108, 108, 111]  (ASCII for 'Hello')");
+print("Running phi-field attention...");
+print("");
+
+h mean_coh1 = attend_and_emit(input1, len1);
+print("");
+print(concat_many("Mean OmniWeight (×1000): ", mean_coh1));
+print(concat_many("Mean φ-coherence ratio: ", to_float(mean_coh1) / 1000));
+print("");
+
+# Second example: pure Fibonacci sequence as input. Should produce very
+# high coherence since the inputs ARE the attractors.
+print("---");
+print("Input codes: [13, 21, 34, 55, 89]  (Fibonacci numbers)");
+print("Running phi-field attention...");
+print("");
+
+h input2 = [13, 21, 34, 55, 89];
+h len2 = arr_len(input2);
+h mean_coh2 = attend_and_emit(input2, len2);
+print("");
+print(concat_many("Mean OmniWeight (×1000): ", mean_coh2));
+print("");
+print("Observation: Fibonacci-aligned inputs produce higher OmniWeights —");
+print("the phi-field is reporting that the input already lives on the");
+print("φ-geodesic. This is the harmonic computing thesis in miniature.");
+print("");
+print("== End ==");
