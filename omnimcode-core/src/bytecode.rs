@@ -98,7 +98,29 @@ pub enum Op {
 
     // Arrays
     NewArray(usize),       // pop N items into a new array, push
-    ArrayIndex,            // pop index, pop array, push array[index]
+    /// Pop 2N values (alternating key, value) off the stack and
+    /// build a Dict. Keys are stringified via to_display_string at
+    /// build time. Order matches source-order pairs in the literal.
+    NewDict(usize),
+    /// Mutating dict insert: pop value, pop key, store at named dict
+    /// variable in the current scope. Same name-on-opcode trick as
+    /// ArrSetNamed — required so the mutation propagates back through
+    /// the VM scope chain instead of getting lost in vm_call_builtin's
+    /// synthetic-arg shim. Emitted by the compiler when it sees
+    /// `dict_set(VAR, k, v)` with a literal Variable as the first arg.
+    DictSetNamed(String),
+    /// Mutating dict delete: pop key, remove from named dict variable.
+    /// Same rationale as DictSetNamed.
+    DictDelNamed(String),
+    /// Tree-walk fallback: execute an AST statement via the embedded
+    /// Interpreter rather than as bytecode. Used for forms whose
+    /// control flow doesn't map cleanly onto the stack VM (currently
+    /// just Statement::Try — exception unwind would require either
+    /// a side try-stack or a full Result-aware op dispatch refactor;
+    /// the fallback keeps the VM dispatch loop simple and pays a
+    /// per-try-block tree-walk cost only).
+    ExecStmt(Box<crate::ast::Statement>),
+    ArrayIndex,            // pop index, pop container; container dispatch (Array → idx int, Dict → idx str)
     ArrayIndexAssign(String), // pop value, pop index, assign array_var[idx] = value
     /// Mutating array push: pop one value off the stack and append it
     /// to the named array variable in the current scope. Emitted by the

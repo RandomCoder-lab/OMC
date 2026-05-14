@@ -52,6 +52,16 @@ pub enum Statement {
         module: String,
         alias: Option<String>,
     },
+    /// `try { ... } catch err { ... }`. If the try block raises an
+    /// error (via `error("msg")` or any builtin failure), execution
+    /// jumps to the catch block with `err_var` bound to a Value::String
+    /// holding the error message. Without try/catch, builtin failures
+    /// crash the program.
+    Try {
+        body: Vec<Statement>,
+        err_var: String,
+        handler: Vec<Statement>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -68,6 +78,11 @@ pub enum Expression {
     String(String),
     Boolean(bool),
     Array(Vec<Expression>),
+    /// Dict literal: `{"k1": v1, "k2": v2}`. Keys are string-typed
+    /// expressions (must evaluate to strings); values are arbitrary.
+    /// Stored as a Vec<(key_expr, value_expr)> so the compiler can
+    /// emit them in source order.
+    Dict(Vec<(Expression, Expression)>),
     
     // Variables and access
     Variable(String),

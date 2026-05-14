@@ -24,6 +24,8 @@ pub enum Token {
     Res,
     Fold,
     Safe,        // H.5 host-level support: `safe <expr>` prefix
+    Try,
+    Catch,
 
     // Identifiers and literals
     Ident(String),
@@ -328,6 +330,8 @@ impl Lexer {
                         "res" => Token::Res,
                         "fold" => Token::Fold,
                         "safe" => Token::Safe,
+                        "try" => Token::Try,
+                        "catch" => Token::Catch,
                         "and" => Token::And,
                         "or" => Token::Or,
                         "not" => Token::Not,
@@ -701,6 +705,7 @@ impl Parser {
             Token::While => self.parse_while_stmt(),
             Token::For => self.parse_for_stmt(),
             Token::Fn => self.parse_function_def(),
+            Token::Try => self.parse_try_stmt(),
             // `import core;` or `import core as c;` or `load "path";`
             Token::Import | Token::Load => {
                 self.advance();
@@ -842,6 +847,21 @@ impl Parser {
         let body = self.parse_block()?;
 
         Ok(Statement::While { condition, body })
+    }
+
+    /// `try { ... } catch err { ... }` — the simplest possible
+    /// exception form. No exception classes (yet); the caught value
+    /// is always a string holding the error message. Single catch
+    /// arm only — we may add multi-arm matching later.
+    fn parse_try_stmt(&mut self) -> Result<Statement, String> {
+        self.expect(Token::Try)?;
+        self.expect(Token::LBrace)?;
+        let body = self.parse_block()?;
+        self.expect(Token::Catch)?;
+        let err_var = self.parse_ident()?;
+        self.expect(Token::LBrace)?;
+        let handler = self.parse_block()?;
+        Ok(Statement::Try { body, err_var, handler })
     }
 
     fn parse_for_stmt(&mut self) -> Result<Statement, String> {
@@ -1261,6 +1281,7 @@ impl Parser {
                 Ok(Expression::String(val))
             }
             Token::LBracket => self.parse_array(),
+            Token::LBrace => self.parse_dict(),
             Token::LParen => {
                 self.advance();
                 let expr = self.parse_expression()?;
@@ -1382,6 +1403,26 @@ impl Parser {
 
         self.expect(Token::RBracket)?;
         Ok(Expression::Array(elements))
+    }
+
+    /// Parse a dict literal: `{"k1": v1, "k2": v2}` or `{}`.
+    /// Reachable only from expression position; statement-level
+    /// blocks (after if/while/fn) are matched by their own
+    /// LBrace expectations and never enter parse_primary.
+    fn parse_dict(&mut self) -> Result<Expression, String> {
+        self.expect(Token::LBrace)?;
+        let mut pairs = Vec::new();
+        while self.current() != Token::RBrace {
+            let key = self.parse_expression()?;
+            self.expect(Token::Colon)?;
+            let val = self.parse_expression()?;
+            pairs.push((key, val));
+            if self.current() == Token::Comma {
+                self.advance();
+            }
+        }
+        self.expect(Token::RBrace)?;
+        Ok(Expression::Dict(pairs))
     }
 
     fn parse_ident(&mut self) -> Result<String, String> {

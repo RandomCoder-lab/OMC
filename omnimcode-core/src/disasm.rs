@@ -71,6 +71,10 @@ fn op_mnemonic(op: &Op, ip: usize, constants: &[Const]) -> String {
         Op::ReturnNull => "RETURN_NULL".to_string(),
 
         Op::NewArray(n) => format!("NEW_ARRAY    {}", n),
+        Op::NewDict(n) => format!("NEW_DICT     {}", n),
+        Op::DictSetNamed(name) => format!("DICT_SET_NAMED  {}", name),
+        Op::DictDelNamed(name) => format!("DICT_DEL_NAMED  {}", name),
+        Op::ExecStmt(_) => "EXEC_STMT       <ast>".to_string(),
         Op::ArrayIndex => "ARRAY_INDEX".to_string(),
         Op::ArrayIndexAssign(name) => format!("ARRAY_INDEX_ASSIGN {}", name),
         Op::ArrPushNamed(name) => format!("ARR_PUSH_NAMED  {}", name),

@@ -170,6 +170,17 @@ fn format_stmt(stmt: &Statement, level: usize, out: &mut String) {
             }
             out.push_str(";\n");
         }
+        Statement::Try { body, err_var, handler } => {
+            out.push_str("try {\n");
+            for s in body { format_stmt(s, level + 1, out); }
+            indent_to(level, out);
+            out.push_str("} catch ");
+            out.push_str(err_var);
+            out.push_str(" {\n");
+            for s in handler { format_stmt(s, level + 1, out); }
+            indent_to(level, out);
+            out.push_str("}\n");
+        }
     }
 }
 
@@ -215,6 +226,16 @@ fn format_expr(expr: &Expression, out: &mut String) {
                 format_expr(e, out);
             }
             out.push(']');
+        }
+        Expression::Dict(pairs) => {
+            out.push('{');
+            for (i, (k, v)) in pairs.iter().enumerate() {
+                if i > 0 { out.push_str(", "); }
+                format_expr(k, out);
+                out.push_str(": ");
+                format_expr(v, out);
+            }
+            out.push('}');
         }
         Expression::Add(l, r) => format_binop(l, "+", r, out),
         Expression::Sub(l, r) => format_binop(l, "-", r, out),

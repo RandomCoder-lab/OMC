@@ -670,6 +670,20 @@ impl Interpreter {
                 // the caller reaches them via dotted-call syntax.
                 self.import_module_with_alias(module, alias.as_deref())
             }
+            Statement::Try { body, err_var, handler } => {
+                // Run the body; if anything inside returns Err, jump to
+                // the handler with err_var bound to the message string.
+                // The body and handler share the surrounding scope —
+                // no extra scope is pushed (matches Python try/except).
+                match self.execute_block(body) {
+                    Ok(()) => Ok(()),
+                    Err(msg) => {
+                        // Install err_var in the current scope, run handler.
+                        self.set_var(err_var.clone(), Value::String(msg));
+                        self.execute_block(handler)
+                    }
+                }
+            }
             _ => Ok(()),
         }
     }
@@ -697,6 +711,15 @@ impl Interpreter {
                 }
                 Ok(Value::Array(HArray { items }))
             }
+            Expression::Dict(pairs) => {
+                let mut map = std::collections::BTreeMap::new();
+                for (k_expr, v_expr) in pairs {
+                    let k = self.eval_expr(k_expr)?.to_display_string();
+                    let v = self.eval_expr(v_expr)?;
+                    map.insert(k, v);
+                }
+                Ok(Value::Dict(map))
+            }
             Expression::Variable(name) => {
                 // First try variable lookup. If missing, fall back to the
                 // function table — bare function names become first-class
@@ -716,17 +739,42 @@ impl Interpreter {
                 }
             }
             Expression::Index { name, index } => {
-                let idx = self.eval_expr(index)?.to_int() as usize;
-                if let Some(Value::Array(arr)) = self.get_var(name) {
-                    arr.items.get(idx).cloned().ok_or_else(|| "Index out of bounds".to_string())
-                } else {
-                    Err(format!("Not an array: {}", name))
+                let idx_v = self.eval_expr(index)?;
+                let container = self.get_var(name)
+                    .ok_or_else(|| format!("Undefined variable: {}", name))?;
+                match container {
+                    Value::Array(arr) => {
+                        let idx = idx_v.to_int() as usize;
+                        arr.items.get(idx).cloned()
+                            .ok_or_else(|| format!("Index out of bounds: {}", idx))
+                    }
+                    Value::Dict(d) => {
+                        // String-keyed lookup. Coerce numeric/bool indices
+                        // via to_display_string so `d[42]` works as
+                        // `d["42"]` — surprising for some, but matches
+                        // OMC's "everything stringifies" stance.
+                        let key = idx_v.to_display_string();
+                        Ok(d.get(&key).cloned().unwrap_or(Value::Null))
+                    }
+                    _ => Err(format!("Not indexable: {}", name)),
                 }
             }
             Expression::Add(l, r) => {
                 let lv = self.eval_expr(l)?;
                 let rv = self.eval_expr(r)?;
-                if lv.is_float() || rv.is_float() {
+                // String + anything → concat, like Python. Avoids the
+                // earlier footgun where `"a" + "b"` coerced to int and
+                // returned 0. Either side being a string triggers this
+                // (numbers/bools/etc. stringify via to_string).
+                if matches!(lv, Value::String(_)) || matches!(rv, Value::String(_)) {
+                    // Use to_display_string so `"count: " + 42` produces
+                    // "count: 42", not "count: HInt(42, φ=..., HIM=...)".
+                    Ok(Value::String(format!(
+                        "{}{}",
+                        lv.to_display_string(),
+                        rv.to_display_string()
+                    )))
+                } else if lv.is_float() || rv.is_float() {
                     Ok(Value::HFloat(lv.to_float() + rv.to_float()))
                 } else {
                     Ok(Value::HInt(HInt::new(lv.to_int() + rv.to_int())))
@@ -1020,6 +1068,9 @@ impl Interpreter {
             | "arr_resonance" | "filter_by_resonance" | "cleanup_array"
             | "arr_map" | "arr_filter" | "arr_reduce"
             | "arr_any" | "arr_all" | "arr_find"
+            // Dicts
+            | "dict_new" | "dict_get" | "dict_set" | "dict_has" | "dict_del"
+            | "dict_keys" | "dict_values" | "dict_len" | "dict_merge"
             // Harmonic primitives
             | "fib" | "fibonacci" | "is_fibonacci" | "harmony_value" | "fold"
             | "fold_escape" | "value_danger" | "classify_resonance"
@@ -1039,7 +1090,7 @@ impl Interpreter {
             | "println" | "print_raw"
             // Time, conversion, introspection
             | "now_ms" | "to_int" | "int" | "to_float" | "float"
-            | "to_string" | "string" | "len" | "type_of"
+            | "to_string" | "string" | "len" | "type_of" | "error"
             | "defined_functions" | "call"
             // Test runner host-state primitives
             | "test_record_failure" | "test_failure_count"
@@ -2346,6 +2397,121 @@ impl Interpreter {
                     Err("arr_find: first argument must be an array".to_string())
                 }
             }
+            // ---- Dict (hash-map) builtins ----------------------------------
+            // String-keyed maps. dict_set / dict_del mutate by name (same
+            // arr_push convention) — first arg must be a Variable so the
+            // mutation can write back. dict_get returns Null on missing key,
+            // matching Python's d.get(k) sans default.
+            "dict_new" => {
+                Ok(Value::Dict(std::collections::BTreeMap::new()))
+            }
+            "dict_get" => {
+                if args.len() < 2 {
+                    return Err("dict_get requires (dict, key)".to_string());
+                }
+                let d_v = self.eval_expr(&args[0])?;
+                let k = self.eval_expr(&args[1])?.to_display_string();
+                if let Value::Dict(d) = d_v {
+                    // Optional 3rd arg = default. Without it, missing → Null.
+                    let default = if args.len() >= 3 {
+                        Some(self.eval_expr(&args[2])?)
+                    } else { None };
+                    Ok(d.get(&k).cloned().unwrap_or_else(|| default.unwrap_or(Value::Null)))
+                } else {
+                    Err("dict_get: first argument must be a dict".to_string())
+                }
+            }
+            "dict_set" => {
+                if args.len() < 3 {
+                    return Err("dict_set requires (dict_var, key, value)".to_string());
+                }
+                let k = self.eval_expr(&args[1])?.to_display_string();
+                let val = self.eval_expr(&args[2])?;
+                if let Expression::Variable(name) = &args[0] {
+                    if let Some(Value::Dict(mut d)) = self.get_var(name) {
+                        d.insert(k, val);
+                        self.assign_var(name.clone(), Value::Dict(d));
+                        return Ok(Value::Null);
+                    }
+                }
+                Err("dict_set: first argument must be a dict variable".to_string())
+            }
+            "dict_has" => {
+                if args.len() < 2 {
+                    return Err("dict_has requires (dict, key)".to_string());
+                }
+                let d_v = self.eval_expr(&args[0])?;
+                let k = self.eval_expr(&args[1])?.to_display_string();
+                if let Value::Dict(d) = d_v {
+                    Ok(Value::HInt(HInt::new(if d.contains_key(&k) { 1 } else { 0 })))
+                } else {
+                    Err("dict_has: first argument must be a dict".to_string())
+                }
+            }
+            "dict_del" => {
+                if args.len() < 2 {
+                    return Err("dict_del requires (dict_var, key)".to_string());
+                }
+                let k = self.eval_expr(&args[1])?.to_display_string();
+                if let Expression::Variable(name) = &args[0] {
+                    if let Some(Value::Dict(mut d)) = self.get_var(name) {
+                        d.remove(&k);
+                        self.assign_var(name.clone(), Value::Dict(d));
+                        return Ok(Value::Null);
+                    }
+                }
+                Err("dict_del: first argument must be a dict variable".to_string())
+            }
+            "dict_keys" => {
+                if args.is_empty() {
+                    return Err("dict_keys requires (dict)".to_string());
+                }
+                if let Value::Dict(d) = self.eval_expr(&args[0])? {
+                    let items: Vec<Value> = d.keys().map(|k| Value::String(k.clone())).collect();
+                    Ok(Value::Array(HArray { items }))
+                } else {
+                    Err("dict_keys: argument must be a dict".to_string())
+                }
+            }
+            "dict_values" => {
+                if args.is_empty() {
+                    return Err("dict_values requires (dict)".to_string());
+                }
+                if let Value::Dict(d) = self.eval_expr(&args[0])? {
+                    let items: Vec<Value> = d.values().cloned().collect();
+                    Ok(Value::Array(HArray { items }))
+                } else {
+                    Err("dict_values: argument must be a dict".to_string())
+                }
+            }
+            "dict_len" => {
+                if args.is_empty() {
+                    return Err("dict_len requires (dict)".to_string());
+                }
+                if let Value::Dict(d) = self.eval_expr(&args[0])? {
+                    Ok(Value::HInt(HInt::new(d.len() as i64)))
+                } else {
+                    Err("dict_len: argument must be a dict".to_string())
+                }
+            }
+            "dict_merge" => {
+                // Returns a NEW dict with both inputs merged; right-hand
+                // wins on key collision. Pure (non-mutating) so it can
+                // chain in expressions: `dict_merge(defaults, overrides)`.
+                if args.len() < 2 {
+                    return Err("dict_merge requires (dict_a, dict_b)".to_string());
+                }
+                let a_v = self.eval_expr(&args[0])?;
+                let b_v = self.eval_expr(&args[1])?;
+                match (a_v, b_v) {
+                    (Value::Dict(a), Value::Dict(b)) => {
+                        let mut out = a;
+                        for (k, v) in b { out.insert(k, v); }
+                        Ok(Value::Dict(out))
+                    }
+                    _ => Err("dict_merge: both arguments must be dicts".to_string()),
+                }
+            }
             // File I/O — basic synchronous reads and writes.
             // Error semantics: read_file returns the error message as the
             // error path so callers can pattern-match; write_file returns
@@ -2391,11 +2557,25 @@ impl Interpreter {
                     Value::String(_) => "string",
                     Value::Bool(_) => "bool",
                     Value::Array(_) => "array",
+                    Value::Dict(_) => "dict",
+                    Value::Function { .. } => "function",
                     Value::Null => "null",
                     Value::Singularity { .. } => "singularity",
                     _ => "unknown",
                 };
                 Ok(Value::String(tag.to_string()))
+            }
+            // Throw a user-defined error. Caught by the surrounding
+            // try/catch if any; otherwise propagates to the top and
+            // crashes the program with the message. Mirrors Python's
+            // `raise ValueError(msg)` for the no-class case.
+            "error" => {
+                let msg = if args.is_empty() {
+                    "error".to_string()
+                } else {
+                    self.eval_expr(&args[0])?.to_display_string()
+                };
+                Err(msg)
             }
             "gcd" => {
                 if args.len() < 2 {
@@ -3261,6 +3441,35 @@ impl Interpreter {
         self.assign_var(name.to_string(), value);
     }
 
+    /// VM-facing wrapper around execute_stmt — exposes the tree-walk
+    /// statement executor so the bytecode VM can fall back to it for
+    /// forms that don't compile (currently just Statement::Try).
+    pub fn vm_exec_stmt(&mut self, stmt: &Statement) -> Result<(), String> {
+        self.execute_stmt(stmt)
+    }
+
+    /// VM-facing: drain any pending return value set by a tree-walk
+    /// Statement (e.g. a `return` inside a try body executed via
+    /// Op::ExecStmt). Returns Some(value) and clears the slot if a
+    /// return was issued; None otherwise. The VM must check this
+    /// after every Op::ExecStmt and propagate via its own return path.
+    pub fn vm_take_return(&mut self) -> Option<Value> {
+        self.return_value.take()
+    }
+
+    /// VM-facing: same idea for break/continue flags. Returns and
+    /// clears the flag.
+    pub fn vm_take_break(&mut self) -> bool {
+        let f = self.break_flag;
+        self.break_flag = false;
+        f
+    }
+    pub fn vm_take_continue(&mut self) -> bool {
+        let f = self.continue_flag;
+        self.continue_flag = false;
+        f
+    }
+
     /// Return an Rc clone of the topmost local scope frame, for closure
     /// capture in Op::Lambda. The Rc is shared — multiple lambdas in
     /// the same scope get the same underlying RefCell, so mutations
@@ -3319,6 +3528,10 @@ impl Interpreter {
                 }
                 Statement::While { body, .. } | Statement::For { body, .. } => {
                     for s in body { visit(s, fns); }
+                }
+                Statement::Try { body, handler, .. } => {
+                    for s in body { visit(s, fns); }
+                    for s in handler { visit(s, fns); }
                 }
                 _ => {}
             }
@@ -3618,6 +3831,9 @@ pub(crate) const HEAL_BUILTIN_NAMES: &[&str] = &[
     "arr_resonance", "filter_by_resonance", "cleanup_array",
     "arr_map", "arr_filter", "arr_reduce", "arr_any", "arr_all", "arr_find",
     "arr_zip", "arr_unique",
+    // Dicts
+    "dict_new", "dict_get", "dict_set", "dict_has", "dict_del",
+    "dict_keys", "dict_values", "dict_len", "dict_merge",
     // Harmonic
     "fib", "fibonacci", "is_fibonacci", "harmony_value", "fold",
     "fold_escape", "value_danger", "classify_resonance",
@@ -3637,7 +3853,7 @@ pub(crate) const HEAL_BUILTIN_NAMES: &[&str] = &[
     // Time / random / conversion / introspection
     "now_ms", "random_int", "random_float", "random_seed",
     "to_int", "int", "to_float", "float",
-    "to_string", "string", "len", "type_of",
+    "to_string", "string", "len", "type_of", "error",
     "defined_functions", "call",
     "test_record_failure", "test_failure_count",
     "test_get_failures", "test_clear_failures",

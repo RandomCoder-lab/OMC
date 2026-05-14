@@ -87,6 +87,7 @@ impl Compiler {
             Expression::String(_) => Some("string"),
             Expression::Boolean(_) => Some("bool"),
             Expression::Array(_) => Some("array"),
+            Expression::Dict(_) => Some("dict"),
             Expression::Variable(name) => self.var_types.get(name.as_str()).copied(),
             Expression::Add(l, r)
             | Expression::Sub(l, r)
@@ -255,6 +256,13 @@ impl Compiler {
                 }
                 self.emit(Op::NewArray(items.len()));
             }
+            Expression::Dict(pairs) => {
+                for (k, v) in pairs {
+                    self.compile_expr(k)?;
+                    self.compile_expr(v)?;
+                }
+                self.emit(Op::NewDict(pairs.len()));
+            }
             Expression::Add(l, r) => {
                 let lt = self.infer_type(l);
                 let rt = self.infer_type(r);
@@ -409,6 +417,28 @@ impl Compiler {
                             self.compile_expr(&args[1])?; // index
                             self.compile_expr(&args[2])?; // value
                             self.emit(Op::ArrSetNamed(arr_name.clone()));
+                            return Ok(());
+                        }
+                    }
+                    if name == "dict_set" && args.len() == 3 {
+                        if let Expression::Variable(d_name) = &args[0] {
+                            // key then value → stack top is value, beneath it is key
+                            self.compile_expr(&args[1])?; // key
+                            self.compile_expr(&args[2])?; // value
+                            self.emit(Op::DictSetNamed(d_name.clone()));
+                            // dict_set returns Null in tree-walk; mirror that
+                            // so the stack stays balanced for the caller.
+                            let null_idx = self.add_const(Const::Null);
+                            self.emit(Op::LoadConst(null_idx));
+                            return Ok(());
+                        }
+                    }
+                    if name == "dict_del" && args.len() == 2 {
+                        if let Expression::Variable(d_name) = &args[0] {
+                            self.compile_expr(&args[1])?; // key
+                            self.emit(Op::DictDelNamed(d_name.clone()));
+                            let null_idx = self.add_const(Const::Null);
+                            self.emit(Op::LoadConst(null_idx));
                             return Ok(());
                         }
                     }
@@ -828,6 +858,13 @@ impl Compiler {
             }
             Statement::FunctionDef { .. } => {
                 // Function defs hoisted by compile_program(); skip here.
+            }
+            Statement::Try { .. } => {
+                // Tree-walk fallback. See Op::ExecStmt comments — full
+                // exception unwind would require a side try-stack and
+                // a Result-aware op dispatch loop. Until that pays for
+                // itself, fall back to the AST walker for try/catch.
+                self.emit(Op::ExecStmt(Box::new(s.clone())));
             }
         }
         Ok(())

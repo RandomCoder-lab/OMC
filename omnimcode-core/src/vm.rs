@@ -331,18 +331,96 @@ impl Vm {
                     items.reverse();
                     stack.push(Value::Array(HArray { items }));
                 }
-                Op::ArrayIndex => {
-                    let idx = stack.pop().ok_or("stack underflow")?.to_int() as usize;
-                    let arr = stack.pop().ok_or("stack underflow")?;
-                    if let Value::Array(a) = arr {
-                        let v = a
-                            .items
-                            .get(idx)
-                            .cloned()
-                            .ok_or_else(|| format!("array index {} out of bounds", idx))?;
-                        stack.push(v);
+                Op::DictSetNamed(name) => {
+                    // Pop value then key; mutate the named dict via
+                    // assign_var so the change propagates into a
+                    // captured-env scope when run inside a closure.
+                    let val = stack.pop().ok_or("stack underflow")?;
+                    let key = stack.pop().ok_or("stack underflow")?
+                        .to_display_string();
+                    if let Some(Value::Dict(mut d)) = self.interp.vm_get_var(name) {
+                        d.insert(key, val);
+                        self.interp.vm_assign_var(name, Value::Dict(d));
                     } else {
-                        return Err("ArrayIndex: not an array".to_string());
+                        return Err(format!(
+                            "DictSetNamed: {} is not a dict variable",
+                            name
+                        ));
+                    }
+                }
+                Op::ExecStmt(stmt) => {
+                    // Tree-walk fallback. Currently only emitted for
+                    // Statement::Try because exception unwind would
+                    // require either a side try-stack or a Result-
+                    // aware op dispatch loop refactor. The Interpreter
+                    // shares its globals/locals/functions with the VM
+                    // (same Interpreter instance), so state changes
+                    // propagate transparently.
+                    self.interp.vm_exec_stmt(stmt)?;
+                    // Drain any control-flow flags the tree-walked body
+                    // may have set: a `return` inside a try body needs
+                    // to bubble out of the surrounding VM-compiled fn.
+                    if let Some(v) = self.interp.vm_take_return() {
+                        self.interp.vm_pop_scope();
+                        return Ok(v);
+                    }
+                    // break/continue flags are flags-only — the VM's
+                    // outer loops use Op::Jump for control flow, so we
+                    // can't propagate them across the bytecode/AST
+                    // boundary. Clear them so they don't leak into
+                    // unrelated subsequent statements; warn in debug
+                    // builds. Future: emit Op::Break/Op::Continue when
+                    // the AST-walked body signals these flags.
+                    let _ = self.interp.vm_take_break();
+                    let _ = self.interp.vm_take_continue();
+                }
+                Op::DictDelNamed(name) => {
+                    let key = stack.pop().ok_or("stack underflow")?
+                        .to_display_string();
+                    if let Some(Value::Dict(mut d)) = self.interp.vm_get_var(name) {
+                        d.remove(&key);
+                        self.interp.vm_assign_var(name, Value::Dict(d));
+                    } else {
+                        return Err(format!(
+                            "DictDelNamed: {} is not a dict variable",
+                            name
+                        ));
+                    }
+                }
+                Op::NewDict(n) => {
+                    // Pairs were emitted in source order; we pop them
+                    // off the stack reversed (value first, then key)
+                    // and reinsert into a temp Vec to restore order
+                    // before building the BTreeMap.
+                    let mut pairs: Vec<(String, Value)> = Vec::with_capacity(*n);
+                    for _ in 0..*n {
+                        let v = stack.pop().ok_or("stack underflow")?;
+                        let k = stack.pop().ok_or("stack underflow")?
+                            .to_display_string();
+                        pairs.push((k, v));
+                    }
+                    pairs.reverse();
+                    let mut map = std::collections::BTreeMap::new();
+                    for (k, v) in pairs { map.insert(k, v); }
+                    stack.push(Value::Dict(map));
+                }
+                Op::ArrayIndex => {
+                    // Polymorphic: container on top is either Array
+                    // (index → int slot) or Dict (index → string key).
+                    let idx_v = stack.pop().ok_or("stack underflow")?;
+                    let container = stack.pop().ok_or("stack underflow")?;
+                    match container {
+                        Value::Array(a) => {
+                            let idx = idx_v.to_int() as usize;
+                            let v = a.items.get(idx).cloned()
+                                .ok_or_else(|| format!("array index {} out of bounds", idx))?;
+                            stack.push(v);
+                        }
+                        Value::Dict(d) => {
+                            let key = idx_v.to_display_string();
+                            stack.push(d.get(&key).cloned().unwrap_or(Value::Null));
+                        }
+                        _ => return Err("ArrayIndex: not indexable".to_string()),
                     }
                 }
                 Op::ArrPushNamed(name) => {
@@ -635,6 +713,14 @@ impl Vm {
 // ---------- helpers ----------
 
 fn arith_add(l: &Value, r: &Value) -> Value {
+    // String + anything → concat. Mirrors tree-walk Expression::Add.
+    if matches!(l, Value::String(_)) || matches!(r, Value::String(_)) {
+        return Value::String(format!(
+            "{}{}",
+            l.to_display_string(),
+            r.to_display_string()
+        ));
+    }
     if l.is_float() || r.is_float() {
         Value::HFloat(l.to_float() + r.to_float())
     } else {

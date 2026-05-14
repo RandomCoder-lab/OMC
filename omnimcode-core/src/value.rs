@@ -208,6 +208,20 @@ pub enum Value {
         /// sharing the captured state.
         captured: Option<std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, Value>>>>,
     },
+    /// Hash-map / dictionary. Keys are always strings — OMC has no
+    /// general hashable-value protocol yet, and string-keyed dicts
+    /// cover virtually every use case (config maps, counter tables,
+    /// JSON-shaped data, named records). Insertion-order semantics
+    /// match Python 3.7+: iteration order is the order keys were
+    /// first inserted, regardless of later updates.
+    ///
+    /// Mutation lives entirely on the host side via dict_set —
+    /// dicts pass by VALUE across function calls (same model as
+    /// arrays) so callees can't mutate a caller's dict. The
+    /// arr_push / arr_set / assign_var pattern applies here too:
+    /// the dict_set builtin walks scopes outward for an existing
+    /// binding and writes back.
+    Dict(std::collections::BTreeMap<String, Value>),
     Null,
 }
 
@@ -243,6 +257,7 @@ impl Value {
             Value::String(s) => !s.is_empty(),
             Value::Bool(b) => *b,
             Value::Array(a) => !a.items.is_empty(),
+            Value::Dict(d) => !d.is_empty(),
             Value::Circuit(_) => true,
             // A singularity is truthy in the same sense as Python OMNIcode treats it:
             // `if is_singularity(result) == 1` is the standard test, not `if result`.
@@ -251,6 +266,34 @@ impl Value {
             // entity, like Python's `bool(some_fn)` returning True.
             Value::Function { .. } => true,
             Value::Null => false,
+        }
+    }
+
+    /// Human-friendly stringification for string-`+`-concat and other
+    /// ergonomic contexts. Unlike to_string() — which prints the full
+    /// HInt physics — this returns bare numbers ("42", "3.14") matching
+    /// concat_many's behavior. Mirrors Python's str(x). Use this when
+    /// you want "count: 42" instead of "count: HInt(42, φ=..., HIM=...)".
+    pub fn to_display_string(&self) -> String {
+        match self {
+            Value::HInt(h) => h.value.to_string(),
+            Value::HFloat(f) => format!("{}", f),
+            Value::String(s) => s.clone(),
+            Value::Bool(b) => b.to_string(),
+            Value::Null => "null".to_string(),
+            Value::Array(a) => {
+                let items: Vec<String> = a.items.iter()
+                    .map(|v| v.to_display_string())
+                    .collect();
+                format!("[{}]", items.join(", "))
+            }
+            Value::Dict(d) => {
+                let pairs: Vec<String> = d.iter()
+                    .map(|(k, v)| format!("\"{}\": {}", k, v.to_display_string()))
+                    .collect();
+                format!("{{{}}}", pairs.join(", "))
+            }
+            other => other.to_string(),
         }
     }
 
@@ -265,6 +308,12 @@ impl Value {
             Value::Array(a) => {
                 let items: Vec<String> = a.items.iter().map(|v| v.to_string()).collect();
                 format!("[{}]", items.join(", "))
+            }
+            Value::Dict(d) => {
+                let pairs: Vec<String> = d.iter()
+                    .map(|(k, v)| format!("\"{}\": {}", k, v.to_string()))
+                    .collect();
+                format!("{{{}}}", pairs.join(", "))
             }
             Value::Singularity {
                 numerator,
