@@ -199,12 +199,29 @@ impl Vm {
                     }
                     argvals.reverse();
 
-                    // Prefer user-defined (compiled in this module) over
-                    // built-ins, to match the tree-walk interpreter's priority.
-                    let result = if let Some(callee) = module.functions.get(name) {
+                    // Phase Q: inline call cache. `ip` has been incremented
+                    // past the current op, so the cache slot is at `ip - 1`.
+                    let cache_ip = ip - 1;
+                    let cached = func.call_cache.get(cache_ip).map(|c| c.get()).unwrap_or(0);
+                    let is_user = match cached {
+                        1 => true,
+                        2 => false,
+                        _ => {
+                            // First execution at this site — probe the function
+                            // table and burn the result into the cache.
+                            let resolved = module.functions.contains_key(name);
+                            if let Some(c) = func.call_cache.get(cache_ip) {
+                                c.set(if resolved { 1 } else { 2 });
+                            }
+                            resolved
+                        }
+                    };
+
+                    let result = if is_user {
+                        // Safe: we already proved this key exists.
+                        let callee = module.functions.get(name).expect("inline cache lied");
                         self.run_function(callee, &argvals, module)?
                     } else {
-                        // Delegate to the tree-walk interpreter's stdlib.
                         self.interp.vm_call_builtin(name, &argvals)?
                     };
                     stack.push(result);

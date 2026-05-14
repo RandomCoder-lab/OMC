@@ -654,6 +654,7 @@ impl Compiler {
         param_types: Vec<Option<String>>,
         return_type: Option<String>,
     ) -> CompiledFunction {
+        let n = self.ops.len();
         CompiledFunction {
             name,
             params,
@@ -661,6 +662,9 @@ impl Compiler {
             return_type,
             ops: self.ops,
             constants: self.constants,
+            // Pre-size the inline call cache to match the op count. All slots
+            // start uncached (0); the VM fills them in on first execution.
+            call_cache: (0..n).map(|_| std::cell::Cell::new(0u8)).collect(),
         }
     }
 }

@@ -130,6 +130,15 @@ pub struct CompiledFunction {
     pub return_type: Option<String>,
     pub ops: Vec<Op>,
     pub constants: Vec<Const>,
+    /// Phase Q inline call cache: one Cell per op. The VM populates the
+    /// matching slot on the first execution of an `Op::Call` with the
+    /// resolved kind (user-defined vs built-in), letting subsequent passes
+    /// skip the HashMap probe. 0 = uncached, 1 = user, 2 = built-in.
+    ///
+    /// Stored as `Cell<u8>` so it can be mutated through an immutable
+    /// borrow (typical for monomorphic ICs). Cell<u8> is Copy + Clone so
+    /// the surrounding struct stays cleanly cloneable.
+    pub call_cache: Vec<std::cell::Cell<u8>>,
 }
 
 /// A compiled module / program.
@@ -149,6 +158,7 @@ impl Default for Module {
                 return_type: None,
                 ops: Vec::new(),
                 constants: Vec::new(),
+                call_cache: Vec::new(),
             },
             functions: std::collections::HashMap::new(),
         }

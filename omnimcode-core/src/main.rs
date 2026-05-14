@@ -64,6 +64,12 @@ fn execute_program(source: &str) -> Result<(), String> {
                 );
             }
         }
+        // OMC_DISASM=1 prints the compiled bytecode (post-optimization) to
+        // stderr before execution. Useful for debugging and verifying that
+        // optimizer/inliner did what was expected.
+        if std::env::var("OMC_DISASM").as_deref() == Ok("1") {
+            eprint!("{}", omnimcode_core::disasm::disassemble_module(&module));
+        }
         let mut vm = omnimcode_core::vm::Vm::new();
         vm.run_module(&module)?;
         return Ok(());

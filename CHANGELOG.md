@@ -4,6 +4,52 @@ All notable changes to OMNIcode will be documented in this file.
 
 ## [Unreleased]
 
+### Added (Phase P + Q: bytecode disassembler + VM inline cache, 2026-05-13)
+
+**Phase P — Bytecode disassembler**
+
+New module `omnimcode-core/src/disasm.rs`. Renders any `CompiledFunction` or `Module` as a human-readable bytecode listing with offsets, mnemonics, constants pool, and resolved jump targets. Function signatures include parameter type annotations and return types.
+
+Triggered at runtime with `OMC_DISASM=1` (output to stderr, before VM execution starts):
+
+```
+fn __main__()    [7 ops, 2 consts]
+------------------------------------------------------------------------
+  constants:
+    [0] 89
+    [1] 144
+
+  0000: LOAD_CONST   0 ; 89
+  0001: LOAD_CONST   1 ; 144
+  0002: CALL         add/2
+  0003: STORE_VAR    r
+  0004: LOAD_VAR     r
+  0005: PRINT
+  0006: RETURN_NULL
+
+fn add(x: int, y: int) -> int    [5 ops, 0 consts]
+------------------------------------------------------------------------
+  0000: LOAD_VAR     x
+  0001: LOAD_VAR     y
+  0002: ADD_INT             ← typed specialization from Phase M
+  0003: RETURN
+  0004: RETURN_NULL
+```
+
+Useful for debugging the optimizer, verifying inlining, and understanding what the VM actually executes.
+
+**Phase Q — Inline cache for Op::Call**
+
+Each `CompiledFunction` gained a `call_cache: Vec<Cell<u8>>` parallel to its op list. Slot values: `0` uncached, `1` user-defined, `2` built-in. On the first execution of an `Op::Call`, the VM probes `module.functions.contains_key(name)`, burns the result into the matching cache slot, and uses that for every subsequent iteration. Standard monomorphic inline cache — Cell-based interior mutability avoids the `&mut` cascade that would otherwise need to flow through the run loop.
+
+**Benchmark** (one million calls to a user-defined `step(x) { return x + 1 }`):
+- Tree-walk: 635ms
+- VM with cache: 587ms (~8% faster)
+
+The savings aren't dramatic in this measurement because Phase J's hot-op inliner already dispatches the harmonic primitives (`res`, `fold`, `is_fibonacci`, `len`, etc.) without going through `Op::Call` at all. The cache helps for everything else — user-defined functions, non-inlined built-ins, and any future pragma-derived calls.
+
+**Tests:** +3 disasm tests (renders simple program, shows typed opcodes, resolves jumps). 137 total tests passing.
+
 ### Added (Phase O: ONN self-healing primitives, 2026-05-13)
 
 Ports the "code/compiler self-heals via Fibonacci alignment" pattern from the ONN system at `/home/thearchitect/.hermes/skills/onn-self-healing-code/` and `Sovereign_Lattice/omninet_package/register_singularity_integration.py`. Four new built-ins, available in both tree-walk and VM:
