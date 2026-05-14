@@ -4,6 +4,69 @@ All notable changes to OMNIcode will be documented in this file.
 
 ## [Unreleased]
 
+### Added (Phase H.3: parse-level recovery — token-stream healing, 2026-05-13)
+
+🎯 **`examples/self_healing_h3.omc` — the healer gains a stage BELOW the parser.**
+
+H.1/H.2 worked on the AST. But an AST presumes a successful parse, and a parse presumes a syntactically valid token stream. H.3 adds the missing layer: TOKEN-LEVEL repair that runs BEFORE the parser sees anything. Three repair classes at this layer:
+
+1. **Unbalanced LBRACE/RBRACE** — count opens vs closes; if opens > closes, append RBRACE tokens before EOF until balanced. Diagnostic: "N missing '}' (brace); appending before EOF".
+
+2. **Unbalanced LPAREN/RPAREN** — same shape.
+
+3. **Missing SEMI** — scan adjacent token pairs. When a clear expression terminator (NUMBER, STRING, RPAREN, RBRACKET) is immediately followed by either a clear statement starter (H, FN, IF, WHILE, RETURN, BREAK, PRINT) OR EOF, insert SEMI between them. The EOF case covers trailing statements at end-of-file with no closing semicolon.
+
+The pipeline is now two-stage:
+
+```
+source → tokenize_b → token_heal (H.3) → tokens'
+                                          ↓
+                                      p_program
+                                          ↓
+                                         AST
+                                          ↓
+                              heal_until_fixpoint (H.1/H.2)
+                                          ↓
+                                      healed AST
+                                          ↓
+                                     emit_source
+                                          ↓
+                                    healed source
+```
+
+#### Why the layers are separate stages, not diagnostic classes
+
+The parser falls off a cliff on unbalanced braces; nothing downstream of a broken parse produces a meaningful AST. Token-level repair has to run FIRST to give the parser back its substrate. Once the parser returns a valid AST, the H.1/H.2 checks fan out over the tree. The iteration loop wraps the AST stage; the token stage is a single-pass count-and-insert.
+
+This was Architect's observation from H.2: "iteration only matters when one fix exposes another, or when fixes happen at different STAGES." H.3 is exactly the latter.
+
+#### The four demos
+
+**Demo 1** — Three statements with no semicolons. token_heal inserts 3 SEMI tokens (including one before EOF for the trailing statement). AST is clean. Output: `8 + 13 = 21` (21 is itself Fibonacci, harmony 1.0).
+
+**Demo 2** — Missing RBRACE at end of file. `print(double(13))` placed BEFORE the broken function so naive append-at-EOF closes the function body cleanly without folding any code into it. Output: `double(13) = 26`.
+
+**Demo 3** — Missing RPAREN in `print(id(21);`. token_heal appends `)` before EOF. Output: `id(21) = 21`.
+
+**Demo 4** — Five bugs across both stages in one source:
+- Token: missing SEMI between `print(...)` and `fn safe`.
+- Token: missing `}` at end of file.
+- AST: `safef` typo → `safe`.
+- AST: `7` close-miss Fibonacci → `8`.
+- AST: `n / 0` divide-by-singularity → `safe_divide(n, 0)`.
+
+The two-stage pipeline handles all five. Output: `safe(8) → safe_divide(8, 0) → 8` (on attractor). **Three of the five would have produced compile errors in any conventional compiler; the other two would have produced runtime crashes. The OMC pipeline turns ALL FIVE into a working program landing on attractor.**
+
+#### One real limit: naive brace placement
+
+token_heal appends missing braces at EOF. If the missing `}` is conceptually MID-source (e.g., between a function body and a top-level statement that follows it), naive appending folds the following statements into the function body where they become unreachable code. The PARSE succeeds; the SEMANTICS may not match the user's intent. Smarter brace placement using indentation analysis is logged for H.3.1.
+
+Mitigated in tonight's demos by structuring sources where the missing brace is genuinely at end-of-file — top-level calls placed BEFORE the broken function. The current limit doesn't bite.
+
+#### What's still unexercised
+
+The `stuck` outcome (diagnostic count plateaus above zero) — reserved for genuine undecidables: a typo that matches NOTHING within edit-distance threshold, or a harmonic violation where the nearest Fibonacci is too far for the proximity gate. The `exhausted` outcome (hit max_iter) — reserved for divergent rewrites. Neither fires in tonight's demos.
+
 ### Added (Phase H.2: autofix-and-retry loop + divide-by-singularity check, 2026-05-13)
 
 🎯 **`examples/self_healing_h2.omc` — the healer becomes iterative and gains a third diagnostic class.**
