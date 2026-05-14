@@ -4,6 +4,41 @@ All notable changes to OMNIcode will be documented in this file.
 
 ## [Unreleased]
 
+### Added (Phase D: stdlib expansion to match canonical surface, 2026-05-13)
+Built out ~35 missing standard-library functions to close the gap with the canonical Python `omnicc/` interpreter at `Sovereign_Lattice/omninet_package/`.
+
+**Math (16):** `abs`, `floor`, `ceil`, `round`, `frac`, `clamp`, `sqrt`, `log`, `exp`, `sin`, `cos`, `tan`, `tanh`, `erf` (Abramowitz & Stegun approximation), `sigmoid`, `pow`. Constants: `pi()`, `e()`, `phi()`.
+
+**Strings (4):** `str_reverse`, `str_contains`, `str_slice`, `concat_many` (variadic — the canonical workaround for OMC's broken cross-type `+` concat). `concat_many` and `to_string` render numerics as bare values (`89`) instead of the HInt display form.
+
+**Arrays (10):** `arr_get`, `arr_set`, `arr_first`, `arr_last`, `arr_min`, `arr_max`, `arr_concat`, `arr_contains`, `arr_index_of`, `arr_slice`, `arr_resonance` (mean resonance across elements). Plus a real implementation of `arr_push` (was a stub returning Null).
+
+**Type coercion (6):** `to_int`, `to_float`, `to_string`, `int`, `float`, `string` aliases. The polymorphic `len(x)` works on both arrays and strings (canonical OMC pattern).
+
+**Parser fixes:**
+- Unary minus: `-5` now parses (was: "Unexpected token in expression: Minus").
+- `for i in range(N)` single-arg form (canonical OMC). The 2-arg `range(start, end)` still works.
+
+### Added (Phase E: Conformance golden tests, 2026-05-13)
+New integration test suite at `omnimcode-core/tests/conformance.rs` (~33 tests). Locks the language's "physics" — mathematical and semantic behaviors that must remain stable across implementations.
+
+Sections: Fibonacci resonance ≥ 0.7 for canonical attractors; `fold()` snaps to Fibonacci preserving sign; `89/0` returns `Singularity` not crash; canonical `smart_divide` pattern; int+int=int, mixed=float arithmetic stability; `phi.X` module-qualified calls match unqualified; math identities (`sqrt(144)=12`, `pow(2,10)=1024`, `sigmoid(0)=0.5`, `pi=π`); array `get/set/push/min/max` semantics; string `reverse/contains`; recursion + while-loop control flow.
+
+### Fixed
+- `Expression::Resonance` (1-arg `res(x)` path) now returns `HFloat`. Was returning `HInt(resonance * 1000)` — inconsistent with the variadic path. Caught by conformance tests.
+- `concat_many` and `to_string` no longer render numerics as `HInt(89, φ=…)` — they emit bare `89`.
+
+### Compatibility milestone
+**4 canonical Python OMNIcode programs now run end-to-end on Rust OMC** (up from 1 after Phase A+B):
+- `miner_nuclear.omc` (131 LOC, 7 stacked pragmas)
+- `test_phase7_features.omc` (Phase 7 import/module/typed-fn smoke tests)
+- `test_phase8_arrays.omc` (Phase 8 array-literal smoke tests)
+- `test_array.omc` (array stdlib regression suite)
+
+### Tests
+- **111 passing** across the workspace (was 78 after Phase C).
+- Conformance suite caught and forced fixes for 2 consistency bugs.
+
 ### Added (Phase C: HSingularity as a first-class Value, 2026-05-13)
 - **`Value::Singularity { numerator, denominator, context }`** — division by zero now produces a printable, first-class portal value instead of an `HInt` with a side-flag. `89 / 0` prints as `Singularity(89/0, ctx=div)`.
 - **`is_singularity(v) -> int`** — returns `1` for any Singularity value, `0` otherwise. Returns int (not bool) to match the canonical Python idiom `if is_singularity(result) == 1`.

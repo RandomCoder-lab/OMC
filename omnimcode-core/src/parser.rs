@@ -593,11 +593,20 @@ impl Parser {
         let iterable = if self.current() == Token::Range {
             self.advance();
             self.expect(Token::LParen)?;
-            let start = self.parse_expression()?;
-            self.expect(Token::Comma)?;
-            let end = self.parse_expression()?;
-            self.expect(Token::RParen)?;
-            ForIterable::Range { start, end }
+            let first = self.parse_expression()?;
+            // Canonical OMC supports both range(end) and range(start, end).
+            if self.current() == Token::Comma {
+                self.advance();
+                let end = self.parse_expression()?;
+                self.expect(Token::RParen)?;
+                ForIterable::Range { start: first, end }
+            } else {
+                self.expect(Token::RParen)?;
+                ForIterable::Range {
+                    start: Expression::Number(0),
+                    end: first,
+                }
+            }
         } else {
             let expr = self.parse_expression()?;
             ForIterable::Expr(expr)
@@ -813,6 +822,15 @@ impl Parser {
     }
 
     fn parse_primary(&mut self) -> Result<Expression, String> {
+        // Unary minus: `-x` becomes `0 - x` (cheap, no new AST variant needed)
+        if self.current() == Token::Minus {
+            self.advance();
+            let inner = self.parse_primary()?;
+            return Ok(Expression::Sub(
+                Box::new(Expression::Number(0)),
+                Box::new(inner),
+            ));
+        }
         match self.current() {
             Token::Number(n) => {
                 let val = n;

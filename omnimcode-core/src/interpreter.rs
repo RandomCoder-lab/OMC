@@ -384,10 +384,12 @@ impl Interpreter {
                 self.call_function(name, args)
             }
             Expression::Resonance(e) => {
+                // Match the call_function("res", ...) path: return HFloat resonance score.
                 let v = self.eval_expr(e)?;
                 match v {
-                    Value::HInt(h) => Ok(Value::HInt(HInt::new((h.resonance * 1000.0) as i64))),
-                    _ => Ok(Value::HInt(HInt::new(0))),
+                    Value::HInt(h) => Ok(Value::HFloat(h.resonance)),
+                    Value::HFloat(f) => Ok(Value::HFloat(HInt::compute_resonance(f as i64))),
+                    _ => Ok(Value::HFloat(0.0)),
                 }
             }
             Expression::Fold(e) => {
@@ -466,6 +468,100 @@ impl Interpreter {
                 }
                 let n = self.eval_expr(&args[0])?.to_int();
                 Ok(Value::Bool(is_fibonacci(n)))
+            }
+            // --- Math: scalar functions ---
+            "abs" => {
+                let v = self.eval_expr(&args[0])?;
+                if v.is_float() {
+                    Ok(Value::HFloat(v.to_float().abs()))
+                } else {
+                    Ok(Value::HInt(HInt::new(v.to_int().abs())))
+                }
+            }
+            "floor" => Ok(Value::HInt(HInt::new(
+                self.eval_expr(&args[0])?.to_float().floor() as i64,
+            ))),
+            "ceil" => Ok(Value::HInt(HInt::new(
+                self.eval_expr(&args[0])?.to_float().ceil() as i64,
+            ))),
+            "round" => Ok(Value::HInt(HInt::new(
+                self.eval_expr(&args[0])?.to_float().round() as i64,
+            ))),
+            "frac" => Ok(Value::HFloat(self.eval_expr(&args[0])?.to_float().fract())),
+            "clamp" => {
+                if args.len() < 3 {
+                    return Err("clamp requires (value, min, max)".to_string());
+                }
+                let v = self.eval_expr(&args[0])?.to_float();
+                let lo = self.eval_expr(&args[1])?.to_float();
+                let hi = self.eval_expr(&args[2])?.to_float();
+                Ok(Value::HFloat(v.max(lo).min(hi)))
+            }
+            "sqrt" => Ok(Value::HFloat(self.eval_expr(&args[0])?.to_float().sqrt())),
+            "log" => Ok(Value::HFloat(self.eval_expr(&args[0])?.to_float().ln())),
+            "exp" => Ok(Value::HFloat(self.eval_expr(&args[0])?.to_float().exp())),
+            "sin" => Ok(Value::HFloat(self.eval_expr(&args[0])?.to_float().sin())),
+            "cos" => Ok(Value::HFloat(self.eval_expr(&args[0])?.to_float().cos())),
+            "tan" => Ok(Value::HFloat(self.eval_expr(&args[0])?.to_float().tan())),
+            "tanh" => Ok(Value::HFloat(self.eval_expr(&args[0])?.to_float().tanh())),
+            "erf" => {
+                // Abramowitz & Stegun approximation (max error ~1.5e-7)
+                let x = self.eval_expr(&args[0])?.to_float();
+                let sign = if x < 0.0 { -1.0 } else { 1.0 };
+                let ax = x.abs();
+                let t = 1.0 / (1.0 + 0.3275911 * ax);
+                let y = 1.0
+                    - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t
+                        - 0.284496736)
+                        * t
+                        + 0.254829592)
+                        * t
+                        * (-ax * ax).exp();
+                Ok(Value::HFloat(sign * y))
+            }
+            "sigmoid" => {
+                let x = self.eval_expr(&args[0])?.to_float();
+                Ok(Value::HFloat(1.0 / (1.0 + (-x).exp())))
+            }
+            "pow" => {
+                if args.len() < 2 {
+                    return Err("pow requires (base, exponent)".to_string());
+                }
+                let b = self.eval_expr(&args[0])?.to_float();
+                let e = self.eval_expr(&args[1])?.to_float();
+                Ok(Value::HFloat(b.powf(e)))
+            }
+            "pi" => Ok(Value::HFloat(std::f64::consts::PI)),
+            "e" => Ok(Value::HFloat(std::f64::consts::E)),
+            "phi" => Ok(Value::HFloat(crate::value::PHI)),
+            // --- Type coercion ---
+            "to_int" => Ok(Value::HInt(HInt::new(self.eval_expr(&args[0])?.to_int()))),
+            "to_float" => Ok(Value::HFloat(self.eval_expr(&args[0])?.to_float())),
+            "to_string" => {
+                // Render the bare value, NOT the HInt-with-resonance display.
+                // This is what canonical Python OMC's to_string returns.
+                let v = self.eval_expr(&args[0])?;
+                let s = match v {
+                    Value::HInt(h) => h.value.to_string(),
+                    Value::HFloat(f) => format!("{}", f),
+                    Value::String(s) => s,
+                    Value::Bool(b) => b.to_string(),
+                    other => other.to_string(),
+                };
+                Ok(Value::String(s))
+            }
+            "int" => Ok(Value::HInt(HInt::new(self.eval_expr(&args[0])?.to_int()))),
+            "float" => Ok(Value::HFloat(self.eval_expr(&args[0])?.to_float())),
+            "string" => {
+                let v = self.eval_expr(&args[0])?;
+                let s = match v {
+                    Value::HInt(h) => h.value.to_string(),
+                    Value::HFloat(f) => format!("{}", f),
+                    Value::String(s) => s,
+                    Value::Bool(b) => b.to_string(),
+                    other => other.to_string(),
+                };
+                Ok(Value::String(s))
             }
             // Portal / Singularity handling — canonical OMNIcode idiom.
             // Python returns 0/1 so `if is_singularity(result) == 1` works.
@@ -556,6 +652,48 @@ impl Interpreter {
                 let s = self.eval_expr(&args[0])?.to_string();
                 Ok(Value::String(s.to_lowercase()))
             }
+            "str_reverse" => {
+                let s = self.eval_expr(&args[0])?.to_string();
+                Ok(Value::String(s.chars().rev().collect()))
+            }
+            "str_contains" => {
+                if args.len() < 2 {
+                    return Err("str_contains requires (haystack, needle)".to_string());
+                }
+                let s = self.eval_expr(&args[0])?.to_string();
+                let needle = self.eval_expr(&args[1])?.to_string();
+                Ok(Value::HInt(HInt::new(if s.contains(&needle) { 1 } else { 0 })))
+            }
+            "str_slice" => {
+                if args.len() < 3 {
+                    return Err("str_slice requires (string, start, end)".to_string());
+                }
+                let s = self.eval_expr(&args[0])?.to_string();
+                let start = self.eval_expr(&args[1])?.to_int().max(0) as usize;
+                let end = self.eval_expr(&args[2])?.to_int().max(0) as usize;
+                let chars: Vec<char> = s.chars().collect();
+                let end = end.min(chars.len());
+                let start = start.min(end);
+                Ok(Value::String(chars[start..end].iter().collect()))
+            }
+            // Canonical Python OMC workaround for cross-type concat (string `+` is broken there).
+            // Variadic: concat_many(a, b) / concat_many(a, b, c) / concat_many(a, b, c, d).
+            // Renders numerics as bare values (89, 1.5) not as HInt(...) display form.
+            "concat_many" => {
+                let mut out = String::new();
+                for a in args {
+                    let v = self.eval_expr(a)?;
+                    let s = match v {
+                        Value::HInt(h) => h.value.to_string(),
+                        Value::HFloat(f) => format!("{}", f),
+                        Value::String(s) => s,
+                        Value::Bool(b) => b.to_string(),
+                        other => other.to_string(),
+                    };
+                    out.push_str(&s);
+                }
+                Ok(Value::String(out))
+            }
             // Array functions
             "arr_new" => {
                 if args.len() < 2 {
@@ -604,10 +742,185 @@ impl Interpreter {
             }
             "arr_push" => {
                 if args.len() < 2 {
-                    return Err("arr_push requires 2 arguments".to_string());
+                    return Err("arr_push requires (array_name, value)".to_string());
                 }
-                // This would modify the array in place - simplified
-                Ok(Value::Null)
+                // Mutates by name. First arg must be a Variable reference so we can write back.
+                let val = self.eval_expr(&args[1])?;
+                if let Expression::Variable(name) = &args[0] {
+                    if let Some(Value::Array(mut arr)) = self.get_var(name) {
+                        arr.items.push(val);
+                        self.set_var(name.clone(), Value::Array(arr));
+                        return Ok(Value::Null);
+                    }
+                }
+                Err("arr_push: first argument must be an array variable".to_string())
+            }
+            "arr_get" => {
+                if args.len() < 2 {
+                    return Err("arr_get requires (array, index)".to_string());
+                }
+                let arr_v = self.eval_expr(&args[0])?;
+                let idx = self.eval_expr(&args[1])?.to_int();
+                if let Value::Array(arr) = arr_v {
+                    let i = idx as usize;
+                    arr.items
+                        .get(i)
+                        .cloned()
+                        .ok_or_else(|| format!("arr_get: index {} out of bounds (len {})", idx, arr.items.len()))
+                } else {
+                    Err("arr_get: first argument must be an array".to_string())
+                }
+            }
+            "arr_set" => {
+                if args.len() < 3 {
+                    return Err("arr_set requires (array_name, index, value)".to_string());
+                }
+                let idx = self.eval_expr(&args[1])?.to_int() as usize;
+                let val = self.eval_expr(&args[2])?;
+                if let Expression::Variable(name) = &args[0] {
+                    if let Some(Value::Array(mut arr)) = self.get_var(name) {
+                        if idx >= arr.items.len() {
+                            return Err(format!(
+                                "arr_set: index {} out of bounds (len {})",
+                                idx,
+                                arr.items.len()
+                            ));
+                        }
+                        arr.items[idx] = val;
+                        self.set_var(name.clone(), Value::Array(arr));
+                        return Ok(Value::Null);
+                    }
+                }
+                Err("arr_set: first argument must be an array variable".to_string())
+            }
+            "arr_first" => {
+                if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                    arr.items
+                        .first()
+                        .cloned()
+                        .ok_or_else(|| "arr_first: empty array".to_string())
+                } else {
+                    Err("arr_first: requires an array".to_string())
+                }
+            }
+            "arr_last" => {
+                if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                    arr.items
+                        .last()
+                        .cloned()
+                        .ok_or_else(|| "arr_last: empty array".to_string())
+                } else {
+                    Err("arr_last: requires an array".to_string())
+                }
+            }
+            "arr_min" => {
+                if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                    if arr.items.is_empty() {
+                        return Err("arr_min: empty array".to_string());
+                    }
+                    let min = arr.items.iter().map(|v| v.to_int()).min().unwrap();
+                    Ok(Value::HInt(HInt::new(min)))
+                } else {
+                    Err("arr_min: requires an array".to_string())
+                }
+            }
+            "arr_max" => {
+                if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                    if arr.items.is_empty() {
+                        return Err("arr_max: empty array".to_string());
+                    }
+                    let max = arr.items.iter().map(|v| v.to_int()).max().unwrap();
+                    Ok(Value::HInt(HInt::new(max)))
+                } else {
+                    Err("arr_max: requires an array".to_string())
+                }
+            }
+            "arr_concat" => {
+                if args.len() < 2 {
+                    return Err("arr_concat requires (array_a, array_b)".to_string());
+                }
+                let a = self.eval_expr(&args[0])?;
+                let b = self.eval_expr(&args[1])?;
+                match (a, b) {
+                    (Value::Array(mut a), Value::Array(b)) => {
+                        a.items.extend(b.items);
+                        Ok(Value::Array(a))
+                    }
+                    _ => Err("arr_concat: both arguments must be arrays".to_string()),
+                }
+            }
+            "arr_contains" => {
+                if args.len() < 2 {
+                    return Err("arr_contains requires (array, value)".to_string());
+                }
+                let arr_v = self.eval_expr(&args[0])?;
+                let target = self.eval_expr(&args[1])?.to_int();
+                if let Value::Array(arr) = arr_v {
+                    let found = arr.items.iter().any(|v| v.to_int() == target);
+                    Ok(Value::HInt(HInt::new(if found { 1 } else { 0 })))
+                } else {
+                    Err("arr_contains: first argument must be an array".to_string())
+                }
+            }
+            "arr_index_of" => {
+                if args.len() < 2 {
+                    return Err("arr_index_of requires (array, value)".to_string());
+                }
+                let arr_v = self.eval_expr(&args[0])?;
+                let target = self.eval_expr(&args[1])?.to_int();
+                if let Value::Array(arr) = arr_v {
+                    let pos = arr.items.iter().position(|v| v.to_int() == target);
+                    Ok(Value::HInt(HInt::new(match pos {
+                        Some(i) => i as i64,
+                        None => -1,
+                    })))
+                } else {
+                    Err("arr_index_of: first argument must be an array".to_string())
+                }
+            }
+            "arr_slice" => {
+                if args.len() < 3 {
+                    return Err("arr_slice requires (array, start, end)".to_string());
+                }
+                let arr_v = self.eval_expr(&args[0])?;
+                let start = self.eval_expr(&args[1])?.to_int().max(0) as usize;
+                let end = self.eval_expr(&args[2])?.to_int().max(0) as usize;
+                if let Value::Array(arr) = arr_v {
+                    let end = end.min(arr.items.len());
+                    let start = start.min(end);
+                    let items: Vec<Value> = arr.items[start..end].to_vec();
+                    Ok(Value::Array(HArray { items }))
+                } else {
+                    Err("arr_slice: first argument must be an array".to_string())
+                }
+            }
+            // Canonical OMC uses bare `len(x)` — polymorphic over arrays and strings.
+            "len" => {
+                let v = self.eval_expr(&args[0])?;
+                match v {
+                    Value::Array(a) => Ok(Value::HInt(HInt::new(a.items.len() as i64))),
+                    Value::String(s) => Ok(Value::HInt(HInt::new(s.chars().count() as i64))),
+                    other => Err(format!(
+                        "len: requires array or string, got {:?}",
+                        other
+                    )),
+                }
+            }
+            "arr_resonance" => {
+                // Mean resonance across all elements that are HInts.
+                if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                    if arr.items.is_empty() {
+                        return Ok(Value::HFloat(0.0));
+                    }
+                    let total: f64 = arr
+                        .items
+                        .iter()
+                        .map(|v| HInt::compute_resonance(v.to_int()))
+                        .sum();
+                    Ok(Value::HFloat(total / arr.items.len() as f64))
+                } else {
+                    Err("arr_resonance: requires an array".to_string())
+                }
             }
             // User-defined functions
             _ => {
@@ -660,6 +973,12 @@ impl Interpreter {
             }
         }
         self.globals.get(name).cloned()
+    }
+
+    /// Test helper: read a variable from outside the interpreter.
+    /// Used by integration tests in `tests/conformance.rs`.
+    pub fn get_var_for_testing(&self, name: &str) -> Option<Value> {
+        self.get_var(name)
     }
 
     fn set_var(&mut self, name: String, value: Value) {
