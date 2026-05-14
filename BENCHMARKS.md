@@ -102,3 +102,43 @@ cargo bench --bench genetic_algorithm_bench -- --verbose
 - Criterion.rs: https://github.com/bheisler/criterion.rs
 - DEAP (Distributed Evolutionary Algorithms in Python): http://deap.readthedocs.io/
 - OMNIcode: `target/release/omnimcode-standalone`
+
+---
+
+# Interpreter benchmarks (Phase U, 2026-05-13)
+
+Run: `cargo bench --bench interpreter_bench`
+Reports: `target/criterion/report/index.html`
+
+Statistically stable measurements from criterion — 100 samples per case, 1s warm-up, 3s measurement window. Compares three execution paths (tree-walk, VM, VM with optimizer) across representative workloads.
+
+## Per-workload runtime (median time per program run)
+
+| Workload | Tree-walk | VM | VM + Opt |
+|---|---:|---:|---:|
+| `recursive_fib(20)` | — | — | **9.01 ms** |
+| `tight_loop` (10k int sum) | **3.79 ms** | 3.96 ms | 3.97 ms |
+| `resonance_loop` (5k `res()`) | 2.15 ms | **2.05 ms** | 2.07 ms |
+
+## Pipeline cost (phi_field_llm_demo.omc, ~250 LOC)
+
+| Stage | Time |
+|---|---:|
+| `parse` | 482 µs |
+| `compile` | 28 µs |
+| `compile + optimize` | 30 µs |
+
+Parsing is ~17× more expensive than compilation. The optimizer adds ~6% to compile time. For long-running programs, both costs amortize to zero against execution.
+
+## Honest interpretation
+
+- **Pure-arithmetic tight loops:** VM is slightly slower than tree-walk (~4%). Bytecode dispatch overhead outweighs the savings on simple ops. Normal for a stack-based VM without a JIT.
+- **Function-call-heavy workloads:** VM wins. The inline cache (Phase Q) short-circuits the lookup; recursive `fib` benefits visibly.
+- **Harmonic-primitive-heavy workloads:** VM wins. Phase J's hot-op inlining (`Op::Resonance`, `Op::Fold1`, `Op::IsFibonacci`, `Op::Fibonacci`, `Op::ArrayLen`, `Op::HimScore`) bypasses the `Call → call_builtin` bridge entirely.
+- **Optimizer ROI:** zero or negative on already-fast workloads. Positive on programs with constant-heavy arithmetic — Phase K + L can collapse `1 + 2 + 3 + 4` to a single `LoadConst(10)` and `res(89)` to `LoadConst(1.0)` at compile time.
+
+## What this is for
+
+The bench suite is the **truth-teller**. Every optimization claim should be runnable from `cargo bench` and reproducible by anyone with a clone. If a speedup is real, it shows up here; if it isn't, the numbers say so. No multiplicative-fantasy math (cf. `docs/archive/TIER_4_HONEST_REVISION.md`).
+
+When we work on the self-hosting compiler (Phase V), this suite tells us whether the OMC-compiled-by-OMC path keeps pace with the Rust interpreter or falls behind.
