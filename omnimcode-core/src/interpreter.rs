@@ -199,6 +199,270 @@ impl Interpreter {
         Ok(())
     }
 
+    /// Host-side self-healing pass over the AST. Walks every node,
+    /// applies harmonic / typo / divide-by-zero / arity-pad rewrites,
+    /// returns `(healed_stmts, diagnostics)`. Mirrors the OMC-written
+    /// healer in `examples/self_healing_h5.omc` but runs natively
+    /// before interpretation, so any OMC program benefits when
+    /// invoked with `OMC_HEAL=1`.
+    ///
+    /// Diagnostic classes (each is a one-line composition over Phase O
+    /// primitives — `is_fibonacci`, `value_danger`, edit-distance):
+    ///
+    /// - **Harmonic**: numeric literal not on the Fibonacci spine but
+    ///   within distance 3 → rewrite to nearest attractor.
+    /// - **Typo (call site)**: function call with unknown name → look
+    ///   up best edit-distance match in defined-name table; if ≤ 2
+    ///   chars away, rewrite.
+    /// - **Divide-by-zero (literal)**: `x / 0` → `safe_divide(x, 0)`.
+    /// - **Arity auto-pad (H.6)**: user-fn call with too few args →
+    ///   pad with `0` literals; too many → truncate. Only fires on
+    ///   USER functions (we know their declared arity); builtins are
+    ///   left alone.
+    pub fn heal_ast(&self, statements: Vec<Statement>) -> (Vec<Statement>, Vec<String>) {
+        let mut diags = Vec::new();
+        let defined = self.collect_defined_for_heal(&statements);
+        // (name → param_count) for user fns — used by arity-pad.
+        let mut arities: HashMap<String, usize> = HashMap::new();
+        for s in &statements {
+            if let Statement::FunctionDef { name, params, .. } = s {
+                arities.insert(name.clone(), params.len());
+            }
+        }
+        let healed: Vec<Statement> = statements.into_iter()
+            .map(|s| Self::heal_stmt(s, &defined, &arities, &mut diags))
+            .collect();
+        (healed, diags)
+    }
+
+    fn collect_defined_for_heal(&self, stmts: &[Statement]) -> HashSet<String> {
+        let mut set: HashSet<String> = HashSet::new();
+        // Baseline: every known builtin name (the healer should never flag
+        // a real builtin as a typo). Enumerated explicitly because
+        // is_known_builtin is a match expression, not iterable.
+        for name in HEAL_BUILTIN_NAMES {
+            set.insert(name.to_string());
+        }
+        // Plus user-defined fns and top-level decls.
+        for stmt in stmts {
+            match stmt {
+                Statement::FunctionDef { name, .. } => { set.insert(name.clone()); }
+                Statement::VarDecl { name, .. } => { set.insert(name.clone()); }
+                _ => {}
+            }
+        }
+        set
+    }
+
+    fn heal_stmt(
+        stmt: Statement,
+        defined: &HashSet<String>,
+        arities: &HashMap<String, usize>,
+        diags: &mut Vec<String>,
+    ) -> Statement {
+        match stmt {
+            Statement::VarDecl { name, value, is_harmonic } => Statement::VarDecl {
+                name,
+                value: Self::heal_expr(value, defined, arities, diags),
+                is_harmonic,
+            },
+            Statement::Assignment { name, value } => Statement::Assignment {
+                name,
+                value: Self::heal_expr(value, defined, arities, diags),
+            },
+            Statement::Print(e) => Statement::Print(Self::heal_expr(e, defined, arities, diags)),
+            Statement::Expression(e) => Statement::Expression(Self::heal_expr(e, defined, arities, diags)),
+            Statement::Return(opt) => Statement::Return(
+                opt.map(|e| Self::heal_expr(e, defined, arities, diags))
+            ),
+            Statement::If { condition, then_body, elif_parts, else_body } => Statement::If {
+                condition: Self::heal_expr(condition, defined, arities, diags),
+                then_body: then_body.into_iter()
+                    .map(|s| Self::heal_stmt(s, defined, arities, diags))
+                    .collect(),
+                elif_parts: elif_parts.into_iter()
+                    .map(|(c, b)| (
+                        Self::heal_expr(c, defined, arities, diags),
+                        b.into_iter()
+                            .map(|s| Self::heal_stmt(s, defined, arities, diags))
+                            .collect(),
+                    ))
+                    .collect(),
+                else_body: else_body.map(|b| b.into_iter()
+                    .map(|s| Self::heal_stmt(s, defined, arities, diags))
+                    .collect()),
+            },
+            Statement::While { condition, body } => Statement::While {
+                condition: Self::heal_expr(condition, defined, arities, diags),
+                body: body.into_iter()
+                    .map(|s| Self::heal_stmt(s, defined, arities, diags))
+                    .collect(),
+            },
+            Statement::FunctionDef { name, params, param_types, body, return_type, pragmas } => {
+                // Augment the defined set with the fn's params so the
+                // body's typo check doesn't flag them.
+                let mut inner = defined.clone();
+                for p in &params {
+                    inner.insert(p.clone());
+                }
+                Statement::FunctionDef {
+                    name,
+                    params,
+                    param_types,
+                    body: body.into_iter()
+                        .map(|s| Self::heal_stmt(s, &inner, arities, diags))
+                        .collect(),
+                    return_type,
+                    pragmas,
+                }
+            }
+            // Pass-through for the rest — no expression children to walk.
+            other => other,
+        }
+    }
+
+    fn heal_expr(
+        expr: Expression,
+        defined: &HashSet<String>,
+        arities: &HashMap<String, usize>,
+        diags: &mut Vec<String>,
+    ) -> Expression {
+        match expr {
+            Expression::Number(n) => {
+                // Harmonic: literal close to but not ON a Fibonacci attractor
+                // gets rewritten. |Δ| ≤ 3 catches off-by-one / transposition.
+                if !is_on_fibonacci_attractor(n) {
+                    let nearest = fold_to_fibonacci_const(n);
+                    let delta = (nearest - n).abs();
+                    if delta > 0 && delta <= 3 {
+                        diags.push(format!(
+                            "harmonic: {} not Fibonacci → {} (|Δ|={})",
+                            n, nearest, delta
+                        ));
+                        return Expression::Number(nearest);
+                    }
+                }
+                Expression::Number(n)
+            }
+            Expression::Div(l, r) => {
+                let l = Self::heal_expr(*l, defined, arities, diags);
+                let r = Self::heal_expr(*r, defined, arities, diags);
+                // Divide-by-zero (literal): wrap in safe_divide.
+                if matches!(&r, Expression::Number(0)) {
+                    diags.push("divide-by-zero: rewriting to safe_divide(...)".to_string());
+                    return Expression::Call {
+                        name: "safe_divide".to_string(),
+                        args: vec![l, r],
+                    };
+                }
+                Expression::Div(Box::new(l), Box::new(r))
+            }
+            Expression::Call { name, args } => {
+                // Typo check at call site. Prefer user-defined fns
+                // (arities.keys()) over builtins as tiebreaker — a typo
+                // is more likely meant for a user fn than a builtin.
+                let user_fns: HashSet<String> = arities.keys().cloned().collect();
+                let healed_name = if defined.contains(&name) {
+                    name
+                } else if let Some(close) = closest_name(&name, defined, 2, Some(&user_fns)) {
+                    diags.push(format!("call: '{}' unknown → '{}'", name, close));
+                    close
+                } else {
+                    name
+                };
+                // Heal each argument first.
+                let mut healed_args: Vec<Expression> = args.into_iter()
+                    .map(|a| Self::heal_expr(a, defined, arities, diags))
+                    .collect();
+                // H.6: arity auto-pad / truncate. Only applies to user
+                // functions whose declared param count we know.
+                if let Some(&expected) = arities.get(&healed_name) {
+                    if healed_args.len() < expected {
+                        let needed = expected - healed_args.len();
+                        diags.push(format!(
+                            "arity: {}() called with {} args, padded with {} zeros to match arity {}",
+                            healed_name, healed_args.len(), needed, expected
+                        ));
+                        for _ in 0..needed {
+                            healed_args.push(Expression::Number(0));
+                        }
+                    } else if healed_args.len() > expected {
+                        let excess = healed_args.len() - expected;
+                        diags.push(format!(
+                            "arity: {}() called with {} args, truncated {} excess to match arity {}",
+                            healed_name, healed_args.len(), excess, expected
+                        ));
+                        healed_args.truncate(expected);
+                    }
+                }
+                Expression::Call { name: healed_name, args: healed_args }
+            }
+            // Recursive walk for the rest of the structural expressions.
+            Expression::Add(l, r) => Expression::Add(
+                Box::new(Self::heal_expr(*l, defined, arities, diags)),
+                Box::new(Self::heal_expr(*r, defined, arities, diags)),
+            ),
+            Expression::Sub(l, r) => Expression::Sub(
+                Box::new(Self::heal_expr(*l, defined, arities, diags)),
+                Box::new(Self::heal_expr(*r, defined, arities, diags)),
+            ),
+            Expression::Mul(l, r) => Expression::Mul(
+                Box::new(Self::heal_expr(*l, defined, arities, diags)),
+                Box::new(Self::heal_expr(*r, defined, arities, diags)),
+            ),
+            Expression::Mod(l, r) => Expression::Mod(
+                Box::new(Self::heal_expr(*l, defined, arities, diags)),
+                Box::new(Self::heal_expr(*r, defined, arities, diags)),
+            ),
+            Expression::Eq(l, r) => Expression::Eq(
+                Box::new(Self::heal_expr(*l, defined, arities, diags)),
+                Box::new(Self::heal_expr(*r, defined, arities, diags)),
+            ),
+            Expression::Ne(l, r) => Expression::Ne(
+                Box::new(Self::heal_expr(*l, defined, arities, diags)),
+                Box::new(Self::heal_expr(*r, defined, arities, diags)),
+            ),
+            Expression::Lt(l, r) => Expression::Lt(
+                Box::new(Self::heal_expr(*l, defined, arities, diags)),
+                Box::new(Self::heal_expr(*r, defined, arities, diags)),
+            ),
+            Expression::Le(l, r) => Expression::Le(
+                Box::new(Self::heal_expr(*l, defined, arities, diags)),
+                Box::new(Self::heal_expr(*r, defined, arities, diags)),
+            ),
+            Expression::Gt(l, r) => Expression::Gt(
+                Box::new(Self::heal_expr(*l, defined, arities, diags)),
+                Box::new(Self::heal_expr(*r, defined, arities, diags)),
+            ),
+            Expression::Ge(l, r) => Expression::Ge(
+                Box::new(Self::heal_expr(*l, defined, arities, diags)),
+                Box::new(Self::heal_expr(*r, defined, arities, diags)),
+            ),
+            Expression::And(l, r) => Expression::And(
+                Box::new(Self::heal_expr(*l, defined, arities, diags)),
+                Box::new(Self::heal_expr(*r, defined, arities, diags)),
+            ),
+            Expression::Or(l, r) => Expression::Or(
+                Box::new(Self::heal_expr(*l, defined, arities, diags)),
+                Box::new(Self::heal_expr(*r, defined, arities, diags)),
+            ),
+            Expression::Not(e) => Expression::Not(
+                Box::new(Self::heal_expr(*e, defined, arities, diags)),
+            ),
+            Expression::Array(items) => Expression::Array(
+                items.into_iter()
+                    .map(|e| Self::heal_expr(e, defined, arities, diags))
+                    .collect(),
+            ),
+            Expression::Safe(inner) => Expression::Safe(
+                Box::new(Self::heal_expr(*inner, defined, arities, diags)),
+            ),
+            // Pass-through for leaves and forms that have no expression
+            // children we'd want to rewrite at this layer.
+            other => other,
+        }
+    }
+
     fn execute_stmt(&mut self, stmt: &Statement) -> Result<(), String> {
         match stmt {
             Statement::Print(expr) => {
@@ -2930,6 +3194,14 @@ impl Interpreter {
         self.set_var(name.to_string(), value);
     }
 
+    /// Return an Rc clone of the topmost local scope frame, for closure
+    /// capture in Op::Lambda. The Rc is shared — multiple lambdas in
+    /// the same scope get the same underlying RefCell, so mutations
+    /// propagate across sibling closures.
+    pub fn vm_top_scope_rc(&self) -> Option<std::rc::Rc<std::cell::RefCell<HashMap<String, Value>>>> {
+        self.locals.last().cloned()
+    }
+
     /// Pre-register user function definitions into the interpreter's
     /// function table. Used by the VM driver in main.rs when running
     /// with OMC_VM=1: the VM has its own compiled function table in
@@ -2944,6 +3216,13 @@ impl Interpreter {
                 self.functions.insert(name.clone(), (params.clone(), body.clone()));
             }
         }
+    }
+
+    /// Register a single anonymous-lambda body. Used by main.rs in VM
+    /// mode to register every lambda the compiler discovered. See
+    /// `module.lambda_asts` in bytecode.rs for context.
+    pub fn register_lambda(&mut self, name: &str, params: Vec<String>, body: Vec<Statement>) {
+        self.functions.insert(name.to_string(), (params, body));
     }
 
     pub fn vm_get_var(&self, name: &str) -> Option<Value> {
@@ -3126,6 +3405,125 @@ pub(crate) fn fold_to_fibonacci_const(n: i64) -> i64 {
     }
     if n < 0 { -nearest } else { nearest }
 }
+
+// Used by the host-side healer in heal_ast. Tests whether `n` falls on
+// the Fibonacci attractor table — same set as fold_to_fibonacci_const.
+// Renamed from `is_fibonacci` because `value.rs` already exports a
+// public function by that name (operating on i64 too — semantically
+// equivalent, but we keep a local copy here so the heal pass doesn't
+// depend on value.rs internals).
+pub(crate) fn is_on_fibonacci_attractor(n: i64) -> bool {
+    let fibs: [i64; 15] = [0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610];
+    let abs_n = n.abs();
+    fibs.iter().any(|&f| f == abs_n)
+}
+
+// Levenshtein edit distance for the heal-pass typo correction. Returns
+// the smallest edit count between two strings (insert/delete/replace = 1).
+// Used over the defined-name table to find the closest match within a
+// threshold (default 2).
+pub(crate) fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let m = a.len();
+    let n = b.len();
+    if m == 0 { return n; }
+    if n == 0 { return m; }
+    let mut prev: Vec<usize> = (0..=n).collect();
+    let mut curr: Vec<usize> = vec![0; n + 1];
+    for i in 1..=m {
+        curr[0] = i;
+        for j in 1..=n {
+            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+            curr[j] = (prev[j] + 1)
+                .min(curr[j - 1] + 1)
+                .min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[n]
+}
+
+// Return the closest defined name within `max_dist` (Levenshtein) of
+// `target`, or None if nothing matches. `prefer` is a priority set:
+// when two candidates tie on distance, the one in `prefer` wins. Used
+// by the heal pass to prefer user-defined functions over builtins —
+// a typo at a call site is more likely a user fn than a builtin.
+pub(crate) fn closest_name(
+    target: &str,
+    defined: &HashSet<String>,
+    max_dist: usize,
+    prefer: Option<&HashSet<String>>,
+) -> Option<String> {
+    let mut best: Option<(usize, String, bool)> = None;
+    for cand in defined {
+        let d = edit_distance(target, cand);
+        if d > max_dist { continue; }
+        let in_prefer = prefer.map(|p| p.contains(cand)).unwrap_or(false);
+        let should_replace = match &best {
+            None => true,
+            Some((bd, _, _)) if d < *bd => true,
+            Some((bd, _, bp)) if d == *bd && in_prefer && !*bp => true,
+            _ => false,
+        };
+        if should_replace {
+            best = Some((d, cand.clone(), in_prefer));
+        }
+    }
+    best.map(|(_, s, _)| s)
+}
+
+// Static list of every host built-in name. Kept in sync with the
+// `is_known_builtin` match arms — used by heal_ast's defined-name
+// table so the typo check doesn't flag legitimate builtins.
+// (When you add a new builtin to is_known_builtin, add it here too.)
+pub(crate) const HEAL_BUILTIN_NAMES: &[&str] = &[
+    // Numbers & math
+    "abs", "min", "max", "sign", "floor", "ceil", "round", "frac",
+    "gcd", "lcm", "square", "cube", "pow", "pow_int", "sqrt",
+    "factorial", "is_even", "even", "is_odd", "odd", "is_prime",
+    "sin", "cos", "tan", "tanh", "exp", "log", "erf", "sigmoid",
+    "clamp", "pi", "tau", "e", "phi", "phi_inv", "phi_sq",
+    "phi_squared", "sqrt_2", "sqrt_5", "ln_2",
+    // Strings
+    "str_len", "str_chars", "str_slice", "str_concat", "concat_many",
+    "str_split", "str_join", "str_trim", "str_replace",
+    "str_index_of", "str_contains", "str_starts_with", "str_ends_with",
+    "str_repeat", "str_reverse", "str_uppercase", "str_lowercase",
+    "str_pad_left", "str_pad_right",
+    // Arrays
+    "arr_new", "arr_from_range", "arr_len", "arr_get", "arr_set",
+    "arr_push", "arr_first", "arr_last", "arr_slice", "arr_concat",
+    "arr_contains", "arr_index_of", "arr_sort", "arr_reverse", "arr_join",
+    "arr_min", "arr_max", "arr_sum", "arr_fold_elements",
+    "arr_resonance", "filter_by_resonance", "cleanup_array",
+    "arr_map", "arr_filter", "arr_reduce", "arr_any", "arr_all", "arr_find",
+    "arr_zip", "arr_unique",
+    // Harmonic
+    "fib", "fibonacci", "is_fibonacci", "harmony_value", "fold",
+    "fold_escape", "value_danger", "classify_resonance",
+    "harmonic_interfere", "interfere", "measure_coherence",
+    "mean_omni_weight", "boundary", "res",
+    "harmonic_checksum", "harmonic_write_file", "harmonic_read_file",
+    "harmonic_sort", "harmonic_split", "harmonic_partition",
+    "harmonic_hash", "harmonic_diff", "harmonic_dedupe",
+    // Self-healing
+    "safe_divide", "safe_arr_get", "safe_arr_set",
+    "safe_add", "safe_sub", "safe_mul", "resolve_singularity",
+    "is_singularity", "ensure_clean", "collapse", "invert",
+    "quantize", "quantization_ratio",
+    // I/O
+    "read_file", "write_file", "file_exists", "print",
+    "println", "print_raw",
+    // Time / random / conversion / introspection
+    "now_ms", "random_int", "random_float", "random_seed",
+    "to_int", "int", "to_float", "float",
+    "to_string", "string", "len", "type_of",
+    "defined_functions", "call",
+    "test_record_failure", "test_failure_count",
+    "test_get_failures", "test_clear_failures",
+    "test_set_current", "test_get_current",
+];
 
 impl Interpreter {
     fn phi_fold_n(&self, v: Value, depth: usize) -> Value {

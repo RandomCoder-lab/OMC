@@ -305,6 +305,20 @@ impl Vm {
                         ));
                     }
                 }
+                Op::Lambda(name) => {
+                    // Closure creation: push Value::Function with the
+                    // current top scope frame as captured env. Sibling
+                    // lambdas in the same scope share the same Rc so
+                    // mutations propagate (matches tree-walk semantics).
+                    // Actual body execution still routes through tree-walk
+                    // via call_first_class_function; fast VM-native body
+                    // execution is future work.
+                    let captured = self.interp.vm_top_scope_rc();
+                    stack.push(Value::Function {
+                        name: name.clone(),
+                        captured,
+                    });
+                }
                 Op::SafeArrSetNamed(name) => {
                     let val = stack.pop().ok_or("stack underflow")?;
                     let raw_idx = stack.pop().ok_or("stack underflow")?.to_int();

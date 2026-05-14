@@ -3,6 +3,13 @@
 use crate::ast::*;
 use crate::bytecode::*;
 
+thread_local! {
+    /// Monotonic counter for anonymous lambda names emitted by the
+    /// compiler. Shared across all Compiler instances within a single
+    /// compile_program call so closures get globally-unique names.
+    static LAMBDA_SEQ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// Loop tracking for `break` / `continue` patch-up.
 struct LoopFrame {
     /// Instruction to resume on `continue`.
@@ -31,6 +38,16 @@ pub struct Compiler {
     /// Phase M: declared return types of user-defined functions, looked up
     /// when inferring the type of a Call expression.
     fn_return_types: std::collections::HashMap<String, &'static str>,
+    /// Lambda bodies compiled during this Compiler's run. Drained by
+    /// compile_program after each top-level / per-function compile and
+    /// inserted into module.functions so closure invocation can find them.
+    pending_lambdas: Vec<CompiledFunction>,
+    /// Lambda body AST forms — drained by compile_program and exposed
+    /// via `compile_program`'s return so main.rs can register them
+    /// into the interpreter's function table. Required because the
+    /// existing call_first_class_function dispatches by name through
+    /// the interpreter (tree-walk), not through module.functions.
+    pending_lambda_asts: Vec<(String, Vec<String>, Vec<Statement>)>,
 }
 
 impl Compiler {
@@ -42,6 +59,8 @@ impl Compiler {
             user_fns: std::collections::HashSet::new(),
             var_types: std::collections::HashMap::new(),
             fn_return_types: std::collections::HashMap::new(),
+            pending_lambdas: Vec::new(),
+            pending_lambda_asts: Vec::new(),
         }
     }
 
@@ -53,6 +72,8 @@ impl Compiler {
             user_fns,
             var_types: std::collections::HashMap::new(),
             fn_return_types: std::collections::HashMap::new(),
+            pending_lambdas: Vec::new(),
+            pending_lambda_asts: Vec::new(),
         }
     }
 
@@ -495,14 +516,56 @@ impl Compiler {
                     _ => self.compile_expr(inner)?,
                 }
             }
-            Expression::Lambda { .. } => {
-                // Closures aren't supported on the Rust VM path yet —
-                // the bytecode VM has no captured-scope plumbing. Tree-walk
-                // handles them via Expression::Lambda evaluation. Run with
-                // OMC_VM unset to use closures.
-                return Err(
-                    "Lambda expressions require tree-walk; unset OMC_VM to use closures".to_string()
+            Expression::Lambda { params, body } => {
+                // Generate a unique anonymous name so it doesn't collide
+                // with anything in module.functions. The counter is per-
+                // Compiler — main.rs creates one Compiler for the top
+                // level + one per user fn, so the namespace `__lambda_*`
+                // is shared across them but globally unique due to the
+                // module-level lambda_seq counter.
+                let lambda_seq = LAMBDA_SEQ.with(|c| {
+                    let v = c.get();
+                    c.set(v + 1);
+                    v
+                });
+                let fn_name = format!("__lambda_{}", lambda_seq);
+                // Stash the AST body too — call_first_class_function
+                // dispatches by name through the interpreter (tree-walk),
+                // not through module.functions, so we need the original
+                // AST registered there as well.
+                self.pending_lambda_asts.push((
+                    fn_name.clone(),
+                    params.clone(),
+                    body.clone(),
+                ));
+                // Compile the body. We use a fresh Compiler with the
+                // outer user_fns set so the body sees the same names.
+                let mut fc = Compiler::with_user_fns(self.user_fns.clone());
+                fc.fn_return_types = self.fn_return_types.clone();
+                for s in body {
+                    fc.compile_stmt(s)?;
+                }
+                fc.emit(Op::ReturnNull);
+                // Drain nested lambdas BEFORE finish (which consumes fc).
+                let nested = std::mem::take(&mut fc.pending_lambdas);
+                let nested_asts = std::mem::take(&mut fc.pending_lambda_asts);
+                let func = fc.finish(
+                    fn_name.clone(),
+                    params.clone(),
+                    vec![None; params.len()],
+                    None,
                 );
+                self.pending_lambdas.push(func);
+                for nf in nested {
+                    self.pending_lambdas.push(nf);
+                }
+                for na in nested_asts {
+                    self.pending_lambda_asts.push(na);
+                }
+                // Emit the runtime op that creates Value::Function with
+                // captured = current scope. Sibling closures in the same
+                // scope share the captured Rc.
+                self.emit(Op::Lambda(fn_name));
             }
         }
         Ok(())
@@ -860,6 +923,14 @@ pub fn compile_program(statements: &[Statement]) -> Result<Module, String> {
             // Ensure every function ends with an implicit ReturnNull so the VM
             // doesn't fall off the end.
             fc.emit(Op::ReturnNull);
+            // Drain anonymous lambda bodies + ASTs out of this Compiler
+            // BEFORE finishing the outer fn (finish consumes self).
+            let lambdas = std::mem::take(&mut fc.pending_lambdas);
+            for lf in lambdas {
+                module.functions.insert(lf.name.clone(), lf);
+            }
+            let lambda_asts = std::mem::take(&mut fc.pending_lambda_asts);
+            module.lambda_asts.extend(lambda_asts);
             let func = fc.finish(
                 name.clone(),
                 params.clone(),
@@ -880,6 +951,12 @@ pub fn compile_program(statements: &[Statement]) -> Result<Module, String> {
         mc.compile_stmt(stmt)?;
     }
     mc.emit(Op::ReturnNull);
+    let lambdas = std::mem::take(&mut mc.pending_lambdas);
+    for lf in lambdas {
+        module.functions.insert(lf.name.clone(), lf);
+    }
+    let lambda_asts = std::mem::take(&mut mc.pending_lambda_asts);
+    module.lambda_asts.extend(lambda_asts);
     module.main = mc.finish("__main__".to_string(), Vec::new(), Vec::new(), None);
 
     Ok(module)

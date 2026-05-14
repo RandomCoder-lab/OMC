@@ -4,6 +4,82 @@ All notable changes to OMNIcode will be documented in this file.
 
 ## [Unreleased]
 
+### Added (Host-side autofixer + VM closures + direct-call benchmarks, 2026-05-14)
+
+🎯 **The healer becomes a toolchain feature; lambdas work on the Rust VM; direct-call benchmark variant reveals the VM's 2.4× speedup on recursion.**
+
+#### Track 1 — Direct-call benchmark variant
+
+Added a second benchmark loop to `examples/benchmarks.omc` that calls each function directly (`bench_int_add(N)`) instead of through `call(fn, args)`. The two loops together reveal exactly where the Rust VM advantage lives.
+
+**Result on a modern laptop:**
+
+| Operation | Tree-walk | VM reflective | VM direct | Speedup |
+|---|---|---|---|---|
+| `int_add` (sum 0..N) | 425 ns/op | 420 ns/op | 375 ns/op | 1.13× |
+| `int_mul` | 505 | 485 | 430 | 1.17× |
+| `is_fibonacci` | 360 | 340 | 280 | 1.29× |
+| `recursive fib(22)` | 2.3 ms | 2.3 ms | **0.95 ms** | **2.42×** |
+
+The big finding: reflective dispatch (`call(fn, args)`) routes through tree-walk regardless of `OMC_VM`. **Direct calls hit the bytecode VM hot path** — and `recursive fib(22)` shows a 2.4× speedup, where the Op::Call cycle dominates. The benchmark suite now produces actionable signal for future VM work.
+
+#### Track 4 — Host-side autofixer (`OMC_HEAL=1`)
+
+The H.1–H.5 self-healing demos lived inside OMC programs — you'd run `self_healing_h5.omc` and it healed a hardcoded broken-source string. Useful as a research demonstration, but you couldn't apply it to your own code.
+
+This commit lifts the healing pass into the **host toolchain**. `OMC_HEAL=1` walks the AST after parsing, applies four classes of rewrites, prints diagnostics to stderr, then executes the healed AST.
+
+```
+$ OMC_HEAL=1 ./target/release/omnimcode-standalone examples/heal_pass_demo.omc
+--- OMC_HEAL: 8 diagnostic(s) ---
+  harmonic: 145 not Fibonacci → 144 (|Δ|=1)
+  divide-by-zero: rewriting to safe_divide(...)
+  call: 'fbi' unknown → 'fib'
+  harmonic: 7 not Fibonacci → 8 (|Δ|=1)
+  arity: fib() called with 0 args, padded with 1 zeros to match arity 1
+  harmonic: 10 not Fibonacci → 8 (|Δ|=2)
+  harmonic: 20 not Fibonacci → 21 (|Δ|=1)
+  arity: fib() called with 3 args, truncated 2 excess to match arity 1
+--- end OMC_HEAL ---
+100        # 100/0 → safe_divide(100, 0) = 100
+21         # fbi(7) → fib(8) = 21
+0          # fib() → fib(0) = 0
+21         # fib(10,20,30) → fib(8) = 21 (extras truncated, harmonic-healed first)
+```
+
+The classes implemented:
+- **Harmonic** (literal close to Fibonacci): rewrite to nearest attractor when `|Δ| ≤ 3`.
+- **Identifier typo at call site**: Levenshtein within distance 2; tiebreaker prefers user-defined functions over builtins. This catches `fbi → fib` (not `fbi → pi`, which is also distance 2 but is a builtin).
+- **Literal divide-by-zero**: `x / 0` → `Call("safe_divide", [x, 0])`.
+- **Arity auto-pad / truncate (H.6)**: user-fn call with too few args → pad with `0` literals; too many → truncate. Only fires on user functions (we know their declared arity).
+
+The implementation is ~250 lines in `interpreter.rs` — `heal_ast`, `heal_stmt`, `heal_expr`, plus module-level helpers `edit_distance`, `closest_name`, `is_on_fibonacci_attractor`, and the `HEAL_BUILTIN_NAMES` static slice that keeps the typo-checker from flagging real builtins.
+
+`OMC_HEAL_QUIET=1` suppresses the diagnostic preamble — heal still happens silently.
+
+#### Track 2 — Closures on the Rust VM (MVP)
+
+Lambdas previously errored under `OMC_VM=1` with "Lambda expressions require tree-walk." Now they compile:
+
+- New `Op::Lambda(name)` opcode. Compile-time: `Expression::Lambda { params, body }` registers the body as a `CompiledFunction` in `module.functions` under a fresh `__lambda_N` name AND stashes the AST body in a new `module.lambda_asts` field. Runtime: pushes a `Value::Function` with `name` and `captured = Some(self.locals.last().cloned())` — sibling lambdas share the captured Rc.
+- `main.rs` registers every entry in `module.lambda_asts` into the interpreter's function table before `vm.run_module(...)`. Closure invocation routes through `call_first_class_function → invoke_user_function` (tree-walk semantics for the body), so this registration makes the body discoverable.
+- Body execution still routes through tree-walk — fast bytecode-VM body execution is future work. But the COMPILE and CREATE steps are now bytecode-native, and `OMC_VM=1` works end-to-end on programs that use lambdas.
+
+Verified: `examples/test_runner.omc` (which uses inline lambdas for `arr_filter`) runs cleanly under `OMC_VM=1` — 5/6 tests pass (the intentional failure still fires).
+
+Bank-account pattern produces identical output on both interpretation paths (100, 150, 120, 120).
+
+#### Architectural side-effects
+
+- `Module` gained a `lambda_asts: Vec<(String, Vec<String>, Vec<Statement>)>` field. Doesn't break existing callers because `Module::default()` returns empty.
+- `Compiler` gained a `pending_lambda_asts` field that nested compilers drain into their parent.
+- `Interpreter` gained a public `register_lambda(name, params, body)` method, used by `main.rs` when running in VM mode.
+- New `Op::Lambda(String)` disassembly form.
+
+#### Regression
+
+V.9b ✓✓✓ unchanged. H.5: 6/6 demos converge. Test runner: 5/6 (1 intentional failure) on BOTH tree-walk and `OMC_VM=1`. `safe_keyword_host`, `module_demo`, `mutable_closure_test`, `benchmarks` all produce expected output. `heal_pass_demo` heals 8 issues and runs to completion.
+
 ### Added (Mutable closures + module aliasing + benchmark suite, 2026-05-14)
 
 🎯 **Three more architectural moves: closures gain shared mutable state, the module system gets namespaced imports, and OMC has its first benchmark suite.**

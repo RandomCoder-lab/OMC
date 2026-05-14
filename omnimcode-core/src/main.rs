@@ -42,7 +42,32 @@ fn main() {
 
 fn execute_program(source: &str) -> Result<(), String> {
     let mut parser = Parser::new(source);
-    let statements = parser.parse()?;
+    let mut statements = parser.parse()?;
+
+    // OMC_HEAL=1 — run the host-side self-healing pass over the AST
+    // before interpretation. Catches harmonic violations, identifier
+    // typos, literal divide-by-zero, and arity mismatches at call
+    // sites. Diagnostics print to stderr; healed AST executes
+    // normally. Same heal classes as the OMC-written self-healing
+    // demo in examples/self_healing_h5.omc, but applied to ANY OMC
+    // program through the standard toolchain.
+    //
+    // OMC_HEAL_QUIET=1 suppresses the diagnostic output (heal still
+    // happens; just runs silently).
+    if std::env::var("OMC_HEAL").as_deref() == Ok("1") {
+        let interpreter = Interpreter::new();
+        let (healed, diagnostics) = interpreter.heal_ast(statements);
+        if !diagnostics.is_empty()
+            && std::env::var("OMC_HEAL_QUIET").as_deref() != Ok("1")
+        {
+            eprintln!("--- OMC_HEAL: {} diagnostic(s) ---", diagnostics.len());
+            for d in &diagnostics {
+                eprintln!("  {}", d);
+            }
+            eprintln!("--- end OMC_HEAL ---");
+        }
+        statements = healed;
+    }
 
     // Opt-in bytecode VM path. The tree-walk interpreter remains the default
     // (full language coverage); the VM is a faster dispatch for the subset of
@@ -77,6 +102,14 @@ fn execute_program(source: &str) -> Result<(), String> {
         // compiled function table for direct Op::Call dispatch; this
         // duplication only kicks in for first-class function reflection.
         vm.interp_mut().register_user_functions(&statements);
+        // Also register every lambda body the compiler collected. Lambda
+        // invocation routes through call_first_class_function → the
+        // interpreter's tree-walk path; that path looks up by name in
+        // `self.interp.functions`, so the lambda body AST needs to live
+        // there too. Fast bytecode-VM body execution is future work.
+        for (lname, lparams, lbody) in &module.lambda_asts {
+            vm.interp_mut().register_lambda(lname, lparams.clone(), lbody.clone());
+        }
         vm.run_module(&module)?;
         return Ok(());
     }

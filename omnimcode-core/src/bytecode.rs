@@ -116,6 +116,17 @@ pub enum Op {
     /// as ArrSetNamed — required so the mutation propagates back through
     /// the VM scope instead of getting lost in vm_call_builtin's shim.
     SafeArrSetNamed(String),
+    /// Closure creation. Pushes a Value::Function whose name is the
+    /// String (resolves to a CompiledFunction in module.functions), and
+    /// whose captured env is the current top scope frame (cloned Rc).
+    /// Sibling closures created in the same scope share the captured
+    /// env so mutations propagate, same as tree-walk.
+    ///
+    /// Note: the body of the lambda is COMPILED as bytecode and stored
+    /// in module.functions, but actual INVOCATION still routes through
+    /// call_first_class_function → tree-walk semantics for the body.
+    /// Fast bytecode-VM execution of closure bodies is future work.
+    Lambda(String),
 
     // Special harmonic operations (short-circuit to built-in semantics
     // without the call overhead — these are the hot ones).
@@ -162,6 +173,13 @@ pub struct CompiledFunction {
 pub struct Module {
     pub main: CompiledFunction,
     pub functions: std::collections::HashMap<String, CompiledFunction>,
+    /// Lambda body ASTs collected during compilation. Each entry is
+    /// (name, params, body_statements). Used by main.rs when running
+    /// in VM mode — closure invocation routes through the interpreter's
+    /// tree-walk path (call_first_class_function → invoke_user_function),
+    /// which dispatches by name through `self.interp.functions`. We
+    /// register these there before VM execution so reflection works.
+    pub lambda_asts: Vec<(String, Vec<String>, Vec<crate::ast::Statement>)>,
 }
 
 impl Default for Module {
@@ -177,6 +195,7 @@ impl Default for Module {
                 call_cache: Vec::new(),
             },
             functions: std::collections::HashMap::new(),
+            lambda_asts: Vec::new(),
         }
     }
 }

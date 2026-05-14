@@ -1,0 +1,42 @@
+# =============================================================================
+# OMC_HEAL — host-side self-healing pass demonstration
+# =============================================================================
+# Set OMC_HEAL=1 to enable. The healer walks the AST after parsing,
+# applies four classes of rewrites using Phase O's φ-math substrate,
+# prints diagnostics to stderr, and runs the healed program.
+#
+# Run without healing (errors out):
+#   ./target/release/omnimcode-standalone examples/heal_pass_demo.omc
+#
+# Run with healing (executes to completion):
+#   OMC_HEAL=1 ./target/release/omnimcode-standalone examples/heal_pass_demo.omc
+#
+# Set OMC_HEAL_QUIET=1 to suppress the diagnostic preamble; the
+# rewrites still happen, just silently.
+# =============================================================================
+
+fn fib(n) {
+    if n < 2 { return n; }
+    return fib(n - 1) + fib(n - 2);
+}
+
+# Harmonic violation — 145 is close to Fibonacci 144. Healed.
+h target = 145;
+
+# Literal divide-by-zero. Healed to safe_divide(100, 0) = 100.
+h result = 100 / 0;
+println(result);
+
+# Identifier typo — fbi is edit-distance 2 from fib. The healer
+# prefers user-defined fns over builtins as tiebreaker, so this
+# resolves to fib (not pi, which is also edit-distance 2).
+println(fbi(7));
+
+# Arity mismatch (too few) — fib takes 1 arg, called with 0.
+# Healed to fib(0) by padding with a zero literal.
+println(fib());
+
+# Arity mismatch (too many) — extras get truncated, harmonic
+# violations in the args get rewritten before truncation.
+# fib(10, 20, 30) → fib(8, 21, 34) → fib(8) = 21.
+println(fib(10, 20, 30));

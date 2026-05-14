@@ -146,6 +146,42 @@ run_bench("is_fibonacci 0..N",        bench_is_fibonacci,   N_RESONANCE);
 run_bench("harmony_value 0..N",       bench_harmony_value,  N_RESONANCE);
 run_bench("recursive fib(N)",         bench_recursive_fib,  N_FIB);
 
+# --- Direct-call variant -----------------------------------------------
+# The harness above dispatches via `call(fn, args)` — which routes user
+# fns through tree-walk semantics regardless of OMC_VM. To isolate the
+# VM hot path on direct Op::Call dispatch, we call the same fn bodies
+# inline here with hardcoded names. The numbers should diverge from the
+# reflective harness above when running with OMC_VM=1 — direct calls
+# get the bytecode-VM speedup; reflective dispatch doesn't.
+
+println("");
+println(str_repeat("=", 70));
+println("Direct-call (no `call` indirection) — isolates VM hot path");
+println(str_repeat("=", 70));
+
+fn time_direct(label, iters) {
+    h start = now_ms();
+    if label == "int_add"       { bench_int_add(iters); }
+    if label == "int_mul"       { bench_int_mul(iters); }
+    if label == "is_fibonacci"  { bench_is_fibonacci(iters); }
+    if label == "harmony_value" { bench_harmony_value(iters); }
+    if label == "recursive_fib" { bench_recursive_fib(iters); }
+    h elapsed_ms = now_ms() - start;
+    h ns_per_op = elapsed_ms * 1000000 / iters;
+    println(concat_many(
+        str_pad_right(label, 32, " "),
+        str_pad_left(to_string(iters), 8, " "), " iters  ",
+        str_pad_left(to_string(elapsed_ms), 6, " "), " ms  ",
+        str_pad_left(to_string(ns_per_op), 8, " "), " ns/op"
+    ));
+}
+
+time_direct("int_add",       N_INT_OPS);
+time_direct("int_mul",       N_INT_OPS);
+time_direct("is_fibonacci",  N_RESONANCE);
+time_direct("harmony_value", N_RESONANCE);
+time_direct("recursive_fib", N_FIB);
+
 println(str_repeat("=", 70));
 println("Done. Run with OMC_VM=1 to compare against the Rust bytecode VM.");
 println(str_repeat("=", 70));

@@ -50,7 +50,9 @@ What this is **not**: a fast runtime, a production toolchain, a stable API, a de
 | Built-in test runner | `examples/test_runner.omc` | `fn test_*()` functions auto-discovered via `defined_functions()` and dispatched via `call(name, args)`. `assert_eq` / `assert_array_eq` etc. record failures in host-side state |
 | Mutable closures (Rc<RefCell> shared capture) | `examples/test_runner.omc` | Bank-account pattern: multiple closures from `make_account(100)` share the same `balance` binding; mutations propagate across all of them |
 | Module system with namespace aliasing | `examples/module_demo.omc` | `import "math_module.omc" as math` then `math.fib_up_to(100)` → `0,1,1,2,3,5,8,13,21,34,55,89`. Idempotent re-import; literal-path resolution |
-| Benchmark suite | `examples/benchmarks.omc` | Times `int_add` / `str_concat` / `arr_push` / `recursive fib(22)` / `is_fibonacci` etc. with per-op ns. Run with `OMC_VM=1` to compare against the bytecode VM |
+| Benchmark suite | `examples/benchmarks.omc` | Times `int_add` / `str_concat` / `arr_push` / `recursive fib(22)` / `is_fibonacci` etc. with per-op ns. Run with `OMC_VM=1` to compare against the bytecode VM. Direct-call variant shows the VM's 2.4× speedup on `recursive_fib`. |
+| Host-side self-healing pass (`OMC_HEAL=1`) | `examples/heal_pass_demo.omc` | Any OMC program benefits: harmonic-violation rewrites, typo correction with user-fn-preferred tiebreaker, literal `/0` → `safe_divide`, and arity auto-pad/truncate at call sites |
+| Closures on the bytecode VM | `examples/test_runner.omc` (run with `OMC_VM=1`) | Lambda expressions now compile under VM. Bank-account pattern produces identical output on tree-walk and VM. Test runner runs cleanly via `OMC_VM=1` |
 
 Run any of these with the binary built from this repo:
 

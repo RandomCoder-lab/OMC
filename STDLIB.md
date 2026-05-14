@@ -329,7 +329,7 @@ fn make_account(balance) {
 }
 ```
 
-VM caveat: lambdas execute via tree-walk, not the Rust bytecode VM. The VM's `OMC_VM=1` path bails with an error on `Expression::Lambda` because the bytecode VM has no captured-scope plumbing. Tree-walk works cleanly.
+**VM update (2026-05-14):** lambdas now compile on the Rust VM. `Op::Lambda(name)` creates a `Value::Function` at runtime with the current scope captured. Body execution still routes through tree-walk via `call_first_class_function`, so closures aren't VM-fast yet — but they no longer error under `OMC_VM=1`. The test runner runs cleanly via the VM now.
 
 ---
 
