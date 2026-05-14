@@ -4,6 +4,33 @@ All notable changes to OMNIcode will be documented in this file.
 
 ## [Unreleased]
 
+### Added (Phase R + S: multi-layer Phi-Field LLM + OmniWeight quantization, 2026-05-13)
+
+**Phase R — Multi-layer Phi-Field LLM**
+
+`examples/phi_field_llm_multilayer.omc` — a three-layer harmonic "language model" with **per-layer residual streams**. Each layer keeps its own previous-position output as context; information doesn't all collapse into the same attractor by position 2. Each layer:
+
+1. `state = harmonic_interfere(prev_layer, current_layer)`
+2. `emitted = best_attractor(state)` via OmniWeight ranking
+3. `residual = phi.fold((current + emitted) / 2)` — the harmonic skip connection
+4. Pass `residual` forward, store `emitted` as that layer's next `prev`
+
+**Observed behavior:** the 3-layer cascade acts as a **timescale hierarchy** — L1 tracks the input most responsively, L2 buffers, L3 holds the longest context. For `[13, 21, 34, 55, 89]`, L1 follows the input near-perfectly, L3 lags by ~2 positions. That lag *is* the harmonic memory. No learned weights anywhere; the vocabulary IS the Fibonacci attractor set, the attention IS the OmniWeight ranking, the residual IS `phi.fold` of an average.
+
+**Phase S — OmniWeight quantization**
+
+Three new built-ins that mirror the Phase 18 pattern from `omnicode_experiment` (35B-Qwen quantization) in miniature:
+
+- **`quantize(arr [, threshold])`** — return a new array where each element is replaced by its nearest Fibonacci attractor *iff* the OmniWeight `w = φ^(-|e|)` clears the threshold. Default threshold = 0.5.
+- **`quantization_ratio(arr [, threshold])`** — fraction of array elements that *would* be quantized at the given threshold. Tells you "how compressible is this dataset?" without actually doing it.
+- **`mean_omni_weight(arr)`** — average OmniWeight against the nearest Fibonacci attractor across the whole array. Higher = more φ-aligned data, less information loss under quantization.
+
+**Demo:** `examples/quantization_demo.omc` runs three datasets — harmonic (mean OmniWeight 0.99, fully compressible), noisy (0.93, mostly compressible), pure Fibonacci (1.00, no-op). Tree-walk and VM produce identical output.
+
+This is the algorithmic shape Phase 18 uses on a 35B-parameter Qwen model. Same math, just scaled down to demonstrable size.
+
+**Tests:** +4 quantization conformance tests pinning the contracts (`mean_omni_weight([13..89]) = 1.0`, strict threshold drops the quantizable ratio, harmonic data collapses to attractors, noisy data has lower mean than pure φ). **141 total tests passing** (was 137).
+
 ### Added (Phase P + Q: bytecode disassembler + VM inline cache, 2026-05-13)
 
 **Phase P — Bytecode disassembler**

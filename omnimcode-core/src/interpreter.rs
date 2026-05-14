@@ -819,6 +819,100 @@ impl Interpreter {
                 };
                 Ok(Value::HInt(HInt::new(if prime { 1 } else { 0 })))
             }
+            // --- OmniWeight quantization (Phase S) ---
+            // quantize(arr) — map each element to its nearest Fibonacci attractor
+            // IF the OmniWeight w = φ^(-|e|) crosses 0.5. Mimics the Phase 18
+            // pattern from omnicode_experiment in miniature: harmonic-aligned
+            // compression that preserves φ-geodesic structure.
+            "quantize" => {
+                if args.is_empty() {
+                    return Err("quantize requires (array[, threshold])".to_string());
+                }
+                let arr_v = self.eval_expr(&args[0])?;
+                let threshold = if args.len() >= 2 {
+                    self.eval_expr(&args[1])?.to_float()
+                } else {
+                    0.5
+                };
+                if let Value::Array(arr) = arr_v {
+                    let mut new_items: Vec<Value> = Vec::with_capacity(arr.items.len());
+                    for v in &arr.items {
+                        let n = v.to_int();
+                        let folded = fold_to_fibonacci_const(n);
+                        // OmniWeight between original and the candidate attractor.
+                        let denom = (folded.abs() as f64).max(1.0);
+                        let e = ((n - folded).abs() as f64) / denom;
+                        let weight = crate::value::PHI.powf(-e);
+                        if weight >= threshold {
+                            new_items.push(Value::HInt(HInt::new(folded)));
+                        } else {
+                            new_items.push(v.clone());
+                        }
+                    }
+                    Ok(Value::Array(HArray { items: new_items }))
+                } else {
+                    Err("quantize: requires an array".to_string())
+                }
+            }
+            // quantization_ratio(arr, threshold) — returns the fraction of array
+            // elements that would be quantized at the given OmniWeight threshold.
+            // Useful for reporting "how compressible is this dataset" without
+            // actually doing the compression.
+            "quantization_ratio" => {
+                if args.is_empty() {
+                    return Err("quantization_ratio requires (array[, threshold])".to_string());
+                }
+                let arr_v = self.eval_expr(&args[0])?;
+                let threshold = if args.len() >= 2 {
+                    self.eval_expr(&args[1])?.to_float()
+                } else {
+                    0.5
+                };
+                if let Value::Array(arr) = arr_v {
+                    if arr.items.is_empty() {
+                        return Ok(Value::HFloat(0.0));
+                    }
+                    let mut count = 0usize;
+                    for v in &arr.items {
+                        let n = v.to_int();
+                        let folded = fold_to_fibonacci_const(n);
+                        let denom = (folded.abs() as f64).max(1.0);
+                        let e = ((n - folded).abs() as f64) / denom;
+                        let weight = crate::value::PHI.powf(-e);
+                        if weight >= threshold {
+                            count += 1;
+                        }
+                    }
+                    Ok(Value::HFloat(count as f64 / arr.items.len() as f64))
+                } else {
+                    Err("quantization_ratio: requires an array".to_string())
+                }
+            }
+            // mean_omni_weight(arr) — average OmniWeight against the nearest
+            // Fibonacci attractor across the whole array. Higher = more
+            // phi-aligned data, more compressible without information loss.
+            "mean_omni_weight" => {
+                if args.is_empty() {
+                    return Err("mean_omni_weight requires (array)".to_string());
+                }
+                let arr_v = self.eval_expr(&args[0])?;
+                if let Value::Array(arr) = arr_v {
+                    if arr.items.is_empty() {
+                        return Ok(Value::HFloat(0.0));
+                    }
+                    let mut sum: f64 = 0.0;
+                    for v in &arr.items {
+                        let n = v.to_int();
+                        let folded = fold_to_fibonacci_const(n);
+                        let denom = (folded.abs() as f64).max(1.0);
+                        let e = ((n - folded).abs() as f64) / denom;
+                        sum += crate::value::PHI.powf(-e);
+                    }
+                    Ok(Value::HFloat(sum / arr.items.len() as f64))
+                } else {
+                    Err("mean_omni_weight: requires an array".to_string())
+                }
+            }
             // --- ONN Self-Healing primitives (Phase O) ---
             // value_danger(x) = exp(-|x|).
             // Predicts proximity to a singularity (zero). Returns 1.0 when x ≈ 0
@@ -1614,6 +1708,27 @@ impl Interpreter {
         }
     }
 
+    fn phi_fold_n_unused_marker(&self) {}
+}
+
+// Free function reused by quantize / quantization_ratio / mean_omni_weight.
+// Snap |n| to the nearest Fibonacci attractor, preserving sign.
+fn fold_to_fibonacci_const(n: i64) -> i64 {
+    let fibs: [i64; 15] = [0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610];
+    let abs_val = n.abs();
+    let mut nearest = fibs[0];
+    let mut min_dist = abs_val;
+    for &f in &fibs {
+        let d = (f - abs_val).abs();
+        if d < min_dist {
+            min_dist = d;
+            nearest = f;
+        }
+    }
+    if n < 0 { -nearest } else { nearest }
+}
+
+impl Interpreter {
     fn phi_fold_n(&self, v: Value, depth: usize) -> Value {
         match v {
             Value::HInt(h) => {

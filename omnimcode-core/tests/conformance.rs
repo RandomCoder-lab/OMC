@@ -401,6 +401,67 @@ fn harmony_value_non_fibonacci_is_lower() {
     );
 }
 
+// ===========================================================================
+// SECTION 12 — OmniWeight quantization (Phase S)
+// ===========================================================================
+
+#[test]
+fn quantize_harmonic_data_collapses_to_attractors() {
+    // Values near Fibonacci attractors should all quantize at threshold 0.5.
+    let src = r#"
+        h xs = [85, 90, 142, 230, 605];
+        h q = quantize(xs, 0.5);
+        __result__ = arr_get(q, 0);
+    "#;
+    let v = run(src).unwrap();
+    // 85 is closest to 89 (Fibonacci).
+    assert_eq!(v.to_int(), 89);
+}
+
+#[test]
+fn mean_omni_weight_is_one_for_pure_fibonacci() {
+    let v = run(
+        "h xs = [13, 21, 34, 55, 89, 144]; __result__ = mean_omni_weight(xs);",
+    )
+    .unwrap();
+    assert!(
+        (v.to_float() - 1.0).abs() < 1e-9,
+        "pure Fibonacci must have mean OmniWeight = 1.0"
+    );
+}
+
+#[test]
+fn mean_omni_weight_is_lower_for_noisy_data() {
+    let v_pure = run("__result__ = mean_omni_weight([13, 21, 34, 55, 89]);")
+        .unwrap()
+        .to_float();
+    let v_noisy = run("__result__ = mean_omni_weight([100, 200, 300, 400, 500]);")
+        .unwrap()
+        .to_float();
+    assert!(
+        v_noisy < v_pure,
+        "noisy mean {} must be < pure mean {}",
+        v_noisy,
+        v_pure
+    );
+}
+
+#[test]
+fn quantization_ratio_at_strict_threshold_drops() {
+    let r_loose = run("__result__ = quantization_ratio([110, 200, 280], 0.5);")
+        .unwrap()
+        .to_float();
+    let r_strict = run("__result__ = quantization_ratio([110, 200, 280], 0.95);")
+        .unwrap()
+        .to_float();
+    assert!(
+        r_strict <= r_loose,
+        "strict threshold {} must drop the quantizable fraction below {}",
+        r_strict,
+        r_loose
+    );
+}
+
 #[test]
 fn while_loop_terminates_with_break() {
     let src = r#"
