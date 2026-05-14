@@ -1384,6 +1384,51 @@ impl Interpreter {
         self.get_var(name)
     }
 
+    // ---------- VM bridge helpers ----------
+    // Used by the bytecode VM (src/vm.rs) so it can reuse this
+    // Interpreter's scope stack + built-in stdlib without duplication.
+
+    pub fn vm_push_scope(&mut self) {
+        self.locals.push(HashMap::new());
+    }
+
+    pub fn vm_pop_scope(&mut self) {
+        if self.locals.len() > 1 {
+            self.locals.pop();
+        }
+    }
+
+    pub fn vm_set_local(&mut self, name: &str, value: Value) {
+        self.set_var(name.to_string(), value);
+    }
+
+    pub fn vm_get_var(&self, name: &str) -> Option<Value> {
+        self.get_var(name)
+    }
+
+    /// Call a built-in (or user-defined) function with already-evaluated args.
+    /// The VM uses this when it encounters Op::Call and the function isn't
+    /// a compiled function in the current module.
+    pub fn vm_call_builtin(
+        &mut self,
+        name: &str,
+        args: &[Value],
+    ) -> Result<Value, String> {
+        // Stash each evaluated arg in a fresh scope under a synthetic name,
+        // then route through call_function with Expression::Variable refs.
+        // This reuses ALL existing built-in implementations.
+        self.vm_push_scope();
+        let mut expr_args = Vec::with_capacity(args.len());
+        for (i, v) in args.iter().enumerate() {
+            let key = format!("__vm_arg_{}", i);
+            self.vm_set_local(&key, v.clone());
+            expr_args.push(crate::ast::Expression::Variable(key));
+        }
+        let result = self.call_function(name, &expr_args);
+        self.vm_pop_scope();
+        result
+    }
+
     fn set_var(&mut self, name: String, value: Value) {
         if let Some(scope) = self.locals.last_mut() {
             scope.insert(name, value);

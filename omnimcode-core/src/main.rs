@@ -43,10 +43,20 @@ fn main() {
 fn execute_program(source: &str) -> Result<(), String> {
     let mut parser = Parser::new(source);
     let statements = parser.parse()?;
-    
+
+    // Opt-in bytecode VM path. The tree-walk interpreter remains the default
+    // (full language coverage); the VM is a faster dispatch for the subset of
+    // programs whose ASTs the compiler currently supports.
+    if std::env::var("OMC_VM").as_deref() == Ok("1") {
+        let module = omnimcode_core::compiler::compile_program(&statements)?;
+        let mut vm = omnimcode_core::vm::Vm::new();
+        vm.run_module(&module)?;
+        return Ok(());
+    }
+
     let mut interpreter = Interpreter::new();
     interpreter.execute(statements)?;
-    
+
     Ok(())
 }
 

@@ -4,6 +4,24 @@ All notable changes to OMNIcode will be documented in this file.
 
 ## [Unreleased]
 
+### Added (Phase H: bytecode VM, 2026-05-13)
+Optional faster execution path. The tree-walk interpreter remains the default and language source-of-truth; the VM is selectable per-run via `OMC_VM=1` env var.
+
+**Architecture:**
+- `omnimcode-core/src/bytecode.rs` — `Op` enum (~30 opcodes), `Const` pool entries, `CompiledFunction`, `Module`.
+- `omnimcode-core/src/compiler.rs` — AST → bytecode lowering. Two-pass: hoist function defs first, then compile `__main__`. Handles arithmetic, comparisons, short-circuit `and`/`or`, `if/elif/else`, `while`, `for in range`, function defs and calls, arrays + indexing.
+- `omnimcode-core/src/vm.rs` — stack-based execution loop. Reuses the tree-walk `Interpreter` for scope management and the built-in stdlib via VM-bridge helpers (`vm_push_scope`, `vm_get_var`, `vm_call_builtin`, etc.), avoiding duplication of ~60 stdlib implementations.
+
+**Performance:** Recursive `fib(28)` benchmarks at **2.14× speedup** (430ms VM vs 923ms tree-walk). Both produce bit-identical output. All 6 OMC example programs run unmodified under VM mode.
+
+**Selectable execution:**
+```
+./standalone.omc program.omc          # tree-walk (default)
+OMC_VM=1 ./standalone.omc program.omc # bytecode VM
+```
+
+**Coverage limits (deferred):** for-over-array (`for x in arr`) currently falls back to error in VM mode; use `while` instead. `break`/`continue` inside loops aren't yet emitted (always exit cleanly via the condition). Module-level `Statement::Import` is a no-op in the VM (imports must happen before the VM is invoked). These are non-blocking — the interpreter handles them; the VM just bypasses for now.
+
 ### Added (Phase G: real module resolution, 2026-05-13)
 **`import core;` actually loads now.** The interpreter searches for the named module on a search path, parses it, and executes its statements (which registers any `fn` definitions in the global function table). Idempotent re-import via an `imported_modules: HashSet<String>` tracked on the interpreter.
 
