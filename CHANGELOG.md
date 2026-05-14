@@ -4,6 +4,20 @@ All notable changes to OMNIcode will be documented in this file.
 
 ## [Unreleased]
 
+### Added (Phase V.2: self-hosting lexer polish, 2026-05-13)
+
+`examples/self_hosting_lexer_v2.omc` — the milestone-1 lexer extended with everything needed to tokenize real-world OMC programs:
+
+**Multi-char operators** (longer-match-wins): `==`, `!=`, `<=`, `>=`, `->`, `<<`, `>>`, `&&`, `||`. A new `match_multichar(source, pos)` helper returns `[kind, length]` on hit or `["", 0]` to fall through to single-char dispatch.
+
+**Float literals**: `3.14`, `2.718` — emitted as `FLOAT` tokens (distinct from `NUMBER`). The lookahead is conservative: a `.` only consumes when followed by a digit, so `phi.fold(x)` still parses as `IDENT DOT IDENT LPAREN ...` rather than misinterpreting `.f` as a malformed float.
+
+**String escapes**: `\n` `\t` `\r` `\"` `\\` are decoded inside the lexer, matching the Rust lexer's behavior. The emitted `STRING` token's value contains real newline/tab characters, not the literal `\n` text.
+
+**`//` and `/* ... */` comments**: added to the OMC lexer's whitespace-skip loop alongside `#`.
+
+Tree-walk and VM produce identical output across all 5 demo inputs. The OMC lexer now covers the lexical grammar of essentially everything the Rust lexer at `omnimcode-core/src/parser.rs` accepts. Milestone 3 (a parser in OMC consuming these tokens) is the next step.
+
 ### Added (Phase V: self-hosting lexer (milestone 1), 2026-05-13)
 
 `examples/self_hosting_lexer.omc` — a lexer for a subset of OMNIcode, written **entirely in OMNIcode itself**. Runs on the Rust OMC interpreter and emits tokens for programs the same interpreter could parse. **First milestone toward self-hosting.**

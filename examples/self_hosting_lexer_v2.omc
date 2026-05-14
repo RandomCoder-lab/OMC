@@ -1,0 +1,387 @@
+# =============================================================================
+# Self-Hosting Lexer v2 (Phase V, milestone 2)
+# =============================================================================
+# Adds to milestone 1:
+#   - Multi-char operators:  ==  !=  <=  >=  ->  <<  >>  &&  ||
+#   - Float literals:        3.14, 0.618
+#   - String escapes:        \n  \t  \"  \\  \r
+#
+# The wider the lexer's coverage, the more of OMNIcode a future OMC parser
+# (milestone 3) can consume. Combined with milestone 1's keyword + ident +
+# integer + punctuation support, this lexer now handles essentially
+# everything in the real Rust OMC parser's lexer.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Character predicates (same as milestone 1)
+# ---------------------------------------------------------------------------
+fn is_digit(c) {
+    return str_contains("0123456789", c);
+}
+
+fn is_alpha(c) {
+    if str_contains("abcdefghijklmnopqrstuvwxyz", c) == 1 { return 1; }
+    if str_contains("ABCDEFGHIJKLMNOPQRSTUVWXYZ", c) == 1 { return 1; }
+    if c == "_" { return 1; }
+    return 0;
+}
+
+fn is_alnum(c) {
+    if is_alpha(c) == 1 { return 1; }
+    if is_digit(c) == 1 { return 1; }
+    return 0;
+}
+
+fn is_space(c) {
+    if c == " "  { return 1; }
+    if c == "\n" { return 1; }
+    if c == "\t" { return 1; }
+    if c == "\r" { return 1; }
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# Whitespace + comment skipping. Handles `#` and `//` and `/* ... */`.
+# ---------------------------------------------------------------------------
+fn skip_ws(source, pos) {
+    h n = str_len(source);
+    h p = pos;
+    while p < n {
+        h c = str_slice(source, p, p + 1);
+        if is_space(c) == 1 {
+            p = p + 1;
+        } else {
+            if c == "#" {
+                # `# ...` line comment
+                while p < n {
+                    h cc = str_slice(source, p, p + 1);
+                    if cc == "\n" { p = p + 1; break; }
+                    p = p + 1;
+                }
+            } else {
+                # `//` and `/* ... */` need a 2-char lookahead
+                if p + 1 < n {
+                    h c2 = str_slice(source, p, p + 2);
+                    if c2 == "//" {
+                        while p < n {
+                            h cc = str_slice(source, p, p + 1);
+                            if cc == "\n" { p = p + 1; break; }
+                            p = p + 1;
+                        }
+                    } else {
+                        if c2 == "/*" {
+                            p = p + 2;
+                            while p < n {
+                                h cc2 = str_slice(source, p, p + 2);
+                                if cc2 == "*/" { p = p + 2; break; }
+                                p = p + 1;
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+    return p;
+}
+
+# ---------------------------------------------------------------------------
+# Keyword table
+# ---------------------------------------------------------------------------
+fn classify_word(word) -> string {
+    if word == "h"        { return "H"; }
+    if word == "fn"       { return "FN"; }
+    if word == "if"       { return "IF"; }
+    if word == "else"     { return "ELSE"; }
+    if word == "while"    { return "WHILE"; }
+    if word == "for"      { return "FOR"; }
+    if word == "in"       { return "IN"; }
+    if word == "return"   { return "RETURN"; }
+    if word == "break"    { return "BREAK"; }
+    if word == "continue" { return "CONTINUE"; }
+    if word == "print"    { return "PRINT"; }
+    if word == "import"   { return "IMPORT"; }
+    if word == "as"       { return "AS"; }
+    if word == "load"     { return "LOAD"; }
+    if word == "range"    { return "RANGE"; }
+    if word == "and"      { return "AND"; }
+    if word == "or"       { return "OR"; }
+    if word == "not"      { return "NOT"; }
+    if word == "res"      { return "RES"; }
+    if word == "fold"     { return "FOLD"; }
+    if word == "true"     { return "BOOL"; }
+    if word == "false"    { return "BOOL"; }
+    return "IDENT";
+}
+
+# ---------------------------------------------------------------------------
+# Read an identifier or keyword. [kind, value, end_pos]
+# ---------------------------------------------------------------------------
+fn read_ident(source, pos) {
+    h n = str_len(source);
+    h end = pos;
+    while end < n {
+        h c = str_slice(source, end, end + 1);
+        if is_alnum(c) == 1 { end = end + 1; } else { break; }
+    }
+    h word = str_slice(source, pos, end);
+    return [classify_word(word), word, end];
+}
+
+# ---------------------------------------------------------------------------
+# Read a numeric literal — integer or float (digits.digits).
+# Returns ["NUMBER", "89", end] or ["FLOAT", "3.14", end].
+# ---------------------------------------------------------------------------
+fn read_number(source, pos) {
+    h n = str_len(source);
+    h end = pos;
+    h is_float = 0;
+
+    # Integer part
+    while end < n {
+        h c = str_slice(source, end, end + 1);
+        if is_digit(c) == 1 { end = end + 1; } else { break; }
+    }
+    # Optional fractional part
+    if end < n {
+        h c = str_slice(source, end, end + 1);
+        if c == "." {
+            if end + 1 < n {
+                h after_dot = str_slice(source, end + 1, end + 2);
+                if is_digit(after_dot) == 1 {
+                    is_float = 1;
+                    end = end + 1;     # consume the '.'
+                    while end < n {
+                        h cd = str_slice(source, end, end + 1);
+                        if is_digit(cd) == 1 { end = end + 1; } else { break; }
+                    }
+                }
+            }
+        }
+    }
+
+    h text = str_slice(source, pos, end);
+    if is_float == 1 {
+        return ["FLOAT", text, end];
+    }
+    return ["NUMBER", text, end];
+}
+
+# ---------------------------------------------------------------------------
+# Read a double-quoted string with backslash escapes:
+#   \n -> newline       \t -> tab        \r -> carriage return
+#   \" -> quote          \\ -> backslash
+# Returns ["STRING", decoded_content, end_pos].
+# ---------------------------------------------------------------------------
+fn read_string_literal(source, pos) {
+    h n = str_len(source);
+    h end = pos + 1;
+    h out = "";
+    while end < n {
+        h c = str_slice(source, end, end + 1);
+        if c == "\"" {
+            return ["STRING", out, end + 1];
+        }
+        if c == "\\" {
+            if end + 1 < n {
+                h esc = str_slice(source, end + 1, end + 2);
+                if esc == "n"  { out = str_concat(out, "\n"); }
+                if esc == "t"  { out = str_concat(out, "\t"); }
+                if esc == "r"  { out = str_concat(out, "\r"); }
+                if esc == "\"" { out = str_concat(out, "\""); }
+                if esc == "\\" { out = str_concat(out, "\\"); }
+                end = end + 2;
+            } else {
+                end = end + 1;
+            }
+        } else {
+            out = str_concat(out, c);
+            end = end + 1;
+        }
+    }
+    return ["STRING_UNCLOSED", out, end];
+}
+
+# ---------------------------------------------------------------------------
+# Multi-char punctuation. Returns a [kind, len] pair on match, or
+# ["", 0] when no multi-char operator starts here. The caller falls
+# back to single-char handling on a miss.
+# ---------------------------------------------------------------------------
+fn match_multichar(source, pos) {
+    h n = str_len(source);
+    if pos + 1 >= n {
+        return ["", 0];
+    }
+    h two = str_slice(source, pos, pos + 2);
+    if two == "==" { return ["EQEQ", 2]; }
+    if two == "!=" { return ["NE",   2]; }
+    if two == "<=" { return ["LE",   2]; }
+    if two == ">=" { return ["GE",   2]; }
+    if two == "->" { return ["ARROW",2]; }
+    if two == "<<" { return ["SHL",  2]; }
+    if two == ">>" { return ["SHR",  2]; }
+    if two == "&&" { return ["AAND", 2]; }
+    if two == "||" { return ["OOR",  2]; }
+    return ["", 0];
+}
+
+# ---------------------------------------------------------------------------
+# Single-char punctuation
+# ---------------------------------------------------------------------------
+fn punct_kind(c) -> string {
+    if c == "(" { return "LPAREN"; }
+    if c == ")" { return "RPAREN"; }
+    if c == "{" { return "LBRACE"; }
+    if c == "}" { return "RBRACE"; }
+    if c == "[" { return "LBRACKET"; }
+    if c == "]" { return "RBRACKET"; }
+    if c == ";" { return "SEMI"; }
+    if c == "," { return "COMMA"; }
+    if c == "=" { return "EQ"; }
+    if c == "+" { return "PLUS"; }
+    if c == "-" { return "MINUS"; }
+    if c == "*" { return "STAR"; }
+    if c == "/" { return "SLASH"; }
+    if c == "%" { return "PERCENT"; }
+    if c == "<" { return "LT"; }
+    if c == ">" { return "GT"; }
+    if c == "." { return "DOT"; }
+    if c == ":" { return "COLON"; }
+    if c == "@" { return "AT"; }
+    if c == "&" { return "AMP"; }
+    if c == "|" { return "PIPE"; }
+    if c == "^" { return "CARET"; }
+    if c == "~" { return "TILDE"; }
+    if c == "!" { return "BANG"; }
+    return "";
+}
+
+# ---------------------------------------------------------------------------
+# Top-level lex routine.
+# ---------------------------------------------------------------------------
+fn tokenize(source) {
+    h n = str_len(source);
+    h tokens = arr_new(0, 0);
+    h pos = 0;
+
+    while pos < n {
+        pos = skip_ws(source, pos);
+        if pos >= n { break; }
+
+        h c = str_slice(source, pos, pos + 1);
+
+        if is_alpha(c) == 1 {
+            h tok = read_ident(source, pos);
+            arr_push(tokens, [arr_get(tok, 0), arr_get(tok, 1)]);
+            pos = arr_get(tok, 2);
+        } else {
+            if is_digit(c) == 1 {
+                h tok = read_number(source, pos);
+                arr_push(tokens, [arr_get(tok, 0), arr_get(tok, 1)]);
+                pos = arr_get(tok, 2);
+            } else {
+                if c == "\"" {
+                    h tok = read_string_literal(source, pos);
+                    arr_push(tokens, [arr_get(tok, 0), arr_get(tok, 1)]);
+                    pos = arr_get(tok, 2);
+                } else {
+                    # Multi-char operator first (longer match wins)
+                    h mm = match_multichar(source, pos);
+                    h mm_kind = arr_get(mm, 0);
+                    h mm_len = arr_get(mm, 1);
+                    if str_len(mm_kind) > 0 {
+                        h val = str_slice(source, pos, pos + mm_len);
+                        arr_push(tokens, [mm_kind, val]);
+                        pos = pos + mm_len;
+                    } else {
+                        h kind = punct_kind(c);
+                        if str_len(kind) > 0 {
+                            arr_push(tokens, [kind, c]);
+                            pos = pos + 1;
+                        } else {
+                            arr_push(tokens, ["UNKNOWN", c]);
+                            pos = pos + 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    arr_push(tokens, ["EOF", ""]);
+    return tokens;
+}
+
+# ---------------------------------------------------------------------------
+# Token-stream pretty-printer
+# ---------------------------------------------------------------------------
+fn print_tokens(tokens) {
+    h i = 0;
+    h n = arr_len(tokens);
+    while i < n {
+        h t = arr_get(tokens, i);
+        h kind = arr_get(t, 0);
+        h value = arr_get(t, 1);
+        print(concat_many("  [", i, "] ", kind, " ", value));
+        i = i + 1;
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Demo
+# ---------------------------------------------------------------------------
+print("== Self-Hosting Lexer v2 (Phase V, milestone 2) ==");
+print("");
+
+# 1. Multi-char operators
+print("--- Input 1: if x == 89 && y <= 144 { return x >= y; } ---");
+h src1 = "if x == 89 && y <= 144 { return x >= y; }";
+h toks1 = tokenize(src1);
+print_tokens(toks1);
+print("");
+
+# 2. Floats
+print("--- Input 2: h phi = 1.618; h e = 2.718; ---");
+h src2 = "h phi = 1.618; h e = 2.718;";
+h toks2 = tokenize(src2);
+print_tokens(toks2);
+print("");
+
+# 3. String escapes
+print("--- Input 3: print(\"line one\\nline two\\ttabbed\"); ---");
+h src3 = "print(\"line one\\nline two\\ttabbed\");";
+h toks3 = tokenize(src3);
+print_tokens(toks3);
+print("");
+
+# 4. Mixed: typed function with arrow return
+print("--- Input 4: fn add(x: int, y: int) -> int { return x + y; } ---");
+h src4 = "fn add(x: int, y: int) -> int { return x + y; }";
+h toks4 = tokenize(src4);
+print_tokens(toks4);
+print("");
+
+# 5. Bitwise operators
+print("--- Input 5: h x = (a & 0xff) << 2 | b >> 1; ---");
+# Note: we don't handle 0x hex yet — this exercises the punctuation only.
+h src5 = "h x = (a & 255) << 2 | b >> 1;";
+h toks5 = tokenize(src5);
+print_tokens(toks5);
+print("");
+
+print("== Observations ==");
+print("- Multi-char operator dispatch consumes 2 chars when matched —");
+print("  longer-match-wins is the standard policy. Single-char fallbacks");
+print("  take over when no 2-char prefix matches.");
+print("- Float vs integer is decided by lookahead: digit . digit becomes");
+print("  a single FLOAT token. Otherwise '.' is its own DOT token, so");
+print("  `phi.fold(x)` still tokenizes as IDENT DOT IDENT LPAREN ...");
+print("- String escapes are decoded in the lexer (not the parser),");
+print("  matching what the Rust lexer does.");
+print("");
+print("Next milestone (V.3): a parser in OMC that consumes these tokens");
+print("and emits an AST as nested tagged arrays.");
