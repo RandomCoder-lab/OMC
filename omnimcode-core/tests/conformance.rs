@@ -322,6 +322,85 @@ fn recursive_fibonacci_matches_built_in() {
     assert_eq!(v.to_int(), 55);
 }
 
+// ===========================================================================
+// SECTION 11 — Self-healing primitives (Phase O)
+// ===========================================================================
+//
+// The ONN self-healing pattern: detect proximity to singularities BEFORE
+// they occur via value_danger(x) = exp(-|x|), then preemptively fold to a
+// Fibonacci attractor via fold_escape(x). This is the canonical "Fibonacci-
+// alignment auto-repair" mechanism — code stays on the φ-geodesic without
+// explicit if-then error handling.
+
+#[test]
+fn value_danger_at_zero_is_one() {
+    let v = run("__result__ = value_danger(0);").unwrap();
+    assert!((v.to_float() - 1.0).abs() < 1e-12);
+}
+
+#[test]
+fn value_danger_at_one_is_exp_minus_one() {
+    let v = run("__result__ = value_danger(1);").unwrap();
+    let expected = (-1.0_f64).exp();
+    assert!((v.to_float() - expected).abs() < 1e-12);
+}
+
+#[test]
+fn value_danger_large_value_near_zero() {
+    let v = run("__result__ = value_danger(89);").unwrap();
+    assert!(v.to_float() < 1e-30, "danger of 89 must be vanishingly small");
+}
+
+#[test]
+fn fold_escape_zero_becomes_one() {
+    // The zero-trap escape: nearest Fibonacci to 0 is 0 itself, but
+    // fold_escape jumps to 1 to actually escape the singularity.
+    let v = run("__result__ = fold_escape(0);").unwrap();
+    assert_eq!(v.to_int(), 1, "fold_escape must NEVER land on 0");
+}
+
+#[test]
+fn fold_escape_safe_value_passthrough() {
+    let v = run("__result__ = fold_escape(100);").unwrap();
+    assert_eq!(v.to_int(), 100, "safe values must passthrough fold_escape");
+}
+
+#[test]
+fn safe_divide_handles_zero_divisor() {
+    // Without self-healing this would return a Singularity. With self-healing,
+    // the divisor is folded away from zero BEFORE the operation.
+    let v = run("__result__ = safe_divide(89, 0);").unwrap();
+    assert!(
+        !v.is_singularity(),
+        "safe_divide must never produce a Singularity"
+    );
+    // 89 / 1 = 89 (zero was healed to nearest non-zero Fibonacci, which is 1)
+    assert_eq!(v.to_int(), 89);
+}
+
+#[test]
+fn safe_divide_normal_division_unchanged() {
+    let v = run("__result__ = safe_divide(89, 2);").unwrap();
+    assert_eq!(v.to_int(), 44);
+}
+
+#[test]
+fn harmony_value_fibonacci_is_perfect() {
+    let v = run("__result__ = harmony_value(89);").unwrap();
+    assert!((v.to_float() - 1.0).abs() < 1e-9);
+}
+
+#[test]
+fn harmony_value_non_fibonacci_is_lower() {
+    let v89 = run("__result__ = harmony_value(89);").unwrap().to_float();
+    let v100 = run("__result__ = harmony_value(100);").unwrap().to_float();
+    assert!(
+        v100 < v89,
+        "harmony(100) {} must be < harmony(89) {}",
+        v100, v89
+    );
+}
+
 #[test]
 fn while_loop_terminates_with_break() {
     let src = r#"

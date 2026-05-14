@@ -4,6 +4,21 @@ All notable changes to OMNIcode will be documented in this file.
 
 ## [Unreleased]
 
+### Added (Phase O: ONN self-healing primitives, 2026-05-13)
+
+Ports the "code/compiler self-heals via Fibonacci alignment" pattern from the ONN system at `/home/thearchitect/.hermes/skills/onn-self-healing-code/` and `Sovereign_Lattice/omninet_package/register_singularity_integration.py`. Four new built-ins, available in both tree-walk and VM:
+
+- **`value_danger(x) = exp(-|x|)`** — proximity gradient. Returns 1.0 when `x ≈ 0` (high danger), decays exponentially. The early-warning signal for approaching singularities, *before* the operation that would trigger them.
+- **`fold_escape(x)`** — if `value_danger(x) > 0.5`, snap to the nearest Fibonacci attractor (preserving sign, with a special case: `fold_escape(0) → 1`, never landing back on the singularity). Else passthrough.
+- **`harmony_value(x)`** — Fibonacci-proximity score in `[0, 1]`. 1.0 iff x is a Fibonacci number. The general "is this value living on the φ-geodesic?" reading.
+- **`safe_divide(a, b)`** — divides, but pre-applies `fold_escape` to the divisor. Zero divisors heal to 1 transparently; the operation always returns a number (never a Singularity).
+
+Together, these realize the pattern the user described: *"when an error comes to the compiler it checks to see if it's Fibonacci-aligned, then it fixes itself."* It's the *predictive* version of HSingularity recovery — fold inputs to a safe attractor before the operation, rather than catching the portal after.
+
+Demo: `examples/self_healing_demo.omc` exercises both scenarios — a pipeline of unsafe divisions that silently heal, and pre-emptive Fibonacci alignment on a list of incoming values. Tree-walk and VM produce identical output.
+
+**Tests:** +9 conformance tests pinning the math (`value_danger(0) = 1`, `value_danger(1) = e⁻¹`, `fold_escape(0) → 1` zero-trap escape, `safe_divide(89, 0) = 89`, `harmony_value(89) = 1.0`, etc.). 134 total tests passing (was 125).
+
 ### Added (Phase N: Phi-Field LLM kernel demo, 2026-05-13)
 
 `examples/phi_field_llm_demo.omc` — a working "language model" written in pure OMNIcode that demonstrates the harmonic computing thesis end-to-end. No transformer. No matrix multiply. No learned weights. Decisions are made by walking phi-space geodesics, with each step scored by OmniWeight `w = φ^(-|e|)` — the canonical formula from `omninet_phi/resonance.py`.

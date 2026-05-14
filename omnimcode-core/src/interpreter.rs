@@ -819,6 +819,107 @@ impl Interpreter {
                 };
                 Ok(Value::HInt(HInt::new(if prime { 1 } else { 0 })))
             }
+            // --- ONN Self-Healing primitives (Phase O) ---
+            // value_danger(x) = exp(-|x|).
+            // Predicts proximity to a singularity (zero). Returns 1.0 when x ≈ 0
+            // (high danger), decays toward 0 as |x| grows. Used as an
+            // early-warning signal BEFORE an operation that might explode.
+            "value_danger" => {
+                let v = self.eval_expr(&args[0])?;
+                let f = v.to_float().abs();
+                Ok(Value::HFloat((-f).exp()))
+            }
+            // fold_escape(x) — if value_danger(x) > 0.5, snap to nearest
+            // Fibonacci attractor (preserves sign). Else passthrough. This is
+            // the AUTOMATIC version of resolve_singularity(v, "fold") that
+            // works BEFORE a value becomes a Singularity — fold the operand
+            // away from the danger zone preemptively.
+            "fold_escape" => {
+                let v = self.eval_expr(&args[0])?;
+                let f = v.to_float();
+                let danger = (-f.abs()).exp();
+                if danger > 0.5 {
+                    // Snap to nearest Fibonacci, preserve sign.
+                    let n = v.to_int();
+                    let fibs: [i64; 15] = [
+                        0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610,
+                    ];
+                    let abs_n = n.abs();
+                    let mut nearest = fibs[0];
+                    let mut min_dist = abs_n;
+                    for &fib in &fibs {
+                        let d = (fib - abs_n).abs();
+                        if d < min_dist {
+                            min_dist = d;
+                            nearest = fib;
+                        }
+                    }
+                    let result = if n < 0 { -nearest } else { nearest };
+                    // The point of fold_escape is to escape the zero-trap:
+                    // if the nearest Fibonacci is 0 (which happens for x=0),
+                    // jump to 1 instead. Otherwise we'd just heal back to
+                    // the same singularity.
+                    let safe = if result == 0 { 1 } else { result };
+                    Ok(Value::HInt(HInt::new(safe)))
+                } else {
+                    Ok(v)
+                }
+            }
+            // harmony_value(x) — harmony score based on Fibonacci proximity.
+            // Returns 1.0 when x IS Fibonacci, decays based on relative distance
+            // to the nearest attractor. This is the "is this value living on
+            // the φ-geodesic?" measurement.
+            "harmony_value" => {
+                let n = self.eval_expr(&args[0])?.to_int();
+                let r = HInt::compute_resonance(n);
+                Ok(Value::HFloat(r))
+            }
+            // safe_divide(a, b) — divide with predictive self-healing.
+            // If b is dangerously close to zero (value_danger > 0.5), fold
+            // b away from zero FIRST, then divide. No HSingularity produced;
+            // the math always returns a number.
+            //
+            // This is the canonical "self-healing arithmetic" pattern: the
+            // operation checks Fibonacci alignment of its operands, applies
+            // fold_escape if needed, and only then performs the operation.
+            "safe_divide" => {
+                if args.len() < 2 {
+                    return Err("safe_divide requires (a, b)".to_string());
+                }
+                let a = self.eval_expr(&args[0])?;
+                let b = self.eval_expr(&args[1])?;
+                let bf = b.to_float();
+                let danger = (-bf.abs()).exp();
+                let divisor = if danger > 0.5 {
+                    // Fold b away from zero.
+                    let n = b.to_int();
+                    let fibs: [i64; 15] = [
+                        0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610,
+                    ];
+                    let abs_n = n.abs();
+                    let mut nearest = fibs[0];
+                    let mut min_dist = abs_n;
+                    for &fib in &fibs {
+                        let d = (fib - abs_n).abs();
+                        if d < min_dist {
+                            min_dist = d;
+                            nearest = fib;
+                        }
+                    }
+                    let mut healed = if n < 0 { -nearest } else { nearest };
+                    if healed == 0 {
+                        healed = 1;
+                    }
+                    healed
+                } else {
+                    b.to_int()
+                };
+                if a.is_float() {
+                    Ok(Value::HFloat(a.to_float() / (divisor as f64)))
+                } else {
+                    Ok(Value::HInt(HInt::new(a.to_int() / divisor)))
+                }
+            }
             // From Phase 6 std/core.omc:
             //   ensure_clean(v) — return v if not a Singularity; else fold to nearest Fibonacci.
             "ensure_clean" => {

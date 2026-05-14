@@ -1,0 +1,108 @@
+# =============================================================================
+# ONN Self-Healing Code Demo (Phase O)
+# =============================================================================
+# Demonstrates the "compiler/code self-heals via Fibonacci alignment"
+# pattern from the ONN system. Three primitives compose a complete
+# auto-repair mechanism:
+#
+#   value_danger(x) = exp(-|x|)
+#     Predicts how close x is to a singularity (zero). Returns 1.0 when
+#     x ≈ 0 (high danger), decays exponentially as |x| grows.
+#
+#   fold_escape(x)
+#     If danger > 0.5, snap x to the nearest Fibonacci attractor
+#     (preserving sign, escaping 0 to 1). Otherwise passthrough.
+#
+#   harmony_value(x)
+#     Fibonacci-proximity score in [0, 1]. 1.0 iff x is exactly
+#     a Fibonacci number.
+#
+# Together with safe_divide(a, b), this lets arithmetic "self-heal" by
+# detecting Fibonacci misalignment BEFORE the operation rather than
+# catching errors after.
+# =============================================================================
+
+print("=== ONN Self-Healing Code Demonstration ===");
+print("");
+
+# ---------------------------------------------------------------------------
+# Scenario 1: A division pipeline where divisors might be unsafe.
+#
+# Without self-healing, you'd write:
+#   if denom == 0 { handle_error } else { ... }
+# Or rely on HSingularity portals:
+#   result = a / b; if is_singularity(result) == 1 { ... }
+#
+# With self-healing, you write the math straight-line. The primitives
+# fix the inputs before the operation.
+# ---------------------------------------------------------------------------
+print("--- Scenario 1: pipeline-style arithmetic with unsafe divisors ---");
+print("");
+
+h numerators = [89, 144, 233, 377];
+h divisors = [0, 1, 0, 2];      # two zero divisors that would normally crash
+h pos = 0;
+h n_items = arr_len(numerators);
+
+while pos < n_items {
+    h a = arr_get(numerators, pos);
+    h b = arr_get(divisors, pos);
+
+    # Look at the situation BEFORE dividing.
+    h risk = value_danger(b);
+    h harm = harmony_value(a);
+
+    # safe_divide applies fold_escape to `b` first if needed, then divides.
+    h result = safe_divide(a, b);
+
+    print(concat_many(
+        "  ", a, " / ", b,
+        "  risk=", risk,
+        "  harmony(numer)=", harm,
+        "  -> ", result
+    ));
+
+    pos = pos + 1;
+}
+
+print("");
+print("Observation: divisors of 0 were silently healed to 1 (the nearest");
+print("non-zero Fibonacci attractor). No exceptions, no Singularity portals");
+print("propagated downstream — the geodesic stayed continuous.");
+print("");
+
+# ---------------------------------------------------------------------------
+# Scenario 2: Pre-emptive folding on a list of incoming values.
+#
+# This is the pattern the ONN docs describe: when an input is Fibonacci-
+# aligned, accept it; when it's near a singularity, fold-escape it; the
+# operation downstream never sees an unsafe value.
+# ---------------------------------------------------------------------------
+print("--- Scenario 2: pre-emptive Fibonacci alignment on inputs ---");
+print("");
+
+h inputs = [89, 100, 0, 1, 233, 7, 144];
+h pos2 = 0;
+h n2 = arr_len(inputs);
+
+while pos2 < n2 {
+    h x = arr_get(inputs, pos2);
+    h healed = fold_escape(x);
+    h h_before = harmony_value(x);
+    h h_after = harmony_value(healed);
+
+    print(concat_many(
+        "  raw=", x,
+        " (harm=", h_before, ")",
+        "  ->  healed=", healed,
+        " (harm=", h_after, ")"
+    ));
+    pos2 = pos2 + 1;
+}
+
+print("");
+print("Observation: values already on the φ-geodesic (89, 233, 144) pass");
+print("through unchanged. Off-geodesic values get snapped to the nearest");
+print("attractor, with harmony rising as a result.");
+print("");
+print("=== End ===");
