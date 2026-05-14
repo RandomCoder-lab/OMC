@@ -1,0 +1,304 @@
+# =============================================================================
+# Self-Hosting Lexer (Phase V, milestone 1)
+# =============================================================================
+# A lexer for a subset of OMNIcode, written entirely in OMNIcode itself.
+# Run on the Rust OMC interpreter, this demonstrates that the language is
+# expressive enough to introspect its own source.
+#
+# Pipeline:
+#   string source  -->  this lexer  -->  array of ["KIND", "value"] tokens
+#
+# Scope: handles identifiers, integers, the major punctuation (= , ; ( ) { }
+# [ ] + - * / . :), the `h` / `fn` / `if` / `while` keywords, and string
+# literals in double quotes. Comments (# ...) are skipped.
+#
+# Not yet handled: float literals, triple-quoted strings, the bitwise ops,
+# escape sequences, multi-character operators (==, !=, <=, >=, ->, <<, >>).
+# Those are the next milestone.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Character class predicates. Implemented via str_contains over the literal
+# alphabets — no ord() needed (we don't have one). Returns 1 / 0 like
+# canonical Python OMC convention.
+# ---------------------------------------------------------------------------
+fn is_digit(c) {
+    return str_contains("0123456789", c);
+}
+
+fn is_alpha(c) {
+    if str_contains("abcdefghijklmnopqrstuvwxyz", c) == 1 { return 1; }
+    if str_contains("ABCDEFGHIJKLMNOPQRSTUVWXYZ", c) == 1 { return 1; }
+    if c == "_" { return 1; }
+    return 0;
+}
+
+fn is_alnum(c) {
+    if is_alpha(c) == 1 { return 1; }
+    if is_digit(c) == 1 { return 1; }
+    return 0;
+}
+
+fn is_space(c) {
+    if c == " " { return 1; }
+    if c == "\n" { return 1; }
+    if c == "\t" { return 1; }
+    if c == "\r" { return 1; }
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# Skip whitespace and `#` comments starting at position `pos`. Returns the
+# new position. This is the only "stateful" helper — we thread the position
+# explicitly because OMC doesn't have mutable references.
+# ---------------------------------------------------------------------------
+fn skip_ws(source, pos) {
+    h n = str_len(source);
+    h p = pos;
+    while p < n {
+        h c = str_slice(source, p, p + 1);
+        if is_space(c) == 1 {
+            p = p + 1;
+        } else {
+            if c == "#" {
+                # Skip to end of line.
+                while p < n {
+                    h cc = str_slice(source, p, p + 1);
+                    if cc == "\n" {
+                        p = p + 1;
+                        break;
+                    }
+                    p = p + 1;
+                }
+            } else {
+                break;
+            }
+        }
+    }
+    return p;
+}
+
+# ---------------------------------------------------------------------------
+# Recognize keywords. Returns the keyword kind string if `word` is a known
+# keyword, or "IDENT" otherwise. Mirrors the OMC lexer's keyword table.
+# ---------------------------------------------------------------------------
+fn classify_word(word) -> string {
+    if word == "h"      { return "H"; }
+    if word == "fn"     { return "FN"; }
+    if word == "if"     { return "IF"; }
+    if word == "else"   { return "ELSE"; }
+    if word == "while"  { return "WHILE"; }
+    if word == "for"    { return "FOR"; }
+    if word == "in"     { return "IN"; }
+    if word == "return" { return "RETURN"; }
+    if word == "break"  { return "BREAK"; }
+    if word == "continue" { return "CONTINUE"; }
+    if word == "print"  { return "PRINT"; }
+    if word == "import" { return "IMPORT"; }
+    if word == "and"    { return "AND"; }
+    if word == "or"     { return "OR"; }
+    if word == "not"    { return "NOT"; }
+    if word == "res"    { return "RES"; }
+    if word == "fold"   { return "FOLD"; }
+    if word == "true"   { return "BOOL"; }
+    if word == "false"  { return "BOOL"; }
+    return "IDENT";
+}
+
+# ---------------------------------------------------------------------------
+# Read an identifier or keyword starting at `pos`. Returns a 3-element
+# array: [kind, value, end_pos].
+# ---------------------------------------------------------------------------
+fn read_ident(source, pos) {
+    h n = str_len(source);
+    h end = pos;
+    while end < n {
+        h c = str_slice(source, end, end + 1);
+        if is_alnum(c) == 1 {
+            end = end + 1;
+        } else {
+            break;
+        }
+    }
+    h word = str_slice(source, pos, end);
+    h kind = classify_word(word);
+    return [kind, word, end];
+}
+
+# ---------------------------------------------------------------------------
+# Read an integer literal. Returns [NUMBER, digits, end_pos].
+# ---------------------------------------------------------------------------
+fn read_number(source, pos) {
+    h n = str_len(source);
+    h end = pos;
+    while end < n {
+        h c = str_slice(source, end, end + 1);
+        if is_digit(c) == 1 {
+            end = end + 1;
+        } else {
+            break;
+        }
+    }
+    h digits = str_slice(source, pos, end);
+    return ["NUMBER", digits, end];
+}
+
+# ---------------------------------------------------------------------------
+# Read a double-quoted string literal. Returns [STRING, content, end_pos].
+# Does NOT handle backslash escapes (next milestone).
+# ---------------------------------------------------------------------------
+fn read_string_literal(source, pos) {
+    h n = str_len(source);
+    h end = pos + 1;     # skip opening quote
+    while end < n {
+        h c = str_slice(source, end, end + 1);
+        if c == "\"" {
+            h content = str_slice(source, pos + 1, end);
+            return ["STRING", content, end + 1];
+        }
+        end = end + 1;
+    }
+    return ["STRING_UNCLOSED", "", end];
+}
+
+# ---------------------------------------------------------------------------
+# Single-character punctuation map. Returns the kind name or empty string.
+# ---------------------------------------------------------------------------
+fn punct_kind(c) -> string {
+    if c == "(" { return "LPAREN"; }
+    if c == ")" { return "RPAREN"; }
+    if c == "{" { return "LBRACE"; }
+    if c == "}" { return "RBRACE"; }
+    if c == "[" { return "LBRACKET"; }
+    if c == "]" { return "RBRACKET"; }
+    if c == ";" { return "SEMI"; }
+    if c == "," { return "COMMA"; }
+    if c == "=" { return "EQ"; }
+    if c == "+" { return "PLUS"; }
+    if c == "-" { return "MINUS"; }
+    if c == "*" { return "STAR"; }
+    if c == "/" { return "SLASH"; }
+    if c == "%" { return "PERCENT"; }
+    if c == "<" { return "LT"; }
+    if c == ">" { return "GT"; }
+    if c == "." { return "DOT"; }
+    if c == ":" { return "COLON"; }
+    if c == "@" { return "AT"; }
+    if c == "&" { return "AMP"; }
+    if c == "|" { return "PIPE"; }
+    if c == "^" { return "CARET"; }
+    if c == "~" { return "TILDE"; }
+    return "";
+}
+
+# ---------------------------------------------------------------------------
+# Tokenize the whole source string. Returns an array of [kind, value]
+# tokens. Position-threading is internal; the caller just gets the
+# completed token stream.
+# ---------------------------------------------------------------------------
+fn tokenize(source) {
+    h n = str_len(source);
+    h tokens = arr_new(0, 0);
+    h pos = 0;
+
+    while pos < n {
+        pos = skip_ws(source, pos);
+        if pos >= n { break; }
+
+        h c = str_slice(source, pos, pos + 1);
+
+        # Identifier or keyword?
+        if is_alpha(c) == 1 {
+            h tok = read_ident(source, pos);
+            arr_push(tokens, [arr_get(tok, 0), arr_get(tok, 1)]);
+            pos = arr_get(tok, 2);
+        } else {
+            # Number?
+            if is_digit(c) == 1 {
+                h tok = read_number(source, pos);
+                arr_push(tokens, [arr_get(tok, 0), arr_get(tok, 1)]);
+                pos = arr_get(tok, 2);
+            } else {
+                # String literal?
+                if c == "\"" {
+                    h tok = read_string_literal(source, pos);
+                    arr_push(tokens, [arr_get(tok, 0), arr_get(tok, 1)]);
+                    pos = arr_get(tok, 2);
+                } else {
+                    # Punctuation.
+                    h kind = punct_kind(c);
+                    if str_len(kind) > 0 {
+                        arr_push(tokens, [kind, c]);
+                        pos = pos + 1;
+                    } else {
+                        # Unknown — emit and skip.
+                        arr_push(tokens, ["UNKNOWN", c]);
+                        pos = pos + 1;
+                    }
+                }
+            }
+        }
+    }
+
+    arr_push(tokens, ["EOF", ""]);
+    return tokens;
+}
+
+# ---------------------------------------------------------------------------
+# Pretty-print a token stream.
+# ---------------------------------------------------------------------------
+fn print_tokens(tokens) {
+    h i = 0;
+    h n = arr_len(tokens);
+    while i < n {
+        h t = arr_get(tokens, i);
+        h kind = arr_get(t, 0);
+        h value = arr_get(t, 1);
+        print(concat_many("  [", i, "] ", kind, " ", value));
+        i = i + 1;
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Drive the lexer on representative inputs.
+# ---------------------------------------------------------------------------
+print("== Self-Hosting Lexer Demo (Phase V, milestone 1) ==");
+print("");
+
+# Test 1: simplest possible OMC program.
+print("--- Input 1: h x = 89; ---");
+h src1 = "h x = 89;";
+h toks1 = tokenize(src1);
+print_tokens(toks1);
+print("");
+
+# Test 2: a function definition with arithmetic.
+print("--- Input 2: fn add(a, b) { return a + b; } ---");
+h src2 = "fn add(a, b) { return a + b; }";
+h toks2 = tokenize(src2);
+print_tokens(toks2);
+print("");
+
+# Test 3: with a comment and a string literal.
+print("--- Input 3: # greet\\nprint(\"hi\"); ---");
+h src3 = "# greet
+print(\"hi\");";
+h toks3 = tokenize(src3);
+print_tokens(toks3);
+print("");
+
+# Test 4: harmonic-flavored — uses res() and a Fibonacci constant.
+print("--- Input 4: h r = res(89); ---");
+h src4 = "h r = res(89);";
+h toks4 = tokenize(src4);
+print_tokens(toks4);
+print("");
+
+print("== Observations ==");
+print("- This lexer runs on the Rust OMC interpreter and emits tokens for");
+print("  programs the SAME interpreter could parse. Self-introspection.");
+print("- Position-threading by return value is verbose but works without");
+print("  mutable references — a real constraint of the language as it stands.");
+print("- Next milestones: multi-char operators (== <= => !=), float literals,");
+print("  string-escape handling. Then a parser. Then a codegen. Then the");
+print("  fixpoint: OMC-compiled-by-OMC produces the same output as itself.");

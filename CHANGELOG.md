@@ -4,6 +4,31 @@ All notable changes to OMNIcode will be documented in this file.
 
 ## [Unreleased]
 
+### Added (Phase V: self-hosting lexer (milestone 1), 2026-05-13)
+
+`examples/self_hosting_lexer.omc` — a lexer for a subset of OMNIcode, written **entirely in OMNIcode itself**. Runs on the Rust OMC interpreter and emits tokens for programs the same interpreter could parse. **First milestone toward self-hosting.**
+
+The lexer handles: identifiers, integer literals, keywords (`h`, `fn`, `if`, `else`, `while`, `for`, `in`, `return`, `break`, `continue`, `print`, `import`, `and`, `or`, `not`, `res`, `fold`, `true`, `false`), double-quoted string literals, all single-character punctuation, `#` line comments, and whitespace. **Not yet:** multi-char operators (`==`, `<=`, `<<`, etc.), float literals, escape sequences, triple-quoted strings — saved for milestone 2.
+
+**Verified output** on `h x = 89;`:
+```
+[0] H h        [1] IDENT x    [2] EQ =       [3] NUMBER 89    [4] SEMI ;    [5] EOF
+```
+
+On `fn add(a, b) { return a + b; }` — 14 tokens, all correctly classified. Tree-walk and VM produce identical output.
+
+### Fixed (surfaced by Phase V)
+
+The self-hosting work exposed two real bugs that had been silent until now:
+
+**1. String equality went through `to_int()` coercion.** `"a" == "b"` was evaluating to `true` because both strings parsed to integer `0` via `s.parse().unwrap_or(0)`. Fix: in `Expression::Eq` / `Expression::Ne` and the VM's `cmp_op`, check for `(Value::String, Value::String)` and compare as strings directly. The same string ordering now works for `<`, `<=`, `>`, `>=` on the VM path. Tree-walk path was already broken in the same way and is also fixed.
+
+**2. `arr_push` / `arr_set` on the VM path lost mutations.** The VM's `vm_call_builtin` shim copies args into synthetic `__vm_arg_0`, `__vm_arg_1` variables before delegating to the tree-walk dispatch. Mutating built-ins like `arr_push` modified the synthetic — not the user's actual array variable — so the mutation never reached the caller's scope. Fix: two new specialized opcodes `Op::ArrPushNamed(name)` and `Op::ArrSetNamed(name)`. The compiler detects `arr_push(varname, expr)` / `arr_set(varname, idx, val)` at compile time and emits the named opcodes, which take the variable name in the opcode itself and mutate the user's binding directly. The disassembler renders them as `ARR_PUSH_NAMED tokens` for clarity.
+
+Both bugs are tested implicitly through the lexer demo (which exercises hundreds of string comparisons and array mutations across both execution paths).
+
+**Tests:** still 141 passing across the workspace. Canonical sweep still 22/30 in both modes.
+
 ### Added (Phase T: source positions in error messages, 2026-05-13)
 
 Every parser error now reports the precise `line:col` where it occurred. The lexer tracks `line` and `col` as it consumes characters (incrementing line on `\n`, col otherwise). `tokenize_with_pos` returns `Vec<(Token, Pos)>` paired; `Parser` stores them and exposes `current_pos()` to error-reporting sites.

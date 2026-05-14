@@ -324,6 +324,30 @@ impl Compiler {
                 self.emit(Op::Fold1);
             }
             Expression::Call { name, args } => {
+                // Mutating built-ins must be specialized so the VM doesn't
+                // route them through vm_call_builtin's synthetic-arg shim
+                // (which would otherwise lose the mutation — the shim
+                // copies args into __vm_arg_N variables and the built-in
+                // mutates the COPY).
+                if !self.user_fns.contains(name) {
+                    if name == "arr_push" && args.len() == 2 {
+                        if let Expression::Variable(arr_name) = &args[0] {
+                            // value first → on stack; then the named push.
+                            self.compile_expr(&args[1])?;
+                            self.emit(Op::ArrPushNamed(arr_name.clone()));
+                            return Ok(());
+                        }
+                    }
+                    if name == "arr_set" && args.len() == 3 {
+                        if let Expression::Variable(arr_name) = &args[0] {
+                            // value, then index → stack top is index, then value
+                            self.compile_expr(&args[1])?; // index
+                            self.compile_expr(&args[2])?; // value
+                            self.emit(Op::ArrSetNamed(arr_name.clone()));
+                            return Ok(());
+                        }
+                    }
+                }
                 // Fast-path inline for hot harmonic ops — avoids the Call -> bridge
                 // -> stdlib lookup overhead. Only inline when the user HASN'T
                 // redefined the name (preserves recursion-by-shadowing).

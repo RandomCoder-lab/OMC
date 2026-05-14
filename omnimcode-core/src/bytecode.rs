@@ -100,6 +100,15 @@ pub enum Op {
     NewArray(usize),       // pop N items into a new array, push
     ArrayIndex,            // pop index, pop array, push array[index]
     ArrayIndexAssign(String), // pop value, pop index, assign array_var[idx] = value
+    /// Mutating array push: pop one value off the stack and append it
+    /// to the named array variable in the current scope. Emitted by the
+    /// compiler when it sees `arr_push(tokens, expr)` with a literal
+    /// variable as the first argument. Bypasses vm_call_builtin's
+    /// synthetic-arg shim, which would otherwise lose the mutation.
+    ArrPushNamed(String),
+    /// Mutating array store: pop value, pop index, store at named array's
+    /// index. Same rationale as ArrPushNamed.
+    ArrSetNamed(String),
 
     // Special harmonic operations (short-circuit to built-in semantics
     // without the call overhead — these are the hot ones).

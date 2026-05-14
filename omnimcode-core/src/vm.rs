@@ -257,6 +257,38 @@ impl Vm {
                         return Err("ArrayIndex: not an array".to_string());
                     }
                 }
+                Op::ArrPushNamed(name) => {
+                    let val = stack.pop().ok_or("stack underflow")?;
+                    if let Some(Value::Array(mut a)) = self.interp.vm_get_var(name) {
+                        a.items.push(val);
+                        self.interp.vm_set_local(name, Value::Array(a));
+                    } else {
+                        return Err(format!(
+                            "ArrPushNamed: {} is not an array variable",
+                            name
+                        ));
+                    }
+                }
+                Op::ArrSetNamed(name) => {
+                    let val = stack.pop().ok_or("stack underflow")?;
+                    let idx = stack.pop().ok_or("stack underflow")?.to_int() as usize;
+                    if let Some(Value::Array(mut a)) = self.interp.vm_get_var(name) {
+                        if idx >= a.items.len() {
+                            return Err(format!(
+                                "ArrSetNamed: index {} out of bounds (len {})",
+                                idx,
+                                a.items.len()
+                            ));
+                        }
+                        a.items[idx] = val;
+                        self.interp.vm_set_local(name, Value::Array(a));
+                    } else {
+                        return Err(format!(
+                            "ArrSetNamed: {} is not an array variable",
+                            name
+                        ));
+                    }
+                }
                 Op::ArrayIndexAssign(name) => {
                     let idx = stack.pop().ok_or("stack underflow")?.to_int() as usize;
                     let val = stack.pop().ok_or("stack underflow")?;
@@ -381,6 +413,19 @@ fn arith_mod(l: &Value, r: &Value) -> Value {
     }
 }
 fn cmp_op(l: &Value, r: &Value, op: &Op) -> bool {
+    // String compare goes through string equality (otherwise to_int()
+    // would treat every non-numeric string as 0 and they'd all be equal).
+    if let (Value::String(a), Value::String(b)) = (l, r) {
+        return match op {
+            Op::Eq => a == b,
+            Op::Ne => a != b,
+            Op::Lt => a < b,
+            Op::Le => a <= b,
+            Op::Gt => a > b,
+            Op::Ge => a >= b,
+            _ => unreachable!(),
+        };
+    }
     if l.is_float() || r.is_float() {
         let lf = l.to_float();
         let rf = r.to_float();

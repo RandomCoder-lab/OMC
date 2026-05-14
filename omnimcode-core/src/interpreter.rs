@@ -390,6 +390,11 @@ impl Interpreter {
             Expression::Eq(l, r) => {
                 let lv = self.eval_expr(l)?;
                 let rv = self.eval_expr(r)?;
+                // String equality must be string-to-string, NOT through to_int()
+                // (which would treat "a" == "b" as 0 == 0 == true).
+                if let (Value::String(a), Value::String(b)) = (&lv, &rv) {
+                    return Ok(Value::Bool(a == b));
+                }
                 if lv.is_float() || rv.is_float() {
                     Ok(Value::Bool(lv.to_float() == rv.to_float()))
                 } else {
@@ -399,6 +404,9 @@ impl Interpreter {
             Expression::Ne(l, r) => {
                 let lv = self.eval_expr(l)?;
                 let rv = self.eval_expr(r)?;
+                if let (Value::String(a), Value::String(b)) = (&lv, &rv) {
+                    return Ok(Value::Bool(a != b));
+                }
                 if lv.is_float() || rv.is_float() {
                     Ok(Value::Bool(lv.to_float() != rv.to_float()))
                 } else {
