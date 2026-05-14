@@ -4,6 +4,94 @@ All notable changes to OMNIcode will be documented in this file.
 
 ## [Unreleased]
 
+### Added (Phase H.1: Self-Healing Compiler — harmonic + typo diagnostics, 2026-05-13)
+
+🎯 **`examples/self_healing_compiler.omc` — OMC's φ-math becomes a diagnostic lattice the compiler reasons against.**
+
+The Phase H arc starts here: a self-healing compiler that catches errors using the Fibonacci-resonance math built in Phase O. Tonight's H.1 deliverable handles two narrow but real classes of bugs:
+
+1. **Harmonic violations** — numeric literals that aren't Fibonacci-aligned but are close to a Fibonacci attractor. Two-stage check:
+   - `is_fibonacci(n) == 0` → off the φ-geodesic.
+   - Distance to nearest Fibonacci ≤ 3 → close-miss typo (off-by-one, transposition).
+   - Suggest replacement; rewrite literal in AST.
+   - Numbers that aren't Fibonacci but ARE far from any attractor (e.g. `100`) are left alone — probably intentional.
+
+2. **Identifier typos** — VAR / CALL references that don't appear in the defined-name table. Levenshtein edit distance against defined names (FN defs, DECLs, parameters, plus a baseline of built-ins). Threshold ≤ 2.
+
+Both classes feed the same pipeline:
+```
+broken source → V.9 lex/parse → AST → heal_program → (healed_ast, diagnostics)
+                                                          ↓
+                                                    emit_source
+                                                          ↓
+                                                   healed source
+                                                          ↓
+                                                 re-lex+re-parse
+                                                          ↓
+                                              0 diagnostics (fixpoint)
+                                                          ↓
+                                                   encode_program
+                                                          ↓
+                                                  run on OMC VM
+                                                          ↓
+                                                  expected output
+```
+
+#### Demo
+
+Input source (intentionally broken):
+```omc
+fn fib(n) {
+    if n < 2 { return n; }
+    return fib(n - 1) + fib(n - 2);
+}
+h target = 12;
+print(fbi(target));
+```
+
+Output:
+```
+--- Healing pass ---
+  diagnostics: 2
+  harmonic: 12 (harmony 0.92, not Fibonacci) → 13 (harmony 1, Fibonacci attractor; |Δ|=1)
+  call: 'fbi(...)' unknown → 'fib(...)' (edit distance 2)
+
+--- HEALED SOURCE ---
+fn fib(n) { ... }
+h target = 13;
+print(fib(target));
+
+--- Sanity check: re-lex + re-parse healed source ---
+  diagnostics on healed source: 0     ← fixpoint property of healer holds
+
+--- Final: execute the healed source via the OMC bytecode VM ---
+  output:
+HInt(233, φ=1.000, HIM=0.002)         ← fib(13) = 233, itself a Fibonacci
+```
+
+The whole pipeline ends on a Fibonacci attractor. The φ-math is internally self-consistent.
+
+#### New OMC-side helpers
+
+- `nearest_fib(n)` — mirrors the host's `fold_escape` attractor table from OMC, exposing the suggestion as a value (not just a side effect of evaluation).
+- `edit_distance(a, b)` — iterative Levenshtein DP, two-row rolling.
+- `closest_name(name, table)` — best edit-distance match below threshold 3, returns "" if none qualify.
+- `collect_defined(stmts)` — walks top-level for FN + DECL names, plus a baseline of host built-ins (print, arr_*, str_*, harmony_value, fold_escape, value_danger, etc.).
+- `heal_expr / heal_stmt / heal_block / heal_program` — recursive AST walker; threads diagnostics array via return-and-rebind (pass-by-value-safe).
+- `emit_source` — V.4-style pretty-printer adapted to V.9's AST shape.
+
+#### What this demonstrates
+
+The compiler doesn't have a hand-written "list of magic Fibonacci numbers." It uses `is_fibonacci` and `harmony_value` — host primitives from Phase O whose semantics are pure math. The healer asks the language to score literals against itself; the φ-math IS the rule.
+
+This is what makes OMC structurally different from a conventional language with a built-in linter. The Fibonacci attractor table isn't a style guide; it's an inductive type-class the language can OBSERVE on any integer at runtime. The healer's logic is short — `is_fibonacci(n) == 0 && |Δ| ≤ 3 → flag` — because the heavy lifting lives in the math, not in the rules.
+
+#### What H.2/H.3/H.4 will add
+
+- **H.2** — autofix-and-retry loop. Run the healer, apply, recompile, iterate up to N attempts. Currently H.1 is one-shot.
+- **H.3** — parse-level recovery. Try inserting missing semicolons / braces guided by HIM scoring of the resulting AST. Catches structural bugs upstream of the AST walker.
+- **H.4** — runtime self-healing primitives surfaced as OMC keywords. Today the healer is compile-time only; H.4 would let OMC functions declare "if my divisor is in the danger zone, fold_escape it" without writing the boilerplate.
+
 ### Added (Phase V.9 + V.9b: UTF-8 safety + gen2 == gen3 of a compiler, 2026-05-13)
 
 #### V.9 — `str_chars` host builtin closes the byte-vs-char mismatch
