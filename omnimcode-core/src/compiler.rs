@@ -492,6 +492,20 @@ impl Compiler {
                             self.emit(Op::ArrayLen);
                             return Ok(());
                         }
+                        // arr_get(arr, idx) is the hottest array call —
+                        // inline to ArrayIndex so we skip vm_call_builtin's
+                        // synthetic-arg shim. This is the same dispatch
+                        // `arr[idx]` already uses; aligning fn syntax with
+                        // bracket syntax was the gap that made the
+                        // arr_push+arr_get benchmark slower under VM than
+                        // tree-walk. ArrayIndex is polymorphic over arrays
+                        // and dicts, so dict_get(d, k) inlines too.
+                        ("arr_get", 2) | ("dict_get", 2) => {
+                            self.compile_expr(&args[0])?;
+                            self.compile_expr(&args[1])?;
+                            self.emit(Op::ArrayIndex);
+                            return Ok(());
+                        }
                         _ => {}
                     }
                 }
