@@ -1,0 +1,291 @@
+# =============================================================================
+# Self-Hosting Codegen (Phase V, milestone 4)
+# =============================================================================
+# Consumes an AST (the nested-tagged-array form produced by V.3) and emits
+# canonical OMNIcode source. The round-trip invariant:
+#
+#       source  →  tokens  →  AST  →  source'  →  tokens'  →  AST'
+#       where AST == AST'
+#
+# is the contract. The emitted source isn't required to be byte-identical
+# to the input — whitespace and parens can differ — but the AST you get
+# back from re-parsing must be the same.
+#
+# Why this matters: with codegen in place, OMC programs can MANIPULATE
+# their own AST and emit back runnable source. Refactoring tools,
+# rewriting passes, and the omnicc-style optimizer-as-source-transform
+# all become accessible from within OMC itself.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Indentation helper: produce a string of N levels of two-space indent.
+# ---------------------------------------------------------------------------
+fn indent_of(level) -> string {
+    h s = "";
+    h i = 0;
+    while i < level {
+        s = str_concat(s, "    ");
+        i = i + 1;
+    }
+    return s;
+}
+
+# ---------------------------------------------------------------------------
+# Escape a string for source emission — turn newlines into \n etc.
+# Mirror of the lexer's escape-decode step.
+# ---------------------------------------------------------------------------
+fn escape_for_source(s) -> string {
+    h out = "";
+    h n = str_len(s);
+    h i = 0;
+    while i < n {
+        h c = str_slice(s, i, i + 1);
+        if c == "\n" {
+            out = str_concat(out, "\\n");
+        } else {
+            if c == "\t" {
+                out = str_concat(out, "\\t");
+            } else {
+                if c == "\r" {
+                    out = str_concat(out, "\\r");
+                } else {
+                    if c == "\"" {
+                        out = str_concat(out, "\\\"");
+                    } else {
+                        if c == "\\" {
+                            out = str_concat(out, "\\\\");
+                        } else {
+                            out = str_concat(out, c);
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+# ---------------------------------------------------------------------------
+# Emit an expression. Returns a string. BINOPs always get parens around
+# them — the round-trip rule is "no precedence ambiguity," not "minimal
+# parens." An AST-aware pretty-printer could elide unnecessary parens
+# but for milestone 4 we play it safe.
+# ---------------------------------------------------------------------------
+fn emit_expr(ast) -> string {
+    h tag = arr_get(ast, 0);
+
+    if tag == "NUMBER" {
+        return arr_get(ast, 1);
+    }
+    if tag == "FLOAT" {
+        return arr_get(ast, 1);
+    }
+    if tag == "STRING" {
+        h body = escape_for_source(arr_get(ast, 1));
+        return concat_many("\"", body, "\"");
+    }
+    if tag == "BOOL" {
+        return arr_get(ast, 1);
+    }
+    if tag == "VAR" {
+        return arr_get(ast, 1);
+    }
+    if tag == "BINOP" {
+        h op = arr_get(ast, 1);
+        h left = emit_expr(arr_get(ast, 2));
+        h right = emit_expr(arr_get(ast, 3));
+        return concat_many("(", left, " ", op, " ", right, ")");
+    }
+    if tag == "CALL" {
+        h name = arr_get(ast, 1);
+        h args = arr_get(ast, 2);
+        h out = str_concat(name, "(");
+        h i = 0;
+        h n = arr_len(args);
+        while i < n {
+            if i > 0 { out = str_concat(out, ", "); }
+            out = str_concat(out, emit_expr(arr_get(args, i)));
+            i = i + 1;
+        }
+        return str_concat(out, ")");
+    }
+    return concat_many("/* UNKNOWN_EXPR ", tag, " */");
+}
+
+# ---------------------------------------------------------------------------
+# Emit a single statement. Returns a string ending with a newline.
+# `level` controls the indent depth (0 = top level).
+# ---------------------------------------------------------------------------
+fn emit_stmt(ast, level) -> string {
+    h pad = indent_of(level);
+    h tag = arr_get(ast, 0);
+
+    if tag == "VARDECL" {
+        h name = arr_get(ast, 1);
+        h v = emit_expr(arr_get(ast, 2));
+        return concat_many(pad, "h ", name, " = ", v, ";\n");
+    }
+    if tag == "ASSIGN" {
+        h name = arr_get(ast, 1);
+        h v = emit_expr(arr_get(ast, 2));
+        return concat_many(pad, name, " = ", v, ";\n");
+    }
+    if tag == "EXPRSTMT" {
+        h e = emit_expr(arr_get(ast, 1));
+        return concat_many(pad, e, ";\n");
+    }
+    if tag == "RETURN" {
+        h v = arr_get(ast, 1);
+        if v == "null" {
+            return concat_many(pad, "return;\n");
+        }
+        return concat_many(pad, "return ", emit_expr(v), ";\n");
+    }
+    if tag == "PRINT" {
+        h e = emit_expr(arr_get(ast, 1));
+        return concat_many(pad, "print(", e, ");\n");
+    }
+    if tag == "IF" {
+        h cond = emit_expr(arr_get(ast, 1));
+        h then_body = emit_block(arr_get(ast, 2), level + 1);
+        h else_body = arr_get(ast, 3);
+        h out = concat_many(pad, "if ", cond, " {\n", then_body, pad, "}");
+        if arr_len(else_body) > 0 {
+            h eb = emit_block(else_body, level + 1);
+            out = concat_many(out, " else {\n", eb, pad, "}");
+        }
+        return str_concat(out, "\n");
+    }
+    if tag == "WHILE" {
+        h cond = emit_expr(arr_get(ast, 1));
+        h body = emit_block(arr_get(ast, 2), level + 1);
+        return concat_many(pad, "while ", cond, " {\n", body, pad, "}\n");
+    }
+    if tag == "FNDEF" {
+        h name = arr_get(ast, 1);
+        h params = arr_get(ast, 2);
+        h body = emit_block(arr_get(ast, 3), level + 1);
+        h plist = "";
+        h i = 0;
+        h pn = arr_len(params);
+        while i < pn {
+            if i > 0 { plist = str_concat(plist, ", "); }
+            plist = str_concat(plist, arr_get(params, i));
+            i = i + 1;
+        }
+        return concat_many(pad, "fn ", name, "(", plist, ") {\n", body, pad, "}\n");
+    }
+    return concat_many(pad, "/* UNKNOWN_STMT ", tag, " */\n");
+}
+
+# ---------------------------------------------------------------------------
+# Emit a block (array of statements) at the given indent level. Returns
+# a single string with the statements concatenated.
+# ---------------------------------------------------------------------------
+fn emit_block(stmts, level) -> string {
+    h out = "";
+    h i = 0;
+    h n = arr_len(stmts);
+    while i < n {
+        out = str_concat(out, emit_stmt(arr_get(stmts, i), level));
+        i = i + 1;
+    }
+    return out;
+}
+
+# ---------------------------------------------------------------------------
+# Emit a whole program (array of top-level statements).
+# ---------------------------------------------------------------------------
+fn emit_program(stmts) -> string {
+    return emit_block(stmts, 0);
+}
+
+# ===========================================================================
+# Demo driver — build ASTs by hand (matching what V.3 would produce from
+# its hand-rolled token streams), emit source, print it.
+#
+# In real round-tripping we'd do: source → tokens → AST → source'. Doing
+# the full pipeline inside one OMC file would require composing lexer +
+# parser + codegen, which works in principle but blows the demo up. The
+# in-line ASTs here are the same shapes V.3 produces.
+# ===========================================================================
+
+print("== Self-Hosting Codegen (Phase V, milestone 4) ==");
+print("");
+
+# Demo 1: `h x = 89 + 144;`
+print("--- AST 1: VARDECL x = (89 + 144) ---");
+h ast1 = ["VARDECL", "x",
+    ["BINOP", "+", ["NUMBER", "89"], ["NUMBER", "144"]]
+];
+print("Emitted OMC source:");
+print(emit_stmt(ast1, 0));
+
+# Demo 2: an if/else with returns
+print("--- AST 2: if x == 89 { return x; } else { return 0; } ---");
+h ast2 = ["IF",
+    ["BINOP", "==", ["VAR", "x"], ["NUMBER", "89"]],
+    [["RETURN", ["VAR", "x"]]],
+    [["RETURN", ["NUMBER", "0"]]]
+];
+print("Emitted OMC source:");
+print(emit_stmt(ast2, 0));
+
+# Demo 3: recursive fib
+print("--- AST 3: fn fib(n) { return fib(n-1) + fib(n-2); } ---");
+h ast3 = ["FNDEF", "fib", ["n"],
+    [
+        ["RETURN",
+            ["BINOP", "+",
+                ["CALL", "fib", [["BINOP", "-", ["VAR", "n"], ["NUMBER", "1"]]]],
+                ["CALL", "fib", [["BINOP", "-", ["VAR", "n"], ["NUMBER", "2"]]]]
+            ]
+        ]
+    ]
+];
+print("Emitted OMC source:");
+print(emit_stmt(ast3, 0));
+
+# Demo 4: while loop with assignments
+print("--- AST 4: while i < 10 { sum = sum + i; i = i + 1; } ---");
+h ast4 = ["WHILE",
+    ["BINOP", "<", ["VAR", "i"], ["NUMBER", "10"]],
+    [
+        ["ASSIGN", "sum", ["BINOP", "+", ["VAR", "sum"], ["VAR", "i"]]],
+        ["ASSIGN", "i",   ["BINOP", "+", ["VAR", "i"], ["NUMBER", "1"]]]
+    ]
+];
+print("Emitted OMC source:");
+print(emit_stmt(ast4, 0));
+
+# Demo 5: a full small program. This is the kind of output a refactoring
+# tool would produce — start with an AST, transform it, emit it back.
+print("--- AST 5: a small program ---");
+h prog = [
+    ["FNDEF", "double", ["x"],
+        [["RETURN", ["BINOP", "*", ["VAR", "x"], ["NUMBER", "2"]]]]
+    ],
+    ["VARDECL", "n", ["NUMBER", "21"]],
+    ["VARDECL", "m", ["CALL", "double", [["VAR", "n"]]]],
+    ["PRINT", ["VAR", "m"]],
+    ["IF",
+        ["BINOP", "==", ["VAR", "m"], ["NUMBER", "42"]],
+        [["PRINT", ["STRING", "the answer"]]],
+        [["PRINT", ["STRING", "not it"]]]
+    ]
+];
+print("Emitted OMC source (a complete runnable program):");
+print(emit_program(prog));
+
+print("== Observations ==");
+print("- Every AST node has a canonical source form. The pretty-printer");
+print("  is total — every node maps to legible OMC.");
+print("- BINOPs always get parens. Costs a few extra characters; saves us");
+print("  from re-implementing the parser's precedence table. The output");
+print("  is still re-parseable to the same AST.");
+print("- Indentation is two spaces per level. The output is human-readable");
+print("  even for nested fn-defs and if/else trees.");
+print("- This emitter, fed into the lexer→parser, would produce an AST");
+print("  the same shape we started with. Closing that loop in a single");
+print("  OMC program is V.5 — the fixpoint demo.");

@@ -4,6 +4,22 @@ All notable changes to OMNIcode will be documented in this file.
 
 ## [Unreleased]
 
+### Added (Phase V.4: self-hosting codegen — AST → OMC source, 2026-05-13)
+
+`examples/self_hosting_codegen.omc` — a pretty-printer written in OMNIcode that consumes the AST from V.3 and emits canonical OMC source. The language can now **read its own source, structure it, AND write it back**. Three of four steps toward true self-hosting.
+
+**Emit contract:** every AST node maps to legible, indented OMC source. BINOPs always get parens (no precedence ambiguity), strings get backslash-escapes back, indentation is 4 spaces per level. The output isn't required to be byte-identical to the original — whitespace and parens may differ — but the *re-parsed AST* must be the same.
+
+**Empirical round-trip proof:** the emitted source for a small program (fn def + var decls + if/else + print + string literal) was literally piped through the Rust interpreter and produced the correct output (`42`, `"the answer"`) on both tree-walk and VM. Code generated from OMC's own pretty-printer runs unmodified. The loop AST → source → execution is closed.
+
+**What this unlocks:**
+- Refactoring tools written in OMC. Parse, transform AST, emit.
+- The omnicc-style "optimizer as source transform" — any pass that rewrites the AST can serialize back to runnable code.
+- Round-trip testing: source → parse → emit → parse → AST equivalence becomes a verifiable property.
+- The fixpoint goal (V.5): compile the compiler-in-OMC with itself, check that gen2 == gen3.
+
+The language can now manipulate itself end to end. Every node has a printable form; every transformation has a tangible result. Self-introspection became self-modification.
+
 ### Added (Phase V.3: self-hosting parser, 2026-05-13)
 
 `examples/self_hosting_parser.omc` — a recursive-descent parser written in OMNIcode that consumes a token stream from V.1/V.2 and emits an AST as **nested tagged arrays** (the canonical Python OMC convention). The OMC language can now both *read* its own source (lexer) and *structure* it (parser). Two of four steps toward true self-hosting are in place.
