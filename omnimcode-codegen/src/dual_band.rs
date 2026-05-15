@@ -269,14 +269,18 @@ impl<'ctx, 'a> DualBandLowerer<'ctx, 'a> {
                     let alpha = match c {
                         Const::Int(n) => i64_type.const_int(*n as u64, true),
                         Const::Bool(b) => i64_type.const_int(*b as u64, false),
+                        // Path A.2: floats live on the i64 stack via
+                        // bitcast IEEE-754 bit pattern. Float-typed
+                        // ops bitcast back to f64 at the boundary.
+                        Const::Float(f) => i64_type.const_int(f.to_bits(), false),
                         _ => {
                             return Err(format!(
-                                "Session C only supports Const::Int/Const::Bool, got {:?} at op{}",
+                                "dual-band lowerer doesn't support {:?} at op{}",
                                 c, i
                             ));
                         }
                     };
-                    // Matched-band entry: β = α. (Session D will add
+                    // Matched-band entry: β = α. (Session F adds
                     // explicit phi-shadow ops that diverge β.)
                     let v = self.splat(alpha, &format!("const{}_v", idx))?;
                     stack.push(v);
@@ -319,6 +323,15 @@ impl<'ctx, 'a> DualBandLowerer<'ctx, 'a> {
                 }
 
                 Op::Add | Op::AddInt => self.bin_vec(&mut stack, i, |b, l, r| b.build_int_add(l, r, "add"))?,
+                // Path A.2: float arithmetic in dual-band mode.
+                // <2 x i64> bitcasts to <2 x f64> directly (same total
+                // bit-width); both lanes get the float op in parallel.
+                // β tracks α through float math the same way it does
+                // through int math (matched-band semantics until an
+                // explicit phi_shadow re-derives β).
+                Op::AddFloat => self.bin_vec_float(&mut stack, i, |b, l, r| b.build_float_add(l, r, "fadd"))?,
+                Op::SubFloat => self.bin_vec_float(&mut stack, i, |b, l, r| b.build_float_sub(l, r, "fsub"))?,
+                Op::MulFloat => self.bin_vec_float(&mut stack, i, |b, l, r| b.build_float_mul(l, r, "fmul"))?,
                 Op::Sub | Op::SubInt => self.bin_vec(&mut stack, i, |b, l, r| b.build_int_sub(l, r, "sub"))?,
                 Op::Mul | Op::MulInt => self.bin_vec(&mut stack, i, |b, l, r| b.build_int_mul(l, r, "mul"))?,
                 Op::Div => self.bin_vec(&mut stack, i, |b, l, r| b.build_int_signed_div(l, r, "div"))?,
@@ -484,6 +497,59 @@ impl<'ctx, 'a> DualBandLowerer<'ctx, 'a> {
                         let h_scalar = self.emit_harmony_call(v, i)?;
                         let h_v = self.splat(h_scalar, "harmony_ret_v")?;
                         stack.push(h_v);
+                        continue;
+                    }
+                    // Path A.2: int↔float boundary intrinsics. The
+                    // dual-band carrier is <2 x i64>; we operate on
+                    // the α lane only (β is the harmonic shadow,
+                    // which doesn't follow the user-visible value
+                    // through int↔float conversions).
+                    if name == "to_float" && *argc == 1 {
+                        let v_v = self.pop(&mut stack, i, "to_float arg")?;
+                        let f64_type = self.ctx.f64_type();
+                        let alpha = self
+                            .builder
+                            .build_extract_element(v_v, i64_type.const_int(0, false), "tof_a")
+                            .map_err(|e| format!("hbit to_float extract at op{}: {}", i, e))?;
+                        let alpha_iv = match alpha {
+                            BasicValueEnum::IntValue(iv) => iv,
+                            _ => return Err(format!("hbit to_float not int at op{}", i)),
+                        };
+                        let f = self
+                            .builder
+                            .build_signed_int_to_float(alpha_iv, f64_type, "tof")
+                            .map_err(|e| format!("hbit to_float sitofp at op{}: {}", i, e))?;
+                        let ri = self
+                            .builder
+                            .build_bit_cast(f, i64_type, "tof_i")
+                            .map_err(|e| format!("hbit to_float bitcast at op{}: {}", i, e))?
+                            .into_int_value();
+                        let new_v = self.splat(ri, "tof_v")?;
+                        stack.push(new_v);
+                        continue;
+                    }
+                    if name == "to_int" && *argc == 1 {
+                        let v_v = self.pop(&mut stack, i, "to_int arg")?;
+                        let f64_type = self.ctx.f64_type();
+                        let alpha = self
+                            .builder
+                            .build_extract_element(v_v, i64_type.const_int(0, false), "toi_a")
+                            .map_err(|e| format!("hbit to_int extract at op{}: {}", i, e))?;
+                        let alpha_iv = match alpha {
+                            BasicValueEnum::IntValue(iv) => iv,
+                            _ => return Err(format!("hbit to_int not int at op{}", i)),
+                        };
+                        let v_f = self
+                            .builder
+                            .build_bit_cast(alpha_iv, f64_type, "toi_f")
+                            .map_err(|e| format!("hbit to_int bitcast at op{}: {}", i, e))?
+                            .into_float_value();
+                        let ri = self
+                            .builder
+                            .build_float_to_signed_int(v_f, i64_type, "toi")
+                            .map_err(|e| format!("hbit to_int fptosi at op{}: {}", i, e))?;
+                        let new_v = self.splat(ri, "toi_v")?;
+                        stack.push(new_v);
                         continue;
                     }
                     // Resolve the call target. Self-recursion uses
@@ -777,6 +843,49 @@ impl<'ctx, 'a> DualBandLowerer<'ctx, 'a> {
         let v = f(&self.builder, lhs, rhs)
             .map_err(|e| format!("hbit binop at op{}: {}", op_idx, e))?;
         stack.push(v);
+        Ok(())
+    }
+
+    /// Path A.2: float-arithmetic binop on the dual-band vector.
+    /// `<2 x i64>` bitcasts to `<2 x f64>` (same 128-bit width); both
+    /// lanes get the float op in parallel; result bitcasts back to
+    /// `<2 x i64>` for stack storage. Bytecode compiler enforces
+    /// type discipline; the JIT just trusts the typed op.
+    fn bin_vec_float<F>(
+        &self,
+        stack: &mut Vec<VectorValue<'ctx>>,
+        op_idx: usize,
+        f: F,
+    ) -> Result<(), CodegenError>
+    where
+        F: FnOnce(
+            &Builder<'ctx>,
+            VectorValue<'ctx>,
+            VectorValue<'ctx>,
+        ) -> Result<VectorValue<'ctx>, inkwell::builder::BuilderError>,
+    {
+        let f64_type = self.ctx.f64_type();
+        let v2f64 = f64_type.vec_type(2);
+        let rhs = self.pop(stack, op_idx, "fbin rhs")?;
+        let lhs = self.pop(stack, op_idx, "fbin lhs")?;
+        let lhs_f = self
+            .builder
+            .build_bit_cast(lhs, v2f64, "fbin_lf")
+            .map_err(|e| format!("hbit fbin lhs cast at op{}: {}", op_idx, e))?
+            .into_vector_value();
+        let rhs_f = self
+            .builder
+            .build_bit_cast(rhs, v2f64, "fbin_rf")
+            .map_err(|e| format!("hbit fbin rhs cast at op{}: {}", op_idx, e))?
+            .into_vector_value();
+        let r_f = f(&self.builder, lhs_f, rhs_f)
+            .map_err(|e| format!("hbit fbinop at op{}: {}", op_idx, e))?;
+        let r_i = self
+            .builder
+            .build_bit_cast(r_f, self.v2i64, "fbin_ri")
+            .map_err(|e| format!("hbit fbin ret cast at op{}: {}", op_idx, e))?
+            .into_vector_value();
+        stack.push(r_i);
         Ok(())
     }
 

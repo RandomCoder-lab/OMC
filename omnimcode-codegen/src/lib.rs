@@ -564,9 +564,17 @@ impl<'ctx, 'a> FunctionLowerer<'ctx, 'a> {
                     let v = match c {
                         Const::Int(n) => i64_type.const_int(*n as u64, true),
                         Const::Bool(b) => i64_type.const_int(*b as u64, false),
+                        Const::Float(f) => {
+                            // Path A.2: floats live on the i64 stack as
+                            // bitcast-i64. const_int(bits) gives the
+                            // raw IEEE-754 bit pattern stored as i64;
+                            // float-typed ops bitcast it back via
+                            // bin_float when consuming.
+                            i64_type.const_int(f.to_bits(), false)
+                        }
                         _ => {
                             return Err(format!(
-                                "Session B only supports Const::Int and Const::Bool, got {:?} at op{}",
+                                "scalar lowerer doesn't support {:?} at op{}",
                                 c, i
                             ));
                         }
@@ -612,6 +620,18 @@ impl<'ctx, 'a> FunctionLowerer<'ctx, 'a> {
                 Op::Mul | Op::MulInt => self.bin_int(&mut stack, i, |b, l, r| b.build_int_mul(l, r, "mul"))?,
                 Op::Div => self.bin_int(&mut stack, i, |b, l, r| b.build_int_signed_div(l, r, "div"))?,
                 Op::Mod => self.bin_int(&mut stack, i, |b, l, r| b.build_int_signed_rem(l, r, "rem"))?,
+                // Float arithmetic — Path A.2.
+                //
+                // Floats live on the stack as bitcast-i64 (the slot
+                // type is uniform i64 throughout the lowerer; floats
+                // are interpreted via bitcast at the float-op boundary
+                // and bitcast back to i64 for storage). The bytecode
+                // compiler only emits the Float-typed ops when it has
+                // statically-typed-float operands, so the bitcast
+                // assumption is sound at the bytecode level.
+                Op::AddFloat => self.bin_float(&mut stack, i, |b, l, r| b.build_float_add(l, r, "fadd"))?,
+                Op::SubFloat => self.bin_float(&mut stack, i, |b, l, r| b.build_float_sub(l, r, "fsub"))?,
+                Op::MulFloat => self.bin_float(&mut stack, i, |b, l, r| b.build_float_mul(l, r, "fmul"))?,
                 Op::Neg => {
                     let v = pop(&mut stack, i, "Neg")?;
                     let zero = i64_type.const_int(0, false);
@@ -767,6 +787,37 @@ impl<'ctx, 'a> FunctionLowerer<'ctx, 'a> {
                 }
 
                 Op::Call(name, argc) => {
+                    // Path A.2 intrinsics: int↔float boundary.
+                    if name == "to_float" && *argc == 1 {
+                        let v = pop(&mut stack, i, "to_float arg")?;
+                        let f64_type = self.ctx.f64_type();
+                        let f = self
+                            .builder
+                            .build_signed_int_to_float(v, f64_type, "tof")
+                            .map_err(|e| format!("to_float sitofp at op{}: {}", i, e))?;
+                        let ri = self
+                            .builder
+                            .build_bit_cast(f, i64_type, "tof_i")
+                            .map_err(|e| format!("to_float bitcast at op{}: {}", i, e))?
+                            .into_int_value();
+                        stack.push(ri);
+                        continue;
+                    }
+                    if name == "to_int" && *argc == 1 {
+                        let v_i = pop(&mut stack, i, "to_int arg")?;
+                        let f64_type = self.ctx.f64_type();
+                        let v_f = self
+                            .builder
+                            .build_bit_cast(v_i, f64_type, "toi_f")
+                            .map_err(|e| format!("to_int bitcast at op{}: {}", i, e))?
+                            .into_float_value();
+                        let ri = self
+                            .builder
+                            .build_float_to_signed_int(v_f, i64_type, "toi")
+                            .map_err(|e| format!("to_int fptosi at op{}: {}", i, e))?;
+                        stack.push(ri);
+                        continue;
+                    }
                     // Session B: only recursive self-calls. Cross-fn
                     // calls (Session D) need a callable-resolution
                     // strategy — currently routed through tree-walk's
@@ -870,6 +921,53 @@ impl<'ctx, 'a> FunctionLowerer<'ctx, 'a> {
         let lhs = pop(stack, op_idx, "bin lhs")?;
         let v = f(&self.builder, lhs, rhs).map_err(|e| format!("binop at op{}: {}", op_idx, e))?;
         stack.push(v);
+        Ok(())
+    }
+
+    /// Path A.2: float-arithmetic binop. The stack holds i64s; the
+    /// operands are interpreted as f64 via bitcast. Result is bitcast
+    /// back to i64 for storage. Caller is responsible for ensuring
+    /// the operands actually contain float bit-patterns (the bytecode
+    /// compiler enforces this via its typed AddFloat/SubFloat/MulFloat
+    /// emission; the JIT just trusts the typed op).
+    fn bin_float<F>(
+        &self,
+        stack: &mut Vec<inkwell::values::IntValue<'ctx>>,
+        op_idx: usize,
+        f: F,
+    ) -> Result<(), CodegenError>
+    where
+        F: FnOnce(
+            &Builder<'ctx>,
+            inkwell::values::FloatValue<'ctx>,
+            inkwell::values::FloatValue<'ctx>,
+        ) -> Result<
+            inkwell::values::FloatValue<'ctx>,
+            inkwell::builder::BuilderError,
+        >,
+    {
+        let f64_type = self.ctx.f64_type();
+        let i64_type = self.ctx.i64_type();
+        let rhs_i = pop(stack, op_idx, "fbin rhs")?;
+        let lhs_i = pop(stack, op_idx, "fbin lhs")?;
+        let rhs_f = self
+            .builder
+            .build_bit_cast(rhs_i, f64_type, "fbin_rf")
+            .map_err(|e| format!("fbin rhs cast at op{}: {}", op_idx, e))?
+            .into_float_value();
+        let lhs_f = self
+            .builder
+            .build_bit_cast(lhs_i, f64_type, "fbin_lf")
+            .map_err(|e| format!("fbin lhs cast at op{}: {}", op_idx, e))?
+            .into_float_value();
+        let r_f = f(&self.builder, lhs_f, rhs_f)
+            .map_err(|e| format!("fbinop at op{}: {}", op_idx, e))?;
+        let r_i = self
+            .builder
+            .build_bit_cast(r_f, i64_type, "fbin_ri")
+            .map_err(|e| format!("fbin ret cast at op{}: {}", op_idx, e))?
+            .into_int_value();
+        stack.push(r_i);
         Ok(())
     }
 
