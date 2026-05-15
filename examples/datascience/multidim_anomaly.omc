@@ -141,7 +141,10 @@ println("");
 
 fn lat_bucket(v) {
     if v <= 0 { return 0; }
-    h logv = py_call(math, "log10", [v]);
+    # Substrate-routed log bucketing. Was py_call(math, "log10", v)
+    # before the substrate-fill-in; routing through the φ-π-fibonacci
+    # substrate aligns the bucket cuts with OMC's attractor lattice.
+    h logv = log_phi_pi_fibonacci(to_float(v));
     return fold(to_int(logv * 50));
 }
 fn status_bucket(s) { return s; }
@@ -196,7 +199,9 @@ fn neg_log_p(freq_dict, bucket, total) {
     h count = dict_get(freq_dict, concat_many("", bucket), 1);
     h p = to_float(count) / total;
     if p <= 0 { p = 1.0 / to_float(total); }
-    return 0 - py_call(math, "log", [p]);
+    # Substrate-routed rarity: log_phi_pi_fibonacci(1/p) is a monotonic
+    # transform of -ln(p), in φ-π-fibonacci units. Ranking preserved.
+    return log_phi_pi_fibonacci(1.0 / p);
 }
 
 fn harmonic_md_score(idx) {

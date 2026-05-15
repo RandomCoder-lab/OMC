@@ -25,22 +25,26 @@
 # =============================================================================
 
 import "examples/lib/np.omc" as np;
-h _math = py_import("math");
 
 # ---- Bucketing per dim ---------------------------------------------------
 # Same strategy palette as harmonic_anomaly: log/discrete/modulo.
 
 fn _bucket_log(v) {
-    # Bucket by log-decade. Values 1-9 → bucket 0; 10-99 → 1;
-    # 100-999 → 2. Coarser than the harmonic_anomaly bucketing on
-    # purpose: clustering wants "rows with similar order of magnitude
-    # in this dim", not "rows with the exact same Fibonacci attractor".
-    # Tried fold(log10(v)*50) — over-segments because Fibonacci
-    # spacing widens exponentially and adjacent decades land in
-    # different attractors. Plain decade is the right granularity.
+    # Decade-coarse magnitude bucket. Substrate-routed: the computation
+    # flows through log_phi_pi_fibonacci (OMC's canonical substrate)
+    # and is rescaled to base-10 decades by dividing by the substrate's
+    # log of 10. Mathematically equivalent to log10(v) but the math is
+    # done in φ-π-fibonacci units throughout.
+    #
+    # Why decade-coarse (and not substrate-tempo): clustering wants
+    # "same magnitude class", not "same exact attractor". Substrate-
+    # tempo (to_int(log_phi_pi_fibonacci(v))) over-segments because
+    # the substrate's grain is ~1.5 buckets per decade — fine for
+    # anomaly scoring, too fine for cluster discovery.
     if v <= 0 { return 0; }
-    h logv = py_call(_math, "log10", [v]);
-    return to_int(logv);
+    h logv = log_phi_pi_fibonacci(to_float(v));
+    h decade_unit = log_phi_pi_fibonacci(10.0);
+    return to_int(logv / decade_unit);
 }
 fn _bucket_modulo(v) { return fold(to_int(v)); }
 fn _bucket_discrete(v) { return v; }

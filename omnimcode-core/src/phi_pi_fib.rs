@@ -464,13 +464,32 @@ pub fn log_phi_pi_fibonacci(n: f64) -> f64 {
     n.ln() / (PI * PHI.ln())
 }
 
-/// log_phi(n) — kept as a deprecated alias for backwards compatibility.
-/// New code should use `log_phi_pi_fibonacci`. The naming change is
-/// architectural: the phi-pi-fibonacci substrate is the unit of
-/// measurement, not the golden ratio in isolation.
-#[deprecated(note = "use log_phi_pi_fibonacci instead — phi-alone is the outdated baseline, phi-pi-fibonacci is the substrate")]
-pub fn log_phi(n: f64) -> f64 {
-    n.ln() / PHI.ln()
+/// largest_attractor_at_most(n) — greatest Fibonacci attractor ≤ |n|,
+/// sign-preserving. For `n == 0` returns 0. For `|n|` smaller than the
+/// smallest positive attractor (1), returns 0.
+///
+/// Used by chunking / partitioning operations that need the largest
+/// attractor that "fits" within a remaining budget — e.g. the
+/// `harmonic_split` builtin walking down the attractor table greedily.
+/// Substrate-canonical replacement for ad-hoc `[1,2,3,5,8,...,610]`
+/// reverse linear scans.
+pub fn largest_attractor_at_most(value: i64) -> i64 {
+    let abs_v = value.unsigned_abs();
+    if abs_v == 0 {
+        return 0;
+    }
+    // FIBONACCI is sorted ascending, with FIBONACCI[0] = 0 and
+    // FIBONACCI[1] = FIBONACCI[2] = 1. Walk from the top and take the
+    // first entry ≤ |value|.
+    let mut found: u64 = 0;
+    for &f in FIBONACCI.iter().rev() {
+        if f <= abs_v {
+            found = f;
+            break;
+        }
+    }
+    let signed = found as i64;
+    if value < 0 { -signed } else { signed }
 }
 
 impl fmt::Display for SearchStats {
@@ -575,9 +594,31 @@ mod tests {
     }
 
     #[test]
-    fn test_log_phi() {
-        let val = log_phi(1000.0);
-        assert!(val > 0.0);
-        assert!(val < 20.0); // log_phi(1000) ≈ 6.8
+    fn test_log_phi_pi_fibonacci_monotonic_positive() {
+        // log_phi_pi_fibonacci should be strictly increasing for n > 1.
+        let small = log_phi_pi_fibonacci(10.0);
+        let medium = log_phi_pi_fibonacci(1000.0);
+        let large = log_phi_pi_fibonacci(63_245_986.0);
+        assert!(small > 0.0);
+        assert!(medium > small);
+        assert!(large > medium);
+    }
+
+    #[test]
+    fn test_largest_attractor_at_most_basics() {
+        // Exact attractor → itself.
+        assert_eq!(largest_attractor_at_most(89), 89);
+        assert_eq!(largest_attractor_at_most(610), 610);
+        // Between attractors → largest below.
+        assert_eq!(largest_attractor_at_most(100), 89);
+        assert_eq!(largest_attractor_at_most(700), 610);
+        // Sign preserved.
+        assert_eq!(largest_attractor_at_most(-100), -89);
+        // Zero stays zero.
+        assert_eq!(largest_attractor_at_most(0), 0);
+        // Reaches into the new range (old 16-entry table topped at 610).
+        assert_eq!(largest_attractor_at_most(2_000_000), 1_346_269);
+        assert_eq!(largest_attractor_at_most(63_245_986), 63_245_986);
+        assert_eq!(largest_attractor_at_most(80_000_000), 63_245_986);
     }
 }

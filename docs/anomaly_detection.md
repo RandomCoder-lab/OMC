@@ -4,21 +4,23 @@
 
 ## TL;DR
 
+Numbers reflect the substrate-fill (Phase 2, 2026-05-15) where the library's `_bucket_log` now routes through `log_phi_pi_fibonacci` end-to-end. The Phase 1 K=500 win on NSL-KDD (365 vs 351) was traded for that architectural consistency. See `SUBSTRATE_CHANGES.md` for the full diff.
+
 | Dataset | Top-K | Harmonic | IsolationForest | Winner |
 |---|---|:---:|:---:|---|
 | Credential stuffing (synthesized, multi-dim) | K=10 | **10/10** | 7/10 | **Harmonic** |
-| Credential stuffing | K=25 | **25/25** | 17/25 | Harmonic |
-| Credential stuffing | K=50 | **50/50** | 40/50 | Harmonic |
+| Credential stuffing | K=25 | **24/25** | 17/25 | Harmonic |
+| Credential stuffing | K=50 | **49/50** | 40/50 | Harmonic |
 | Attack zoo: exfiltration + scraping + DDoS | K=10×3 | **30/30** | unmeasured | Harmonic (all 100%) |
-| Power-law latency outliers (synthesized, 1-D) | K=5 | **4/5** | 0/5 | **Harmonic** |
-| Power-law latency outliers | K=30 | 5/30 | **15/30** | IF |
+| Power-law latency outliers (synthesized, 1-D) | K=5 | 1/5 | 0/5 | both struggle |
+| Power-law latency outliers | K=30 | 12/30 | **15/30** | IF |
 | NAB realKnownCause (1-D time series) | K=10 windows | 7/19 | 7/19 | **Tie** |
-| **NSL-KDD network intrusion (real)** | K=10 | 7/10 | **9/10** | **IF** |
-| NSL-KDD | K=50 | 42/50 | **45/50** | IF |
+| **NSL-KDD network intrusion (real)** | K=10 | 6/10 | **9/10** | **IF** |
+| NSL-KDD | K=50 | 43/50 | **45/50** | IF |
 | NSL-KDD | K=100 | 78/100 | **92/100** | IF |
-| NSL-KDD | K=500 | **365/500** | 351/500 | **Harmonic** (post-substrate-refactor) |
+| NSL-KDD | K=500 | 302/500 | **351/500** | IF |
 
-**The pattern:** harmonic wins on *structural* anomalies (rare combinations of normal-looking values), loses on *magnitude* anomalies (values that are simply unusual in scale). NAB and NSL-KDD are mostly magnitude anomalies; credential stuffing is structural.
+**The pattern:** harmonic still wins decisively on *structural* anomalies (rare combinations of normal-looking values — credential stuffing, attack zoo). On *magnitude* anomalies (NAB, NSL-KDD, power-law top-K), IF leads. The Phase-2 substrate-fill widened IF's lead on volumetric data — see Result 5 for the trade.
 
 ---
 
@@ -163,27 +165,29 @@ The NAB result documents what doesn't work — and where the next architectural 
 
 ---
 
-## Result 5: NSL-KDD network intrusion (mixed — substrate-refactor flipped K=500)
+## Result 5: NSL-KDD network intrusion (IF leads — substrate-fill traded the K=500 crossover)
 
 **Setup:** Real labeled network intrusion dataset from University of New Brunswick. 22,544 captured connections; we use a 5000-row sample with 2147 normal + 2853 attacks across many classes (neptune DoS, mscan, satan, smurf, warezmaster, etc.). Each row has 41 features; we use 6 numeric ones (duration, src/dst bytes, count, srv_count, dst_host_count).
 
-**Result (post-substrate-refactor, 2026-05-15):**
+**Result (post-substrate-fill, 2026-05-15 Phase 2):**
 ```
                      K=10    K=50    K=100   K=500
   IsolationForest    9/10    45/50   92/100   351/500
-  OMC harmonic       7/10    42/50   78/100   365/500
+  OMC harmonic       6/10    43/50   78/100   302/500
 ```
 
-IsolationForest wins at low K (9/10 vs 7/10) and through K=100; harmonic crosses over and wins at K=500 (365 vs 351). The K=500 result is +17 over the pre-refactor measurement (348/500) — the new `log_phi_pi_fibonacci` substrate uses a 40-entry attractor table extending to 63M, vs the old 16-entry table that saturated at 610. NSL-KDD's `src_bytes` and `dst_bytes` features routinely exceed millions; the old substrate compressed every large attack-magnitude to the same near-zero resonance score and the detector couldn't distinguish them. The new substrate sees finer per-row gradients on volumetric attacks.
+IsolationForest leads at every K. The headline `harmonic_anomaly` win at K=500 from Phase 1 (365 vs 351) was traded away in Phase 2 (substrate-fill) for architectural completeness — see `SUBSTRATE_CHANGES.md`.
+
+**Why the trade:** Phase 1 refactored `compute_resonance` to route through `log_phi_pi_fibonacci`'s 40-entry attractor table (reaches 63M). That refactor alone, with the library's bucket function still using log10, drove K=500 up to 365/500 — a genuine win on volumetric data because resonance scoring suddenly had room to discriminate large byte-counts.
+
+Phase 2 extended the substrate to the bucket function itself (`_bucket_log` now calls `log_phi_pi_fibonacci(v)` instead of `py_call(math, "log10", v)`). Substrate-tempo bucketing has ~1.5 buckets per base-10 decade, which spreads NSL-KDD's heavy-tailed `src_bytes`/`dst_bytes` across multiple attractors (377, 610, 987, …) instead of clumping them all at 377 like log10 did. The clumping was *helping* the score function discriminate big spikes; spreading them out across attractors *hurts* recall on volumetric attacks. Net: −63 at K=500.
+
+**The honest read:** harmonic with log10 bucketing genuinely beat IF at K=500 on NSL-KDD; harmonic with substrate-tempo bucketing does not. The Architect chose substrate purity over the K=500 win. The result table here is what the shipped library produces under the substrate-fill regime.
 
 Looking at IF's top-10 picks: 9 of 10 are labeled `smurf` (a volumetric ICMP flood attack — huge byte counts).
 Looking at harmonic's top-10 picks: a mix of `mscan` (port scanning), `warezmaster` (privilege escalation), `back` (buffer overflow), `smurf`.
 
-**Why IF still leads at low K:** NSL-KDD's labeled attacks are dominated by *volumetric* events — DoS floods with massive byte counts. IF picks magnitude outliers first; the labeled attacks at the top of any reasonable score distribution ARE the most extreme magnitudes. IF's job is finding "the biggest spike"; the dataset rewards that.
-
-**Why harmonic catches up at K=500:** look at the *diversity* of what each detector flags. IF stacks on smurf because every smurf row looks the same in magnitude space. Harmonic finds mscan + warezmaster + back + smurf — multiple distinct attack patterns. By the time you've spent 500 alerts, harmonic has surfaced more unique attack types and more total true positives.
-
-For an SRE on a tight alert budget hunting *known* threats, IF is still the right tool (9/10 vs 7/10 at K=10). For *threat hunting* — investigating broadly to find anything anomalous — harmonic's broader coverage (365 vs 351 at K=500) becomes the winning trade.
+**Why harmonic still surfaces diverse attack types:** the score function still rewards "rare combination across dims" — the structural-anomaly signal that picks credential stuffing perfectly. NSL-KDD's labeled attacks are dominated by *volumetric* events, which is structurally IF's regime; harmonic still surfaces mscan/warezmaster/back diversity, just at lower precision than the log10-bucketing version did.
 
 **Reproduction:**
 ```bash

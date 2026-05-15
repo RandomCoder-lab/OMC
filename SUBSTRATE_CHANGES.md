@@ -252,3 +252,88 @@ The "IF wins on volumetric" framing in `docs/anomaly_detection.md` needs softeni
 2. **README's "Where harmonic detection actually wins" table** — replace NSL-KDD K=100/500 entries; add "+17 at K=500 from substrate refactor (2026-05-15)" note.
 3. **No changes needed** for credential stuffing, attack zoo, power-law, NAB sections — those numbers held.
 4. **PAIN_POINTS.md** — no substrate-dependent claims; unchanged.
+
+---
+
+# Phase 2 — Substrate Fill-in (same day, 2026-05-15)
+
+After the validation sweep above, the Architect declared `log_phi_pi_fibonacci` THE base algorithm of all of OMC and asked for a comprehensive audit + migration of every site that uses or should use the substrate. Five Bucket-B findings (sites that bypassed the substrate via Python `math.log10`/`math.log` round-trips or hardcoded Fibonacci arrays) plus one deprecated alias removal.
+
+## Migrations applied
+
+| ID | File / location | Old | New | Type |
+|---|---|---|---|---|
+| B1 | `examples/lib/harmonic_anomaly.omc` `_bucket_log` | `py_call(math, "log10", v) * 50` then `fold` | `log_phi_pi_fibonacci(v) * 50` then `fold` | substrate-tempo |
+| B2 | `examples/lib/harmonic_anomaly.omc` `score` | `-py_call(math, "log", p)` | `log_phi_pi_fibonacci(1.0/p)` (monotonic) | substrate-routed |
+| B3 | `examples/lib/harmonic_clustering.omc` `_bucket_log` | `py_call(math, "log10", v)` | `log_phi_pi_fibonacci(v) / log_phi_pi_fibonacci(10.0)` (decade-rescale: substrate-routed computation, log10-equivalent output) | substrate-routed |
+| B4 | `omnimcode-core/src/interpreter.rs` `harmonic_split` | hardcoded `[1,2,3,5,8,...,610]` 14-entry array | `phi_pi_fib::largest_attractor_at_most(remaining)` — new helper, 40-entry table reaches 63M | substrate-canonical |
+| B5 | `examples/datascience/multidim_anomaly.omc` and `anomaly_detection.omc` | inline copies of B1/B2 patterns | mirrored to substrate-tempo | substrate-tempo |
+| D2 | `omnimcode-core/src/phi_pi_fib.rs` | deprecated `log_phi(n)` alias | DELETED — new code uses `log_phi_pi_fibonacci` | DEPRECATION removed |
+
+New helper added: `phi_pi_fib::largest_attractor_at_most(value: i64) -> i64` — sign-preserving, returns the greatest attractor ≤ |value|. Replaces ad-hoc reverse linear scans over hardcoded Fibonacci arrays. Two new unit tests pin its behavior (basics + large-magnitude range that the old 16-entry table couldn't reach).
+
+## Architectural decision: substrate purity over benchmark numbers
+
+The Architect was presented with three resolution options for B1 (the bucket function in harmonic_anomaly) after observing that **substrate-tempo bucketing measurably hurts empirical results on real heavy-tailed data**:
+
+| Option | Substrate-routed | Empirical impact |
+|---|---|---|
+| Revert B1 to log10 (via OMC's native log builtin) | NO | Restores all numbers |
+| Decade-rescale (window-dressing route) | yes (mathematically equivalent to log10) | Restores all numbers |
+| **Keep current substrate-tempo (CHOSEN)** | **YES, fully** | **K=500 NSL-KDD: 365 → 302 (−63)** |
+
+The Architect chose substrate purity. The substrate now governs magnitude-slicing semantics throughout OMC, even where its grain (~1.5 buckets per base-10 decade) produces empirically worse anomaly recall than base-10 decades would.
+
+## Validation: empirical impact of the fill-in
+
+Engine parity and infrastructure tests all held:
+
+- 44/45 functional examples byte-identical TW vs VM (the diverger is `benchmarks.omc` — timing-only, same as before)
+- 149/149 Rust unit tests pass (was 148; one removed via D2, two added for `largest_attractor_at_most` and `log_phi_pi_fibonacci` monotonicity)
+- 18/18 OMC harmonic-lib tests pass (after decade-rescale fix to `harmonic_clustering`)
+- NAB realKnownCause: 7/19 covered, NEUTRAL
+- Attack zoo: 30/30, NEUTRAL
+
+Anomaly benchmarks (the substrate-sensitive sites):
+
+| Benchmark | Phase-1 substrate refactor | Phase-2 substrate fill-in | Verdict |
+|---|---|---|---|
+| Credential stuffing K=10 | 10/10 | 10/10 | NEUTRAL |
+| Credential stuffing K=25 | 25/25 | 24/25 | UNIMPROVEMENT (−1) |
+| Credential stuffing K=50 | 50/50 | 49/50 | UNIMPROVEMENT (−1) |
+| Credential stuffing K=100 | 50/100 | 50/100 | NEUTRAL |
+| Power-law K=5 (alert budget) | **4/5** | 1/5 | **UNIMPROVEMENT (−3)** |
+| Power-law K=10 | 5/10 | 3/10 | UNIMPROVEMENT (−2) |
+| Power-law K=20 | 5/20 | 7/20 | IMPROVEMENT (+2) |
+| Power-law K=30 | 5/30 | 12/30 | IMPROVEMENT (+7) |
+| NSL-KDD K=10 | 7/10 | 6/10 | UNIMPROVEMENT (−1) |
+| NSL-KDD K=50 | 42/50 | 43/50 | IMPROVEMENT (+1) |
+| NSL-KDD K=100 | 78/100 | 78/100 | NEUTRAL |
+| **NSL-KDD K=500** | **365/500** | 302/500 | **UNIMPROVEMENT (−63)** |
+
+The pattern: substrate-tempo bucketing **trades low-K precision for high-K-on-spread-data**. Where the old log10-bucketing concentrated big spikes into a single attractor (e.g. all DoS-attack byte counts landing in bucket-377), substrate-tempo spreads them across multiple attractors (377/610/987/...), which weakens "biggest spike wins" alerting but improves diversity at high K. Real-world heavy-tailed data (NSL-KDD's volumetric DoS) is the worst case for this trade — those attacks were structurally the same and benefited from concentration.
+
+## What's groundbreaking, what's an unimprovement
+
+**GROUNDBREAKING** — Phase 2:
+- The substrate is now THE base algorithm everywhere. Five sites that bypassed it via Python round-trips or hardcoded arrays are now routed through `phi_pi_fib::*`. Architectural completeness over benchmark numbers.
+- New helper `largest_attractor_at_most` retires the last hardcoded Fibonacci array inside core (`harmonic_split` was the holdout).
+
+**UNIMPROVEMENT** — Phase 2:
+- NSL-KDD K=500: 365 → 302. We lose the "harmonic beats IF on volumetric data at K=500" claim from Phase 1. This was the most-cited Phase-1 win and it's been deliberately traded for substrate consistency.
+- Power-law K=5 (alert budget): 4/5 → 1/5. The headline "harmonic surfaces structural anomalies before magnitude outliers" claim weakens — at top-5 we now mostly miss.
+- Credential stuffing K=25/K=50: 25→24, 50→49. Small slippage on the synthetic benchmark that was a Phase-1 anchor.
+
+**DEPRECATION** — Phase 2:
+- `phi_pi_fib::log_phi` deleted. New code uses `log_phi_pi_fibonacci`. The substrate naming convention is now consistent.
+
+## Doc updates needed
+
+1. **README's "Where harmonic detection actually wins" table** — Phase-2 numbers replace Phase-1 numbers. The K=500 win flips back to a tie (302 vs 351 → IF leads). The K=5 power-law win weakens.
+2. **`docs/anomaly_detection.md`** — Result 5 NSL-KDD K=500 narrative needs to drop the "harmonic now beats IF" framing; the K=500 crossover from Phase 1 is gone.
+3. **`SUBSTRATE_CHANGES.md`** (this doc) — captures the Phase-2 trade in full so future readers know the choice was deliberate.
+
+## What's NOT in scope of this fill-in (deferred)
+
+- **D3: HBit harmony substrate-routing.** `hbit.rs:43` uses Euclidean `1.0/(1.0+diff)`; the dual-band α/β/harmony channel doesn't yet speak substrate units. The Architect flagged this has "bigger implications" and deferred to its own session. Next on the queue.
+- **LLM evolution experiments (Experiments 0-9).** Developed ON the new substrate; no migration needed but worth a separate audit pass to identify which findings would've failed under the old substrate (substrate-aware vs substrate-dependent classification).

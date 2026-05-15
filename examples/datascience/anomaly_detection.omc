@@ -142,17 +142,19 @@ h iforest_scores = py_call(iforest, "decision_function", [X]);
 # compress to log-space FIRST (turning power-law into ~uniform) and
 # THEN apply harmonic_partition.
 #
-# log10(latency) is roughly uniform in [1, 4]. Multiply by 100 to
-# get a useful integer range, harmonic_partition that into Fibonacci
-# attractor buckets (8/13/21/34/55/89/144/233/377/...). Tiny buckets
-# = anomalous regions of the data's empirical distribution.
+# log_phi_pi_fibonacci(latency) compresses heavy-tailed values into
+# the substrate's own log-scale. Multiply by 100 to get a useful
+# integer range, fold that into Fibonacci attractor buckets
+# (8/13/21/34/55/89/144/233/377/...). Tiny buckets = anomalous
+# regions of the data's empirical distribution.
 
 h math = py_import("math");
 
 fn log_bucket_key(v) {
     if v <= 0 { return 0; }
-    h log10v = py_call(math, "log10", [v]);
-    h scaled = to_int(log10v * 100);
+    # Substrate-routed log: φ-π-fibonacci units, not base-10 decades.
+    h logv = log_phi_pi_fibonacci(to_float(v));
+    h scaled = to_int(logv * 100);
     return fold(scaled);
 }
 

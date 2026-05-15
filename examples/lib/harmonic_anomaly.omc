@@ -31,20 +31,21 @@
 
 import "examples/lib/np.omc" as np;
 
-h _math = py_import("math");
-
 # ---- Bucketing per dim ---------------------------------------------------
 # Three bucketing strategies depending on dim type:
 #   "discrete" — value IS the bucket (status codes, endpoint IDs)
-#   "log"      — fold(log10(v) * 50) — for numeric ranges spanning
-#                multiple magnitudes (latency, bytes)
+#   "log"      — fold(log_phi_pi_fibonacci(v) * 50) — substrate-routed
+#                log bucketing for ranges spanning multiple magnitudes
+#                (latency, bytes). Uses OMC's canonical φ-π-fibonacci
+#                substrate so buckets align with the attractor lattice
+#                rather than arbitrary base-10 decades.
 #   "modulo"   — fold(v) — for periodic small ints (hour-of-day)
 #
 # Default: "log" if numeric and varies, else "discrete".
 
 fn _bucket_log(v) {
     if v <= 0 { return 0; }
-    h logv = py_call(_math, "log10", [v]);
+    h logv = log_phi_pi_fibonacci(to_float(v));
     return fold(to_int(logv * 50));
 }
 fn _bucket_modulo(v) { return fold(to_int(v)); }
@@ -137,7 +138,12 @@ fn score(detector, row) {
         # Critical: float division, not int division.
         h p = to_float(count) / n;
         if p <= 0 { p = 1.0 / to_float(n); }
-        total = total + (0 - py_call(_math, "log", [p]));
+        # Substrate-routed rarity. -log(p) = log(1/p); use the
+        # φ-π-fibonacci substrate so rarity is measured in the same
+        # units as resonance/HIM elsewhere in OMC. Monotonic transform
+        # of natural log — ranking preserved, absolute scores in
+        # substrate units.
+        total = total + log_phi_pi_fibonacci(1.0 / p);
         di = di + 1;
     }
     return total;

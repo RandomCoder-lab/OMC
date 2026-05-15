@@ -3626,23 +3626,24 @@ impl Interpreter {
                 }
                 let s = self.eval_expr(&args[0])?.to_string();
                 let chars: Vec<char> = s.chars().collect();
-                let n = chars.len();
-                let fibs: [usize; 14] = [1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610];
+                let total_chars = chars.len();
                 let mut chunks: Vec<Value> = Vec::new();
                 let mut pos = 0;
-                while pos < n {
-                    let remaining = n - pos;
-                    // Largest Fibonacci ≤ remaining
-                    let target = fibs.iter().rev().find(|&&f| f <= remaining).copied().unwrap_or(1);
-                    let mut end = (pos + target).min(n);
+                while pos < total_chars {
+                    let remaining = total_chars - pos;
+                    // Largest attractor ≤ remaining, sourced from the
+                    // canonical substrate (40-entry table, reaches 63M).
+                    // Was a hardcoded 14-entry array saturating at 610.
+                    let target = crate::phi_pi_fib::largest_attractor_at_most(remaining as i64).max(1) as usize;
+                    let mut end = (pos + target).min(total_chars);
                     // Walk to nearest word boundary if mid-word and not at EOS
-                    if end < n {
+                    if end < total_chars {
                         // Search forward up to +5 chars for a space
                         let mut e = end;
-                        while e < n && e < end + 5 && chars[e] != ' ' && chars[e] != '\n' {
+                        while e < total_chars && e < end + 5 && chars[e] != ' ' && chars[e] != '\n' {
                             e += 1;
                         }
-                        if e < n && (chars[e] == ' ' || chars[e] == '\n') {
+                        if e < total_chars && (chars[e] == ' ' || chars[e] == '\n') {
                             end = e;
                         }
                     }
@@ -3650,7 +3651,7 @@ impl Interpreter {
                     chunks.push(Value::String(chunk));
                     pos = end;
                     // Skip the boundary space so it doesn't open the next chunk
-                    if pos < n && (chars[pos] == ' ' || chars[pos] == '\n') {
+                    if pos < total_chars && (chars[pos] == ' ' || chars[pos] == '\n') {
                         pos += 1;
                     }
                 }
