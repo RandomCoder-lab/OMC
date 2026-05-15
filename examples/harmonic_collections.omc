@@ -1,0 +1,278 @@
+# =============================================================================
+# Harmonic-distinctive collections: the OMC-only data structures
+# =============================================================================
+# Three collections that only make sense in a language with first-class
+# Fibonacci attractors and HIM scores:
+#
+#   harmonic_set        — auto-deduplicates near-fold-equivalent values
+#   harmonic_pq         — priority queue ranked by HIM score (low = dominant)
+#   harmonic_index      — Fibonacci-attractor bucketing for sub-linear lookup
+#
+# Pure-functional API (each op returns a fresh structure, mirroring the
+# OMC convention for arrays/dicts that pass by value). Built on top of
+# existing dict + fold + phi.him primitives — no new VM opcodes needed.
+#
+# Run:
+#   ./target/release/omnimcode-standalone examples/harmonic_collections.omc
+#   OMC_VM=1 ./target/release/omnimcode-standalone examples/harmonic_collections.omc
+# =============================================================================
+
+# ---- harmonic_set ---------------------------------------------------------
+# Two values are "equivalent" iff their Fibonacci attractors match. So 23
+# and 21 BOTH live on the 21-attractor; adding both leaves only the first
+# (canonical representative). 89 vs 144 stay distinct.
+#
+# Internal layout: { fold_key_as_string : original_value }. Keeps insertion
+# order via dict's BTreeMap (sorted, deterministic) and lets membership
+# tests run in O(log n) via dict_has.
+
+fn hset_new() {
+    return {};
+}
+
+fn _hset_key(v) {
+    # The fold-attractor IS the equivalence class. Stringify because dict
+    # keys are strings.
+    return concat_many("", fold(v));
+}
+
+fn hset_add(s, v) {
+    h key = _hset_key(v);
+    h out = dict_merge(s, {});   # shallow copy
+    if dict_has(out, key) == 1 {
+        return out;   # already represented on this attractor
+    }
+    dict_set(out, key, v);
+    return out;
+}
+
+fn hset_has(s, v) {
+    return dict_has(s, _hset_key(v));
+}
+
+fn hset_len(s) {
+    return dict_len(s);
+}
+
+fn hset_items(s) {
+    return dict_values(s);
+}
+
+# Set union — right-hand wins on attractor collision (matches dict_merge
+# semantics so users don't have to remember a different convention).
+fn hset_union(a, b) {
+    return dict_merge(a, b);
+}
+
+# ---- harmonic_pq ----------------------------------------------------------
+# Priority queue ranked by HIM score. Lower HIM = more harmonically
+# dominant (a "purer" value, closer to an attractor). pop returns the
+# dominant element.
+#
+# Internal layout: { him_score_str : list_of_values_with_that_score }.
+# A list-of-lists handles HIM ties naturally. Iteration order from
+# dict_keys is sorted-string-ascending — which happens to put "0.000"
+# before "0.382" before "0.459", giving us the right priority order
+# WITHOUT a sort step on each pop. Saves real time on large queues.
+
+fn hpq_new() {
+    return {};
+}
+
+fn _hpq_him_key(v) {
+    # Use 6-decimal padding so dict's lexicographic key sort matches
+    # numeric order. phi.him returns a float in [0, 1].
+    h h_score = phi.him(v);
+    h scaled = to_int(h_score * 1000000);
+    # Zero-pad to 7 digits so lexicographic order matches numeric.
+    h s = concat_many("", scaled);
+    h n = str_len(s);
+    h pad_count = 7 - n;
+    h padded = "";
+    h i = 0;
+    while i < pad_count {
+        padded = padded + "0";
+        i = i + 1;
+    }
+    return padded + s;
+}
+
+fn hpq_push(q, v) {
+    h key = _hpq_him_key(v);
+    h out = dict_merge(q, {});
+    h existing = dict_get(out, key, []);
+    h fresh = arr_concat(existing, [v]);
+    dict_set(out, key, fresh);
+    return out;
+}
+
+# Returns [value, new_queue]. If empty: [null, q].
+fn hpq_pop(q) {
+    h ks = dict_keys(q);
+    if arr_len(ks) == 0 {
+        return [null, q];
+    }
+    # First key is the lowest HIM score — that's the dominant element.
+    h k = arr_get(ks, 0);
+    h bucket = dict_get(q, k);
+    h v = arr_get(bucket, 0);
+    h rest = arr_slice(bucket, 1, arr_len(bucket));
+    h out = dict_merge(q, {});
+    if arr_len(rest) == 0 {
+        dict_del(out, k);
+    } else {
+        dict_set(out, k, rest);
+    }
+    return [v, out];
+}
+
+fn hpq_peek(q) {
+    h ks = dict_keys(q);
+    if arr_len(ks) == 0 { return null; }
+    h bucket = dict_get(q, arr_get(ks, 0));
+    return arr_get(bucket, 0);
+}
+
+fn hpq_len(q) {
+    h ks = dict_keys(q);
+    h total = 0;
+    h i = 0;
+    while i < arr_len(ks) {
+        total = total + arr_len(dict_get(q, arr_get(ks, i)));
+        i = i + 1;
+    }
+    return total;
+}
+
+# ---- harmonic_index -------------------------------------------------------
+# An index that buckets every key by its Fibonacci attractor. Lookup of
+# a query key folds the query to its attractor and returns the entire
+# bucket — sub-linear in the FULL data set, but linear within an
+# attractor. For data that clusters along the Fibonacci spine
+# (resonance-aligned domains), this is significantly faster than a
+# naive scan AND it surfaces "fuzzy match" semantics for free.
+#
+# Internal layout: { fold_key_str : list_of_(key, value)_pairs }.
+
+fn hidx_new() {
+    return {};
+}
+
+fn hidx_insert(idx, key, value) {
+    h k = _hset_key(key);
+    h out = dict_merge(idx, {});
+    h existing = dict_get(out, k, []);
+    h pair = [key, value];
+    h fresh = arr_concat(existing, [pair]);
+    dict_set(out, k, fresh);
+    return out;
+}
+
+# Returns the array of (key, value) pairs whose key folds to the same
+# attractor as `query`. Empty array if no match.
+fn hidx_lookup(idx, query) {
+    return dict_get(idx, _hset_key(query), []);
+}
+
+# All values across all buckets. Useful for length / iteration.
+fn hidx_size(idx) {
+    h ks = dict_keys(idx);
+    h total = 0;
+    h i = 0;
+    while i < arr_len(ks) {
+        total = total + arr_len(dict_get(idx, arr_get(ks, i)));
+        i = i + 1;
+    }
+    return total;
+}
+
+# How many distinct attractors hold data? Useful for sparsity diagnostics.
+fn hidx_attractors(idx) {
+    return dict_len(idx);
+}
+
+# =============================================================================
+# Demo
+# =============================================================================
+
+println("=== harmonic_set: dedup-by-attractor ======================");
+h s = hset_new();
+s = hset_add(s, 21);
+s = hset_add(s, 23);    # folds to 21 — duplicate, ignored
+s = hset_add(s, 89);
+s = hset_add(s, 91);    # folds to 89 — duplicate, ignored
+s = hset_add(s, 144);
+s = hset_add(s, 200);   # folds to 233 — distinct
+println(concat_many("  added 6 values, len = ", hset_len(s),
+    " (because 23 folds to 21, 91 folds to 89)"));
+println(concat_many("  members: ", hset_items(s)));
+println(concat_many("  has(20)?  ", hset_has(s, 20),
+    " (folds to 21, present)"));
+println(concat_many("  has(50)?  ", hset_has(s, 50),
+    " (folds to 55, absent)"));
+println("");
+
+println("=== harmonic_pq: HIM-ranked priority queue ================");
+h q = hpq_new();
+q = hpq_push(q, 100);   # off-attractor → high HIM
+q = hpq_push(q, 89);    # exact Fibonacci → HIM = 0
+q = hpq_push(q, 50);    # near 55 → middling HIM
+q = hpq_push(q, 144);   # exact Fibonacci → HIM = 0
+q = hpq_push(q, 23);    # near 21
+println(concat_many("  pushed 5 values, len = ", hpq_len(q)));
+println(concat_many("  peek (most dominant) = ", hpq_peek(q)));
+println("  popping in HIM order:");
+h still = q;
+while hpq_len(still) > 0 {
+    h pair = hpq_pop(still);
+    h v = arr_get(pair, 0);
+    still = arr_get(pair, 1);
+    println(concat_many("    pop -> ", v, "  (HIM=", phi.him(v), ")"));
+}
+println("");
+
+println("=== harmonic_index: attractor-bucketed lookup =============");
+h idx = hidx_new();
+# Insert 12 user records keyed by user_id (the harmonic value).
+idx = hidx_insert(idx, 21, "alice");
+idx = hidx_insert(idx, 23, "bob");      # same attractor as alice (21)
+idx = hidx_insert(idx, 19, "carol");    # also folds to 21
+idx = hidx_insert(idx, 89, "dave");
+idx = hidx_insert(idx, 90, "eve");      # folds to 89
+idx = hidx_insert(idx, 144, "frank");
+idx = hidx_insert(idx, 142, "grace");   # folds to 144
+idx = hidx_insert(idx, 233, "heidi");
+idx = hidx_insert(idx, 55, "ivan");
+idx = hidx_insert(idx, 8, "judy");
+idx = hidx_insert(idx, 3, "kim");
+idx = hidx_insert(idx, 377, "leo");
+
+println(concat_many("  total records: ", hidx_size(idx),
+    " across ", hidx_attractors(idx), " attractors"));
+
+println("  query: who is near user_id 22?");
+h hits = hidx_lookup(idx, 22);
+h k = 0;
+while k < arr_len(hits) {
+    h pair = arr_get(hits, k);
+    println(concat_many("    user_id=", arr_get(pair, 0),
+        " -> ", arr_get(pair, 1)));
+    k = k + 1;
+}
+
+println("  query: who is near user_id 91?");
+h hits2 = hidx_lookup(idx, 91);
+h k2 = 0;
+while k2 < arr_len(hits2) {
+    h pair = arr_get(hits2, k2);
+    println(concat_many("    user_id=", arr_get(pair, 0),
+        " -> ", arr_get(pair, 1)));
+    k2 = k2 + 1;
+}
+
+println("  query: who is near user_id 999? (folds off-spine to 610)");
+h hits3 = hidx_lookup(idx, 999);
+println(concat_many("    -> ", arr_len(hits3), " hits"));
+
+println("");
+println("=== Done ====================================================");

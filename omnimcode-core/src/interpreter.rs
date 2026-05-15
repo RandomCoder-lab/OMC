@@ -2103,17 +2103,14 @@ impl Interpreter {
             // Variadic: concat_many(a, b) / concat_many(a, b, c) / concat_many(a, b, c, d).
             // Renders numerics as bare values (89, 1.5) not as HInt(...) display form.
             "concat_many" => {
+                // to_display_string for every arg — produces "42" not
+                // "HInt(42, φ=..., HIM=...)" and recurses correctly
+                // through arrays/dicts so `concat_many("xs: ", xs)`
+                // shows "[1, 2, 3]" not the verbose Array dump.
                 let mut out = String::new();
                 for a in args {
                     let v = self.eval_expr(a)?;
-                    let s = match v {
-                        Value::HInt(h) => h.value.to_string(),
-                        Value::HFloat(f) => format!("{}", f),
-                        Value::String(s) => s,
-                        Value::Bool(b) => b.to_string(),
-                        other => other.to_string(),
-                    };
-                    out.push_str(&s);
+                    out.push_str(&v.to_display_string());
                 }
                 Ok(Value::String(out))
             }
