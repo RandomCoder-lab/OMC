@@ -35,12 +35,12 @@ pub struct Interpreter {
     /// reason as test_failures: a plain OMC global wouldn't propagate
     /// to nested assertion calls.
     test_current_name: std::cell::RefCell<String>,
-    /// Names of currently-executing user functions, innermost-last.
-    /// Pushed at the entry of invoke_user_function, popped on exit
-    /// (success OR failure). Used to render call traces on errors —
-    /// future work will also attach source line numbers via per-op
-    /// metadata in CompiledFunction.
-    call_stack: Vec<String>,
+    /// (Function name, call-site position) for currently-executing
+    /// user functions, innermost-last. The position is the line of
+    /// the SITE where this fn was called from — that's what the user
+    /// sees in stack traces. The fn's own internal line numbers don't
+    /// belong here; they'd need per-statement position tracking.
+    call_stack: Vec<(String, crate::ast::Pos)>,
 }
 
 impl Interpreter {
@@ -394,11 +394,12 @@ impl Interpreter {
                     return Expression::Call {
                         name: "safe_divide".to_string(),
                         args: vec![l, r],
+                        pos: crate::ast::Pos::unknown(),
                     };
                 }
                 Expression::Div(Box::new(l), Box::new(r))
             }
-            Expression::Call { name, args } => {
+            Expression::Call { name, args, pos } => {
                 // Typo check at call site. Prefer user-defined fns
                 // (arities.keys()) over builtins as tiebreaker — a typo
                 // is more likely meant for a user fn than a builtin.
@@ -436,7 +437,11 @@ impl Interpreter {
                         healed_args.truncate(expected);
                     }
                 }
-                Expression::Call { name: healed_name, args: healed_args }
+                // Preserve the original source position through the
+                // heal pass — we don't reposition synthesized call
+                // nodes, but we DO keep the original pos so traces
+                // still point at the user's code.
+                Expression::Call { name: healed_name, args: healed_args, pos }
             }
             // Recursive walk for the rest of the structural expressions.
             Expression::Add(l, r) => Expression::Add(
@@ -966,8 +971,8 @@ impl Interpreter {
                 let rv = self.eval_expr(r)?.to_int();
                 Ok(Value::HInt(HInt::new(lv.wrapping_shr((rv & 63) as u32))))
             }
-            Expression::Call { name, args } => {
-                self.call_function(name, args)
+            Expression::Call { name, args, pos } => {
+                self.call_function_at(name, args, *pos)
             }
             Expression::Resonance(e) => {
                 // Match the call_function("res", ...) path: return HFloat resonance score.
@@ -1009,10 +1014,10 @@ impl Interpreter {
                         let args = vec![(**l).clone(), (**r).clone()];
                         self.call_function("safe_divide", &args)
                     }
-                    Expression::Call { name, args } if name == "arr_get" && args.len() == 2 => {
+                    Expression::Call { name, args, .. } if name == "arr_get" && args.len() == 2 => {
                         self.call_function("safe_arr_get", args)
                     }
-                    Expression::Call { name, args } if name == "arr_set" && args.len() == 3 => {
+                    Expression::Call { name, args, .. } if name == "arr_set" && args.len() == 3 => {
                         self.call_function("safe_arr_set", args)
                     }
                     _ => self.eval_expr(inner),
@@ -1169,6 +1174,22 @@ impl Interpreter {
             self.locals.pop();
         }
         result
+    }
+
+    /// Position-tagged variant — the call site's source position
+    /// becomes the line attached to the new stack frame.
+    fn call_function_at(
+        &mut self,
+        name: &str,
+        args: &[Expression],
+        pos: crate::ast::Pos,
+    ) -> Result<Value, String> {
+        if let Some((params, body)) = self.functions.get(name).cloned() {
+            return self.invoke_user_function_at(name, &params, &body, args, pos);
+        }
+        // Module-qualified calls and builtins don't push frames, so
+        // pos doesn't matter — fall through to the unpositioned path.
+        self.call_function(name, args)
     }
 
     fn call_function(&mut self, name: &str, args: &[Expression]) -> Result<Value, String> {
@@ -3348,6 +3369,19 @@ impl Interpreter {
         body: &[Statement],
         args: &[Expression],
     ) -> Result<Value, String> {
+        // Convenience for call sites we haven't position-tagged yet
+        // (HOFs, reflective dispatch, module imports).
+        self.invoke_user_function_at(name, params, body, args, crate::ast::Pos::unknown())
+    }
+
+    fn invoke_user_function_at(
+        &mut self,
+        name: &str,
+        params: &[String],
+        body: &[Statement],
+        args: &[Expression],
+        call_site: crate::ast::Pos,
+    ) -> Result<Value, String> {
         let mut eval_args = Vec::new();
         for arg in args {
             eval_args.push(self.eval_expr(arg)?);
@@ -3370,7 +3404,7 @@ impl Interpreter {
         // Push a call-stack frame so error messages can show
         // who-called-whom. The frame is popped in BOTH the success
         // and error paths so the trace doesn't leak across calls.
-        self.call_stack.push(name.to_string());
+        self.call_stack.push((name.to_string(), call_site));
 
         let mut exec_err: Option<String> = None;
         for stmt in body {
@@ -3387,11 +3421,15 @@ impl Interpreter {
         self.locals.pop();
 
         if let Some(e) = exec_err {
-            // Append our own frame and rethrow. Each invoke_user_function
-            // up the stack does the same, so the final message lists
-            // every frame innermost-first. Mirrors VM run_function's
-            // error-path formatting.
-            return Err(format!("{}\n  at {}", e, display_frame_name(name)));
+            // Append our own frame + the call site and rethrow.
+            // Each invoke_user_function up the stack does the same,
+            // so the final message lists every frame innermost-first.
+            return Err(format!(
+                "{}\n  at {}{}",
+                e,
+                display_frame_name(name),
+                format_call_site(call_site),
+            ));
         }
 
         let result = self.return_value.take().unwrap_or(Value::Null);
@@ -3506,11 +3544,11 @@ impl Interpreter {
         self.return_value.take()
     }
 
-    /// Push a call-stack frame (function name only for now). The VM
-    /// calls this at the entry of run_function so error traces work
-    /// for VM-dispatched calls too, not just tree-walk.
-    pub fn push_call_frame(&mut self, name: &str) {
-        self.call_stack.push(name.to_string());
+    /// Push a call-stack frame. The VM calls this at the entry of
+    /// run_function so error traces work for VM-dispatched calls too.
+    /// Pass Pos::unknown() if the call site isn't tracked.
+    pub fn push_call_frame(&mut self, name: &str, call_site: crate::ast::Pos) {
+        self.call_stack.push((name.to_string(), call_site));
     }
 
     /// REPL-facing: evaluate a single expression in the current
@@ -3535,8 +3573,12 @@ impl Interpreter {
             return msg.to_string();
         }
         let mut out = msg.to_string();
-        for fname in self.call_stack.iter().rev() {
-            out.push_str(&format!("\n  at {}", display_frame_name(fname)));
+        for (fname, pos) in self.call_stack.iter().rev() {
+            out.push_str(&format!(
+                "\n  at {}{}",
+                display_frame_name(fname),
+                format_call_site(*pos),
+            ));
         }
         out
     }
@@ -3861,6 +3903,18 @@ pub fn display_frame_name(name: &str) -> &str {
         "<lambda>"
     } else {
         name
+    }
+}
+
+/// Render a call-site position as the `(line:col)` suffix shown
+/// after the frame name in stack traces. Returns the empty string
+/// for synthesized frames (Pos::unknown) so traces stay clean
+/// when the call wasn't position-tagged.
+pub fn format_call_site(p: crate::ast::Pos) -> String {
+    if p.line == 0 {
+        String::new()
+    } else {
+        format!(" ({})", p)
     }
 }
 

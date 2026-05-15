@@ -1,5 +1,32 @@
 // src/ast.rs - Abstract syntax tree definitions
 
+/// Source position. 1-indexed for human-friendly error reports.
+/// Lives in ast.rs (rather than parser.rs) so AST nodes can carry
+/// positions without depending on parser internals.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Pos {
+    pub line: u32,
+    pub col: u32,
+}
+
+impl Pos {
+    /// Sentinel for synthesized AST nodes that don't trace back to
+    /// a real source location (e.g. nodes created by the heal pass).
+    pub fn unknown() -> Self {
+        Pos { line: 0, col: 0 }
+    }
+}
+
+impl std::fmt::Display for Pos {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.line == 0 {
+            write!(f, "<unknown>")
+        } else {
+            write!(f, "{}:{}", self.line, self.col)
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Statement {
     Print(Expression),
@@ -170,10 +197,13 @@ pub enum Expression {
     Shl(Box<Expression>, Box<Expression>),
     Shr(Box<Expression>, Box<Expression>),
     
-    // Function call
+    // Function call. `pos` is the source position of the callee
+    // identifier — used for stack-trace line numbers. Synthesized
+    // calls (e.g. from the heal pass) use Pos::unknown().
     Call {
         name: String,
         args: Vec<Expression>,
+        pos: Pos,
     },
     
     // Harmonic operations

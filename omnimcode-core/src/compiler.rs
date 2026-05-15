@@ -48,6 +48,10 @@ pub struct Compiler {
     /// existing call_first_class_function dispatches by name through
     /// the interpreter (tree-walk), not through module.functions.
     pending_lambda_asts: Vec<(String, Vec<String>, Vec<Statement>)>,
+    /// Source position attached to each emitted op, indexed by op
+    /// position. Built up alongside `ops`; finish() resizes to match
+    /// the final op count, padding any missing tail with Pos::unknown().
+    op_positions: Vec<crate::ast::Pos>,
 }
 
 impl Compiler {
@@ -61,6 +65,7 @@ impl Compiler {
             fn_return_types: std::collections::HashMap::new(),
             pending_lambdas: Vec::new(),
             pending_lambda_asts: Vec::new(),
+            op_positions: Vec::new(),
         }
     }
 
@@ -74,6 +79,7 @@ impl Compiler {
             fn_return_types: std::collections::HashMap::new(),
             pending_lambdas: Vec::new(),
             pending_lambda_asts: Vec::new(),
+            op_positions: Vec::new(),
         }
     }
 
@@ -210,8 +216,17 @@ impl Compiler {
     }
 
     fn emit(&mut self, op: Op) -> usize {
+        self.emit_at(op, crate::ast::Pos::unknown())
+    }
+
+    /// Emit an op with an attached source position. Used by Op::Call
+    /// emission so VM-thrown errors can point back at the call site
+    /// in the original source.
+    fn emit_at(&mut self, op: Op, pos: crate::ast::Pos) -> usize {
         let idx = self.ops.len();
         self.ops.push(op);
+        // Keep op_positions in lockstep so the VM can index either.
+        self.op_positions.push(pos);
         idx
     }
 
@@ -396,7 +411,11 @@ impl Compiler {
                 self.compile_expr(e)?;
                 self.emit(Op::Fold1);
             }
-            Expression::Call { name, args } => {
+            Expression::Call { name, args, pos } => {
+                // Capture the call-site position for the bytecode emit
+                // so VM-thrown errors can show the same "(line:col)" the
+                // tree-walk side does. Stored on Op::Call directly.
+                let _site_pos = *pos;
                 // Mutating built-ins must be specialized so the VM doesn't
                 // route them through vm_call_builtin's synthetic-arg shim
                 // (which would otherwise lose the mutation — the shim
@@ -512,7 +531,9 @@ impl Compiler {
                 for arg in args {
                     self.compile_expr(arg)?;
                 }
-                self.emit(Op::Call(name.clone(), args.len()));
+                // emit_at attaches the call-site pos so VM-thrown
+                // errors surface a line number in stack traces.
+                self.emit_at(Op::Call(name.clone(), args.len()), _site_pos);
             }
             Expression::Safe(inner) => {
                 // H.5 host-level: lower `safe <expr>` to the matching
@@ -533,13 +554,13 @@ impl Compiler {
                         self.compile_expr(r)?;
                         self.emit(Op::Call("safe_divide".to_string(), 2));
                     }
-                    Expression::Call { name, args } if name == "arr_get" && args.len() == 2 => {
+                    Expression::Call { name, args, .. } if name == "arr_get" && args.len() == 2 => {
                         for arg in args {
                             self.compile_expr(arg)?;
                         }
                         self.emit(Op::Call("safe_arr_get".to_string(), 2));
                     }
-                    Expression::Call { name, args } if name == "arr_set" && args.len() == 3 => {
+                    Expression::Call { name, args, .. } if name == "arr_set" && args.len() == 3 => {
                         // H.5.2: bare-VAR first arg → emit SafeArrSetNamed
                         // so the mutation propagates back through VM scope.
                         // Non-VAR shapes (e.g. nested array) fall through
@@ -910,6 +931,14 @@ impl Compiler {
             // Pre-size the inline call cache to match the op count. All slots
             // start uncached (0); the VM fills them in on first execution.
             call_cache: (0..n).map(|_| std::cell::Cell::new(0u8)).collect(),
+            // Pad op_positions to match. Compiler appends the correct
+            // pos at every emit site that knows it (Op::Call); other
+            // ops get Pos::unknown() and never appear in traces.
+            op_positions: {
+                let mut v = self.op_positions;
+                v.resize(n, crate::ast::Pos::unknown());
+                v
+            },
         }
     }
 }

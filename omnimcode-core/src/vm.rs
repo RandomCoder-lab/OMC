@@ -14,12 +14,19 @@ pub struct Vm {
     /// Reuses tree-walk Interpreter for built-in stdlib + module imports
     /// + Value handling. The VM only takes over the hot dispatch path.
     interp: Interpreter,
+    /// Call-site position for the next run_function entry. Set by
+    /// Op::Call dispatch from func.op_positions[ip-1]; read on
+    /// frame push then reset to Pos::unknown(). Side-channel
+    /// avoids threading a new parameter through every run_function
+    /// call site (HOFs, vm_invoke_callable, reflective `call`).
+    next_call_site: crate::ast::Pos,
 }
 
 impl Vm {
     pub fn new() -> Self {
         Vm {
             interp: Interpreter::new(),
+            next_call_site: crate::ast::Pos::unknown(),
         }
     }
 
@@ -49,8 +56,15 @@ impl Vm {
         // Skip stack-frame tracking for __main__ — "in __main__" is
         // noise; the top-level module isn't a user-issued call.
         let track_frame = func.name != "__main__";
+        // Drain the side-channel call site set by Op::Call dispatch.
+        // Reset it immediately so a child frame doesn't accidentally
+        // inherit our parent's site.
+        let call_site = std::mem::replace(
+            &mut self.next_call_site,
+            crate::ast::Pos::unknown(),
+        );
         if track_frame {
-            self.interp.push_call_frame(&func.name);
+            self.interp.push_call_frame(&func.name, call_site);
         }
         let result = self.run_function_inner(func, args, module);
         if track_frame {
@@ -65,9 +79,10 @@ impl Vm {
                 self.interp.vm_pop_scope();
                 if track_frame {
                     Err(format!(
-                        "{}\n  at {}",
+                        "{}\n  at {}{}",
                         e,
-                        crate::interpreter::display_frame_name(&func.name)
+                        crate::interpreter::display_frame_name(&func.name),
+                        crate::interpreter::format_call_site(call_site),
                     ))
                 } else {
                     Err(e)
@@ -269,6 +284,13 @@ impl Vm {
                     // Phase Q: inline call cache. `ip` has been incremented
                     // past the current op, so the cache slot is at `ip - 1`.
                     let cache_ip = ip - 1;
+                    // Stash the call-site source position so any user-fn
+                    // entry through run_function (direct, HOF, reflective
+                    // `call`) can record it on the new frame.
+                    self.next_call_site = func.op_positions
+                        .get(cache_ip)
+                        .copied()
+                        .unwrap_or(crate::ast::Pos::unknown());
                     let cached = func.call_cache.get(cache_ip).map(|c| c.get()).unwrap_or(0);
                     let is_user = match cached {
                         1 => true,

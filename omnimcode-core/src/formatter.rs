@@ -302,7 +302,7 @@ fn format_expr(expr: &Expression, out: &mut String) {
         }
         Expression::Shl(l, r) => format_binop(l, "<<", r, out),
         Expression::Shr(l, r) => format_binop(l, ">>", r, out),
-        Expression::Call { name, args } => {
+        Expression::Call { name, args, .. } => {
             out.push_str(name);
             out.push('(');
             for (i, a) in args.iter().enumerate() {

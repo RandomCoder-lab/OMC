@@ -82,28 +82,9 @@ pub enum Token {
     Eof,
 }
 
-/// Source position. 1-indexed for human-friendly error reports.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Pos {
-    pub line: u32,
-    pub col: u32,
-}
-
-impl Pos {
-    pub fn unknown() -> Self {
-        Pos { line: 0, col: 0 }
-    }
-}
-
-impl std::fmt::Display for Pos {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.line == 0 {
-            write!(f, "<unknown>")
-        } else {
-            write!(f, "{}:{}", self.line, self.col)
-        }
-    }
-}
+// `Pos` lives in crate::ast — re-exported here so existing
+// `crate::parser::Pos` references continue to compile.
+pub use crate::ast::Pos;
 
 pub struct Lexer {
     input: Vec<char>,
@@ -707,6 +688,7 @@ impl Parser {
                         value: Expression::Call {
                             name: "arr_new".to_string(),
                             args: vec![size_expr, Expression::Number(0)],
+                            pos: Pos::unknown(),
                         },
                         is_harmonic: true,
                     });
@@ -1456,7 +1438,7 @@ impl Parser {
                 if args.len() == 1 {
                     Ok(Expression::Resonance(Box::new(args.into_iter().next().unwrap())))
                 } else {
-                    Ok(Expression::Call { name: "res".to_string(), args })
+                    Ok(Expression::Call { name: "res".to_string(), args, pos: Pos::unknown() })
                 }
             }
             Token::Fold => {
@@ -1473,7 +1455,7 @@ impl Parser {
                 if args.len() == 1 {
                     Ok(Expression::Fold(Box::new(args.into_iter().next().unwrap())))
                 } else {
-                    Ok(Expression::Call { name: "fold".to_string(), args })
+                    Ok(Expression::Call { name: "fold".to_string(), args, pos: Pos::unknown() })
                 }
             }
             Token::Ident(_) => self.parse_ident_expr(),
@@ -1486,6 +1468,10 @@ impl Parser {
     }
 
     fn parse_ident_expr(&mut self) -> Result<Expression, String> {
+        // Capture position BEFORE consuming the identifier — this is
+        // the position attached to any Expression::Call we build for
+        // stack-trace line numbers.
+        let callee_pos = self.current_pos();
         let mut name = self.parse_ident()?;
 
         // Handle module-qualified calls: phi.fold, core.fib, phi.res, etc.
@@ -1529,7 +1515,7 @@ impl Parser {
                     }
                 }
                 self.expect(Token::RParen)?;
-                Ok(Expression::Call { name, args })
+                Ok(Expression::Call { name, args, pos: callee_pos })
             }
             Token::LBracket => {
                 self.advance();

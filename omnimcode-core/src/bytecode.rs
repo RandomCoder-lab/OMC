@@ -199,6 +199,15 @@ pub struct CompiledFunction {
     /// borrow (typical for monomorphic ICs). Cell<u8> is Copy + Clone so
     /// the surrounding struct stays cleanly cloneable.
     pub call_cache: Vec<std::cell::Cell<u8>>,
+    /// Source position of each op (for stack-trace line numbers).
+    /// Same length as `ops`; entries default to Pos::unknown() for
+    /// ops that don't trace back to user source (e.g. compiler-
+    /// synthesized arr_new initializers, fall-through nulls). The
+    /// VM consults this when pushing a call frame so VM-thrown
+    /// errors get the same "(line:col)" suffix the tree-walk side
+    /// produces. Cell<()> would suffice but Pos is Copy so a plain
+    /// Vec works.
+    pub op_positions: Vec<crate::ast::Pos>,
 }
 
 /// A compiled module / program.
@@ -226,6 +235,7 @@ impl Default for Module {
                 ops: Vec::new(),
                 constants: Vec::new(),
                 call_cache: Vec::new(),
+                op_positions: Vec::new(),
             },
             functions: std::collections::HashMap::new(),
             lambda_asts: Vec::new(),
