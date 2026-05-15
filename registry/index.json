@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "registry_version": 1,
+  "description": "OMNIcode official package registry. Maps short names to canonical URLs + verification hashes. Resolved by `omc --install <name>`.",
+  "packages": {
+    "np": {
+      "url": "https://raw.githubusercontent.com/sovereignlattice/omnimcode/main/examples/lib/np.omc",
+      "sha256": "2f94bcfb606976575601e3f9b915b517c0c3004a0fbb47754d191224005741d6",
+      "version": "0.1.0",
+      "description": "numpy bridge for OMC: array, mean, dot, sort, percentile, argsort"
+    },
+    "pd": {
+      "url": "https://raw.githubusercontent.com/sovereignlattice/omnimcode/main/examples/lib/pd.omc",
+      "sha256": "1dcb99d39de5e4fdc9c978009412e5d1021ee863ddf47f955559fa04762d98a4",
+      "version": "0.1.0",
+      "description": "pandas bridge for OMC: read_csv, group_by, agg_mean, fillna, apply_omc"
+    },
+    "sk": {
+      "url": "https://raw.githubusercontent.com/sovereignlattice/omnimcode/main/examples/lib/sklearn.omc",
+      "sha256": "bb1e172112eda38eaa150146aa864a8dd573e996983217b3b27904b327b6cec0",
+      "version": "0.1.0",
+      "description": "scikit-learn bridge: RandomForest, KMeans, train_test_split, accuracy"
+    },
+    "sklearn": {
+      "url": "https://raw.githubusercontent.com/sovereignlattice/omnimcode/main/examples/lib/sklearn.omc",
+      "sha256": "bb1e172112eda38eaa150146aa864a8dd573e996983217b3b27904b327b6cec0",
+      "version": "0.1.0",
+      "description": "alias for sk"
+    },
+    "requests": {
+      "url": "https://raw.githubusercontent.com/sovereignlattice/omnimcode/main/examples/lib/requests.omc",
+      "sha256": "d36165e15d06637f317499c26c4a6eeefb7481606d68299dcf56261b580ec9ee",
+      "version": "0.1.0",
+      "description": "HTTP bridge: get, post, json, fetch_json"
+    },
+    "sqlite": {
+      "url": "https://raw.githubusercontent.com/sovereignlattice/omnimcode/main/examples/lib/sqlite.omc",
+      "sha256": "c4f3d1048258d3eb8b7fb53a3e9a439150a49ffee2873e2ffd2a10d29f30693a",
+      "version": "0.1.0",
+      "description": "sqlite3 bridge: connect, execute, query, group_by"
+    },
+    "torch": {
+      "url": "https://raw.githubusercontent.com/sovereignlattice/omnimcode/main/examples/lib/torch.omc",
+      "sha256": "725c118bf7b822dc2d300abd3be0bafbd7358f87d4e1525fd2ffafca0472c4ed",
+      "version": "0.1.0",
+      "description": "PyTorch bridge: tensor, Linear, SGD, MSE loss, backward"
+    }
+  }
+}

@@ -21,6 +21,7 @@ fn main() {
             "--fmt" | "--format" | "-f" => mode = "fmt",
             "--install" | "-i" => mode = "install",
             "--list" | "-l" => mode = "list",
+            "--init" => mode = "init",
             "--help" | "-h" => mode = "help",
             other if !other.starts_with('-') => file_arg = Some(other),
             other => {
@@ -54,6 +55,7 @@ fn main() {
         }
         ("install", spec) => install_command(spec),
         ("list", _) => list_command(),
+        ("init", _) => init_command(),
         _ => unreachable!(),
     };
     if exit_code != 0 {
@@ -76,18 +78,27 @@ fn maybe_register_python(interp: &mut Interpreter) {
     omnimcode_core::python_embed::register_python_builtins(interp);
 }
 
-/// `--install [URL_OR_NAME]`. With no argument: read `omc.toml` in
-/// the current directory and install every entry in [dependencies].
-/// With a URL: fetch it and store the file under `omc_modules/`,
-/// using the basename (sans .omc) as the module name. With a name
-/// that doesn't look like a URL: error (no central registry yet —
-/// users provide explicit URLs in omc.toml).
+/// `--install [SPEC]`. SPEC can be:
 ///
-/// Eats our own dogfood: uses the embedded Python `requests` for
-/// the HTTP fetch and `tomllib` for the manifest parse. Zero new
-/// Rust dependencies.
+///   * a URL                 → fetch and store under that basename
+///   * a registry short name → look up in the central registry,
+///                             fetch, verify sha256, store
+///   * absent                → read `omc.toml` and install every
+///                             entry in [dependencies]
+///
+/// omc.toml [dependencies] entries can be:
+///
+///   * `name = "<URL>"`                   → fetch URL directly
+///   * `name = "<short-name>"`            → registry lookup
+///   * `name = { url = "...", sha256 = "..." }` → URL + verification
+///
+/// Eats our own dogfood: HTTP fetch via embedded Python `requests`,
+/// TOML parse via `tomllib`, sha256 via `hashlib`. Zero new Rust
+/// dependencies.
 fn install_command(spec: Option<&str>) -> i32 {
-    use omnimcode_core::python_embed::{install_url_via_python, parse_omc_toml_via_python};
+    use omnimcode_core::python_embed::{
+        install_url_via_python, parse_omc_toml_via_python, registry_lookup,
+    };
 
     if std::env::var("OMC_NO_PYTHON").as_deref() == Ok("1") {
         eprintln!("--install requires Python (used for HTTP fetch + TOML parse).");
@@ -95,7 +106,6 @@ fn install_command(spec: Option<&str>) -> i32 {
         return 2;
     }
 
-    // Ensure omc_modules/ exists.
     if let Err(e) = std::fs::create_dir_all("omc_modules") {
         eprintln!("install: cannot create omc_modules/: {}", e);
         return 1;
@@ -103,23 +113,30 @@ fn install_command(spec: Option<&str>) -> i32 {
 
     match spec {
         Some(spec) => {
-            let url = if spec.starts_with("http://") || spec.starts_with("https://") {
-                spec.to_string()
+            let (name, url, sha) = if spec.starts_with("http://") || spec.starts_with("https://")
+            {
+                let name = spec
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or("module")
+                    .trim_end_matches(".omc")
+                    .to_string();
+                (name, spec.to_string(), None)
             } else {
-                eprintln!("install: argument must be a URL (no central registry yet).");
-                eprintln!("        For a manifest install, run `omc --install` with no arg");
-                eprintln!("        and create an omc.toml in this directory.");
-                return 2;
+                // Treat as a registry short name.
+                match registry_lookup(spec) {
+                    Ok((url, sha)) => (spec.to_string(), url, Some(sha)),
+                    Err(e) => {
+                        eprintln!("install: {}", e);
+                        eprintln!("        Use a full URL or check the registry.");
+                        return 1;
+                    }
+                }
             };
-            // Derive name from URL basename.
-            let name = url
-                .rsplit('/')
-                .next()
-                .unwrap_or("module")
-                .trim_end_matches(".omc");
-            match install_url_via_python(name, &url) {
+            match install_url_via_python(&name, &url, sha.as_deref()) {
                 Ok(path) => {
-                    println!("installed: {} -> {}", name, path);
+                    let v = if sha.is_some() { " (sha256 ok)" } else { "" };
+                    println!("installed: {} -> {}{}", name, path, v);
                     0
                 }
                 Err(e) => {
@@ -134,10 +151,7 @@ fn install_command(spec: Option<&str>) -> i32 {
                 Ok(t) => t,
                 Err(e) => {
                     eprintln!("install: cannot read {}: {}", manifest_path, e);
-                    eprintln!("        Create one with [dependencies] entries:");
-                    eprintln!("");
-                    eprintln!("            [dependencies]");
-                    eprintln!("            np = \"https://raw.githubusercontent.com/.../np.omc\"");
+                    eprintln!("        Run `omnimcode-standalone --init` to create one.");
                     return 1;
                 }
             };
@@ -153,9 +167,25 @@ fn install_command(spec: Option<&str>) -> i32 {
                 return 0;
             }
             let mut failures = 0;
-            for (name, url) in &deps {
-                match install_url_via_python(name, url) {
-                    Ok(path) => println!("installed: {} -> {}", name, path),
+            for (name, value) in &deps {
+                // value is a URL OR a registry short name.
+                let (url, sha) = if value.starts_with("http://") || value.starts_with("https://") {
+                    (value.clone(), None)
+                } else {
+                    match registry_lookup(value) {
+                        Ok((u, s)) => (u, Some(s)),
+                        Err(e) => {
+                            eprintln!("install({}): registry lookup failed: {}", name, e);
+                            failures += 1;
+                            continue;
+                        }
+                    }
+                };
+                match install_url_via_python(name, &url, sha.as_deref()) {
+                    Ok(path) => {
+                        let v = if sha.is_some() { " (sha256 ok)" } else { "" };
+                        println!("installed: {} -> {}{}", name, path, v);
+                    }
                     Err(e) => {
                         eprintln!("install({}): {}", name, e);
                         failures += 1;
@@ -165,6 +195,70 @@ fn install_command(spec: Option<&str>) -> i32 {
             if failures > 0 { 1 } else { 0 }
         }
     }
+}
+
+/// `--init`: scaffold a new OMC project in the current directory.
+/// Creates `omc.toml` (with no dependencies yet) and `main.omc`
+/// (a hello-world). Refuses to overwrite existing files.
+fn init_command() -> i32 {
+    let toml_path = "omc.toml";
+    let main_path = "main.omc";
+    if std::path::Path::new(toml_path).exists() {
+        eprintln!("init: {} already exists — refusing to overwrite", toml_path);
+        return 1;
+    }
+    if std::path::Path::new(main_path).exists() {
+        eprintln!("init: {} already exists — refusing to overwrite", main_path);
+        return 1;
+    }
+    let toml_content = r#"# OMNIcode project manifest. Run `omnimcode-standalone --install`
+# to fetch + cache every dependency listed below into omc_modules/.
+
+[package]
+name = "my-omc-project"
+version = "0.1.0"
+description = "an omnicode project"
+
+[dependencies]
+# Short names resolve through the central registry (sha256-verified).
+# Uncomment as needed:
+#
+# np      = "np"          # numpy bridge
+# pd      = "pd"          # pandas bridge
+# sk      = "sklearn"     # scikit-learn bridge
+# requests = "requests"   # HTTP client
+# sqlite   = "sqlite"     # embedded SQL
+#
+# You can also pin to a specific URL:
+# my_lib   = "https://example.com/raw/my_lib.omc"
+"#;
+    let main_content = r#"# Welcome to OMNIcode. Edit this file, run with `omnimcode-standalone main.omc`.
+println("Hello, harmonic world.");
+
+# Try the embedded Python (always-on):
+# h np = py_import("numpy");
+# h xs = py_call(np, "arange", [10]);
+# println(concat_many("first 10 ints from numpy: ", xs));
+
+# Or import a registry package after `--install`:
+# import "np" as np;
+# println(concat_many("np.pi = ", np.pi()));
+"#;
+    if let Err(e) = std::fs::write(toml_path, toml_content) {
+        eprintln!("init: write {}: {}", toml_path, e);
+        return 1;
+    }
+    if let Err(e) = std::fs::write(main_path, main_content) {
+        eprintln!("init: write {}: {}", main_path, e);
+        return 1;
+    }
+    println!("created {} and {}", toml_path, main_path);
+    println!("");
+    println!("Next steps:");
+    println!("  edit omc.toml — uncomment deps you want");
+    println!("  omnimcode-standalone --install");
+    println!("  omnimcode-standalone main.omc");
+    0
 }
 
 /// `--list`: enumerate everything in omc_modules/.
@@ -211,15 +305,16 @@ fn print_help() {
     println!("  {} [FILE]              run a program (or start REPL if no file)", prog);
     println!("  {} --check FILE        run heal pass, print diagnostics, exit", prog);
     println!("  {} --fmt FILE          pretty-print AST as canonical OMC source", prog);
-    println!("  {} --install [URL]     install package from URL into omc_modules/", prog);
-    println!("                         (no URL = read omc.toml [dependencies])", );
+    println!("  {} --init              scaffold a new project (omc.toml + main.omc)", prog);
+    println!("  {} --install [SPEC]    install package into omc_modules/", prog);
+    println!("                         SPEC = URL, registry name, or absent (reads omc.toml)");
     println!("  {} --list              list packages installed under omc_modules/", prog);
     println!("  {} --help              this message", prog);
     println!();
     println!("omc.toml format (for --install with no arg):");
     println!("  [dependencies]");
-    println!("  np = \"https://example.com/raw/np.omc\"");
-    println!("  pd = \"https://example.com/raw/pd.omc\"");
+    println!("  np = \"np\"                                # registry name");
+    println!("  custom = \"https://example.com/raw/x.omc\" # explicit URL");
     println!();
     println!("Environment variables:");
     println!("  OMC_VM=1               execute through the Rust bytecode VM");

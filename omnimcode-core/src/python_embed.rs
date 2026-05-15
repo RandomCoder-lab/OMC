@@ -553,12 +553,92 @@ pub fn fetch_url(url: &str) -> Result<String, String> {
 }
 
 /// Fetch `url` and write to `omc_modules/<name>.omc`. Returns the
-/// final on-disk path on success.
-pub fn install_url_via_python(name: &str, url: &str) -> Result<String, String> {
+/// final on-disk path on success. If `expected_sha256` is Some,
+/// verify the body matches before writing — guards against MITM
+/// and registry corruption. Hash mismatch is a hard error.
+pub fn install_url_via_python(
+    name: &str,
+    url: &str,
+    expected_sha256: Option<&str>,
+) -> Result<String, String> {
     let body = fetch_url(url)?;
+    if let Some(want) = expected_sha256 {
+        let got = sha256_hex(body.as_bytes());
+        if got != want {
+            return Err(format!(
+                "hash mismatch — expected {}, got {} (URL may have been tampered with or registry is stale)",
+                want, got
+            ));
+        }
+    }
     let path = format!("omc_modules/{}.omc", name);
     std::fs::write(&path, body).map_err(|e| format!("write {}: {}", path, e))?;
     Ok(path)
+}
+
+/// Hex-encoded sha256 of `bytes`. Computed via embedded Python
+/// `hashlib` to avoid pulling in a Rust crypto crate. The hashlib
+/// path is cold (called once per install), so the overhead is fine.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    Python::with_gil(|py| -> PyResult<String> {
+        let hashlib = py.import_bound("hashlib")?;
+        let h = hashlib.call_method1("sha256", (bytes,))?;
+        let hex = h.call_method0("hexdigest")?;
+        hex.extract::<String>()
+    })
+    .unwrap_or_else(|_| "<sha256 failed>".to_string())
+}
+
+/// Resolve a registry entry by short name. Fetches the registry
+/// index.json (cached for the duration of the process via thread_local),
+/// looks up `name`, returns (url, sha256). None if name is not in
+/// the registry — caller can fall back to "treat as URL" or error.
+///
+/// Registry URL defaults to the canonical sovereignlattice/omnimcode
+/// repo; override with OMC_REGISTRY env var.
+pub fn registry_lookup(name: &str) -> Result<(String, String), String> {
+    let registry_url = std::env::var("OMC_REGISTRY").unwrap_or_else(|_| {
+        "https://raw.githubusercontent.com/sovereignlattice/omnimcode/main/registry/index.json"
+            .to_string()
+    });
+    let body = fetch_url(&registry_url)
+        .map_err(|e| format!("registry fetch {}: {}", registry_url, e))?;
+    Python::with_gil(|py| {
+        let json = py.import_bound("json").map_err(|e| format!("json: {}", e))?;
+        let parsed = json
+            .call_method1("loads", (body,))
+            .map_err(|e| format!("registry parse: {}", e))?;
+        let dict = parsed
+            .downcast::<PyDict>()
+            .map_err(|e| format!("registry root not a JSON object: {}", e))?;
+        let pkgs = match dict.get_item("packages") {
+            Ok(Some(p)) => p,
+            _ => return Err("registry has no 'packages' key".to_string()),
+        };
+        let pkgs_d = pkgs
+            .downcast::<PyDict>()
+            .map_err(|e| format!("packages not an object: {}", e))?;
+        let entry = match pkgs_d.get_item(name) {
+            Ok(Some(e)) => e,
+            _ => return Err(format!("'{}' not in registry", name)),
+        };
+        let entry_d = entry
+            .downcast::<PyDict>()
+            .map_err(|e| format!("entry not an object: {}", e))?;
+        let url: String = entry_d
+            .get_item("url")
+            .map_err(|e| format!("url: {}", e))?
+            .ok_or_else(|| "entry missing url".to_string())?
+            .extract()
+            .map_err(|e| format!("url extract: {}", e))?;
+        let sha: String = entry_d
+            .get_item("sha256")
+            .map_err(|e| format!("sha256: {}", e))?
+            .ok_or_else(|| "entry missing sha256".to_string())?
+            .extract()
+            .map_err(|e| format!("sha extract: {}", e))?;
+        Ok((url, sha))
+    })
 }
 
 /// Parse `omc.toml`'s `[dependencies]` table via Python's `tomllib`

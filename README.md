@@ -1,284 +1,227 @@
 # OMNIcode
 
-**A self-hosting harmonic computing language with a self-healing compiler.**
+**A self-hosting harmonic computing language with a self-healing compiler, embedded CPython, and a real package manager.**
 
-OMNIcode (OMC) is an experimental programming language built around a single architectural premise: **φ-math (Fibonacci resonance, value-danger, harmonic alignment) is not decoration — it is a decidable, cheap-to-compute substrate the compiler can reason against.** That substrate makes possible two things conventional languages structurally cannot do without external tooling:
+OMNIcode (OMC) treats φ-math (Fibonacci attractors, resonance scoring, harmonic alignment) as a *decidable substrate* the compiler reasons against. Built on top of that substrate:
 
-1. **Self-hosting at the back-end level.** The OMC compiler is written in OMC, and the bytecode the compiler produces for its own source is byte-identical to the bytecode the host-language tree-walker would produce. See `examples/self_hosting_v9b.omc` — `gen2 == gen3` of a real compiler-as-function.
-2. **Self-healing at compile time AND runtime.** The compiler can detect a working class of bugs (numeric off-by-one against Fibonacci attractors, identifier typos, dynamic divide-by-singularity, array-index out-of-bounds, missing braces / parens / semicolons) and rewrite the program — using the language's own φ-math primitives, not a hand-written rule table. See `examples/self_healing_h5.omc`.
+- **Self-hosting** at the back-end level (`gen2 == gen3` of the compiler-on-itself, [`examples/self_hosting_v9b.omc`](examples/self_hosting_v9b.omc))
+- **Self-healing** that rewrites typo'd identifiers, off-attractor literals, and divide-by-zero as the compiler runs ([`examples/self_healing_h5.omc`](examples/self_healing_h5.omc))
+- **Embedded CPython always-on** — `py_import("numpy")`, `py_call(...)`, full reach into the Python ecosystem ([`examples/datascience/titanic.omc`](examples/datascience/titanic.omc))
+- **Bidirectional callbacks** — Python can invoke OMC functions via `py_callback("name")`, useful for `df.apply(omc_fn)` patterns
+- **Package manager** — `omc --install np` resolves through a registry, sha256-verifies, caches under `omc_modules/`
+- **Harmonic-distinctive primitives** — `harmonic_index` (sub-linear lookup by attractor neighborhood), `harmonic_sort` (by HIM score), `harmonic_partition` (Fibonacci-bucketed), all in [`examples/harmonic_collections.omc`](examples/harmonic_collections.omc)
 
-This is a research artifact. It is not a production runtime. But the architectural claims above are **demonstrable, reproducible, and run on the binary in this repository.**
-
----
-
-## Two ways to read this project
-
-### For language designers and researchers
-
-OMC sits in a small category that includes Lisp, Smalltalk, and Forth: languages where the entire toolchain (read, parse, emit, execute, analyze, repair) lives inside the language itself, on a single coherent semantic substrate. What's distinctive about OMC is the **substrate**: not S-expressions, not a stack-VM convention, but **φ-math** — a value-semantic lattice with the property that "is this number on the Fibonacci geodesic?" is decidable in O(log N) and correlates with what the project calls *harmonic alignment*.
-
-The interesting consequence is that **the compiler's static analysis pass is one-line-per-check**. `is_fibonacci(n) == 0 && |Δ| ≤ 3 → flag` catches off-by-one harmonic violations. `value_danger(b) > 0.5 → rewrite a/b as safe_divide(a,b)` catches dynamic divide-by-zero. The heavy lifting lives in the math — `is_fibonacci`, `value_danger`, `harmony_value`, `fold_escape` — not in the rules. Adding a new diagnostic class is composing existing primitives, not authoring a parser pass.
-
-The math is documented in `PHI_PI_FIB_ALGORITHM.md` and the type system in `ARCHITECTURE.md`. The complete self-hosting proof is `examples/self_hosting_v9b.omc`.
-
-### For developers and engineers
-
-What you can do with OMC right now, with the binary in this repo:
-
-- **Run a Turing-complete language.** Recursion, functions, strings, arrays, mutating builtins, while loops, if/else. ~150 host primitives across strings, arrays, file I/O, type introspection, math, harmonic-math, and self-healing — full reference in `STDLIB.md`. See `examples/fibonacci.omc`, `array_ops.omc`, `strings.omc`, `stdlib_expansion.omc`.
-- **Compile OMC to bytecode AND execute that bytecode** — both stages of which can be written in OMC. The bytecode VM is faithful to the tree-walker: byte-identical output across both paths for any program in the supported feature surface.
-- **Feed broken code into a self-healing compiler.** A program with a missing semicolon, a missing `}`, a typo'd function name, an off-by-one Fibonacci constant, and a `/0` runtime crash will be **rewritten and executed to a finite answer** — no try/catch, no defensive guards. The math is the error handling.
-
-What this is **not**: a fast runtime, a production toolchain, a stable API, a deployment target. The tree-walker is in Rust (fast); the bytecode VM is in OMC running on the tree-walker (slow, for science). Single-developer experimental codebase. The point is the architectural pattern, not the throughput numbers.
+Single binary, two engines (tree-walk + bytecode VM with byte-identical output across 43 functional examples), no opt-in flags for any of this.
 
 ---
 
-## What's proven right now
-
-| Claim | File to run | What you'll see |
-|---|---|---|
-| Bytecode VM = tree-walker (semantic fixpoint) | `examples/self_hosting_v8.omc` | `✓ FIXPOINT REACHED` on two demos |
-| The compiler is a fixed point under self-application | `examples/self_hosting_v9b.omc` | `✓✓✓ ALL THREE FIXPOINTS REACHED` |
-| Self-healing across two stages (token + AST), 5 bugs healed in one source | `examples/self_healing_h3.omc` | All four demos converge; `safe(8) → 8` on the integrated case |
-| User-declared runtime self-healing via `safe` keyword | `examples/self_healing_h4.omc` | `compute(144, 0) → 144` — runtime crash converted to finite answer on attractor |
-| Array-bounds healing — out-of-bounds reads become attractor-landing | `examples/self_healing_h5.omc` | Loop walking 8 indices off a 5-element array; every output has `φ=1.000` |
-| Host-level `safe` keyword — works in any OMC program, not just the self-healing demos | `examples/safe_keyword_host.omc` | `safe 89/0 → 89`, `safe arr_get(xs, 999) → 20`, `safe arr_set(xs, 999, 99)` mutates xs[1] |
-| Python-tier standard library: 16 new built-ins added 2026-05-14 | `examples/stdlib_expansion.omc` | `str_split`, `arr_sort`, `read_file`/`write_file`, `type_of`, `gcd`, `now_ms` and more — see `STDLIB.md` for the full reference |
-| First-class functions + higher-order array ops | `examples/harmonic_variants.omc` | `arr_map(xs, double)`, `arr_filter(xs, gt_5)`, `arr_reduce(xs, add, 0)`, plus `arr_any/all/find` |
-| OMNIcode harmonic variants — operations that USE the φ-math substrate | `examples/harmonic_variants.omc` | `harmonic_write_file` gates writes by resonance ≥ 0.5; `harmonic_sort` puts Fibonacci values first; `harmonic_split` chunks strings at φ-aligned word boundaries; `harmonic_partition` buckets by nearest attractor |
-| Closures over local scope (snapshot capture) | `examples/test_runner.omc` | `fn make_adder(n) { return fn(x) { return x + n; }; }` — partial application, currying, captured-state patterns |
-| Built-in test runner | `examples/test_runner.omc` | `fn test_*()` functions auto-discovered via `defined_functions()` and dispatched via `call(name, args)`. `assert_eq` / `assert_array_eq` etc. record failures in host-side state |
-| Mutable closures (Rc<RefCell> shared capture) | `examples/test_runner.omc` | Bank-account pattern: multiple closures from `make_account(100)` share the same `balance` binding; mutations propagate across all of them |
-| Module system with namespace aliasing | `examples/module_demo.omc` | `import "math_module.omc" as math` then `math.fib_up_to(100)` → `0,1,1,2,3,5,8,13,21,34,55,89`. Idempotent re-import; literal-path resolution |
-| Benchmark suite | `examples/benchmarks.omc` | Times `int_add` / `str_concat` / `arr_push` / `recursive fib(22)` / `is_fibonacci` etc. with per-op ns. Run with `OMC_VM=1` to compare against the bytecode VM. Direct-call variant shows the VM's 2.4× speedup on `recursive_fib`. |
-| Host-side self-healing pass (`OMC_HEAL=1`) | `examples/heal_pass_demo.omc` | Iterative until fixpoint. Any OMC program benefits: harmonic-violation rewrites, typo correction with user-fn-preferred tiebreaker, literal `/0` → `safe_divide`, and arity auto-pad/truncate at call sites |
-| Heal-on-runtime-error (`OMC_HEAL_RETRY=1`) | any program — catches `Undefined function: fbi` etc. | Execution errors trigger one round of healing + retry. Combines static and dynamic discovery into a single auto-recover pass |
-| CLI flags `--check` / `--fmt` | `omnimcode-standalone --check examples/heal_pass_demo.omc` | `--check` runs the heal pass and reports diagnostics without executing. `--fmt` pretty-prints AST as canonical OMC source. `--help` lists all environment variables |
-| VM-native reflective dispatch | `OMC_VM=1` on `examples/benchmarks.omc` | `call(fn, args)` intercepted at `Op::Call("call")` site; targets in `module.functions` dispatch via `run_function`. Reflective and direct calls now produce identical numbers. Test runner runs cleanly under `OMC_VM=1` |
-| Closures on the bytecode VM | `examples/test_runner.omc` (run with `OMC_VM=1`) | Lambda expressions now compile under VM. Bank-account pattern produces identical output on tree-walk and VM. Test runner runs cleanly via `OMC_VM=1` |
-
-Run any of these with the binary built from this repo:
-
-```bash
-./target/release/omnimcode-standalone examples/self_hosting_v9b.omc
-./target/release/omnimcode-standalone examples/self_healing_h4.omc
-```
-
----
-
-## The arc
-
-How the project reached the claims above. Each phase has a working demo file you can run today — every entry in this section is a real artifact in this repo, not a roadmap item.
-
-### Phase V — Self-hosting (front-end through back-end)
-
-The arc that closed the bootstrap loop.
-
-- **V.1 / V.2 — Lexer in OMC** (`examples/self_hosting_lexer.omc`, `self_hosting_lexer_v2.omc`)
-  An OMC program that tokenizes OMC source. Multi-char operators, float literals, escape decoding.
-- **V.3 — Parser in OMC** (`examples/self_hosting_parser.omc`)
-  Recursive-descent parser; produces nested-tagged-array AST. Surfaced the type-aware-equality bug; fixed at host level.
-- **V.4 — Codegen in OMC** (`examples/self_hosting_codegen.omc`)
-  AST → OMC source pretty-printer. Closes the parse↔emit half of the loop.
-- **V.5 — Lex/parse/print fixpoint** (`examples/self_hosting_fixpoint.omc`)
-  `source → tokens → AST → source' → tokens' → AST'` with `AST == AST'`. 6/6 tests pass.
-- **V.6 — Bytecode encoder + stack-VM executor in OMC** (`examples/self_hosting_bytecode.omc`)
-  Integer arithmetic, while, if/else. Discovered OMC's pass-by-value array semantics; encoder uses return-and-rebind with relative jumps.
-- **V.7 — Functions, recursion, call frames** (`examples/self_hosting_v7.omc`)
-  `fib(10) = 55` via 177 recursive CALL/RETURN cycles on the OMC-written executor.
-- **V.7b — Strings, arrays, builtin dispatch** (`examples/self_hosting_v7b.omc`)
-  `LOAD_STR`, `MAKE_ARR`, `CALL_BUILTIN` open the bytecode VM to non-numeric data.
-- **V.7c — Mutating builtins via named-store opcodes** (`examples/self_hosting_v7c.omc`)
-  `ARR_PUSH_NAMED`, `ARR_SET_NAMED` close the pass-by-value trap.
-- **V.8 — Round-trip fixpoint** (`examples/self_hosting_v8.omc`)
-  Same OMC source, two paths (tree-walk vs OMC-bytecode-VM), byte-identical output.
-- **V.8b — Full compiler subset round-trips** (`examples/self_hosting_v8b.omc`)
-  `#` comments, `-> type` annotations, `break` — all the syntax the compiler source itself uses.
-- **V.9 — UTF-8 safety via `str_chars`** (`examples/self_hosting_v9.omc`)
-  Host-side fix to the byte-vs-char-index mismatch that broke V.8b's lexer on non-ASCII source.
-- **V.9b — Gen2 == Gen3 of a compiler** (`examples/self_hosting_v9b.omc`)
-  A real mini-compiler-in-OMC (`mini_enc`: NUM/VAR/BIN expression encoder), run two ways on the same hardcoded input AST. Both produce identical bytecode arrays. **The textbook self-hosting closure property at compiler-bootstrap level.**
-
-### Phase H — Self-Healing Compiler
-
-Built on top of the Phase V self-hosting stack. The compiler now uses φ-math to detect AND repair a working class of bugs.
-
-- **H.1 — Harmonic + typo diagnostics** (`examples/self_healing_compiler.omc`)
-  AST walker. `is_fibonacci(n) == 0 && |Δ| ≤ 3 → flag and rewrite to nearest Fibonacci`. Levenshtein-distance typo correction against the defined-name table. Demo input has 2 bugs, both fixed; output lands on Fibonacci attractor.
-- **H.2 — Iterative loop + divide-by-singularity** (`examples/self_healing_h2.omc`)
-  `heal_until_fixpoint`. `value_danger(b) > 0.5 → rewrite a/b as safe_divide(a, b)`. `numerator / 0` becomes a working program returning 8 (attractor).
-- **H.3 — Parse-level recovery** (`examples/self_healing_h3.omc`)
-  Token-level repair: missing braces, parens, semicolons. The integrated demo handles **five bugs across two stages** (token + AST) in one source. Output: `safe(8) → 8` on attractor.
-- **H.4 — `safe` keyword** (`examples/self_healing_h4.omc`)
-  User-declared runtime self-healing. `safe count / mod` unconditionally rewrites to `safe_divide(count, mod)` even when `mod` is a variable the static healer can't reach. `compute(144, 0)` returns 144 instead of crashing.
-- **H.5 — Array-bounds healing** (`examples/self_healing_h5.omc`)
-  Extends `safe` to array accesses. `safe arr_get(xs, idx)` rewrites to `safe_arr_get`, which folds the index onto the nearest Fibonacci attractor and modulos by `arr_len(xs)`. Out-of-bounds reads become total, deterministic, attractor-landing finite values. Demo: a loop reading 8 indices off a 5-element array — every value has `φ=1.000`.
-
-The full design rationale, milestone-by-milestone, is in `CHANGELOG.md`.
-
----
-
-## Quick start
-
-### Build
+## 30-second hello
 
 ```bash
 git clone https://github.com/RandomCoder-lab/OMC.git
 cd OMC
-cargo build --release
+PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 cargo build --release
+./target/release/omnimcode-standalone --init
+./target/release/omnimcode-standalone main.omc
 ```
 
-### Run a program
+`--init` creates `omc.toml` + a hello-world `main.omc`. Edit, run, you're going.
 
-```bash
-./target/release/omnimcode-standalone examples/fibonacci.omc
+## 60-second wow
+
+OMC reaches into Python and does end-to-end machine learning:
+
+```omc
+import "examples/lib/sklearn.omc" as sk;
+import "examples/lib/np.omc" as np;
+
+# Train + score a random forest on the iris dataset
+h iris = sk.load_iris();
+h X = arr_get(iris, 0);
+h y = arr_get(iris, 1);
+h split = sk.train_test_split(X, y, 0.3);
+h model = sk.random_forest_classifier(100);
+sk.fit(model, arr_get(split, 0), arr_get(split, 2));
+h preds = sk.predict(model, arr_get(split, 1));
+println(concat_many("RF accuracy: ", sk.accuracy_score(arr_get(split, 3), preds)));
 ```
 
-### Interactive REPL
-
-```bash
-./target/release/omnimcode-standalone
-```
-
-### See the headline demos
-
-```bash
-# The compiler is a fixed point under self-application:
-./target/release/omnimcode-standalone examples/self_hosting_v9b.omc
-
-# Five bugs (token-level + AST-level) healed in one source, runs to completion:
-./target/release/omnimcode-standalone examples/self_healing_h3.omc
-
-# `safe` keyword: runtime guard against dynamic singularities:
-./target/release/omnimcode-standalone examples/self_healing_h4.omc
-```
+For the full real-world demo, run `examples/datascience/titanic.omc` — Kaggle Titanic via seaborn (~120 lines of OMC), loading 891 passengers in ~280ms, training a 100-tree forest, comparing baseline vs harmonic-augmented features. Zero Rust extensions for the user.
 
 ---
 
-## Try the language
+## What's in the box
 
-A taste of OMC syntax. The grammar is defined in `omnimcode-core/src/parser.rs`. The complete standard library — ~150 host primitives organized by category — is in `STDLIB.md`.
+### Language
+- φ-math substrate with `HInt` (resonance, HIM, value_danger as primitives)
+- Pattern matching with attractor ranges (`0..21 => ...`), type tags, alternation
+- First-class functions, mutable closures (Rc-shared environments)
+- Try / catch with stack traces that include source line numbers
+- Two interpreters: tree-walk (fast iteration) and bytecode VM (~2× faster on hot paths)
+- Self-healing pass (`OMC_HEAL=1`) — typo correction, harmonic-violation rewrites, dynamic divide-by-zero rescue
 
-### Hello world
+### Toolchain
+- `omnimcode-standalone main.omc` — run a program (or REPL with no args)
+- `--init` — scaffold a new project (omc.toml + main.omc)
+- `--install [SPEC]` — install package by registry name OR URL into `omc_modules/`
+- `--list` — enumerate installed modules
+- `--check FILE` — heal pass + diagnostics, no execution (CI-friendly)
+- `--fmt FILE` — pretty-print AST as canonical OMC source
 
-```omnicode
-print("Hello, harmonic world!");
-```
+### Embedded CPython (always-on)
+- `py_import("numpy")`, `py_call(handle, "method", [args])`, `py_get`, `py_eval`, `py_exec`
+- `py_call_kw` / `py_call_fn_kw` for kwargs-aware Python APIs
+- `py_call_raw` to skip auto-conversion when chaining ops
+- `py_callback("omc_fn_name")` — wraps an OMC fn as a Python callable for `df.apply` etc.
+- Auto Value↔PyObject conversion: scalars, lists, tuples, dicts, numpy ndarrays
+- Set `OMC_NO_PYTHON=1` to skip Python initialisation
 
-### Recursive Fibonacci
+### Integration libraries (written in OMC, all in [`examples/lib/`](examples/lib/))
+- `np.omc` — numpy bridge (array, mean, dot, sort, percentile, argsort)
+- `pd.omc` — pandas bridge (read_csv/json/parquet/excel, group_by, fillna, apply_omc)
+- `sklearn.omc` — RandomForest, KMeans, train_test_split, accuracy
+- `requests.omc` — HTTP client (get, post, json, fetch_json)
+- `sqlite.omc` — embedded SQL via Python's sqlite3
+- `torch.omc` — PyTorch tensors, nn.Linear, optimizers
 
-```omnicode
-fn fib(n) {
-    if n < 2 { return n; }
-    return fib(n - 1) + fib(n - 2);
-}
-print(fib(13));   # → 233 (itself on the Fibonacci attractor)
-```
-
-### Self-healing semantics
-
-```omnicode
-fn compute(numerator, divisor) {
-    return safe numerator / divisor;   # `safe` opts into runtime guards
-}
-print(compute(144, 0));   # → 144, not a crash
-```
+Each one is 30-110 lines of OMC. Fork them or write your own.
 
 ### Harmonic primitives
+- `harmonic_set` — dedupe by Fibonacci attractor equivalence
+- `harmonic_pq` — priority queue ranked by HIM score
+- `harmonic_index` — sub-linear lookup by attractor neighborhood
+- `harmonic_sort`, `harmonic_partition`, `harmonic_dedupe` — bulk ops
+- `fold(n)` — snap to nearest Fibonacci attractor
+- `phi.res(n)`, `phi.him(n)`, `phi.fold(n)` — direct φ-math access
 
-```omnicode
-print(is_fibonacci(144));    # 1 — on the φ-geodesic
-print(is_fibonacci(145));    # 0 — close miss, off by 1
-print(harmony_value(89));    # 1.0 — Fibonacci attractor
-print(value_danger(0));      # 1.0 — singularity (exp(-|0|) = 1)
-print(fold_escape(0));       # 1 — escape from the singularity
+---
+
+## Demos worth running
+
+| File | Story |
+|---|---|
+| [`examples/self_hosting_v9b.omc`](examples/self_hosting_v9b.omc) | Compiler-in-OMC produces byte-identical bytecode under self-application |
+| [`examples/self_healing_h5.omc`](examples/self_healing_h5.omc) | Out-of-bounds array reads become finite attractor-landing values |
+| [`examples/lisp.omc`](examples/lisp.omc) | Mini Scheme interpreter in OMC — closures, recursion, quote, let, lambda |
+| [`examples/json.omc`](examples/json.omc) | JSON parser + serializer in OMC, recursive descent via mutable-closure cursor |
+| [`examples/recommend/recommend.omc`](examples/recommend/recommend.omc) | MovieLens 100k recommendation engine — `harmonic_index` over real ratings |
+| [`examples/datascience/titanic.omc`](examples/datascience/titanic.omc) | Kaggle Titanic via seaborn → harmonic feature engineering → sklearn classifier |
+| [`examples/datascience/movielens_harmonic.omc`](examples/datascience/movielens_harmonic.omc) | pandas-loaded movielens → harmonic_partition → numpy stats per bucket |
+| [`examples/datascience/harmonic_ml.omc`](examples/datascience/harmonic_ml.omc) | sklearn wine + Python→OMC callback via `numpy.vectorize` |
+
+---
+
+## Package manager
+
+```bash
+# Install one package by registry name (sha256-verified)
+omnimcode-standalone --install np
+
+# Install everything in omc.toml
+omnimcode-standalone --install
+
+# Install from arbitrary URL
+omnimcode-standalone --install https://example.com/raw/my_lib.omc
+```
+
+Manifest format:
+
+```toml
+[package]
+name = "my-omc-project"
+version = "0.1.0"
+
+[dependencies]
+np      = "np"            # registry name (verified)
+sklearn = "sklearn"       # registry name
+custom  = "https://example.com/raw/my_lib.omc"   # explicit URL
+```
+
+Installed modules land under `omc_modules/<name>.omc`. `import "name";` resolves the local copy first. Override the registry with `OMC_REGISTRY=<url>` for private forks.
+
+Submit a package: PR an entry to [`registry/index.json`](registry/index.json).
+
+---
+
+## Architecture notes
+
+OMC has **two semantic engines** that produce byte-identical output:
+- **Tree-walk interpreter** — what you debug against, what `OMC_HEAL` runs through
+- **Bytecode VM** — `OMC_VM=1` to enable; ~2× faster on hot paths
+
+Both share:
+- The same `Value` enum, including Rc-shared `Array` / `Dict` for O(1) clone
+- The same builtin dispatch surface, with VM hot-path inlining for arr_get / dict_get / str_concat
+- The same `register_builtin` API for embedders to register host functions
+
+Self-healing is a static AST-rewrite pass with five diagnostic classes:
+- Off-attractor numeric literal → snap to nearest Fibonacci
+- Identifier typo → Levenshtein-closest match in defined-name table
+- Literal `/0` → `safe_divide(...)`
+- User-fn arity mismatch → auto-pad/truncate args
+- Parser-level recovery (missing braces, parens, semicolons)
+
+Run with `OMC_HEAL=1` to apply iteratively to fixpoint, `OMC_HEAL_RETRY=1` to retry once after a runtime error. Both opt-in — production code shouldn't ship with healing on.
+
+The full historical arc lives in [CHANGELOG.md](CHANGELOG.md). The φ-math substrate is documented in [PHI_PI_FIB_ALGORITHM.md](PHI_PI_FIB_ALGORITHM.md).
+
+---
+
+## Performance
+
+| Workload | Tree-walk | VM | Notes |
+|---|---:|---:|---|
+| MovieLens 10k aggregate | 29 ms | 33 ms | Was 16s before Rc-shared collections (552× speedup) |
+| MovieLens 100k full pipeline | 0.92 sec | 1.0 sec | Builds 9724-entry harmonic_index in 345ms |
+| recursive_fib(22) | 54 ms | 26 ms | VM 2.08× faster |
+| arr_map(double) over 1k × 200 reps | 131 ms | 59 ms | VM 2.22× faster |
+
+OMC is now usable for real-world data sizes (10k → 100k records routine). The architectural blocker (Value::Array clone-on-mutation) was killed in commit `d3c29b6` by switching to `Rc<RefCell<>>` semantics — collections now pass by reference like Python's mutable types.
+
+---
+
+## Status & honest limits
+
+OMC is a research artifact built around an architectural premise. What works:
+- Self-hosting compiler with self-healing (V.9b + H.5)
+- Real ML pipelines via embedded Python (np / pd / sklearn / requests / sqlite)
+- Two-engine parity (43/43 functional examples byte-identical)
+- Package manager with registry + sha256 verification
+
+What's not production-grade:
+- Single-developer experimental codebase
+- No formal type system (the static analysis is φ-math, not Hindley-Milner)
+- Heavy operations (huge collections, parallelism, async) aren't a focus
+- Some `OMC_HEAL` rewrites are over-eager on domain values (see [`examples/recommend/PAIN_POINTS.md`](examples/recommend/PAIN_POINTS.md) MED-3)
+
+Open known issues live in [PAIN_POINTS.md](examples/recommend/PAIN_POINTS.md). Most surfaced from a single real-world stress test (10k MovieLens recommendation engine) — exactly as a research project should.
+
+---
+
+## Quick reference
+
+```bash
+omnimcode-standalone FILE                 # run a program
+omnimcode-standalone                      # REPL
+omnimcode-standalone --init               # scaffold project
+omnimcode-standalone --install [SPEC]     # package install
+omnimcode-standalone --list               # list installed
+omnimcode-standalone --check FILE         # lint via heal pass
+omnimcode-standalone --fmt FILE           # pretty-print
+omnimcode-standalone --help               # all flags + env vars
+
+OMC_VM=1               # use bytecode VM
+OMC_HEAL=1             # auto-heal AST iteratively
+OMC_HEAL_RETRY=1       # retry after runtime errors
+OMC_NO_PYTHON=1        # skip embedded Python
+OMC_REGISTRY=<url>     # alternative package registry
+OMC_STDLIB_PATH=<...>  # extra import search paths
 ```
 
 ---
 
-## What this doesn't do yet
+OMC stands for OMNIcode. The work builds on a long lineage of self-hosting language research — Lisp, Smalltalk, Forth — with an additional dimension: the static analysis substrate is φ-math, not S-expressions or types. The toolchain (lex, parse, emit, execute, analyze, repair, embed) lives inside the language.
 
-This is a research codebase. Honest list of things that are NOT done:
-
-- **No fast bytecode runtime.** The bytecode VM is written in OMC and executes on the tree-walker. It's correct (byte-identical to tree-walk) but slow. A native bytecode VM in Rust is future work.
-- **Phase H limits:**
-  - Naive brace placement in token-level repair appends missing `}` at EOF — fine for end-of-file mistakes, will fold mid-source statements into function bodies if the missing brace is conceptually mid-source. Indentation-aware repair (H.3.1) is logged.
-  - The healer's identifier-correction has no semantic check beyond edit-distance. A typo that resolves to ANOTHER typo would stabilize but not be correct.
-  - The `stuck` and `exhausted` outcomes of `heal_until_fixpoint` are designed but unexercised — no current demo triggers them.
-- **No production deployment target.** No package manager. No formatter. No LSP. No debugger. The standard library is real (~150 host primitives covering strings, arrays, file I/O, type introspection, math, φ-math, and self-healing — see `STDLIB.md`), but it's not Python-tier — no first-class functions, no formatters, no module ecosystem.
-- **Adversarial cases untested.** The healer's correctness has been demonstrated on the demo inputs in `examples/self_healing_*.omc`. Fuzz testing, malicious inputs, and pathological edge cases have not been done.
-- **Single-developer experiment.** The codebase has not had external review. There are likely bugs we don't know about.
-
-The architectural claims at the top of this README are demonstrable today. The above limits are real and undersold nowhere. If you're considering OMC for production, the answer is "not yet."
-
----
-
-## Architecture
-
-The full breakdown is in `ARCHITECTURE.md`. The short version:
-
-```
-OMC source
-    ↓
-omnimcode-core/src/parser.rs       Lexer + recursive-descent parser
-    ↓
-omnimcode-core/src/ast.rs          AST node definitions
-    ↓
-omnimcode-core/src/interpreter.rs  Tree-walk interpreter + host primitives
-    ↓
-omnimcode-core/src/vm.rs           Stack VM (used by bytecode path)
-    ↓
-omnimcode-core/src/value.rs        HInt with φ-resonance, HArray, HFloat, HSingularity
-```
-
-OMC files implementing the language itself, in the language itself, live under `examples/self_hosting_*.omc` and `examples/self_healing_*.omc`. They run on the Rust interpreter above; this is what makes the gen2==gen3 claim verifiable.
-
-### Key supporting documents
-
-- `CHANGELOG.md` — milestone-by-milestone account of the V and H phases (this is where the design history lives in real detail)
-- `ARCHITECTURE.md` — type system, interpreter, VM internals
-- `BUILD.md` — build instructions including cross-compilation and optimization flags
-- `BENCHMARKS.md` — criterion benchmarks comparing tree-walk vs VM vs VM+optimizer
-- `PHI_PI_FIB_ALGORITHM.md` — mathematical foundation
-- `OMC_STRATEGIC_PLAN.md` — where the project is headed
-- `00-START-HERE.md` and `READING_ORDER.md` — recommended traversal for new readers
-
----
-
-## Implications
-
-For language design, OMC demonstrates that a coherent value-semantic substrate (φ-math, in our case) enables a class of compile-time analyses that are **cheap, decidable, and one-line-per-check**. Most modern languages would benefit from having ANY such substrate they could check against, instead of the patchwork of lint rules they currently maintain. OMC is one existence proof.
-
-For LLM-generated code specifically: the failure modes of language-model-generated programs cluster around three classes — typos and naming drift, off-by-one numeric constants, and unguarded edge cases. Phase H handles all three. A self-healing target language reduces the defensive-coding burden on the generator: it doesn't need to write defensively because the compiler does the defense automatically. Whether this generalizes beyond OMC's specific aesthetic is open.
-
-For the broader question of whether OMC will grow beyond a research artifact: that depends on whether the φ-math substrate resonates outside the people who already think this way. The science is real. The tooling is small. The substrate is reusable. What it becomes is downstream of what gets built on top.
-
----
-
-## Contributing
-
-This is a single-developer research codebase. Issues, observations, and PRs are welcome but please read `00-START-HERE.md` first to calibrate.
-
-If you want to write OMC code: look at any `examples/self_healing_*.omc` — they exercise nearly every language feature.
-
-If you want to extend the host: `omnimcode-core/src/interpreter.rs` is the place to add new primitives. New host builtins automatically become available to the bytecode VM through `vm_call_builtin → call_function`.
-
-If you want to extend the self-healer: `examples/self_healing_h4.omc` Part V is the template. Add a diagnostic class by composing the existing φ-math primitives (`is_fibonacci`, `value_danger`, `harmony_value`, `fold_escape`).
-
----
-
-## License
-
-MIT. See `LICENSE` if present, or `Cargo.toml` workspace metadata.
-
----
-
-## Credits
-
-OMNIcode is a research project by The Architect, with substantial co-development assistance from Claude (Anthropic). The φ-math foundation, harmonic-integer type system, and overall language design are The Architect's. The Phase V (self-hosting) and Phase H (self-healing compiler) implementations were co-authored across an extended series of sessions.
-
-The work builds on a long lineage of self-hosting language research — Lisp, Smalltalk, Forth, and the broader bootstrapping-compiler tradition. OMC's contribution to that tradition is a specific kind of architectural completeness: the toolchain (lex, parse, emit, execute, analyze, repair) lives inside the language on a single mathematical substrate.
-
----
+License: MIT.
 
 **Built around φ (1.618…). The substrate is the architecture.**
