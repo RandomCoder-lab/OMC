@@ -1,0 +1,64 @@
+# =============================================================================
+# requests bridge for OMC — HTTP in 30 lines
+# =============================================================================
+# Wraps python's `requests` library. OMC programs gain real HTTP:
+# fetch APIs, post JSON, scrape pages, anything you'd do in Python.
+#
+# Usage:
+#   import "examples/lib/requests.omc" as r;
+#   h resp = r.get("https://api.github.com/zen");
+#   println(r.text(resp));
+# =============================================================================
+
+h _RQ_HANDLE = 0;
+
+fn _rq() {
+    if _RQ_HANDLE == 0 {
+        _RQ_HANDLE = py_import("requests");
+    }
+    return _RQ_HANDLE;
+}
+
+# ---- Verbs (return Response handles) -------------------------------------
+
+fn get(url)              { return py_call(_rq(), "get",    [url]); }
+fn post(url, data)       { return py_call(_rq(), "post",   [url, data]); }
+fn put(url, data)        { return py_call(_rq(), "put",    [url, data]); }
+fn delete(url)           { return py_call(_rq(), "delete", [url]); }
+fn head(url)             { return py_call(_rq(), "head",   [url]); }
+
+# ---- Response inspection -------------------------------------------------
+
+fn status(resp)          { return py_get(resp, "status_code"); }
+fn text(resp)            { return py_get(resp, "text"); }
+fn json(resp)            { return py_call(resp, "json", []); }
+fn headers(resp)         { return py_get(resp, "headers"); }
+fn url_of(resp)          { return py_get(resp, "url"); }
+fn ok(resp) {
+    h s = status(resp);
+    if s >= 200 {
+        if s < 300 {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+# ---- Convenience: one-line GET-and-parse-JSON ----------------------------
+# Returns the parsed JSON as an OMC dict/array, or null on non-200.
+fn fetch_json(url) {
+    h resp = get(url);
+    if ok(resp) == 1 {
+        return json(resp);
+    }
+    return null;
+}
+
+# Returns response text or null.
+fn fetch_text(url) {
+    h resp = get(url);
+    if ok(resp) == 1 {
+        return text(resp);
+    }
+    return null;
+}

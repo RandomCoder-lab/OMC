@@ -129,6 +129,34 @@ impl Interpreter {
         self.host_builtins.contains_key(name)
     }
 
+    /// Invoke an OMC function by name with already-evaluated Values
+    /// as arguments. Used by Python → OMC callbacks (py_callback)
+    /// where the caller has live Values from the Python side and
+    /// needs to dispatch into OMC code.
+    ///
+    /// Wraps each Value in a synthetic local + Variable expression
+    /// so we can reuse the standard call_function path (which
+    /// expects Expressions). Slightly more overhead than raw call
+    /// but reuses every dispatch / trace / heal feature.
+    pub fn call_function_with_values(
+        &mut self,
+        name: &str,
+        args: &[Value],
+    ) -> Result<Value, String> {
+        // Push a fresh scope to hold the synthetic args so we don't
+        // pollute the caller's locals.
+        self.locals.push(std::rc::Rc::new(std::cell::RefCell::new(HashMap::new())));
+        let mut expr_args = Vec::with_capacity(args.len());
+        for (i, v) in args.iter().enumerate() {
+            let key = format!("__cb_arg_{}", i);
+            self.set_var(key.clone(), v.clone());
+            expr_args.push(crate::ast::Expression::Variable(key));
+        }
+        let result = self.call_function(name, &expr_args);
+        self.locals.pop();
+        result
+    }
+
     /// xorshift64* — fast and tiny, sufficient for OMC scripting needs.
     /// Not cryptographic. Returns a non-zero u64.
     fn rng_next(&self) -> u64 {
@@ -1101,6 +1129,16 @@ impl Interpreter {
                 Ok(Value::dict_from(map))
             }
             Expression::Variable(name) => {
+                // Reserved literals — match position is identifier in
+                // the source, but semantically these are constants.
+                // Cheaper than adding three more Token variants and
+                // matches user expectation ("null is just a value").
+                match name.as_str() {
+                    "null" => return Ok(Value::Null),
+                    "true" => return Ok(Value::Bool(true)),
+                    "false" => return Ok(Value::Bool(false)),
+                    _ => {}
+                }
                 // First try variable lookup. If missing, fall back to the
                 // function table — bare function names become first-class
                 // values (Value::Function) so they can be passed to
@@ -1560,7 +1598,15 @@ impl Interpreter {
             for a in args {
                 argvals.push(self.eval_expr(a)?);
             }
-            return handler(&argvals);
+            // Stash a self-pointer so the handler can reach back into
+            // the interpreter (needed for Python→OMC callbacks). The
+            // pointer is valid only for the duration of this call —
+            // we clear it on return. See `with_active_interp` /
+            // `active_interp_mut` in this file.
+            let prev = INTERP_PTR.with(|p| p.replace(self as *mut _));
+            let r = handler(&argvals);
+            INTERP_PTR.with(|p| p.set(prev));
+            return r;
         }
         // Module-qualified calls (e.g., "phi.fold", "phi.res", "core.fib")
         if let Some((module, func)) = name.split_once('.') {
@@ -4114,7 +4160,12 @@ impl Interpreter {
         // sees /tmp, etc. Skipped if the host hasn't registered the
         // name — the no-op cost is one HashMap lookup.
         if let Some(handler) = self.host_builtins.get(name).cloned() {
-            return handler(args);
+            // Stash a self-pointer so the handler can call back into
+            // the interp (Python→OMC callbacks). Mirror call_function.
+            let prev = INTERP_PTR.with(|p| p.replace(self as *mut _));
+            let r = handler(args);
+            INTERP_PTR.with(|p| p.set(prev));
+            return r;
         }
 
         // Phase 4 fast-path: hot builtins handled directly on values,
@@ -4307,6 +4358,43 @@ fn vm_fast_dispatch(name: &str, args: &[Value]) -> Option<Result<Value, String>>
 /// to a single "<lambda>" so traces don't leak the implementation
 /// detail of which engine assigned the counter — and so traces stay
 /// stable across tree-walk vs VM runs.
+// ===========================================================================
+// Active-interpreter pointer for reentrant host calls.
+//
+// Set by call_function / vm_call_builtin BEFORE invoking a host
+// builtin handler, cleared after. While set, a host handler can
+// reach back into the live Interpreter via `with_active_interp` —
+// needed for Python → OMC callbacks (py_callback returns a
+// PyCallable that calls back into OMC's interp).
+//
+// Single-threaded by design (matches OMC's runtime model). The
+// pointer is only valid for the duration of the host handler call;
+// stashing it elsewhere is a use-after-free waiting to happen.
+// ===========================================================================
+
+thread_local! {
+    static INTERP_PTR: std::cell::Cell<*mut Interpreter> =
+        const { std::cell::Cell::new(std::ptr::null_mut()) };
+}
+
+/// Run `f` with a `&mut Interpreter` pointing at the currently-
+/// active interpreter (the one whose host_builtin handler is
+/// running). Returns None if called outside a host_builtin context.
+///
+/// SAFETY: The pointer is valid only inside a host_builtin call —
+/// the dispatch site sets it on entry and clears on exit. Don't
+/// stash the &mut anywhere; use it within `f` and let it drop.
+pub fn with_active_interp<R>(f: impl FnOnce(&mut Interpreter) -> R) -> Option<R> {
+    let p = INTERP_PTR.with(|p| p.get());
+    if p.is_null() {
+        return None;
+    }
+    // SAFETY: see doc comment. The dispatch contract guarantees
+    // the pointer is valid for the duration of this call.
+    let interp = unsafe { &mut *p };
+    Some(f(interp))
+}
+
 pub fn display_frame_name(name: &str) -> &str {
     if name.starts_with("__rt_lambda_") || name.starts_with("__lambda_") {
         "<lambda>"

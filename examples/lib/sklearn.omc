@@ -1,0 +1,137 @@
+# =============================================================================
+# scikit-learn bridge for OMC — classical ML
+# =============================================================================
+# Wraps the most common scikit-learn estimators. Pattern: each fn
+# returns a fitted-or-untrained MODEL HANDLE; OMC code calls .fit and
+# .predict via py_call. Lazy module imports per submodule.
+#
+# Usage:
+#   import "examples/lib/sklearn.omc" as sk;
+#   h X = [[1, 2], [3, 4], [5, 6]];
+#   h y = [0, 1, 1];
+#   h model = sk.kmeans(2);
+#   sk.fit(model, X, y);
+#   h preds = sk.predict(model, X);
+# =============================================================================
+
+h _CLUSTER     = 0;
+h _LINEAR      = 0;
+h _ENSEMBLE    = 0;
+h _MODEL_SEL   = 0;
+h _PREPROC     = 0;
+h _METRICS     = 0;
+
+fn _cluster()    { if _CLUSTER == 0    { _CLUSTER    = py_import("sklearn.cluster"); }     return _CLUSTER; }
+fn _linear()     { if _LINEAR == 0     { _LINEAR     = py_import("sklearn.linear_model"); } return _LINEAR; }
+fn _ensemble()   { if _ENSEMBLE == 0   { _ENSEMBLE   = py_import("sklearn.ensemble"); }     return _ENSEMBLE; }
+fn _model_sel()  { if _MODEL_SEL == 0  { _MODEL_SEL  = py_import("sklearn.model_selection"); } return _MODEL_SEL; }
+fn _preproc()    { if _PREPROC == 0    { _PREPROC    = py_import("sklearn.preprocessing"); } return _PREPROC; }
+fn _metrics()    { if _METRICS == 0    { _METRICS    = py_import("sklearn.metrics"); }       return _METRICS; }
+
+# ---- Models (constructors return untrained model handle) -----------------
+
+fn kmeans(n_clusters) {
+    h cls = py_get(_cluster(), "KMeans");
+    return py_call_fn(cls, [n_clusters]);
+}
+
+fn linear_regression() {
+    h cls = py_get(_linear(), "LinearRegression");
+    return py_call_fn(cls, []);
+}
+
+fn logistic_regression() {
+    h cls = py_get(_linear(), "LogisticRegression");
+    return py_call_fn(cls, []);
+}
+
+fn random_forest_classifier(n_estimators) {
+    h cls = py_get(_ensemble(), "RandomForestClassifier");
+    return py_call_fn(cls, [n_estimators]);
+}
+
+fn random_forest_regressor(n_estimators) {
+    h cls = py_get(_ensemble(), "RandomForestRegressor");
+    return py_call_fn(cls, [n_estimators]);
+}
+
+# ---- Universal fit/predict surface ---------------------------------------
+# Every sklearn estimator has .fit(X, y) and .predict(X). Some (KMeans,
+# clustering) are unsupervised — pass null for y and we'll skip it.
+
+fn fit(model, X, y) {
+    if y == null {
+        py_call(model, "fit", [X]);
+    } else {
+        py_call(model, "fit", [X, y]);
+    }
+    return model;
+}
+
+fn predict(model, X) {
+    return py_call(model, "predict", [X]);
+}
+
+fn score(model, X, y) {
+    return py_call(model, "score", [X, y]);
+}
+
+# ---- Train/test split ----------------------------------------------------
+# Returns [X_train, X_test, y_train, y_test] as OMC arrays.
+# test_size is a kwarg in sklearn's API — passing it positionally
+# would make it a third array. py_call_fn_kw handles the split.
+fn train_test_split(X, y, test_size) {
+    h tts = py_get(_model_sel(), "train_test_split");
+    return py_call_fn_kw(tts, [X, y], {"test_size": test_size});
+}
+
+# ---- Preprocessing -------------------------------------------------------
+
+fn standard_scaler() {
+    h cls = py_get(_preproc(), "StandardScaler");
+    return py_call_fn(cls, []);
+}
+
+fn fit_transform(scaler, X) {
+    return py_call(scaler, "fit_transform", [X]);
+}
+
+fn transform(scaler, X) {
+    return py_call(scaler, "transform", [X]);
+}
+
+# ---- Metrics --------------------------------------------------------------
+
+fn accuracy_score(y_true, y_pred) {
+    return py_call(_metrics(), "accuracy_score", [y_true, y_pred]);
+}
+
+fn r2_score(y_true, y_pred) {
+    return py_call(_metrics(), "r2_score", [y_true, y_pred]);
+}
+
+fn confusion_matrix(y_true, y_pred) {
+    return py_call(_metrics(), "confusion_matrix", [y_true, y_pred]);
+}
+
+# ---- Built-in datasets (handy for demos) --------------------------------
+# Each load_* returns a Bunch; we extract data + target as OMC arrays.
+
+fn _datasets() { return py_import("sklearn.datasets"); }
+
+fn load_iris() {
+    # sklearn returns a Bunch — dict subclass — so py_to_omc auto-
+    # converts to an OMC dict. Use dict_get, not py_get.
+    h ds = py_call(_datasets(), "load_iris", []);
+    return [dict_get(ds, "data"), dict_get(ds, "target")];
+}
+
+fn load_wine() {
+    h ds = py_call(_datasets(), "load_wine", []);
+    return [dict_get(ds, "data"), dict_get(ds, "target")];
+}
+
+fn load_breast_cancer() {
+    h ds = py_call(_datasets(), "load_breast_cancer", []);
+    return [dict_get(ds, "data"), dict_get(ds, "target")];
+}

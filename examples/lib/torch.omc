@@ -1,0 +1,110 @@
+# =============================================================================
+# PyTorch bridge for OMC — neural networks in OMC
+# =============================================================================
+# Minimal but real surface: tensors, basic ops, nn.Linear, optimizer
+# step, loss. Enough to write a forward/backward loop in OMC.
+#
+# Note: torch is heavy (~1GB install). This file is included for the
+# pattern, not as a daily-use library — most data science doesn't
+# need a GPU runtime.
+#
+# Usage:
+#   import "examples/lib/torch.omc" as t;
+#   h x = t.tensor([1.0, 2.0, 3.0]);
+#   h y = t.add(x, t.tensor([10.0, 20.0, 30.0]));
+#   println(t.tolist(y));
+# =============================================================================
+
+h _T_HANDLE  = 0;
+h _NN_HANDLE = 0;
+
+fn _torch() {
+    if _T_HANDLE == 0 {
+        _T_HANDLE = py_import("torch");
+    }
+    return _T_HANDLE;
+}
+
+fn _nn() {
+    if _NN_HANDLE == 0 {
+        _NN_HANDLE = py_import("torch.nn");
+    }
+    return _NN_HANDLE;
+}
+
+# ---- Tensor constructors --------------------------------------------------
+
+fn tensor(items) {
+    return py_call(_torch(), "tensor", [items]);
+}
+
+fn zeros(shape) {
+    return py_call(_torch(), "zeros", [shape]);
+}
+
+fn ones(shape) {
+    return py_call(_torch(), "ones", [shape]);
+}
+
+fn randn(shape) {
+    return py_call(_torch(), "randn", [shape]);
+}
+
+# ---- Tensor ops -----------------------------------------------------------
+# All return new tensor handles (torch is immutable in this sense).
+
+fn add(a, b)         { return py_call(_torch(), "add", [a, b]); }
+fn sub(a, b)         { return py_call(_torch(), "sub", [a, b]); }
+fn mul(a, b)         { return py_call(_torch(), "mul", [a, b]); }
+fn matmul(a, b)      { return py_call(_torch(), "matmul", [a, b]); }
+fn t_sum(t)          { return py_call(_torch(), "sum", [t]); }
+fn t_mean(t)         { return py_call(_torch(), "mean", [t]); }
+
+# ---- Conversion -----------------------------------------------------------
+
+fn tolist(t)         { return py_call(t, "tolist", []); }
+fn item(t)           { return py_call(t, "item", []); }      # 0-d → scalar
+fn t_shape(t)        { return py_get(t, "shape"); }
+
+# ---- Modules: Linear layer -----------------------------------------------
+
+fn linear(in_features, out_features) {
+    h cls = py_get(_nn(), "Linear");
+    return py_call_fn(cls, [in_features, out_features]);
+}
+
+fn forward(model, x) {
+    return py_call_fn(model, [x]);
+}
+
+# ---- Optim ---------------------------------------------------------------
+# Returns an optimizer handle bound to the model's parameters.
+
+fn _optim() { return py_import("torch.optim"); }
+
+fn sgd(model, lr) {
+    h cls = py_get(_optim(), "SGD");
+    h params = py_call(model, "parameters", []);
+    return py_call_fn(cls, [params, lr]);
+}
+
+fn adam(model, lr) {
+    h cls = py_get(_optim(), "Adam");
+    h params = py_call(model, "parameters", []);
+    return py_call_fn(cls, [params, lr]);
+}
+
+fn step(opt)         { return py_call(opt, "step", []); }
+fn zero_grad(opt)    { return py_call(opt, "zero_grad", []); }
+
+# ---- Loss functions ------------------------------------------------------
+
+fn mse_loss(pred, target) {
+    h fn_handle = py_get(_torch(), "nn");
+    h functional = py_get(fn_handle, "functional");
+    return py_call(functional, "mse_loss", [pred, target]);
+}
+
+fn backward(loss) {
+    return py_call(loss, "backward", []);
+}

@@ -1,0 +1,111 @@
+# =============================================================================
+# sqlite3 bridge for OMC — embedded database
+# =============================================================================
+# Wraps python's stdlib sqlite3. OMC programs gain a real SQL database
+# with zero install (sqlite ships with Python). Useful for: persisting
+# results across runs, dataset triage too big for memory, joining OMC
+# computations to existing app data.
+#
+# Usage:
+#   import "examples/lib/sqlite.omc" as db;
+#   h conn = db.connect(":memory:");
+#   db.execute(conn, "CREATE TABLE users (id INTEGER, name TEXT)");
+#   db.execute_with(conn, "INSERT INTO users VALUES (?, ?)", [1, "alice"]);
+#   db.commit(conn);
+#   h rows = db.query(conn, "SELECT * FROM users");
+# =============================================================================
+
+h _SQL_HANDLE = 0;
+
+fn _sql() {
+    if _SQL_HANDLE == 0 {
+        _SQL_HANDLE = py_import("sqlite3");
+    }
+    return _SQL_HANDLE;
+}
+
+# ---- Connection lifecycle -------------------------------------------------
+
+# `path` can be ":memory:" for an in-memory database or a real file path.
+fn connect(path) {
+    return py_call(_sql(), "connect", [path]);
+}
+
+fn close(conn) {
+    return py_call(conn, "close", []);
+}
+
+fn commit(conn) {
+    return py_call(conn, "commit", []);
+}
+
+fn rollback(conn) {
+    return py_call(conn, "rollback", []);
+}
+
+# ---- Cursor / execute pattern --------------------------------------------
+
+# Execute a SQL statement that doesn't return rows (DDL, INSERT/UPDATE/DELETE
+# without RETURNING). Returns null. Caller is responsible for commit.
+fn execute(conn, sql) {
+    h cur = py_call(conn, "cursor", []);
+    py_call(cur, "execute", [sql]);
+    py_call(cur, "close", []);
+    return null;
+}
+
+# Same but with bound parameters. Pass an OMC array; sqlite3 binds via "?".
+fn execute_with(conn, sql, params) {
+    h cur = py_call(conn, "cursor", []);
+    py_call(cur, "execute", [sql, params]);
+    py_call(cur, "close", []);
+    return null;
+}
+
+# Execute many: one SQL with a list of parameter rows.
+fn execute_many(conn, sql, rows) {
+    h cur = py_call(conn, "cursor", []);
+    py_call(cur, "executemany", [sql, rows]);
+    py_call(cur, "close", []);
+    return null;
+}
+
+# ---- Queries (return rows as OMC arrays) ---------------------------------
+
+# Run SELECT, return all rows as an OMC array of arrays.
+fn query(conn, sql) {
+    h cur = py_call(conn, "cursor", []);
+    py_call(cur, "execute", [sql]);
+    h rows = py_call(cur, "fetchall", []);
+    py_call(cur, "close", []);
+    return rows;
+}
+
+# Same with bound parameters.
+fn query_with(conn, sql, params) {
+    h cur = py_call(conn, "cursor", []);
+    py_call(cur, "execute", [sql, params]);
+    h rows = py_call(cur, "fetchall", []);
+    py_call(cur, "close", []);
+    return rows;
+}
+
+# Single-row helper: returns the first row or null.
+fn query_one(conn, sql) {
+    h rows = query(conn, sql);
+    if arr_len(rows) > 0 { return arr_get(rows, 0); }
+    return null;
+}
+
+# Schema introspection — useful for "show me what's in this DB" workflows.
+fn tables(conn) {
+    h rows = query(conn,
+        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name");
+    h out = [];
+    h i = 0;
+    while i < arr_len(rows) {
+        arr_push(out, arr_get(arr_get(rows, i), 0));
+        i = i + 1;
+    }
+    return out;
+}

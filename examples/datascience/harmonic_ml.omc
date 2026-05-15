@@ -1,0 +1,136 @@
+# =============================================================================
+# Harmonic ML pipeline: OMC + scikit-learn end-to-end
+# =============================================================================
+# The full story:
+#   1. Load a real classification dataset (sklearn's wine, 178 samples)
+#   2. ENGINEER NEW HARMONIC FEATURES with an OMC-only operation
+#      (harmony_value of each feature — a real number not in the
+#      original Python ecosystem)
+#   3. Train a classifier on (original + harmonic) features
+#   4. Compare to baseline (original features only)
+#   5. Use a Python ↔ OMC callback to score each sample's "harmonic
+#      signature" via numpy.vectorize
+#
+# This is the harmonic preprocessing pipeline. Replace step 2 with
+# any OMC-distinctive transform (attractor partition, HIM ranking,
+# fold-and-mod) and you have a model that's measurably aware of
+# Fibonacci structure in the input — something no native Python
+# library exposes as a primitive.
+#
+# Run:
+#   PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 cargo build --release \
+#       --bin omnimcode-standalone --features python-embed
+#   OMC_PYTHON=1 ./target/release/omnimcode-standalone \
+#       examples/datascience/harmonic_ml.omc
+# =============================================================================
+
+import "examples/lib/sklearn.omc" as sk;
+import "examples/lib/np.omc" as np;
+
+println("=== Harmonic ML pipeline (OMC + scikit-learn) ===");
+println("");
+
+# ---- 1. Load wine dataset --------------------------------------------------
+
+h wine = sk.load_wine();
+h X_orig = arr_get(wine, 0);
+h y = arr_get(wine, 1);
+println(concat_many("loaded sklearn wine: ", arr_len(X_orig), " samples, ",
+    arr_len(arr_get(X_orig, 0)), " features"));
+println("");
+
+# ---- 2. Harmonic feature engineering ---------------------------------------
+# For each row, compute one new feature: the SUM of harmony_values across
+# the original features. This is a single scalar that captures "how
+# Fibonacci-aligned is this sample's feature vector overall." Cheap to
+# compute, OMC-distinctive, completely absent from the sklearn pipeline.
+
+fn harmonic_signature(row) {
+    # row is an OMC array of 13 floats. Convert each to nearest int and
+    # sum the harmony_value scores.
+    h sum = 0.0;
+    h i = 0;
+    while i < arr_len(row) {
+        h v = to_int(arr_get(row, i) * 100);   # scale into integer space
+        sum = sum + harmony_value(v);
+        i = i + 1;
+    }
+    return sum;
+}
+
+# Build the augmented feature matrix: each row = original + 1 harmonic feature.
+fn augment(matrix) {
+    h out = [];
+    h i = 0;
+    while i < arr_len(matrix) {
+        h row = arr_get(matrix, i);
+        h h_score = harmonic_signature(row);
+        h new_row = arr_concat(row, [h_score]);
+        arr_push(out, new_row);
+        i = i + 1;
+    }
+    return out;
+}
+
+h t0 = now_ms();
+h X_aug = augment(X_orig);
+h t1 = now_ms();
+println(concat_many("augmented features in ", t1 - t0,
+    " ms (added 1 harmonic_signature column)"));
+println("");
+
+# ---- 3a. Baseline classifier on original features -------------------------
+
+h split_o = sk.train_test_split(X_orig, y, 0.3);
+h Xo_train = arr_get(split_o, 0);
+h Xo_test  = arr_get(split_o, 1);
+h yo_train = arr_get(split_o, 2);
+h yo_test  = arr_get(split_o, 3);
+
+h model_o = sk.random_forest_classifier(50);
+sk.fit(model_o, Xo_train, yo_train);
+h preds_o = sk.predict(model_o, Xo_test);
+h acc_o = sk.accuracy_score(yo_test, preds_o);
+println(concat_many("baseline RF (13 features):    accuracy = ", acc_o));
+
+# ---- 3b. Augmented classifier on (original + harmonic) features ----------
+
+h split_a = sk.train_test_split(X_aug, y, 0.3);
+h Xa_train = arr_get(split_a, 0);
+h Xa_test  = arr_get(split_a, 1);
+h ya_train = arr_get(split_a, 2);
+h ya_test  = arr_get(split_a, 3);
+
+h model_a = sk.random_forest_classifier(50);
+sk.fit(model_a, Xa_train, ya_train);
+h preds_a = sk.predict(model_a, Xa_test);
+h acc_a = sk.accuracy_score(ya_test, preds_a);
+println(concat_many("with harmonic feature (14):   accuracy = ", acc_a));
+println("");
+
+# ---- 4. Bonus: OMC callback driven by numpy.vectorize ---------------------
+# Bind harmonic_signature to a Python callable, then have numpy apply
+# it across a 1-D array of indices to compute the signature for every
+# sample. Demonstrates Python → OMC dispatch at scale.
+
+fn harmonic_signature_at(idx) {
+    return harmonic_signature(arr_get(X_orig, idx));
+}
+
+h cb = py_callback("harmonic_signature_at");
+h np_h = np._np();
+h vec = py_call(np_h, "vectorize", [cb]);
+
+# Build index range 0..nsamples in numpy and vectorize-apply.
+h idx_range = np.arange(arr_len(X_orig));
+h all_sigs = py_call_fn(vec, [idx_range]);
+
+println(concat_many("harmonic signatures computed via Python→OMC callback (",
+    arr_len(all_sigs), " samples)"));
+println(concat_many("  min: ", np.np_min(all_sigs)));
+println(concat_many("  max: ", np.np_max(all_sigs)));
+println(concat_many("  mean: ", np.mean(all_sigs)));
+println(concat_many("  std:  ", np.std(all_sigs)));
+
+println("");
+println("=== Done ===");

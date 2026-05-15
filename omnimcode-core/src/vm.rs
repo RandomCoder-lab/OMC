@@ -123,18 +123,22 @@ impl Vm {
                     stack.pop();
                 }
                 Op::LoadVar(name) => {
-                    // First try the interpreter's variable lookup (with
-                    // its own function-table fallback). If nothing found,
-                    // check the Module's function table — that's where
-                    // VM-compiled user functions live, and supporting
-                    // first-class function values means they need to
-                    // resolve as Value::Function here too.
-                    let v = if let Some(v) = self.interp.vm_get_var(name) {
-                        v
-                    } else if module.functions.contains_key(name) {
-                        Value::Function { name: name.clone(), captured: None }
-                    } else {
-                        return Err(format!("Undefined variable: {}", name));
+                    // Reserved literals (parity with tree-walk).
+                    let v = match name.as_str() {
+                        "null" => Value::Null,
+                        "true" => Value::Bool(true),
+                        "false" => Value::Bool(false),
+                        _ => {
+                            // Variable lookup (with function-table fallback).
+                            // First-class function values resolve here too.
+                            if let Some(v) = self.interp.vm_get_var(name) {
+                                v
+                            } else if module.functions.contains_key(name) {
+                                Value::Function { name: name.clone(), captured: None }
+                            } else {
+                                return Err(format!("Undefined variable: {}", name));
+                            }
+                        }
                     };
                     stack.push(v);
                 }

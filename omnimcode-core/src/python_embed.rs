@@ -23,7 +23,7 @@
 //   numpy ndarray (any-D)        → Value::Array (via .tolist())
 //   anything else                → opaque handle (Value::HInt registry id)
 
-use crate::interpreter::Interpreter;
+use crate::interpreter::{with_active_interp, Interpreter};
 use crate::value::{HArray, HInt, Value};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
@@ -274,6 +274,78 @@ pub fn register_python_builtins(interp: &mut Interpreter) {
         })
     });
 
+    // ---- py_call_kw / py_call_fn_kw -----------------------------------
+    // Same as py_call / py_call_fn but accept an OMC dict as a final
+    // kwargs argument. Required for Python APIs like sklearn that
+    // distinguish positional arrays from named scalars
+    // (`train_test_split(X, y, test_size=0.3)`).
+    interp.register_builtin("py_call_kw", |args| {
+        if args.len() < 4 {
+            return Err("py_call_kw requires (handle, method, args, kwargs)".to_string());
+        }
+        let handle = args[0].to_int();
+        let method = args[1].to_display_string();
+        let pos_args = args[2].clone();
+        let kwargs_v = args[3].clone();
+        Python::with_gil(|py| {
+            let obj = fetch_handle(py, handle)
+                .ok_or_else(|| format!("py_call_kw: invalid handle {}", handle))?;
+            let bound = obj.bind(py);
+            let tuple = arr_to_py_tuple(py, &pos_args)
+                .map_err(|e| format!("py_call_kw: pos arg conversion: {}", e))?;
+            let kwargs = match &kwargs_v {
+                Value::Dict(d) => {
+                    let py_d = PyDict::new_bound(py);
+                    for (k, v) in d.borrow().iter() {
+                        py_d.set_item(k, omc_to_py(py, v).map_err(|e|
+                            format!("py_call_kw: kwarg {}: {}", k, e))?)
+                            .map_err(|e| format!("py_call_kw: set kwarg {}: {}", k, e))?;
+                    }
+                    Some(py_d)
+                }
+                Value::Null => None,
+                _ => return Err("py_call_kw: kwargs must be a dict or null".to_string()),
+            };
+            let result = bound
+                .call_method(method.as_str(), tuple, kwargs.as_ref())
+                .map_err(|e| format!("py_call_kw({}): {}", method, e))?;
+            Ok(py_to_omc(py, &result))
+        })
+    });
+
+    interp.register_builtin("py_call_fn_kw", |args| {
+        if args.len() < 3 {
+            return Err("py_call_fn_kw requires (handle, args, kwargs)".to_string());
+        }
+        let handle = args[0].to_int();
+        let pos_args = args[1].clone();
+        let kwargs_v = args[2].clone();
+        Python::with_gil(|py| {
+            let obj = fetch_handle(py, handle)
+                .ok_or_else(|| format!("py_call_fn_kw: invalid handle {}", handle))?;
+            let bound = obj.bind(py);
+            let tuple = arr_to_py_tuple(py, &pos_args)
+                .map_err(|e| format!("py_call_fn_kw: pos arg conversion: {}", e))?;
+            let kwargs = match &kwargs_v {
+                Value::Dict(d) => {
+                    let py_d = PyDict::new_bound(py);
+                    for (k, v) in d.borrow().iter() {
+                        py_d.set_item(k, omc_to_py(py, v).map_err(|e|
+                            format!("py_call_fn_kw: kwarg {}: {}", k, e))?)
+                            .map_err(|e| format!("py_call_fn_kw: set kwarg {}: {}", k, e))?;
+                    }
+                    Some(py_d)
+                }
+                Value::Null => None,
+                _ => return Err("py_call_fn_kw: kwargs must be a dict or null".to_string()),
+            };
+            let result = bound
+                .call(tuple, kwargs.as_ref())
+                .map_err(|e| format!("py_call_fn_kw: {}", e))?;
+            Ok(py_to_omc(py, &result))
+        })
+    });
+
     interp.register_builtin("py_eval", |args| {
         if args.is_empty() {
             return Err("py_eval requires (code_string)".to_string());
@@ -321,4 +393,81 @@ pub fn register_python_builtins(interp: &mut Interpreter) {
         PY_REGISTRY.with(|r| r.borrow_mut().clear());
         Ok(Value::Null)
     });
+
+    // ---- py_callback("omc_fn_name") -> handle (Python callable) -------
+    // Returns a Python callable that, when invoked from Python with
+    // positional args, calls back into OMC's `omc_fn_name` with the
+    // converted args and returns the converted result. Enables the
+    // df.apply(omc_fn) style.
+    //
+    // Lifecycle: the Python callable is valid only while the OMC
+    // interpreter that created it is still on the call stack — i.e.
+    // for the duration of the OMC program. Calling a stale callback
+    // after the interp is destroyed is an error (the thread_local
+    // pointer is null).
+    interp.register_builtin("py_callback", |args| {
+        if args.is_empty() {
+            return Err("py_callback requires (omc_fn_name)".to_string());
+        }
+        let fn_name = args[0].to_display_string();
+        Python::with_gil(|py| {
+            let cb = OmcCallback { fn_name };
+            let py_obj = Py::new(py, cb)
+                .map_err(|e| format!("py_callback: pyclass alloc failed: {}", e))?;
+            let id = store_handle(py_obj.into_any());
+            Ok(Value::HInt(HInt::new(id)))
+        })
+    });
+}
+
+/// PyClass that wraps an OMC function name and exposes it as a
+/// Python callable. When Python invokes `cb(*args)`, the __call__
+/// method converts each arg to an OMC Value, dispatches to the
+/// OMC function via the active interpreter, and converts the
+/// result back to a PyObject.
+#[pyclass]
+struct OmcCallback {
+    fn_name: String,
+}
+
+#[pymethods]
+impl OmcCallback {
+    /// Python __call__ entry point. PyO3 maps to `cb(*args)` from
+    /// Python code. We collect the args via *PyTuple, convert each
+    /// to a Value, run the OMC fn, return the converted result.
+    #[pyo3(signature = (*args))]
+    fn __call__(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+    ) -> PyResult<PyObject> {
+        // Convert each Python positional arg to an OMC Value.
+        let mut omc_args: Vec<Value> = Vec::with_capacity(args.len());
+        for item in args.iter() {
+            omc_args.push(py_to_omc(py, &item));
+        }
+        // Dispatch into the live interp.
+        let fn_name = self.fn_name.clone();
+        let result = with_active_interp(|interp| {
+            interp.call_function_with_values(&fn_name, &omc_args)
+        });
+        let v = match result {
+            None => return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "OmcCallback('{}'): no active OMC interpreter — \
+                 callback invoked outside the OMC call that created it",
+                fn_name
+            ))),
+            Some(Err(e)) => return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "OmcCallback('{}'): {}",
+                fn_name, e
+            ))),
+            Some(Ok(v)) => v,
+        };
+        // omc_to_py returns Bound<'py, PyAny> — propagate.
+        omc_to_py(py, &v)
+    }
+
+    fn __repr__(&self) -> String {
+        format!("<OmcCallback '{}'>", self.fn_name)
+    }
 }
