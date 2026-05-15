@@ -1,0 +1,198 @@
+# =============================================================================
+# Experiment 11 — Substrate-distance attention (Path E1).
+#
+# Background: experiment 1 established that OmniWeight
+#   w(q, k) = φ^(-|q - k| / max(|k|, 1))
+# loses to softmax on perturbed-query recovery. The |k| denominator
+# pulls the score toward smaller-magnitude attractors regardless of
+# whether they're actually nearer to the query.
+#
+# This experiment proposes a different harmonic primitive for
+# attention scoring:
+#
+#   substrate_score(q, k) = exp(-attractor_distance(|q - k|))
+#
+# where attractor_distance(d) is the distance from d to the nearest
+# Fibonacci attractor. The substrate's own metric — what
+# phi_pi_fib::nearest_attractor_with_dist returns.
+#
+# Architectural hypothesis: query-key pairs whose DIFFERENCE lands on
+# (or near) an attractor are "harmonically aligned." Real-world
+# similarity often follows substrate-aligned scales (orders of
+# magnitude, log decades, Fibonacci-spaced steps), so an attention
+# score that rewards attractor-aligned differences should outperform
+# both raw-distance softmax (no scale awareness) and OmniWeight
+# (wrong direction of scale awareness).
+#
+# Three scorers compared head-to-head on the same perturbed-query task:
+#   1. softmax:       w = exp(-|q - k|)
+#   2. omni_weight:   w = φ^(-|q - k| / max(|k|, 1))   (experiment 1's loser)
+#   3. substrate:     w = exp(-attractor_distance(|q - k|))   (NEW)
+#
+# Sweep noise levels {0, 1, 3, 7, 15, 30, 50}, count how often each
+# scorer picks the true neighbour back from a perturbed query.
+#
+# Hypothesis: substrate beats omni_weight (probably) and is
+# competitive with softmax (open question — may win at certain noise
+# levels where attractor structure helps, lose at others where the
+# raw-distance gradient is what's needed).
+# =============================================================================
+
+# Inline approximation of substrate's nearest-attractor distance
+# (we want a pure-OMC version for measurement; the canonical impl
+# is in Rust as phi_pi_fib::nearest_attractor_with_dist).
+h FIBS = [1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610];
+
+fn attractor_distance(d) -> int {
+    h abs_d = d;
+    if abs_d < 0 { abs_d = 0 - abs_d; }
+    h best_dist = abs_d;  # distance to attractor 0 (inclusive)
+    h n = arr_len(FIBS);
+    h i = 0;
+    while i < n {
+        h f = arr_get(FIBS, i);
+        h diff = abs_d - f;
+        if diff < 0 { diff = 0 - diff; }
+        if diff < best_dist { best_dist = diff; }
+        i = i + 1;
+    }
+    return best_dist;
+}
+
+fn substrate_score(q, k) -> float {
+    h diff = q - k;
+    if diff < 0 { diff = 0 - diff; }
+    h ad = attractor_distance(diff);
+    return exp(0.0 - to_float(ad));
+}
+
+h PHI = 1.6180339887498948;
+
+fn omni_weight(q, k) -> float {
+    h diff = to_float(q - k);
+    if diff < 0.0 { diff = 0.0 - diff; }
+    h denom = to_float(k);
+    if denom < 0.0 { denom = 0.0 - denom; }
+    if denom < 1.0 { denom = 1.0; }
+    h e = diff / denom;
+    return pow(PHI, 0.0 - e);
+}
+
+fn softmax_score(q, k) -> float {
+    h diff = to_float(q - k);
+    if diff < 0.0 { diff = 0.0 - diff; }
+    return exp(0.0 - diff);
+}
+
+# Pick argmax under one scorer (0=substrate, 1=softmax, 2=omni).
+fn argmax(context, n, query, which) -> array {
+    h best_idx = 0;
+    h k0 = arr_get(context, 0);
+    h best_score = 0.0;
+    if which == 0 { best_score = substrate_score(query, k0); }
+    if which == 1 { best_score = softmax_score(query, k0); }
+    if which == 2 { best_score = omni_weight(query, k0); }
+    h i = 1;
+    while i < n {
+        h k = arr_get(context, i);
+        h s = 0.0;
+        if which == 0 { s = substrate_score(query, k); }
+        if which == 1 { s = softmax_score(query, k); }
+        if which == 2 { s = omni_weight(query, k); }
+        if s > best_score {
+            best_score = s;
+            best_idx = i;
+        }
+        i = i + 1;
+    }
+    h out = arr_new(2, 0);
+    arr_set(out, 0, best_idx);
+    arr_set(out, 1, arr_get(context, best_idx));
+    return out;
+}
+
+h VOCAB_SIZE = 12;
+fn vocab_at(i) -> int {
+    if i == 0 { return 1; }
+    if i == 1 { return 2; }
+    if i == 2 { return 3; }
+    if i == 3 { return 5; }
+    if i == 4 { return 8; }
+    if i == 5 { return 13; }
+    if i == 6 { return 21; }
+    if i == 7 { return 34; }
+    if i == 8 { return 55; }
+    if i == 9 { return 89; }
+    if i == 10 { return 144; }
+    if i == 11 { return 233; }
+    return 1;
+}
+
+fn run_perturbed(ctx_len, noise) -> array {
+    h context = arr_new(ctx_len, 0);
+    h i = 0;
+    while i < ctx_len {
+        arr_set(context, i, vocab_at(random_int(0, VOCAB_SIZE - 1)));
+        i = i + 1;
+    }
+    h target_idx = random_int(0, ctx_len - 1);
+    h true_val = arr_get(context, target_idx);
+    h query = true_val + noise;
+
+    h sub = argmax(context, ctx_len, query, 0);
+    h sm = argmax(context, ctx_len, query, 1);
+    h om = argmax(context, ctx_len, query, 2);
+
+    h out = arr_new(7, 0);
+    arr_set(out, 0, arr_get(sub, 0));
+    arr_set(out, 1, arr_get(sub, 1));
+    arr_set(out, 2, arr_get(sm, 0));
+    arr_set(out, 3, arr_get(sm, 1));
+    arr_set(out, 4, arr_get(om, 0));
+    arr_set(out, 5, arr_get(om, 1));
+    arr_set(out, 6, true_val);
+    return out;
+}
+
+# ---------------------------------------------------------------------------
+# Sweep noise levels.
+# ---------------------------------------------------------------------------
+random_seed(42);
+h N_TRIALS = 200;
+h CTX_LEN = 8;
+
+print("Experiment 11: substrate vs softmax vs omni_weight on perturbed-query");
+print(concat_many("trials per noise level = ", N_TRIALS, ", ctx_len = ", CTX_LEN));
+print("");
+print("noise | substrate_recovers | softmax_recovers | omni_recovers");
+
+h noise_levels = [0, 1, 3, 7, 15, 30, 50];
+h nl = arr_len(noise_levels);
+h n_idx = 0;
+while n_idx < nl {
+    h noise = arr_get(noise_levels, n_idx);
+    h sub_recovers = 0;
+    h soft_recovers = 0;
+    h omni_recovers = 0;
+    h t = 0;
+    while t < N_TRIALS {
+        h r = run_perturbed(CTX_LEN, noise);
+        h true_val = arr_get(r, 6);
+        if arr_get(r, 1) == true_val { sub_recovers = sub_recovers + 1; }
+        if arr_get(r, 3) == true_val { soft_recovers = soft_recovers + 1; }
+        if arr_get(r, 5) == true_val { omni_recovers = omni_recovers + 1; }
+        t = t + 1;
+    }
+    print(concat_many("",
+        "noise=", noise,
+        "  sub=", sub_recovers, "/", N_TRIALS,
+        "  soft=", soft_recovers, "/", N_TRIALS,
+        "  omni=", omni_recovers, "/", N_TRIALS));
+    n_idx = n_idx + 1;
+}
+
+print("");
+print("If substrate >= softmax at any noise level, substrate-distance");
+print("is at least competitive — first per-component harmonic primitive");
+print("for attention scoring. If substrate >> omni at every level, we've");
+print("already cleared the experiment-1 negative bar.");
