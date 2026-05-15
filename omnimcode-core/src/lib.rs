@@ -20,5 +20,4 @@ pub mod bytecode_opt;  // Constant folding + peephole optimizer [Phase K]
 pub mod disasm;        // Bytecode disassembler [Phase P]
 pub mod formatter;     // AST -> canonical OMC source (for --fmt)
 
-#[cfg(feature = "python-embed")]
-pub mod python_embed;  // Embed CPython for py_* builtins (numpy, pandas, ...)
+pub mod python_embed;  // Embedded CPython: py_* builtins (numpy, pandas, ...)

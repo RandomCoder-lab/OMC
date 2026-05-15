@@ -19,19 +19,17 @@ path = "src/lib.rs"
 [dependencies]
 regex = "1.10"
 thiserror = "1.0"
-# Optional Python embedding: when the `python-embed` feature is on,
-# OMC programs gain `py_import` / `py_call` / etc. and can drive any
-# CPython library (numpy, pandas, requests, ...). Off by default so
-# building OMC requires no Python toolchain.
-pyo3 = { version = "0.23", features = ["auto-initialize"], optional = true }
+# Embedded CPython is now mandatory: OMC programs gain `py_import` /
+# `py_call` / etc. out of the box. Building requires libpython at link
+# time (pyo3 auto-detects via PYO3_PYTHON / `python3-config --prefix`).
+# Set PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 if your Python is newer
+# than pyo3's max supported version.
+pyo3 = { version = "0.23", features = ["auto-initialize"] }
 
 [features]
 default = []
 ffi = []
 serialization = []
-# Embed CPython for `py_*` builtins. Requires libpython at link time
-# (pyo3 auto-detects via PYO3_PYTHON / `python3-config --prefix`).
-python-embed = ["dep:pyo3"]
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

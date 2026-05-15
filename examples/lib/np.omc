@@ -35,6 +35,10 @@ fn linspace(a, b, n) { return py_call(_np(), "linspace", [a, b, n]); }
 
 fn mean(arr)       { return py_call(_np(), "mean",   [arr]); }
 fn median(arr)     { return py_call(_np(), "median", [arr]); }
+# NaN-safe variants: pandas columns with missing values become arrays
+# of HFloat(NaN) — vanilla mean/median return NaN. nan* skips them.
+fn nanmean(arr)    { return py_call(_np(), "nanmean",   [arr]); }
+fn nanmedian(arr)  { return py_call(_np(), "nanmedian", [arr]); }
 fn std(arr)        { return py_call(_np(), "std",    [arr]); }
 fn np_sum(arr)     { return py_call(_np(), "sum",    [arr]); }
 fn np_min(arr)     { return py_call(_np(), "min",    [arr]); }

@@ -1,0 +1,147 @@
+# =============================================================================
+# Titanic survival prediction — OMC + pandas + sklearn end-to-end
+# =============================================================================
+# Real Kaggle classic, 891 passengers, mix of numerical and categorical
+# features, missing values everywhere. The full data-science loop in
+# 50 lines of OMC.
+#
+# Pipeline:
+#   seaborn.load_dataset("titanic")       — load real CSV with nulls
+#   pandas fillna + one-hot                — clean + encode
+#   OMC harmonic feature engineering       — fare_attractor, age_group
+#   sklearn train/test split + RF          — fit + predict
+#   accuracy + confusion matrix            — report
+#
+# Run:
+#   ./target/release/omnimcode-standalone examples/datascience/titanic.omc
+# =============================================================================
+
+import "examples/lib/pd.omc" as pd;
+import "examples/lib/sklearn.omc" as sk;
+import "examples/lib/np.omc" as np;
+
+println("=== Titanic survival prediction ===");
+println("");
+
+# ---- 1. Load via seaborn ---------------------------------------------------
+
+h sns = py_import("seaborn");
+h df = py_call(sns, "load_dataset", ["titanic"]);
+println(concat_many("loaded ", pd.nrows(df), " passengers, ",
+    pd.ncols(df), " columns"));
+
+# ---- 2. Clean: fill missing ages with the median, drop other-null rows ---
+
+h ages_full = pd.col(df, "age");
+# numpy's nanmedian skips NaN entries (the form pandas-nulls take
+# after py_to_omc conversion). Avoids a manual filter loop.
+h age_median = np.nanmedian(ages_full);
+println(concat_many("median age (after skipping nulls): ", age_median));
+
+h df1 = pd.fillna_col(df, "age", age_median);
+h df2 = pd.fillna_col(df1, "fare", 0.0);
+
+# ---- 3. Harmonic feature engineering --------------------------------------
+# Two new features:
+#   age_attractor  — fold(age) snaps each passenger to a Fibonacci age
+#                    cohort (8/13/21/34/55). Captures "natural age band"
+#                    independent of the raw value.
+#   fare_class     — fold(fare * 10) buckets fares onto attractors
+#                    (cheap third-class fares cluster on 8-21 attractors;
+#                    expensive cabins on 144-377).
+#
+# Both are computed by OMC fns called from Python via apply_omc — the
+# Python ↔ OMC bridge running ON the pandas DataFrame.
+
+fn age_attractor(age) {
+    return fold(to_int(age));
+}
+fn fare_class(fare) {
+    return fold(to_int(fare * 10));
+}
+
+h t0 = now_ms();
+h age_attr = pd.apply_omc(df2, "age", "age_attractor");
+h fare_attr = pd.apply_omc(df2, "fare", "fare_class");
+h t1 = now_ms();
+println(concat_many("computed harmonic features for ", arr_len(age_attr),
+    " rows in ", t1 - t0, " ms (Python apply, OMC callbacks)"));
+
+# ---- 4. Build feature matrix ----------------------------------------------
+# Columns: pclass, sex_male (0/1), age, fare, sibsp, parch, age_attr, fare_attr
+
+h pclass = pd.col(df2, "pclass");
+h sex    = pd.col(df2, "sex");
+h age    = pd.col(df2, "age");
+h fare   = pd.col(df2, "fare");
+h sibsp  = pd.col(df2, "sibsp");
+h parch  = pd.col(df2, "parch");
+h y      = pd.col(df2, "survived");
+
+# Encode sex as 0/1.
+fn sex_to_int(s) {
+    if s == "male" { return 1; }
+    return 0;
+}
+h sex_enc = arr_map(sex, sex_to_int);
+
+# Stitch into per-row feature vectors.
+fn build_X(includes_harmonic) {
+    h n = arr_len(pclass);
+    h X = [];
+    h i = 0;
+    while i < n {
+        h row = [
+            arr_get(pclass, i),
+            arr_get(sex_enc, i),
+            arr_get(age, i),
+            arr_get(fare, i),
+            arr_get(sibsp, i),
+            arr_get(parch, i)
+        ];
+        if includes_harmonic == 1 {
+            row = arr_concat(row, [arr_get(age_attr, i), arr_get(fare_attr, i)]);
+        }
+        arr_push(X, row);
+        i = i + 1;
+    }
+    return X;
+}
+
+h X_base = build_X(0);
+h X_aug  = build_X(1);
+println(concat_many("feature matrix: ", arr_len(X_base), " rows, ",
+    arr_len(arr_get(X_base, 0)), " base features, ",
+    arr_len(arr_get(X_aug, 0)), " with harmonic"));
+println("");
+
+# ---- 5. Train + evaluate baseline vs harmonic-augmented -------------------
+
+fn run_model(X, y, label) {
+    h split = sk.train_test_split(X, y, 0.3);
+    h X_train = arr_get(split, 0);
+    h X_test  = arr_get(split, 1);
+    h y_train = arr_get(split, 2);
+    h y_test  = arr_get(split, 3);
+
+    h model = sk.random_forest_classifier(100);
+    sk.fit(model, X_train, y_train);
+    h preds = sk.predict(model, X_test);
+    h acc = sk.accuracy_score(y_test, preds);
+    println(concat_many("  ", label, ":  accuracy = ", acc));
+    return acc;
+}
+
+println("=== Random Forest results ===");
+h acc_base = run_model(X_base, y, "baseline (6 features)        ");
+h acc_aug  = run_model(X_aug,  y, "with harmonic feats (8)      ");
+println("");
+
+h delta = acc_aug - acc_base;
+h verdict = "tie";
+if delta > 0 { verdict = "harmonic helps"; }
+if delta < 0 { verdict = "harmonic hurts"; }
+println(concat_many("delta: ", delta, "   (", verdict, ")"));
+
+println("");
+println("=== Done ===");

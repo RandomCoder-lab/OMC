@@ -100,3 +100,38 @@ fn describe(df) {
     h d = py_call(df, "describe", []);
     return py_call(d, "to_dict", ["list"]);
 }
+
+# ---- Cleaning -------------------------------------------------------------
+# Fill missing values in `col` with `value`. Returns a NEW DataFrame
+# (pandas immutable-on-assignment semantics).
+#
+# Implementation note: we can't pull the Series out and operate on it
+# (py_to_omc auto-converts Series → OMC array via .tolist(), losing
+# the handle). Instead we call df.fillna(value={col: value}) which
+# operates on the whole DataFrame and returns a fresh one.
+fn fillna_col(df, col, value) {
+    return py_call_kw(df, "fillna", [],
+        {"value": dict_merge({}, {col: value})});
+}
+
+# ---- One-hot / dummies ---------------------------------------------------
+# Returns a new DataFrame with `col` replaced by N indicator columns.
+# Uses pandas.get_dummies under the hood.
+fn one_hot(df, col) {
+    return py_call_kw(_pd(), "get_dummies", [df],
+        {"columns": [col], "drop_first": false});
+}
+
+# ---- Apply an OMC callback to every row of a column ----------------------
+# `omc_fn_name` is the name of an OMC fn taking a single value.
+# Returns a new column (OMC array).
+#
+# Implementation: py_call_raw keeps the Series as a handle (vanilla
+# py_call would auto-convert via .tolist()). Then apply via the
+# py_callback. Final .tolist() materialises the result.
+fn apply_omc(df, col, omc_fn_name) {
+    h series = py_call_raw(df, "get", [col]);
+    h cb = py_callback(omc_fn_name);
+    h applied = py_call_raw(series, "apply", [cb]);
+    return py_call(applied, "tolist", []);
+}

@@ -57,20 +57,19 @@ fn main() {
     }
 }
 
-/// Register the `py_*` builtin family on `interp` if both
-/// (a) the binary was compiled with `--features python-embed` AND
-/// (b) `OMC_PYTHON=1` is set in the environment.
+/// Register the `py_*` builtin family on `interp`. Embedded Python
+/// is now always-on (used to be feature-gated + OMC_PYTHON=1) — the
+/// standalone binary ships with numpy/pandas/sklearn reachable from
+/// any OMC program out of the box.
 ///
-/// The two-gate design lets us ship a single binary that opts in to
-/// the Python runtime cost only when the user asks for it. Without
-/// the feature flag this is a no-op stub; without OMC_PYTHON=1 the
-/// builtins aren't registered and OMC programs that try to call
-/// py_import will see "Undefined function: py_import".
-fn maybe_register_python(_interp: &mut Interpreter) {
-    #[cfg(feature = "python-embed")]
-    if std::env::var("OMC_PYTHON").as_deref() == Ok("1") {
-        omnimcode_core::python_embed::register_python_builtins(_interp);
+/// Set OMC_NO_PYTHON=1 in the environment to skip registration if
+/// you genuinely don't want CPython initialised in your process
+/// (saves ~5 MB resident from the embedded interpreter).
+fn maybe_register_python(interp: &mut Interpreter) {
+    if std::env::var("OMC_NO_PYTHON").as_deref() == Ok("1") {
+        return;
     }
+    omnimcode_core::python_embed::register_python_builtins(interp);
 }
 
 fn print_help() {

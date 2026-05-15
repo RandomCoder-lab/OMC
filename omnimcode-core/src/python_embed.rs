@@ -26,7 +26,7 @@
 use crate::interpreter::{with_active_interp, Interpreter};
 use crate::value::{HArray, HInt, Value};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PyTuple};
+use pyo3::types::{PyDict, PyList, PyString, PyTuple};
 use std::cell::RefCell;
 use std::collections::HashMap;
 
@@ -143,8 +143,12 @@ fn py_to_omc(py: Python<'_>, obj: &Bound<PyAny>) -> Value {
     if let Ok(f) = obj.extract::<f64>() {
         return Value::HFloat(f);
     }
-    if let Ok(s) = obj.extract::<String>() {
-        return Value::String(s);
+    // Strict string check: only convert if obj is actually a PyString.
+    // extract::<String> would call str() on anything (DataFrames, etc.)
+    // and silently strip the entire object's repr — disastrous for
+    // pandas/numpy interop where users want to keep the handle.
+    if let Ok(s) = obj.downcast::<PyString>() {
+        return Value::String(s.to_string());
     }
     if let Ok(list) = obj.downcast::<PyList>() {
         let items: Vec<Value> = list.iter().map(|item| py_to_omc(py, &item)).collect();
@@ -279,6 +283,32 @@ pub fn register_python_builtins(interp: &mut Interpreter) {
     // kwargs argument. Required for Python APIs like sklearn that
     // distinguish positional arrays from named scalars
     // (`train_test_split(X, y, test_size=0.3)`).
+    // ---- py_call_raw: like py_call but ALWAYS returns a handle ------
+    // Skip the py_to_omc auto-conversion. Useful when chaining ops
+    // on objects that would otherwise auto-collapse (pandas Series
+    // → OMC array, dict subclasses → OMC dict). The user explicitly
+    // wants to keep the Python object alive for further py_call.
+    interp.register_builtin("py_call_raw", |args| {
+        if args.len() < 2 {
+            return Err("py_call_raw requires (handle, method, args?)".to_string());
+        }
+        let handle = args[0].to_int();
+        let method = args[1].to_display_string();
+        let call_args = args.get(2).cloned().unwrap_or(Value::Array(HArray::new()));
+        Python::with_gil(|py| {
+            let obj = fetch_handle(py, handle)
+                .ok_or_else(|| format!("py_call_raw: invalid handle {}", handle))?;
+            let bound = obj.bind(py);
+            let tuple = arr_to_py_tuple(py, &call_args)
+                .map_err(|e| format!("py_call_raw: arg conversion failed: {}", e))?;
+            let result = bound
+                .call_method1(method.as_str(), tuple)
+                .map_err(|e| format!("py_call_raw({}): {}", method, e))?;
+            // Force handle — no py_to_omc.
+            Ok(Value::HInt(HInt::new(store_handle(result.into_py(py)))))
+        })
+    });
+
     interp.register_builtin("py_call_kw", |args| {
         if args.len() < 4 {
             return Err("py_call_kw requires (handle, method, args, kwargs)".to_string());
