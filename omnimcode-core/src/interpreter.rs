@@ -677,6 +677,24 @@ impl Interpreter {
                 // the caller reaches them via dotted-call syntax.
                 self.import_module_with_alias(module, alias.as_deref())
             }
+            Statement::Match { scrutinee, arms } => {
+                let value = self.eval_expr(scrutinee)?;
+                for arm in arms {
+                    let mut bindings: Vec<(String, Value)> = Vec::new();
+                    if pattern_matches(&arm.pattern, &value, &mut bindings) {
+                        // Apply the bindings as plain set_var into the
+                        // current scope, then run the arm body. The
+                        // scope IS the surrounding block — match isn't
+                        // its own scope, matching `if`'s behavior.
+                        for (n, v) in bindings {
+                            self.set_var(n, v);
+                        }
+                        return self.execute_block(&arm.body);
+                    }
+                }
+                // No arm matched — silent no-op.
+                Ok(())
+            }
             Statement::Try { body, err_var, handler } => {
                 // Run the body; if anything inside returns Err, jump to
                 // the handler with err_var bound to the message string.
@@ -3599,6 +3617,9 @@ impl Interpreter {
                     for s in body { visit(s, fns); }
                     for s in handler { visit(s, fns); }
                 }
+                Statement::Match { arms, .. } => {
+                    for arm in arms { for s in &arm.body { visit(s, fns); } }
+                }
                 _ => {}
             }
         }
@@ -3826,6 +3847,95 @@ fn vm_fast_dispatch(name: &str, args: &[Value]) -> Option<Result<Value, String>>
             Some(Ok(Value::Null))
         }
         _ => None,
+    }
+}
+
+/// Test whether `pattern` accepts `value`. On success, appends any
+/// `Pattern::Bind(name)` matches into `bindings` (ordered) so the
+/// caller can install them in the arm's scope.
+///
+/// Pure / side-effect-free aside from the bindings vec — same
+/// helper is used by both tree-walk and VM (via vm_match_helper).
+pub(crate) fn pattern_matches(
+    pattern: &crate::ast::Pattern,
+    value: &Value,
+    bindings: &mut Vec<(String, Value)>,
+) -> bool {
+    use crate::ast::Pattern;
+    match pattern {
+        Pattern::Wildcard => true,
+        Pattern::Bind(n) => {
+            bindings.push((n.clone(), value.clone()));
+            true
+        }
+        Pattern::LitInt(n) => match value {
+            Value::HInt(h) => h.value == *n,
+            Value::HFloat(f) => *f == *n as f64,
+            _ => false,
+        },
+        Pattern::LitFloat(f) => match value {
+            Value::HFloat(g) => g == f,
+            Value::HInt(h) => (h.value as f64) == *f,
+            _ => false,
+        },
+        Pattern::LitString(s) => matches!(value, Value::String(v) if v == s),
+        Pattern::LitBool(b) => match value {
+            Value::Bool(v) => v == b,
+            // OMC's int-as-bool convention: 0/1 ints commonly stand
+            // in for false/true. Accept matches against literal bool
+            // patterns so `match flag { true => ..., false => ... }`
+            // works on the int-coded values too.
+            Value::HInt(h) => (h.value != 0) == *b,
+            _ => false,
+        },
+        Pattern::LitNull => matches!(value, Value::Null),
+        Pattern::RangeInt(lo, hi) => {
+            let n = match value {
+                Value::HInt(h) => h.value,
+                Value::HFloat(f) => *f as i64,
+                _ => return false,
+            };
+            n >= *lo && n <= *hi
+        }
+        Pattern::RangeStr(lo, hi) => {
+            if let Value::String(s) = value {
+                let chars: Vec<char> = s.chars().collect();
+                if chars.len() == 1 {
+                    let c = chars[0];
+                    return c >= *lo && c <= *hi;
+                }
+            }
+            false
+        }
+        Pattern::Or(alts) => {
+            // Try each alt with a snapshot of bindings; first match wins.
+            // We don't allow bindings to differ between alts (same as Rust's
+            // requirement that all alts bind the same names) — for v1 we
+            // simply propagate whatever the matching alt produced.
+            for p in alts {
+                let snapshot_len = bindings.len();
+                if pattern_matches(p, value, bindings) {
+                    return true;
+                }
+                bindings.truncate(snapshot_len);
+            }
+            false
+        }
+        Pattern::Type(tag) => {
+            let actual = match value {
+                Value::HInt(_) => "int",
+                Value::HFloat(_) => "float",
+                Value::String(_) => "string",
+                Value::Bool(_) => "bool",
+                Value::Array(_) => "array",
+                Value::Dict(_) => "dict",
+                Value::Function { .. } => "function",
+                Value::Null => "null_t",
+                Value::Singularity { .. } => "singularity",
+                _ => "unknown",
+            };
+            actual == tag
+        }
     }
 }
 

@@ -26,6 +26,13 @@ pub enum Token {
     Safe,        // H.5 host-level support: `safe <expr>` prefix
     Try,
     Catch,
+    Match,
+    /// `..` for inclusive ranges in match patterns: `0..9`, `"a".."z"`.
+    /// Lexed when not part of `..=` (which we don't use yet) or `...`.
+    DotDot,
+    /// `=>` arm separator in match. (Alternation uses the existing
+    /// `BitOr` token — `|` in pattern position parses as alternation.)
+    FatArrow,
 
     // Identifiers and literals
     Ident(String),
@@ -332,6 +339,7 @@ impl Lexer {
                         "safe" => Token::Safe,
                         "try" => Token::Try,
                         "catch" => Token::Catch,
+                        "match" => Token::Match,
                         "and" => Token::And,
                         "or" => Token::Or,
                         "not" => Token::Not,
@@ -367,6 +375,11 @@ impl Lexer {
                     if self.current() == Some('=') {
                         self.advance();
                         return Token::EqEq;
+                    }
+                    if self.current() == Some('>') {
+                        // `=>` for match arms.
+                        self.advance();
+                        return Token::FatArrow;
                     }
                     return Token::Eq;
                 }
@@ -452,6 +465,13 @@ impl Lexer {
                 }
                 Some('.') => {
                     self.advance();
+                    if self.current() == Some('.') {
+                        // `..` inclusive range in match patterns. We
+                        // treat as inclusive since that's the only
+                        // place ranges currently appear.
+                        self.advance();
+                        return Token::DotDot;
+                    }
                     return Token::Dot;
                 }
                 Some(':') => {
@@ -706,6 +726,7 @@ impl Parser {
             Token::For => self.parse_for_stmt(),
             Token::Fn => self.parse_function_def(),
             Token::Try => self.parse_try_stmt(),
+            Token::Match => self.parse_match_stmt(),
             // `import core;` or `import core as c;` or `load "path";`
             Token::Import | Token::Load => {
                 self.advance();
@@ -878,6 +899,123 @@ impl Parser {
         self.expect(Token::LBrace)?;
         let handler = self.parse_block()?;
         Ok(Statement::Try { body, err_var, handler })
+    }
+
+    /// `match expr { pat => stmt, pat => { stmts }, ... }`
+    /// Comma between arms is optional when the body is a brace block.
+    fn parse_match_stmt(&mut self) -> Result<Statement, String> {
+        self.expect(Token::Match)?;
+        let scrutinee = self.parse_expression()?;
+        self.expect(Token::LBrace)?;
+        let mut arms = Vec::new();
+        while self.current() != Token::RBrace {
+            let pattern = self.parse_pattern()?;
+            self.expect(Token::FatArrow)?;
+            // Body is either a block `{ ... }` or a single statement
+            // ending in `;` or `,`.
+            let body = if self.current() == Token::LBrace {
+                self.expect(Token::LBrace)?;
+                self.parse_block()?
+            } else {
+                // Single statement — accept either `expr;` or `expr,`.
+                // We parse as one Statement::Expression and require its
+                // terminator separately.
+                let expr = self.parse_expression()?;
+                vec![Statement::Expression(expr)]
+            };
+            arms.push(crate::ast::MatchArm { pattern, body });
+            // Optional comma between arms.
+            if self.current() == Token::Comma {
+                self.advance();
+            }
+        }
+        self.expect(Token::RBrace)?;
+        Ok(Statement::Match { scrutinee, arms })
+    }
+
+    /// Parse a single pattern. Alternation (`|`) is handled here;
+    /// each alternative is a `parse_pattern_atom`.
+    fn parse_pattern(&mut self) -> Result<crate::ast::Pattern, String> {
+        let first = self.parse_pattern_atom()?;
+        if self.current() != Token::BitOr {
+            return Ok(first);
+        }
+        let mut alts = vec![first];
+        while self.current() == Token::BitOr {
+            self.advance();
+            alts.push(self.parse_pattern_atom()?);
+        }
+        Ok(crate::ast::Pattern::Or(alts))
+    }
+
+    fn parse_pattern_atom(&mut self) -> Result<crate::ast::Pattern, String> {
+        use crate::ast::Pattern;
+        match self.current() {
+            Token::Number(n) => {
+                self.advance();
+                if self.current() == Token::DotDot {
+                    self.advance();
+                    let hi = match self.current() {
+                        Token::Number(h) => { self.advance(); h }
+                        other => return Err(format!(
+                            "expected upper bound after `..` in range pattern, got {:?}", other
+                        )),
+                    };
+                    Ok(Pattern::RangeInt(n, hi))
+                } else {
+                    Ok(Pattern::LitInt(n))
+                }
+            }
+            Token::Float(f) => { self.advance(); Ok(Pattern::LitFloat(f)) }
+            Token::String(s) => {
+                self.advance();
+                if self.current() == Token::DotDot {
+                    // `"a".."z"` — both sides must be 1-char strings.
+                    let lo_chars: Vec<char> = s.chars().collect();
+                    if lo_chars.len() != 1 {
+                        return Err(format!(
+                            "lower bound of string range must be a 1-char string, got {:?}", s
+                        ));
+                    }
+                    self.advance();
+                    let hi = match self.current() {
+                        Token::String(h) => { self.advance(); h }
+                        other => return Err(format!(
+                            "expected string upper bound after `..` in range pattern, got {:?}", other
+                        )),
+                    };
+                    let hi_chars: Vec<char> = hi.chars().collect();
+                    if hi_chars.len() != 1 {
+                        return Err(format!(
+                            "upper bound of string range must be a 1-char string, got {:?}", hi
+                        ));
+                    }
+                    Ok(Pattern::RangeStr(lo_chars[0], hi_chars[0]))
+                } else {
+                    Ok(Pattern::LitString(s))
+                }
+            }
+            Token::Ident(name) => {
+                self.advance();
+                // Reserved type-tag names dispatch as Pattern::Type.
+                // Anything else is a Bind (binds the value to the
+                // identifier in the arm body) — including `_` which
+                // we special-case to Wildcard so the body can't refer
+                // to it (matches Rust convention).
+                Ok(match name.as_str() {
+                    "_" => Pattern::Wildcard,
+                    "true" => Pattern::LitBool(true),
+                    "false" => Pattern::LitBool(false),
+                    "null" => Pattern::LitNull,
+                    "int" | "float" | "string" | "bool" | "array"
+                    | "dict" | "function" | "null_t" | "singularity" => {
+                        Pattern::Type(name)
+                    }
+                    _ => Pattern::Bind(name),
+                })
+            }
+            other => Err(format!("expected pattern, got {:?}", other)),
+        }
     }
 
     fn parse_for_stmt(&mut self) -> Result<Statement, String> {

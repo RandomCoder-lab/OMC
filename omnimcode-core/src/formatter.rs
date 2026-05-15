@@ -181,6 +181,45 @@ fn format_stmt(stmt: &Statement, level: usize, out: &mut String) {
             indent_to(level, out);
             out.push_str("}\n");
         }
+        Statement::Match { scrutinee, arms } => {
+            out.push_str("match ");
+            format_expr(scrutinee, out);
+            out.push_str(" {\n");
+            for arm in arms {
+                indent_to(level + 1, out);
+                format_pattern(&arm.pattern, out);
+                out.push_str(" => {\n");
+                for s in &arm.body { format_stmt(s, level + 2, out); }
+                indent_to(level + 1, out);
+                out.push_str("}\n");
+            }
+            indent_to(level, out);
+            out.push_str("}\n");
+        }
+    }
+}
+
+fn format_pattern(pat: &crate::ast::Pattern, out: &mut String) {
+    use crate::ast::Pattern;
+    match pat {
+        Pattern::Wildcard => out.push('_'),
+        Pattern::Bind(n) => out.push_str(n),
+        Pattern::LitInt(n) => out.push_str(&n.to_string()),
+        Pattern::LitFloat(f) => out.push_str(&format!("{}", f)),
+        Pattern::LitString(s) => out.push_str(&format!("{:?}", s)),
+        Pattern::LitBool(b) => out.push_str(if *b { "true" } else { "false" }),
+        Pattern::LitNull => out.push_str("null"),
+        Pattern::RangeInt(lo, hi) => out.push_str(&format!("{}..{}", lo, hi)),
+        Pattern::RangeStr(lo, hi) => {
+            out.push_str(&format!("\"{}\"..\"{}\"", lo, hi));
+        }
+        Pattern::Or(alts) => {
+            for (i, p) in alts.iter().enumerate() {
+                if i > 0 { out.push_str(" | "); }
+                format_pattern(p, out);
+            }
+        }
+        Pattern::Type(name) => out.push_str(name),
     }
 }
 

@@ -62,6 +62,57 @@ pub enum Statement {
         err_var: String,
         handler: Vec<Statement>,
     },
+    /// `match expr { pat => stmts, ... }`. First arm whose pattern
+    /// accepts the scrutinee runs; remaining arms are skipped.
+    /// A wildcard or bare-identifier arm at the end is the default.
+    /// If no arm matches, the whole match is a no-op (no error).
+    Match {
+        scrutinee: Expression,
+        arms: Vec<MatchArm>,
+    },
+}
+
+/// A single arm in a `match` statement. Patterns can:
+///  - match literals (number, float, string, bool, null)
+///  - match a wildcard (`_`) or bind a variable (any bare ident)
+///  - match a range (numeric `1..10` or single-char string `"a".."z"`)
+///  - alternate via `|` (`1 | 2 | 3`)
+///  - dispatch on type name (`int`, `string`, `dict`, etc.)
+///
+/// Body is a sequence of statements (block or single `=> stmt;` arm).
+#[derive(Clone, Debug, PartialEq)]
+pub struct MatchArm {
+    pub pattern: Pattern,
+    pub body: Vec<Statement>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Pattern {
+    /// Matches anything; binds nothing.
+    Wildcard,
+    /// Matches anything; binds the value to `name` in the arm body.
+    Bind(String),
+    /// Matches by structural equality with the literal.
+    LitInt(i64),
+    LitFloat(f64),
+    LitString(String),
+    LitBool(bool),
+    LitNull,
+    /// Numeric range, inclusive on both ends. `lo..=hi`. Stored as
+    /// inclusive because that's the common case for digit/letter
+    /// dispatch (`'0'..='9'`, `'a'..='z'`).
+    RangeInt(i64, i64),
+    /// Single-char string range, inclusive. Each side must be a
+    /// 1-char string at parse time. Matches a 1-char string whose
+    /// codepoint falls in [lo, hi]. Useful for the JSON-parser
+    /// `is_digit` style dispatch.
+    RangeStr(char, char),
+    /// Alternation: any of the inner patterns matches.
+    Or(Vec<Pattern>),
+    /// Match by type tag — same names as the `type_of` builtin.
+    /// E.g. `int`, `float`, `string`, `bool`, `array`, `dict`,
+    /// `function`, `null`.
+    Type(String),
 }
 
 #[derive(Clone, Debug, PartialEq)]

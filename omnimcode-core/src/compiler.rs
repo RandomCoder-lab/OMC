@@ -880,6 +880,14 @@ impl Compiler {
                 // itself, fall back to the AST walker for try/catch.
                 self.emit(Op::ExecStmt(Box::new(s.clone())));
             }
+            Statement::Match { .. } => {
+                // Same fallback strategy as Try. A native lowering
+                // would compile each arm into a guarded Jump and
+                // emit the bindings as Op::StoreVar — straightforward
+                // but adds 50+ lines of Rust per pattern variant.
+                // Defer until benchmarks show match in a hot path.
+                self.emit(Op::ExecStmt(Box::new(s.clone())));
+            }
         }
         Ok(())
     }
