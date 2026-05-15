@@ -243,19 +243,303 @@ impl Interpreter {
             self.continue_flag = false;
         }
         if let Some(prefix) = alias {
-            // Rename newly-defined functions to alias.name.
+            // Rename newly-defined functions to alias.name AND
+            // rewrite intra-module calls in their bodies so `_pd()`
+            // inside this module still resolves after `_pd` becomes
+            // `pd._pd`. Without this rewrite, helper-fn patterns
+            // ("init once, return cached handle") break under aliasing.
             let new_names: Vec<String> = self.functions.keys()
                 .filter(|k| !pre_fns.contains(*k))
                 .cloned()
                 .collect();
-            for original in new_names {
-                if let Some(def) = self.functions.remove(&original) {
+            let module_set: HashSet<String> = new_names.iter().cloned().collect();
+            for original in &new_names {
+                if let Some((params, body)) = self.functions.remove(original) {
+                    let rewritten_body: Vec<Statement> = body
+                        .into_iter()
+                        .map(|s| Self::rewrite_module_calls(s, &module_set, prefix))
+                        .collect();
                     let aliased = format!("{}.{}", prefix, original);
-                    self.functions.insert(aliased, def);
+                    self.functions.insert(aliased, (params, rewritten_body));
                 }
             }
         }
         Ok(())
+    }
+
+    /// Walk a Statement and rewrite any Expression::Call whose name
+    /// is in `module_names` to `alias.name`. Used by aliased imports
+    /// so a module's helpers can call its other functions even after
+    /// they've been renamed.
+    fn rewrite_module_calls(
+        stmt: Statement,
+        module_names: &HashSet<String>,
+        alias: &str,
+    ) -> Statement {
+        match stmt {
+            Statement::Expression(e) => Statement::Expression(
+                Self::rewrite_call_expr(e, module_names, alias),
+            ),
+            Statement::Print(e) => Statement::Print(
+                Self::rewrite_call_expr(e, module_names, alias),
+            ),
+            Statement::VarDecl { name, value, is_harmonic } => Statement::VarDecl {
+                name,
+                value: Self::rewrite_call_expr(value, module_names, alias),
+                is_harmonic,
+            },
+            Statement::Parameter { name, value } => Statement::Parameter {
+                name,
+                value: Self::rewrite_call_expr(value, module_names, alias),
+            },
+            Statement::Assignment { name, value } => Statement::Assignment {
+                name,
+                value: Self::rewrite_call_expr(value, module_names, alias),
+            },
+            Statement::IndexAssignment { name, index, value } => Statement::IndexAssignment {
+                name,
+                index: Self::rewrite_call_expr(index, module_names, alias),
+                value: Self::rewrite_call_expr(value, module_names, alias),
+            },
+            Statement::Return(opt) => Statement::Return(
+                opt.map(|e| Self::rewrite_call_expr(e, module_names, alias)),
+            ),
+            Statement::If { condition, then_body, elif_parts, else_body } => Statement::If {
+                condition: Self::rewrite_call_expr(condition, module_names, alias),
+                then_body: then_body
+                    .into_iter()
+                    .map(|s| Self::rewrite_module_calls(s, module_names, alias))
+                    .collect(),
+                elif_parts: elif_parts
+                    .into_iter()
+                    .map(|(c, b)| {
+                        (
+                            Self::rewrite_call_expr(c, module_names, alias),
+                            b.into_iter()
+                                .map(|s| Self::rewrite_module_calls(s, module_names, alias))
+                                .collect(),
+                        )
+                    })
+                    .collect(),
+                else_body: else_body.map(|b| {
+                    b.into_iter()
+                        .map(|s| Self::rewrite_module_calls(s, module_names, alias))
+                        .collect()
+                }),
+            },
+            Statement::While { condition, body } => Statement::While {
+                condition: Self::rewrite_call_expr(condition, module_names, alias),
+                body: body
+                    .into_iter()
+                    .map(|s| Self::rewrite_module_calls(s, module_names, alias))
+                    .collect(),
+            },
+            Statement::For { var, iterable, body } => Statement::For {
+                var,
+                iterable: match iterable {
+                    ForIterable::Range { start, end } => ForIterable::Range {
+                        start: Self::rewrite_call_expr(start, module_names, alias),
+                        end: Self::rewrite_call_expr(end, module_names, alias),
+                    },
+                    ForIterable::Expr(e) => ForIterable::Expr(
+                        Self::rewrite_call_expr(e, module_names, alias),
+                    ),
+                },
+                body: body
+                    .into_iter()
+                    .map(|s| Self::rewrite_module_calls(s, module_names, alias))
+                    .collect(),
+            },
+            Statement::FunctionDef { name, params, param_types, body, return_type, pragmas } => {
+                Statement::FunctionDef {
+                    name,
+                    params,
+                    param_types,
+                    body: body
+                        .into_iter()
+                        .map(|s| Self::rewrite_module_calls(s, module_names, alias))
+                        .collect(),
+                    return_type,
+                    pragmas,
+                }
+            }
+            Statement::Try { body, err_var, handler } => Statement::Try {
+                body: body
+                    .into_iter()
+                    .map(|s| Self::rewrite_module_calls(s, module_names, alias))
+                    .collect(),
+                err_var,
+                handler: handler
+                    .into_iter()
+                    .map(|s| Self::rewrite_module_calls(s, module_names, alias))
+                    .collect(),
+            },
+            Statement::Match { scrutinee, arms } => Statement::Match {
+                scrutinee: Self::rewrite_call_expr(scrutinee, module_names, alias),
+                arms: arms
+                    .into_iter()
+                    .map(|arm| MatchArm {
+                        pattern: arm.pattern,
+                        body: arm
+                            .body
+                            .into_iter()
+                            .map(|s| Self::rewrite_module_calls(s, module_names, alias))
+                            .collect(),
+                    })
+                    .collect(),
+            },
+            other => other,
+        }
+    }
+
+    fn rewrite_call_expr(
+        e: Expression,
+        module_names: &HashSet<String>,
+        alias: &str,
+    ) -> Expression {
+        match e {
+            Expression::Call { name, args, pos } => {
+                let new_name = if module_names.contains(&name) {
+                    format!("{}.{}", alias, name)
+                } else {
+                    name
+                };
+                Expression::Call {
+                    name: new_name,
+                    args: args
+                        .into_iter()
+                        .map(|a| Self::rewrite_call_expr(a, module_names, alias))
+                        .collect(),
+                    pos,
+                }
+            }
+            Expression::Add(l, r) => Expression::Add(
+                Box::new(Self::rewrite_call_expr(*l, module_names, alias)),
+                Box::new(Self::rewrite_call_expr(*r, module_names, alias)),
+            ),
+            Expression::Sub(l, r) => Expression::Sub(
+                Box::new(Self::rewrite_call_expr(*l, module_names, alias)),
+                Box::new(Self::rewrite_call_expr(*r, module_names, alias)),
+            ),
+            Expression::Mul(l, r) => Expression::Mul(
+                Box::new(Self::rewrite_call_expr(*l, module_names, alias)),
+                Box::new(Self::rewrite_call_expr(*r, module_names, alias)),
+            ),
+            Expression::Div(l, r) => Expression::Div(
+                Box::new(Self::rewrite_call_expr(*l, module_names, alias)),
+                Box::new(Self::rewrite_call_expr(*r, module_names, alias)),
+            ),
+            Expression::Mod(l, r) => Expression::Mod(
+                Box::new(Self::rewrite_call_expr(*l, module_names, alias)),
+                Box::new(Self::rewrite_call_expr(*r, module_names, alias)),
+            ),
+            Expression::Eq(l, r) => Expression::Eq(
+                Box::new(Self::rewrite_call_expr(*l, module_names, alias)),
+                Box::new(Self::rewrite_call_expr(*r, module_names, alias)),
+            ),
+            Expression::Ne(l, r) => Expression::Ne(
+                Box::new(Self::rewrite_call_expr(*l, module_names, alias)),
+                Box::new(Self::rewrite_call_expr(*r, module_names, alias)),
+            ),
+            Expression::Lt(l, r) => Expression::Lt(
+                Box::new(Self::rewrite_call_expr(*l, module_names, alias)),
+                Box::new(Self::rewrite_call_expr(*r, module_names, alias)),
+            ),
+            Expression::Le(l, r) => Expression::Le(
+                Box::new(Self::rewrite_call_expr(*l, module_names, alias)),
+                Box::new(Self::rewrite_call_expr(*r, module_names, alias)),
+            ),
+            Expression::Gt(l, r) => Expression::Gt(
+                Box::new(Self::rewrite_call_expr(*l, module_names, alias)),
+                Box::new(Self::rewrite_call_expr(*r, module_names, alias)),
+            ),
+            Expression::Ge(l, r) => Expression::Ge(
+                Box::new(Self::rewrite_call_expr(*l, module_names, alias)),
+                Box::new(Self::rewrite_call_expr(*r, module_names, alias)),
+            ),
+            Expression::And(l, r) => Expression::And(
+                Box::new(Self::rewrite_call_expr(*l, module_names, alias)),
+                Box::new(Self::rewrite_call_expr(*r, module_names, alias)),
+            ),
+            Expression::Or(l, r) => Expression::Or(
+                Box::new(Self::rewrite_call_expr(*l, module_names, alias)),
+                Box::new(Self::rewrite_call_expr(*r, module_names, alias)),
+            ),
+            Expression::Not(e) => Expression::Not(Box::new(Self::rewrite_call_expr(
+                *e,
+                module_names,
+                alias,
+            ))),
+            Expression::Array(items) => Expression::Array(
+                items
+                    .into_iter()
+                    .map(|e| Self::rewrite_call_expr(e, module_names, alias))
+                    .collect(),
+            ),
+            Expression::Dict(pairs) => Expression::Dict(
+                pairs
+                    .into_iter()
+                    .map(|(k, v)| {
+                        (
+                            Self::rewrite_call_expr(k, module_names, alias),
+                            Self::rewrite_call_expr(v, module_names, alias),
+                        )
+                    })
+                    .collect(),
+            ),
+            Expression::Index { name, index } => Expression::Index {
+                name,
+                index: Box::new(Self::rewrite_call_expr(*index, module_names, alias)),
+            },
+            Expression::Resonance(e) => Expression::Resonance(Box::new(
+                Self::rewrite_call_expr(*e, module_names, alias),
+            )),
+            Expression::Fold(e) => Expression::Fold(Box::new(Self::rewrite_call_expr(
+                *e,
+                module_names,
+                alias,
+            ))),
+            Expression::Safe(e) => Expression::Safe(Box::new(Self::rewrite_call_expr(
+                *e,
+                module_names,
+                alias,
+            ))),
+            Expression::Lambda { params, body } => Expression::Lambda {
+                params,
+                body: body
+                    .into_iter()
+                    .map(|s| Self::rewrite_module_calls(s, module_names, alias))
+                    .collect(),
+            },
+            // BitAnd/Or/Xor/Shl/Shr/BitNot/Neg: rewrite recursively
+            Expression::BitAnd(l, r) => Expression::BitAnd(
+                Box::new(Self::rewrite_call_expr(*l, module_names, alias)),
+                Box::new(Self::rewrite_call_expr(*r, module_names, alias)),
+            ),
+            Expression::BitOr(l, r) => Expression::BitOr(
+                Box::new(Self::rewrite_call_expr(*l, module_names, alias)),
+                Box::new(Self::rewrite_call_expr(*r, module_names, alias)),
+            ),
+            Expression::BitXor(l, r) => Expression::BitXor(
+                Box::new(Self::rewrite_call_expr(*l, module_names, alias)),
+                Box::new(Self::rewrite_call_expr(*r, module_names, alias)),
+            ),
+            Expression::BitNot(e) => Expression::BitNot(Box::new(Self::rewrite_call_expr(
+                *e,
+                module_names,
+                alias,
+            ))),
+            Expression::Shl(l, r) => Expression::Shl(
+                Box::new(Self::rewrite_call_expr(*l, module_names, alias)),
+                Box::new(Self::rewrite_call_expr(*r, module_names, alias)),
+            ),
+            Expression::Shr(l, r) => Expression::Shr(
+                Box::new(Self::rewrite_call_expr(*l, module_names, alias)),
+                Box::new(Self::rewrite_call_expr(*r, module_names, alias)),
+            ),
+            // Leaf nodes pass through.
+            other => other,
+        }
     }
 
     pub fn execute(&mut self, statements: Vec<Statement>) -> Result<(), String> {

@@ -57,6 +57,22 @@ fn main() {
     }
 }
 
+/// Register the `py_*` builtin family on `interp` if both
+/// (a) the binary was compiled with `--features python-embed` AND
+/// (b) `OMC_PYTHON=1` is set in the environment.
+///
+/// The two-gate design lets us ship a single binary that opts in to
+/// the Python runtime cost only when the user asks for it. Without
+/// the feature flag this is a no-op stub; without OMC_PYTHON=1 the
+/// builtins aren't registered and OMC programs that try to call
+/// py_import will see "Undefined function: py_import".
+fn maybe_register_python(_interp: &mut Interpreter) {
+    #[cfg(feature = "python-embed")]
+    if std::env::var("OMC_PYTHON").as_deref() == Ok("1") {
+        omnimcode_core::python_embed::register_python_builtins(_interp);
+    }
+}
+
 fn print_help() {
     let prog = env::args().next().unwrap_or_else(|| "omnimcode-standalone".to_string());
     println!("Usage:");
@@ -200,6 +216,11 @@ fn execute_program(source: &str) -> Result<(), String> {
         // and resolve normally.
         vm.interp_mut().process_imports(&statements)?;
         vm.interp_mut().register_user_functions(&statements);
+        // OMC_PYTHON=1 — register py_import / py_call / py_eval / etc.
+        // so OMC code can drive numpy, pandas, requests, any pip lib.
+        // Off by default; the standalone binary still builds without
+        // libpython if `python-embed` feature isn't on at build time.
+        maybe_register_python(vm.interp_mut());
         // Also register every lambda body the compiler collected. Lambda
         // invocation routes through call_first_class_function → the
         // interpreter's tree-walk path; that path looks up by name in
@@ -213,6 +234,7 @@ fn execute_program(source: &str) -> Result<(), String> {
     }
 
     let mut interpreter = Interpreter::new();
+    maybe_register_python(&mut interpreter);
     // OMC_HEAL_RETRY=1 — catch runtime errors after execution starts,
     // run the heal pass on a fresh copy of the AST, and retry. Captures
     // bugs that the static heal pass missed (e.g. dynamic /0, missing
@@ -260,6 +282,7 @@ fn repl() {
 
     let stdin = io::stdin();
     let mut interpreter = Interpreter::new();
+    maybe_register_python(&mut interpreter);
     let mut buffer = String::new();
     let mut continuing = false;
 

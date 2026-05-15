@@ -1,0 +1,144 @@
+# =============================================================================
+# Real-world demo: pandas-loads-MovieLens → OMC-harmonic-clusters → numpy-stats
+# =============================================================================
+# What this proves:
+#   1. OMC can ingest any dataset pandas can read (CSV here; parquet,
+#      JSON, Excel, SQL all just one line in pd.* away)
+#   2. OMC can drive numpy for the math it doesn't natively do
+#   3. The OMC-distinctive part — Fibonacci-attractor bucketing — runs
+#      ON TOP of the standard ecosystem, not as a replacement for it
+#
+# Pipeline:
+#   pd.read_csv → OMC arrays
+#       → harmonic_partition by attractor (OMC-side)
+#           → numpy stats per bucket (mean/std/percentile)
+#               → printed report
+#
+# Run:
+#   PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 cargo build --release \
+#       --bin omnimcode-standalone --features python-embed
+#   OMC_PYTHON=1 ./target/release/omnimcode-standalone \
+#       examples/datascience/movielens_harmonic.omc
+# =============================================================================
+
+import "examples/lib/pd.omc" as pd;
+import "examples/lib/np.omc" as np;
+
+println("=== OMC + pandas + numpy: harmonic clustering of MovieLens ===");
+println("");
+
+# ---- 1. Load the full 10k-row sample via pandas ---------------------------
+
+h t0 = now_ms();
+h df = pd.read_csv("examples/recommend/sample_10k.csv");
+h t1 = now_ms();
+
+println(concat_many("loaded ", pd.nrows(df), " rows in ",
+    t1 - t0, " ms via pandas"));
+println(concat_many("columns: ", pd.columns(df)));
+println("");
+
+# ---- 2. Pull the rating column as an OMC array ----------------------------
+
+h ratings = pd.col(df, "rating");
+h t2 = now_ms();
+println(concat_many("ratings array materialised in ",
+    t2 - t1, " ms (", arr_len(ratings), " values)"));
+println("");
+
+# ---- 3. Quick stats via numpy (the part OMC doesn't natively do) ---------
+
+println("=== numpy stats on the rating column ===");
+println(concat_many("  mean:    ", np.mean(ratings)));
+println(concat_many("  median:  ", np.median(ratings)));
+println(concat_many("  std:     ", np.std(ratings)));
+println(concat_many("  min/max: ", np.np_min(ratings), " / ", np.np_max(ratings)));
+println(concat_many("  p25:     ", np.percentile(ratings, 25)));
+println(concat_many("  p75:     ", np.percentile(ratings, 75)));
+println("");
+
+# ---- 4. Harmonic clustering: bucket by Fibonacci attractor ---------------
+# Multiply ratings by 100 and feed through OMC's harmonic_partition. The
+# resulting buckets group ratings that fold to the same attractor —
+# something neither pandas nor numpy expose as a primitive.
+
+fn ratings_x100(arr) {
+    h out = [];
+    h i = 0;
+    while i < arr_len(arr) {
+        arr_push(out, to_int(arr_get(arr, i) * 100));
+        i = i + 1;
+    }
+    return out;
+}
+
+h scaled = ratings_x100(ratings);
+h t3 = now_ms();
+h buckets = harmonic_partition(scaled);
+h t4 = now_ms();
+println(concat_many("harmonic_partition: ", t4 - t3,
+    " ms, ", arr_len(buckets), " attractor buckets"));
+println("");
+
+# ---- 5. For each bucket, hand back to numpy for stats --------------------
+# This is the join: OMC bucketed harmonically, numpy summarises each
+# group. Round-trip through both runtimes works seamlessly.
+
+println("=== Per-attractor bucket stats (mean / std / count via numpy) ===");
+h k = 0;
+while k < arr_len(buckets) {
+    h bucket = arr_get(buckets, k);
+    if arr_len(bucket) > 0 {
+        h label = fold(arr_get(bucket, 0));
+        h n = arr_len(bucket);
+        h m = np.mean(bucket);
+        h sd = np.std(bucket);
+        println(concat_many(
+            "  attractor ~", label, "  ",
+            "n=", n, "  ",
+            "mean=", m, "  ",
+            "std=", sd
+        ));
+    }
+    k = k + 1;
+}
+println("");
+
+# ---- 6. Demonstrate the inverse: argsort via numpy, lookup via OMC -------
+# Sort the unique movies by avg rating using numpy's argsort, then build
+# a top-10 with OMC indexing.
+
+h grouped = pd.group_by(df, "movieId");
+h means_dict = pd.agg_mean(grouped);
+h movie_ids = dict_get(means_dict, "movieId");
+h avg_ratings = dict_get(means_dict, "rating");
+println(concat_many("aggregated ", arr_len(movie_ids),
+    " movies (pandas group_by + mean)"));
+
+# numpy argsort returns indices that would sort the array. We negate
+# the ratings to get descending order.
+fn negate(arr) {
+    h out = [];
+    h i = 0;
+    while i < arr_len(arr) {
+        arr_push(out, 0 - arr_get(arr, i));
+        i = i + 1;
+    }
+    return out;
+}
+h order = np.argsort(negate(avg_ratings));
+
+println("");
+println("=== Top 10 movies by avg rating (numpy sort, OMC indexing) ===");
+h j = 0;
+while j < 10 {
+    h idx = arr_get(order, j);
+    println(concat_many(
+        "  movie ", arr_get(movie_ids, idx),
+        "   avg=", arr_get(avg_ratings, idx)
+    ));
+    j = j + 1;
+}
+
+println("");
+println("=== Done ===");

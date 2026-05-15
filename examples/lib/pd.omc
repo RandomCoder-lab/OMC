@@ -1,0 +1,102 @@
+# =============================================================================
+# pandas bridge for OMC — written in OMC
+# =============================================================================
+# The "OMC can dissect any dataset" layer. Wraps pd.read_* so OMC code
+# can ingest CSV / parquet / JSON / Excel / SQL with one call each.
+#
+# Design choice: we always return PANDAS HANDLES, not OMC dicts. The
+# caller can pull rows / columns into OMC via to_dict / to_list when
+# they actually need it. This keeps memory off OMC's heap until the
+# user decides to materialise — matters for million-row datasets.
+#
+# Usage:
+#   import "examples/lib/pd.omc" as pd;
+#   h df = pd.read_csv("data/movies.csv");
+#   h cols = pd.columns(df);                    # OMC array of strings
+#   h rows = pd.head_dict(df, 5);               # OMC dict of arrays
+# =============================================================================
+
+h _PD_HANDLE = 0;
+
+fn _pd() {
+    if _PD_HANDLE == 0 {
+        _PD_HANDLE = py_import("pandas");
+    }
+    return _PD_HANDLE;
+}
+
+# ---- Loaders --------------------------------------------------------------
+# Each one returns a pandas handle. Composable with the rest of pd.*.
+
+fn read_csv(path)      { return py_call(_pd(), "read_csv", [path]); }
+fn read_json(path)     { return py_call(_pd(), "read_json", [path]); }
+fn read_parquet(path)  { return py_call(_pd(), "read_parquet", [path]); }
+fn read_excel(path)    { return py_call(_pd(), "read_excel", [path]); }
+fn read_table(path)    { return py_call(_pd(), "read_table", [path]); }
+
+# ---- DataFrame inspection -------------------------------------------------
+
+fn shape(df)        { return py_get(df, "shape"); }
+fn nrows(df)        { return arr_get(shape(df), 0); }
+fn ncols(df)        { return arr_get(shape(df), 1); }
+
+fn columns(df) {
+    # py_get already auto-converts pandas.Index via .tolist(), so we
+    # get an OMC array directly. No need for a second .tolist() call.
+    return py_get(df, "columns");
+}
+
+# ---- Materialisation (handle → OMC) --------------------------------------
+
+# All rows as a dict-of-arrays (one entry per column). Memory-heavy
+# on big DataFrames; prefer head_dict when sampling.
+fn to_dict(df) {
+    return py_call(df, "to_dict", ["list"]);
+}
+
+fn head_dict(df, n) {
+    h h_df = py_call(df, "head", [n]);
+    return py_call(h_df, "to_dict", ["list"]);
+}
+
+# Pull a single column as an OMC array. py_call already auto-converts
+# the returned pandas Series via .tolist() (Series exposes that
+# attr), so we get an OMC array directly. No second call needed.
+fn col(df, name) {
+    return py_call(df, "get", [name]);
+}
+
+# ---- Filtering / selection -----------------------------------------------
+
+fn head(df, n)      { return py_call(df, "head", [n]); }
+fn tail(df, n)      { return py_call(df, "tail", [n]); }
+
+fn select_cols(df, cols) {
+    return py_call(df, "get", [cols]);   # df[cols] equivalent
+}
+
+# ---- Aggregation ----------------------------------------------------------
+
+fn group_by(df, key) {
+    return py_call(df, "groupby", [key]);
+}
+
+# Apply mean/sum/count to a groupby and pull as a dict-of-arrays.
+fn agg_mean(grouped) {
+    h means = py_call(grouped, "mean", []);
+    h reset = py_call(means, "reset_index", []);
+    return py_call(reset, "to_dict", ["list"]);
+}
+
+fn agg_count(grouped) {
+    h counts = py_call(grouped, "count", []);
+    h reset = py_call(counts, "reset_index", []);
+    return py_call(reset, "to_dict", ["list"]);
+}
+
+# ---- Conversion -----------------------------------------------------------
+
+fn describe(df) {
+    h d = py_call(df, "describe", []);
+    return py_call(d, "to_dict", ["list"]);
+}

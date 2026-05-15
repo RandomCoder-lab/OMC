@@ -2,8 +2,14 @@
 members = [
     "omnimcode-core",
     "omnimcode-ffi",
-    "omnimcode-python"
 ]
+# omnimcode-python kept around but excluded from the default workspace.
+# It was the "Python embeds OMC" wrapper (extension-module mode); now
+# eclipsed by the python-embed feature on omnimcode-core, which goes
+# the other way (OMC embeds Python). Building it would conflict with
+# python-embed because both crates would `links = "python"`. Build it
+# separately via `cargo build -p omnimcode-python` if needed.
+exclude = ["omnimcode-python"]
 resolver = "2"
 
 [workspace.package]

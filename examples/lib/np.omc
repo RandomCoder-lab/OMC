@@ -1,0 +1,67 @@
+# =============================================================================
+# numpy bridge for OMC — written in OMC, no Rust required
+# =============================================================================
+# Wraps the most common numpy operations in idiomatic OMC. Every
+# function is one or two lines on top of the py_* primitives.
+#
+# Usage from a caller:
+#   import "examples/lib/np.omc" as np;
+#   h ndarray = np.array([1, 2, 3, 4, 5]);
+#   h m = np.mean(ndarray);
+#
+# Run with: OMC_PYTHON=1 ./target/release/omnimcode-standalone <file>
+# =============================================================================
+
+# Cached numpy module handle. Lazily initialised on first call so importing
+# this file is free if you never use it.
+h _NP_HANDLE = 0;
+
+fn _np() {
+    if _NP_HANDLE == 0 {
+        _NP_HANDLE = py_import("numpy");
+    }
+    return _NP_HANDLE;
+}
+
+# ---- Array constructors ---------------------------------------------------
+
+fn array(items)    { return py_call(_np(), "array", [items]); }
+fn zeros(n)        { return py_call(_np(), "zeros", [n]); }
+fn ones(n)         { return py_call(_np(), "ones",  [n]); }
+fn arange(n)       { return py_call(_np(), "arange",[n]); }
+fn linspace(a, b, n) { return py_call(_np(), "linspace", [a, b, n]); }
+
+# ---- Reductions -----------------------------------------------------------
+
+fn mean(arr)       { return py_call(_np(), "mean",   [arr]); }
+fn median(arr)     { return py_call(_np(), "median", [arr]); }
+fn std(arr)        { return py_call(_np(), "std",    [arr]); }
+fn np_sum(arr)     { return py_call(_np(), "sum",    [arr]); }
+fn np_min(arr)     { return py_call(_np(), "min",    [arr]); }
+fn np_max(arr)     { return py_call(_np(), "max",    [arr]); }
+
+# ---- Element-wise ---------------------------------------------------------
+
+fn dot(a, b)       { return py_call(_np(), "dot",  [a, b]); }
+fn np_add(a, b)    { return py_call(_np(), "add",  [a, b]); }
+fn np_mul(a, b)    { return py_call(_np(), "multiply", [a, b]); }
+
+# ---- Sorting / shape ------------------------------------------------------
+
+fn sort(arr)       { return py_call(_np(), "sort", [arr]); }
+fn argsort(arr)    { return py_call(_np(), "argsort", [arr]); }
+fn shape(arr)      { return py_get(arr, "shape"); }
+fn np_len(arr)     { return arr_len(shape(arr)) ; }   # rank, not size; use py_get(arr, "size") for elements
+
+# ---- Statistics -----------------------------------------------------------
+
+fn percentile(arr, p) { return py_call(_np(), "percentile", [arr, p]); }
+fn quantile(arr, q)   { return py_call(_np(), "quantile",   [arr, q]); }
+fn corrcoef(a, b)     { return py_call(_np(), "corrcoef",   [a, b]); }
+
+# ---- Constants (lazy) -----------------------------------------------------
+
+fn pi()  { return py_get(_np(), "pi"); }
+fn e()   { return py_get(_np(), "e"); }
+fn inf() { return py_get(_np(), "inf"); }
+fn nan() { return py_get(_np(), "nan"); }
