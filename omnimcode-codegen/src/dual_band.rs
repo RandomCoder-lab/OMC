@@ -392,6 +392,31 @@ impl<'ctx, 'a> DualBandLowerer<'ctx, 'a> {
                     let val = self.emit_array_index(arr_v, idx_v, i)?;
                     stack.push(self.splat(val, "aidx_v")?);
                 }
+                // Path D: array writes. ArrSetNamed(name) is the
+                // optimized form the compiler emits for
+                // `arr_set(name, idx, val)` where `name` is a literal
+                // variable. Pops value, pops index, looks up the
+                // array via the named slot, GEPs slot+1, stores.
+                // Pushes a placeholder (0) so the trailing Pop the
+                // compiler emits doesn't underflow — the OMC builtin
+                // arr_set returns null in tree-walk.
+                Op::ArrSetNamed(name) => {
+                    let val_v = self.pop(&mut stack, i, "ArrSetNamed value")?;
+                    let idx_v = self.pop(&mut stack, i, "ArrSetNamed idx")?;
+                    self.emit_array_set_named(name, idx_v, val_v, i)?;
+                    stack.push(self.splat(i64_type.const_int(0, false), "asn_ret")?);
+                }
+                // ArrayIndexAssign(name): the compiler's emit for
+                // `name[idx] = val` syntax. Same semantics as
+                // ArrSetNamed but the bytecode form is value-then-
+                // index-then-op (different stack discipline).
+                // Doesn't push a placeholder (the AST form is a
+                // statement, not an expression).
+                Op::ArrayIndexAssign(name) => {
+                    let val_v = self.pop(&mut stack, i, "ArrayIndexAssign value")?;
+                    let idx_v = self.pop(&mut stack, i, "ArrayIndexAssign idx")?;
+                    self.emit_array_set_named(name, idx_v, val_v, i)?;
+                }
 
                 Op::Eq => self.cmp_vec(&mut stack, i, IntPredicate::EQ)?,
                 Op::Ne => self.cmp_vec(&mut stack, i, IntPredicate::NE)?,
@@ -835,6 +860,85 @@ impl<'ctx, 'a> DualBandLowerer<'ctx, 'a> {
             BasicValueEnum::IntValue(iv) => Ok(iv),
             _ => Err(format!("ArrayLen load not int at op{}", op_idx)),
         }
+    }
+
+    /// Path D: ArrSetNamed / ArrayIndexAssign helper. Looks up the
+    /// named array slot, loads the i64-pointer-bit-pattern, inttoptrs
+    /// to a real LLVM pointer, GEPs to slot `idx + 1` (skipping the
+    /// length prefix), and stores the value's α lane.
+    ///
+    /// β is discarded on writes — the value's β was the harmonic
+    /// shadow of the value at the call site; once written into the
+    /// array, the slot only holds α (the array's storage is
+    /// scalar i64). When the value is later READ back via ArrayIndex,
+    /// it gets a fresh splatted (α, α) pair (matched bands).
+    ///
+    /// This is a deliberate semantic choice for the MVP: arrays are
+    /// classical-only storage. β-tracking through arrays would need
+    /// either parallel β arrays or a wider element type. Leaves
+    /// the door open for a future "harmonic array" type.
+    fn emit_array_set_named(
+        &mut self,
+        name: &str,
+        idx_v: VectorValue<'ctx>,
+        val_v: VectorValue<'ctx>,
+        op_idx: usize,
+    ) -> Result<(), CodegenError> {
+        let i64_type = self.ctx.i64_type();
+        // Look up the slot holding the array's pointer-bit-pattern.
+        let slot = self.get_or_create_slot(name)?;
+        // Load the <2 x i64> from the slot, extract α (pointer).
+        let arr_v_loaded = self
+            .builder
+            .build_load(self.v2i64, slot, &format!("{}_arr_load", name))
+            .map_err(|e| format!("ArrSetNamed slot load at op{}: {}", op_idx, e))?;
+        let arr_vv = match arr_v_loaded {
+            BasicValueEnum::VectorValue(vv) => vv,
+            _ => return Err(format!("ArrSetNamed slot not vector at op{}", op_idx)),
+        };
+        let arr_alpha = self
+            .builder
+            .build_extract_element(arr_vv, i64_type.const_int(0, false), "asn_aptr")
+            .map_err(|e| format!("ArrSetNamed extract α at op{}: {}", op_idx, e))?;
+        let idx_alpha = self
+            .builder
+            .build_extract_element(idx_v, i64_type.const_int(0, false), "asn_aix")
+            .map_err(|e| format!("ArrSetNamed extract idx α at op{}: {}", op_idx, e))?;
+        let val_alpha = self
+            .builder
+            .build_extract_element(val_v, i64_type.const_int(0, false), "asn_aval")
+            .map_err(|e| format!("ArrSetNamed extract val α at op{}: {}", op_idx, e))?;
+        let arr_iv = match arr_alpha {
+            BasicValueEnum::IntValue(iv) => iv,
+            _ => return Err(format!("ArrSetNamed ptr not int at op{}", op_idx)),
+        };
+        let idx_iv = match idx_alpha {
+            BasicValueEnum::IntValue(iv) => iv,
+            _ => return Err(format!("ArrSetNamed idx not int at op{}", op_idx)),
+        };
+        let val_iv = match val_alpha {
+            BasicValueEnum::IntValue(iv) => iv,
+            _ => return Err(format!("ArrSetNamed val not int at op{}", op_idx)),
+        };
+        let ptr_ty = self.ctx.ptr_type(inkwell::AddressSpace::default());
+        let ptr = self
+            .builder
+            .build_int_to_ptr(arr_iv, ptr_ty, "asn_ptr")
+            .map_err(|e| format!("ArrSetNamed inttoptr at op{}: {}", op_idx, e))?;
+        let one = i64_type.const_int(1, false);
+        let slot_idx = self
+            .builder
+            .build_int_add(idx_iv, one, "asn_slot")
+            .map_err(|e| format!("ArrSetNamed slot calc at op{}: {}", op_idx, e))?;
+        let elem_gep = unsafe {
+            self.builder
+                .build_in_bounds_gep(i64_type, ptr, &[slot_idx], "asn_gep")
+                .map_err(|e| format!("ArrSetNamed gep at op{}: {}", op_idx, e))?
+        };
+        self.builder
+            .build_store(elem_gep, val_iv)
+            .map_err(|e| format!("ArrSetNamed store at op{}: {}", op_idx, e))?;
+        Ok(())
     }
 
     /// Path A.4: ArrayIndex — extract α (pointer) and the user-given

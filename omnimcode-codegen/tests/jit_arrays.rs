@@ -90,6 +90,64 @@ fn jit_array_sum_in_loop() {
 }
 
 #[test]
+fn jit_array_write_with_arr_set() {
+    // Path D: arr_set in a loop. Build an array of zeros, then fill
+    // with squares. Verify a known slot.
+    let source = r#"
+        fn build_squares(unused) {
+            h arr = [0, 0, 0, 0, 0];
+            h k = 0;
+            while k < 5 {
+                arr_set(arr, k, k * k);
+                k = k + 1;
+            }
+            return arr_get(arr, 3);
+        }
+    "#;
+    let mut parser = Parser::new(source);
+    let statements = parser.parse().expect("parse");
+    let module = omnimcode_core::compiler::compile_program(&statements).expect("compile");
+    let ctx = Context::create();
+    let jit = JitContext::new(&ctx).expect("jit");
+    let jitted = jit.jit_module(&module).expect("jit_module");
+    let f = jitted.get("build_squares").expect("build_squares JIT'd");
+    assert_eq!(f.call(&[0]).expect("call"), 9); // 3*3
+}
+
+#[test]
+fn jit_array_write_then_sum() {
+    // Build, write into, read back — sum the squares of 0..9.
+    let source = r#"
+        fn sum_of_squares(n) {
+            h arr = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+            h k = 0;
+            while k < n {
+                arr_set(arr, k, k * k);
+                k = k + 1;
+            }
+            h sum = 0;
+            h j = 0;
+            while j < n {
+                sum = sum + arr_get(arr, j);
+                j = j + 1;
+            }
+            return sum;
+        }
+    "#;
+    let mut parser = Parser::new(source);
+    let statements = parser.parse().expect("parse");
+    let module = omnimcode_core::compiler::compile_program(&statements).expect("compile");
+    let ctx = Context::create();
+    let jit = JitContext::new(&ctx).expect("jit");
+    let jitted = jit.jit_module(&module).expect("jit_module");
+    let f = jitted.get("sum_of_squares").expect("sum_of_squares JIT'd");
+    // 0² + 1² + 2² + … + 9² = 285
+    assert_eq!(f.call(&[10]).expect("call"), 285);
+    // 0² + 1² + 2² + 3² + 4² = 30
+    assert_eq!(f.call(&[5]).expect("call"), 30);
+}
+
+#[test]
 fn jit_array_via_dispatch_hook() {
     // End-to-end through Interpreter dispatch (matches CLI's
     // OMC_HBIT_JIT=1 path). Verifies arrays survive the JIT round-
