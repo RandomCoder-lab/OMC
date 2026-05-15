@@ -165,7 +165,18 @@ impl<'ctx> JitContext<'ctx> {
     pub fn new(context: &'ctx Context) -> Result<Self, CodegenError> {
         let module = context.create_module("omc_jit");
         let engine = module
-            .create_jit_execution_engine(OptimizationLevel::Default)
+            // L1.5 fix: optimization level lowered from Default to
+            // None. LLVM's Loop Strength Reduction pass crashes on
+            // some of the loops we emit (LCSSA-form violation) at
+            // Default level — the crash is non-deterministic
+            // (sometimes succeeds, sometimes segfaults during
+            // emitObject -> LSR -> isBlockInLCSSAForm). Lowering
+            // the opt level skips LSR entirely. We trade some
+            // peephole optimization for stability; future work to
+            // emit cleaner LCSSA-respecting loops in the dual-band
+            // lowerer would let us re-enable Default. Tracked as
+            // L1.5 follow-up.
+            .create_jit_execution_engine(OptimizationLevel::None)
             .map_err(|e| format!("failed to create JIT engine: {}", e))?;
         // Pre-declare `omc_harmony` and bind it to the runtime helper
         // so JIT'd code (Session G harmony intrinsic) can call into
@@ -303,43 +314,61 @@ impl<'ctx> JitContext<'ctx> {
         }
 
         // Phase 2: lower bodies. Track names that succeeded and
-        // names that failed so we can do dependency cleanup below.
+        // names that failed. We DON'T delete failed fns from the
+        // module — early L1.5 attempts to delete caused intermittent
+        // heap corruption (free(): invalid size from glibc) when
+        // other fns retained references to the deleted symbol's
+        // FunctionValue. Instead we leave the empty declaration in
+        // place; the dependency cleanup pass below ensures no
+        // succeeded fn calls a failed one (so the dangling
+        // declarations are unreferenced from real call sites).
         let mut succeeded: std::collections::HashSet<String> =
             std::collections::HashSet::new();
         let mut failed: std::collections::HashSet<String> =
             std::collections::HashSet::new();
         for (name, cf) in &module.functions {
-            let suffixed = format!("{}_hbit", name);
             match dual_band::DualBandLowerer::lower_existing(self.context, &self.module, cf) {
                 Ok(_) => {
                     succeeded.insert(name.clone());
                 }
                 Err(_) => {
                     failed.insert(name.clone());
-                    // Erase the broken declaration entirely. Any
-                    // already-lowered caller that referenced this
-                    // symbol will now have a dangling reference,
-                    // which the dependency-cleanup pass below
-                    // detects and erases. This is the fix for the
-                    // L1 silent-wrong-answer bug: previously failed
-                    // fns got a "broken stub returns 0" body that
-                    // produced wrong results in callers; now the
-                    // entire dependency chain is correctly removed
-                    // from the JIT registry.
+                    // Replace the partial body with a single trap
+                    // entry block. LLVM needs every declared fn to
+                    // either be extern OR have a complete body; a
+                    // partial fn (some blocks emitted, no terminator
+                    // on the last) corrupts MCJIT's instruction
+                    // selection. Trap-on-call also makes accidental
+                    // reach-into a failed fn loud instead of silent.
+                    let suffixed = format!("{}_hbit", name);
                     if let Some(partial) = self.module.get_function(&suffixed) {
-                        unsafe { partial.delete() };
+                        // Drop any partial blocks first.
+                        for bb in partial.get_basic_blocks() {
+                            unsafe { bb.delete().ok() };
+                        }
+                        let entry =
+                            self.context.append_basic_block(partial, "broken_entry");
+                        let builder = self.context.create_builder();
+                        builder.position_at_end(entry);
+                        // Emit `unreachable` — LLVM intrinsic that
+                        // generates a trap (UD2 on x86) when reached.
+                        // If the cleanup pass is correct, no caller
+                        // reaches this; if it ISN'T, we crash loudly
+                        // instead of silently returning 0.
+                        let _ = builder.build_unreachable();
                     }
                 }
             }
         }
 
         // Phase 2b: dependency-cleanup fixpoint. A fn that
-        // successfully lowered but whose body calls a `failed` fn is
-        // itself broken (its IR contains a dangling reference). Walk
+        // successfully lowered but whose body calls a `failed` fn
+        // would route to the trap stub — silent miscompilation. Walk
         // each succeeded fn's bytecode, look for Op::Call to failed
-        // targets, mark caller as failed too. Iterate until no new
-        // failures. Skip intrinsics / builtins (handled inline by the
-        // lowerer, not via cross-fn references).
+        // targets, mark caller as failed too (replace its body with
+        // an unreachable stub). Iterate until no new failures. Skip
+        // intrinsics / builtins (handled inline by the lowerer, not
+        // via cross-fn references).
         let intrinsics: std::collections::HashSet<&'static str> = [
             "phi_shadow",
             "harmony",
@@ -370,16 +399,9 @@ impl<'ctx> JitContext<'ctx> {
                                 newly_failed.push(name.clone());
                                 break;
                             }
-                            // Target isn't in the user-fn set at all
-                            // (probably a builtin). Trust the
-                            // lowerer's intrinsic handling — if it
-                            // didn't error during phase 2, the
-                            // builtin is supported.
                             if !module.functions.contains_key(target) {
                                 continue;
                             }
-                            // Target is a user fn but not in
-                            // succeeded — it failed. Cascade.
                             if !succeeded.contains(target) {
                                 newly_failed.push(name.clone());
                                 break;
@@ -394,13 +416,43 @@ impl<'ctx> JitContext<'ctx> {
             for name in newly_failed {
                 let suffixed = format!("{}_hbit", name);
                 if let Some(broken) = self.module.get_function(&suffixed) {
-                    unsafe { broken.delete() };
+                    // Same trap-stub treatment as a phase-2 failure.
+                    // We leave the declaration intact so any
+                    // already-emitted reference stays valid; the
+                    // body becomes `unreachable`.
+                    for bb in broken.get_basic_blocks() {
+                        unsafe { bb.delete().ok() };
+                    }
+                    let entry =
+                        self.context.append_basic_block(broken, "cascade_broken_entry");
+                    let builder = self.context.create_builder();
+                    builder.position_at_end(entry);
+                    let _ = builder.build_unreachable();
                 }
                 succeeded.remove(&name);
                 failed.insert(name);
             }
         }
 
+        // L1.5 debug: optionally verify the LLVM module before
+        // extraction. If verify_module returns an error, the IR is
+        // malformed and JIT compile will crash. Setting
+        // OMC_HBIT_JIT_VERIFY=1 enables this; the verifier is mildly
+        // expensive so it's opt-in.
+        if std::env::var("OMC_HBIT_JIT_VERIFY").as_deref() == Ok("1") {
+            if let Err(msg) = self.module.verify() {
+                eprintln!("[OMC_HBIT_JIT_VERIFY] module verification FAILED:");
+                eprintln!("{}", msg.to_string());
+            } else {
+                eprintln!("[OMC_HBIT_JIT_VERIFY] module verified OK ({} fns succeeded)",
+                    succeeded.len());
+            }
+        }
+        // L1.5 debug: optionally dump the IR for inspection.
+        if std::env::var("OMC_HBIT_JIT_DUMP_IR").as_deref() == Ok("1") {
+            eprintln!("[OMC_HBIT_JIT_DUMP_IR]");
+            eprintln!("{}", self.module.print_to_string().to_string());
+        }
         // Phase 3: extract fn pointers for everything that survived
         // both lowering and dependency cleanup.
         let mut out: HashMap<String, JittedFn> = HashMap::new();
