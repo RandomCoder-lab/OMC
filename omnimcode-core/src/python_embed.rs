@@ -424,6 +424,20 @@ pub fn register_python_builtins(interp: &mut Interpreter) {
         Ok(Value::Null)
     });
 
+    // ---- py_fetch_text(url) -> string -------------------------------
+    // Convenience: HTTP GET via embedded Python `requests`. Returns
+    // body as string on 2xx, errors on anything else. Used internally
+    // by `omc --install` so we don't need a separate Rust HTTP crate.
+    interp.register_builtin("py_fetch_text", |args| {
+        if args.is_empty() {
+            return Err("py_fetch_text requires (url)".to_string());
+        }
+        let url = args[0].to_display_string();
+        let body = fetch_url(&url)
+            .map_err(|e| format!("py_fetch_text({}): {}", url, e))?;
+        Ok(Value::String(body))
+    });
+
     // ---- py_callback("omc_fn_name") -> handle (Python callable) -------
     // Returns a Python callable that, when invoked from Python with
     // positional args, calls back into OMC's `omc_fn_name` with the
@@ -500,4 +514,100 @@ impl OmcCallback {
     fn __repr__(&self) -> String {
         format!("<OmcCallback '{}'>", self.fn_name)
     }
+}
+
+// ===========================================================================
+// Package manager helpers — used by `omc --install` from main.rs.
+//
+// We do the HTTP fetch and TOML parse via embedded Python (`requests`
+// + `tomllib`) rather than pulling in Rust HTTP/TOML crates. The
+// dependency model is already "Python is always on" — leaning on it
+// for tooling avoids dep bloat and proves the integration works for
+// our own infrastructure.
+// ===========================================================================
+
+/// HTTP GET via embedded Python's `requests`. Returns the response
+/// body on 2xx; Err on connection failure, non-2xx, or a missing
+/// `requests` install.
+pub fn fetch_url(url: &str) -> Result<String, String> {
+    Python::with_gil(|py| {
+        let requests = py
+            .import_bound("requests")
+            .map_err(|e| format!("requests not installed: {}", e))?;
+        let response = requests
+            .call_method1("get", (url,))
+            .map_err(|e| format!("GET failed: {}", e))?;
+        let status: u16 = response
+            .getattr("status_code")
+            .and_then(|s| s.extract())
+            .map_err(|e| format!("status_code: {}", e))?;
+        if !(200..300).contains(&status) {
+            return Err(format!("HTTP {}", status));
+        }
+        let body: String = response
+            .getattr("text")
+            .and_then(|t| t.extract())
+            .map_err(|e| format!("read body: {}", e))?;
+        Ok(body)
+    })
+}
+
+/// Fetch `url` and write to `omc_modules/<name>.omc`. Returns the
+/// final on-disk path on success.
+pub fn install_url_via_python(name: &str, url: &str) -> Result<String, String> {
+    let body = fetch_url(url)?;
+    let path = format!("omc_modules/{}.omc", name);
+    std::fs::write(&path, body).map_err(|e| format!("write {}: {}", path, e))?;
+    Ok(path)
+}
+
+/// Parse `omc.toml`'s `[dependencies]` table via Python's `tomllib`
+/// (stdlib in 3.11+). Returns a list of (name, url) pairs preserving
+/// source order.
+pub fn parse_omc_toml_via_python(text: &str) -> Result<Vec<(String, String)>, String> {
+    Python::with_gil(|py| {
+        let tomllib = py
+            .import_bound("tomllib")
+            .map_err(|e| format!("tomllib not available (need Python 3.11+): {}", e))?;
+        // tomllib.loads(text) — needs bytes in some versions, str in others.
+        // Use loads with str, fall back to bytes.
+        let parsed = match tomllib.call_method1("loads", (text,)) {
+            Ok(v) => v,
+            Err(_) => tomllib
+                .call_method1("loads", (text.as_bytes(),))
+                .map_err(|e| format!("tomllib.loads: {}", e))?,
+        };
+        let dict = parsed
+            .downcast::<PyDict>()
+            .map_err(|e| format!("toml root must be a table: {}", e))?;
+        let deps_obj = match dict.get_item("dependencies") {
+            Ok(Some(o)) => o,
+            _ => return Ok(Vec::new()),
+        };
+        let deps = deps_obj
+            .downcast::<PyDict>()
+            .map_err(|e| format!("[dependencies] must be a table: {}", e))?;
+        let mut out: Vec<(String, String)> = Vec::with_capacity(deps.len());
+        for (k, v) in deps.iter() {
+            let name: String = k.extract().map_err(|e| format!("dep name: {}", e))?;
+            // Accept either a string URL or a table with `url = "..."`.
+            let url: String = if let Ok(s) = v.extract::<String>() {
+                s
+            } else if let Ok(t) = v.downcast::<PyDict>() {
+                match t.get_item("url") {
+                    Ok(Some(u)) => u
+                        .extract::<String>()
+                        .map_err(|e| format!("dep {} url: {}", name, e))?,
+                    _ => return Err(format!("dep {} table missing `url`", name)),
+                }
+            } else {
+                return Err(format!(
+                    "dep {} must be a string URL or table with `url`",
+                    name
+                ));
+            };
+            out.push((name, url));
+        }
+        Ok(out)
+    })
 }

@@ -173,6 +173,11 @@ impl Interpreter {
     /// small built-in list that includes the canonical Python OMC stdlib.
     fn module_search_path() -> Vec<std::path::PathBuf> {
         let mut paths = Vec::new();
+        // Project-local package cache. Populated by `omc --install`
+        // and checked first so `import "np";` resolves the local
+        // copy before falling back to user paths or the legacy stdlib.
+        // Mirrors npm's node_modules / pip's site-packages convention.
+        paths.push(std::path::PathBuf::from("omc_modules"));
         if let Ok(env) = std::env::var("OMC_STDLIB_PATH") {
             for p in env.split(':') {
                 if !p.is_empty() {

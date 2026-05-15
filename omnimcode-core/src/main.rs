@@ -11,14 +11,16 @@ use std::io::{self, Write};
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    // Parse simple flag-style args: --check, --fmt, --help / -h
-    // Anything else after the flag is the input file.
+    // Parse simple flag-style args. Anything else is the input file
+    // (or the install spec when --install is set).
     let mut mode = "run";
     let mut file_arg: Option<&str> = None;
     for a in args.iter().skip(1) {
         match a.as_str() {
             "--check" | "-c" => mode = "check",
             "--fmt" | "--format" | "-f" => mode = "fmt",
+            "--install" | "-i" => mode = "install",
+            "--list" | "-l" => mode = "list",
             "--help" | "-h" => mode = "help",
             other if !other.starts_with('-') => file_arg = Some(other),
             other => {
@@ -50,6 +52,8 @@ fn main() {
             eprintln!("--fmt requires a file argument.");
             2
         }
+        ("install", spec) => install_command(spec),
+        ("list", _) => list_command(),
         _ => unreachable!(),
     };
     if exit_code != 0 {
@@ -72,13 +76,150 @@ fn maybe_register_python(interp: &mut Interpreter) {
     omnimcode_core::python_embed::register_python_builtins(interp);
 }
 
+/// `--install [URL_OR_NAME]`. With no argument: read `omc.toml` in
+/// the current directory and install every entry in [dependencies].
+/// With a URL: fetch it and store the file under `omc_modules/`,
+/// using the basename (sans .omc) as the module name. With a name
+/// that doesn't look like a URL: error (no central registry yet —
+/// users provide explicit URLs in omc.toml).
+///
+/// Eats our own dogfood: uses the embedded Python `requests` for
+/// the HTTP fetch and `tomllib` for the manifest parse. Zero new
+/// Rust dependencies.
+fn install_command(spec: Option<&str>) -> i32 {
+    use omnimcode_core::python_embed::{install_url_via_python, parse_omc_toml_via_python};
+
+    if std::env::var("OMC_NO_PYTHON").as_deref() == Ok("1") {
+        eprintln!("--install requires Python (used for HTTP fetch + TOML parse).");
+        eprintln!("Unset OMC_NO_PYTHON or run with Python embedding enabled.");
+        return 2;
+    }
+
+    // Ensure omc_modules/ exists.
+    if let Err(e) = std::fs::create_dir_all("omc_modules") {
+        eprintln!("install: cannot create omc_modules/: {}", e);
+        return 1;
+    }
+
+    match spec {
+        Some(spec) => {
+            let url = if spec.starts_with("http://") || spec.starts_with("https://") {
+                spec.to_string()
+            } else {
+                eprintln!("install: argument must be a URL (no central registry yet).");
+                eprintln!("        For a manifest install, run `omc --install` with no arg");
+                eprintln!("        and create an omc.toml in this directory.");
+                return 2;
+            };
+            // Derive name from URL basename.
+            let name = url
+                .rsplit('/')
+                .next()
+                .unwrap_or("module")
+                .trim_end_matches(".omc");
+            match install_url_via_python(name, &url) {
+                Ok(path) => {
+                    println!("installed: {} -> {}", name, path);
+                    0
+                }
+                Err(e) => {
+                    eprintln!("install({}): {}", name, e);
+                    1
+                }
+            }
+        }
+        None => {
+            let manifest_path = "omc.toml";
+            let manifest_text = match std::fs::read_to_string(manifest_path) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("install: cannot read {}: {}", manifest_path, e);
+                    eprintln!("        Create one with [dependencies] entries:");
+                    eprintln!("");
+                    eprintln!("            [dependencies]");
+                    eprintln!("            np = \"https://raw.githubusercontent.com/.../np.omc\"");
+                    return 1;
+                }
+            };
+            let deps = match parse_omc_toml_via_python(&manifest_text) {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("install: omc.toml parse: {}", e);
+                    return 1;
+                }
+            };
+            if deps.is_empty() {
+                println!("install: no [dependencies] in omc.toml — nothing to do.");
+                return 0;
+            }
+            let mut failures = 0;
+            for (name, url) in &deps {
+                match install_url_via_python(name, url) {
+                    Ok(path) => println!("installed: {} -> {}", name, path),
+                    Err(e) => {
+                        eprintln!("install({}): {}", name, e);
+                        failures += 1;
+                    }
+                }
+            }
+            if failures > 0 { 1 } else { 0 }
+        }
+    }
+}
+
+/// `--list`: enumerate everything in omc_modules/.
+fn list_command() -> i32 {
+    let dir = std::path::Path::new("omc_modules");
+    if !dir.exists() {
+        println!("(no omc_modules/ in this directory)");
+        return 0;
+    }
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("list: cannot read omc_modules/: {}", e);
+            return 1;
+        }
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let p = e.path();
+            if p.extension().and_then(|s| s.to_str()) == Some("omc") {
+                p.file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+    names.sort();
+    if names.is_empty() {
+        println!("(no installed modules — use --install to add some)");
+    } else {
+        for n in names {
+            println!("  {}", n);
+        }
+    }
+    0
+}
+
 fn print_help() {
     let prog = env::args().next().unwrap_or_else(|| "omnimcode-standalone".to_string());
     println!("Usage:");
     println!("  {} [FILE]              run a program (or start REPL if no file)", prog);
     println!("  {} --check FILE        run heal pass, print diagnostics, exit", prog);
     println!("  {} --fmt FILE          pretty-print AST as canonical OMC source", prog);
+    println!("  {} --install [URL]     install package from URL into omc_modules/", prog);
+    println!("                         (no URL = read omc.toml [dependencies])", );
+    println!("  {} --list              list packages installed under omc_modules/", prog);
     println!("  {} --help              this message", prog);
+    println!();
+    println!("omc.toml format (for --install with no arg):");
+    println!("  [dependencies]");
+    println!("  np = \"https://example.com/raw/np.omc\"");
+    println!("  pd = \"https://example.com/raw/pd.omc\"");
     println!();
     println!("Environment variables:");
     println!("  OMC_VM=1               execute through the Rust bytecode VM");
@@ -89,6 +230,7 @@ fn print_help() {
     println!("  OMC_OPT=0              disable optimizer (on by default)");
     println!("  OMC_OPT_STATS=1        print optimizer pass statistics");
     println!("  OMC_STDLIB_PATH=...    colon-separated module search path");
+    println!("  OMC_NO_PYTHON=1        skip embedded CPython initialisation");
 }
 
 fn read_and_run(path: &str) -> Result<(), String> {
