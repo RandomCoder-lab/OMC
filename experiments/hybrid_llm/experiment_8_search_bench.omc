@@ -1,0 +1,160 @@
+# =============================================================================
+# Experiment 8 — Head-to-head benchmark of three search algorithms.
+#
+# The repo has two contradictory docs:
+#
+#   PHI_PI_FIB_ALGORITHM.md       claims an F(k)/φ^(π·k) split-point
+#                                 search achieves O(log_φ_π_fibonacci n)
+#                                 ≈ 0.459 · log₂(n) comparisons.
+#
+#   TIER_4_HONEST_REVISION.md     says the actual implementation was
+#                                 standard Fibonacci search, ~1.44 ·
+#                                 log₂(n), and 20% SLOWER than binary.
+#
+# This experiment settles it by running all three algorithms under the
+# same OMC harness and the same random-query workload:
+#
+#   1. phi_pi_fib_search       — original Fibonacci-step search
+#   2. phi_pi_fib_search_v2    — F(k)/φ^(π·k) split-point formula
+#                                from PHI_PI_FIB_ALGORITHM.md
+#   3. phi_pi_bin_search       — standard binary search baseline
+#
+# All three share the same compare counter (phi_pi_fib_stats), so we
+# reset between runs and measure cleanly.
+#
+# Whichever wins on average comparisons becomes the substrate root
+# in the unification refactor that follows.
+#
+# Run:
+#   ./target/release/omnimcode-standalone experiments/hybrid_llm/experiment_8_search_bench.omc
+# =============================================================================
+
+fn build_sorted_n(n) -> array {
+    h arr = arr_new(n, 0);
+    h i = 0;
+    while i < n {
+        arr_set(arr, i, i * 2 + 1);   # 1, 3, 5, ..., 2n-1
+        i = i + 1;
+    }
+    return arr;
+}
+
+# Measure average comparisons for a single search algorithm against
+# `arr` with `n_queries` random integer targets in the valid range.
+# Returns the avg compares/search.
+#
+# `which` selects: 0 = phi_pi_fib_search, 1 = phi_pi_fib_search_v2,
+#                  2 = phi_pi_bin_search.
+fn measure_search(arr, n_queries, which) -> float {
+    h n = arr_len(arr);
+    h max_target = arr_get(arr, n - 1) + 5;
+    phi_pi_fib_reset();
+    h k = 0;
+    while k < n_queries {
+        h target = random_int(0, max_target);
+        h r = 0;
+        if which == 0 { r = phi_pi_fib_search(arr, target); }
+        if which == 1 { r = phi_pi_fib_search_v2(arr, target); }
+        if which == 2 { r = phi_pi_bin_search(arr, target); }
+        k = k + 1;
+    }
+    h s = phi_pi_fib_stats();
+    return to_float(arr_get(s, 1)) / to_float(arr_get(s, 0));
+}
+
+random_seed(42);
+
+print("== Experiment 8: head-to-head search benchmark ==");
+print("(random integer queries against sorted [1, 3, 5, ..., 2N-1]; 500 queries per N)");
+print("");
+print("    N    | fib-step | phi-pi-fib-v2 | binary | log2(N) | log_phi_pi_fib(N)");
+print("  -------+----------+---------------+--------+---------+------------------");
+
+h sizes = [16, 64, 256, 1024, 4096, 16384, 65536];
+h ns = arr_len(sizes);
+h si = 0;
+while si < ns {
+    h N = arr_get(sizes, si);
+    h arr_n = build_sorted_n(N);
+    h avg_fib = measure_search(arr_n, 500, 0);
+    h avg_v2  = measure_search(arr_n, 500, 1);
+    h avg_bin = measure_search(arr_n, 500, 2);
+    h log2_N = log(to_float(N)) / log(2.0);
+    h log_ppf_N = log_phi_pi_fibonacci(to_float(N));
+    print(concat_many(
+        "  ", N,
+        "   |   ", avg_fib,
+        "   |     ", avg_v2,
+        "   |   ", avg_bin,
+        "   |  ", log2_N,
+        "  |   ", log_ppf_N
+    ));
+    si = si + 1;
+}
+print("");
+
+# ---------------------------------------------------------------------------
+# Race: total comparisons across the same fixed query set, summed.
+# This is the single number that decides which algorithm wins as the
+# substrate root.
+# ---------------------------------------------------------------------------
+
+fn total_compares(arr, n_queries, seed_offset, which) -> int {
+    random_seed(100 + seed_offset);   # deterministic across algorithms
+    h n = arr_len(arr);
+    h max_target = arr_get(arr, n - 1) + 5;
+    phi_pi_fib_reset();
+    h k = 0;
+    while k < n_queries {
+        h target = random_int(0, max_target);
+        if which == 0 { h r = phi_pi_fib_search(arr, target); }
+        if which == 1 { h r = phi_pi_fib_search_v2(arr, target); }
+        if which == 2 { h r = phi_pi_bin_search(arr, target); }
+        k = k + 1;
+    }
+    h s = phi_pi_fib_stats();
+    return arr_get(s, 1);
+}
+
+print("== Race over a 65,536-element array, 2,000 random queries each ==");
+print("(same seeded query stream for all three algorithms — fair fight)");
+print("");
+
+h big = build_sorted_n(65536);
+h fib_total = total_compares(big, 2000, 1, 0);
+h v2_total  = total_compares(big, 2000, 1, 1);
+h bin_total = total_compares(big, 2000, 1, 2);
+
+print(concat_many("  fib-step total compares:        ", fib_total));
+print(concat_many("  phi-pi-fib-v2 total compares:   ", v2_total));
+print(concat_many("  binary search total compares:   ", bin_total));
+print("");
+
+# Show pairwise ratios so the result is unambiguous.
+fn ratio(a, b) -> float {
+    return to_float(a) / to_float(b);
+}
+
+print("Pairwise ratios (lower = better for left side):");
+print(concat_many("  v2  / binary    = ", ratio(v2_total,  bin_total)));
+print(concat_many("  fib / binary    = ", ratio(fib_total, bin_total)));
+print(concat_many("  v2  / fib       = ", ratio(v2_total,  fib_total)));
+print("");
+
+# ---------------------------------------------------------------------------
+# Verdict.
+# ---------------------------------------------------------------------------
+
+print("== Verdict (read the numbers above, no spin) ==");
+print("");
+print("If v2 < binary: PHI_PI_FIB_ALGORITHM.md was right and v2 should");
+print("  become the substrate root.");
+print("");
+print("If v2 ≈ binary but cheaper than fib-step: v2 is still a net win");
+print("  over the current substrate; promote it.");
+print("");
+print("If binary < v2 and binary < fib-step: TIER_4_HONEST_REVISION.md");
+print("  was right. Use binary_search (renamed appropriately) as the");
+print("  substrate root, and the phi-pi-fibonacci framework is");
+print("  architectural naming over a binary-search implementation.");
+print("== End ==");

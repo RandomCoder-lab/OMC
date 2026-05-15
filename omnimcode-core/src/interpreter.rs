@@ -1663,6 +1663,9 @@ impl Interpreter {
             // Phi-Pi-Fib search (Fibonacci-step binary search variant)
             | "phi_pi_fib_search" | "phi_pi_fib_nearest"
             | "phi_pi_fib_stats" | "phi_pi_fib_reset"
+            // Phi-Pi-Fib search v2 + binary baseline + theoretical bound
+            | "phi_pi_fib_search_v2" | "phi_pi_fib_nearest_v2"
+            | "phi_pi_bin_search" | "log_phi_pi_fibonacci"
             // Self-healing
             | "safe_divide" | "safe_arr_get" | "safe_arr_set"
             | "safe_add" | "safe_sub" | "safe_mul" | "resolve_singularity"
@@ -4027,6 +4030,109 @@ impl Interpreter {
                 crate::phi_pi_fib::reset_search_stats();
                 Ok(Value::Null)
             }
+            // phi_pi_fib_search_v2(sorted_arr, target) -> int
+            //   F(k)/φ^(π·k) split-point search. Same return convention
+            //   as phi_pi_fib_search (exact match index, or -(insert+1)).
+            //   Comparison counts are folded into the shared counters so
+            //   phi_pi_fib_stats() reports both algorithms' totals — call
+            //   phi_pi_fib_reset between runs when measuring head-to-head.
+            "phi_pi_fib_search_v2" => {
+                if args.len() < 2 {
+                    return Err("phi_pi_fib_search_v2 requires (sorted_array, target)".to_string());
+                }
+                let arr_v = self.eval_expr(&args[0])?;
+                let target = self.eval_expr(&args[1])?.to_int();
+                if let Value::Array(arr) = arr_v {
+                    let items_b = arr.items.borrow();
+                    let ints: Vec<i64> = items_b.iter().map(|v| v.to_int()).collect();
+                    let r = crate::phi_pi_fib::phi_pi_fib_search_v2(
+                        &ints,
+                        &target,
+                        |a, b| if a < b { -1 } else if a > b { 1 } else { 0 },
+                    );
+                    Ok(Value::HInt(HInt::new(match r {
+                        Ok(i) => i as i64,
+                        Err(insert_pos) => -(insert_pos as i64 + 1),
+                    })))
+                } else {
+                    Err("phi_pi_fib_search_v2: first argument must be an array".to_string())
+                }
+            }
+            // phi_pi_fib_nearest_v2(sorted_arr, target) -> int
+            //   Always-valid nearest-index variant of phi_pi_fib_search_v2.
+            "phi_pi_fib_nearest_v2" => {
+                if args.len() < 2 {
+                    return Err("phi_pi_fib_nearest_v2 requires (sorted_array, target)".to_string());
+                }
+                let arr_v = self.eval_expr(&args[0])?;
+                let target = self.eval_expr(&args[1])?.to_int();
+                if let Value::Array(arr) = arr_v {
+                    let items_b = arr.items.borrow();
+                    let ints: Vec<i64> = items_b.iter().map(|v| v.to_int()).collect();
+                    if ints.is_empty() {
+                        return Ok(Value::HInt(HInt::new(-1)));
+                    }
+                    let r = crate::phi_pi_fib::phi_pi_fib_search_v2(
+                        &ints,
+                        &target,
+                        |a, b| if a < b { -1 } else if a > b { 1 } else { 0 },
+                    );
+                    let idx: usize = match r {
+                        Ok(i) => i,
+                        Err(insert_pos) => {
+                            let n = ints.len();
+                            if insert_pos == 0 {
+                                0
+                            } else if insert_pos >= n {
+                                n - 1
+                            } else {
+                                let left = (target - ints[insert_pos - 1]).abs();
+                                let right = (ints[insert_pos] - target).abs();
+                                if right < left { insert_pos } else { insert_pos - 1 }
+                            }
+                        }
+                    };
+                    Ok(Value::HInt(HInt::new(idx as i64)))
+                } else {
+                    Err("phi_pi_fib_nearest_v2: first argument must be an array".to_string())
+                }
+            }
+            // phi_pi_bin_search(sorted_arr, target) -> int
+            //   Standard binary search baseline. Same return convention as
+            //   the phi_pi_fib_search variants. Shares the global compare
+            //   counter so head-to-head benches see all three algorithms.
+            "phi_pi_bin_search" => {
+                if args.len() < 2 {
+                    return Err("phi_pi_bin_search requires (sorted_array, target)".to_string());
+                }
+                let arr_v = self.eval_expr(&args[0])?;
+                let target = self.eval_expr(&args[1])?.to_int();
+                if let Value::Array(arr) = arr_v {
+                    let items_b = arr.items.borrow();
+                    let ints: Vec<i64> = items_b.iter().map(|v| v.to_int()).collect();
+                    let r = crate::phi_pi_fib::binary_search(
+                        &ints,
+                        &target,
+                        |a, b| if a < b { -1 } else if a > b { 1 } else { 0 },
+                    );
+                    Ok(Value::HInt(HInt::new(match r {
+                        Ok(i) => i as i64,
+                        Err(insert_pos) => -(insert_pos as i64 + 1),
+                    })))
+                } else {
+                    Err("phi_pi_bin_search: first argument must be an array".to_string())
+                }
+            }
+            // log_phi_pi_fibonacci(n) -> float
+            //   The theoretical compare-count bound for phi_pi_fib_search_v2.
+            //   Equals ln(n) / (π · ln(φ)) ≈ 0.459 · log₂(n).
+            "log_phi_pi_fibonacci" => {
+                if args.is_empty() {
+                    return Err("log_phi_pi_fibonacci requires (n)".to_string());
+                }
+                let n = self.eval_expr(&args[0])?.to_float();
+                Ok(Value::HFloat(crate::phi_pi_fib::log_phi_pi_fibonacci(n)))
+            }
             "arr_slice" => {
                 if args.len() < 3 {
                     return Err("arr_slice requires (array, start, end)".to_string());
@@ -4994,6 +5100,8 @@ pub(crate) const HEAL_BUILTIN_NAMES: &[&str] = &[
     // Phi-Pi-Fib search
     "phi_pi_fib_search", "phi_pi_fib_nearest",
     "phi_pi_fib_stats", "phi_pi_fib_reset",
+    "phi_pi_fib_search_v2", "phi_pi_fib_nearest_v2",
+    "phi_pi_bin_search", "log_phi_pi_fibonacci",
     // Self-healing
     "safe_divide", "safe_arr_get", "safe_arr_set",
     "safe_add", "safe_sub", "safe_mul", "resolve_singularity",

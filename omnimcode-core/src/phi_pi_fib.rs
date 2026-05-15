@@ -1,20 +1,32 @@
-// src/phi_pi_fib.rs - Fibonacci-Based Search Algorithm
+// src/phi_pi_fib.rs - Fibonacci-Based Search Algorithms
 //
-// This module implements a practical search algorithm using Fibonacci numbers
-// for split point determination. Unlike binary search which splits at 50%,
-// Fibonacci search uses the golden ratio to create split points that can
-// improve cache efficiency in certain patterns.
+// Two algorithms live here, exposed side-by-side so OMC code can pick
+// (or benchmark) at runtime:
 //
-// WARNING: This is NOT a magic O(log_φ_π n) algorithm. It's a variant of
-// standard binary search with comparable or slightly better performance in
-// some cases. Use it when you have specific reason to believe the working set
-// size matches Fibonacci growth patterns. For most purposes, std::sort is better.
+//   fibonacci_search       — Fibonacci-step search. Standard textbook
+//                            algorithm. Comparison count tracks
+//                            log_phi(n) ≈ 1.44 * log_2(n).
+//
+//   phi_pi_fib_search_v2   — The F(k) / φ^(π·k) split-point formula
+//                            from PHI_PI_FIB_ALGORITHM.md. Probes at
+//                            non-uniform fractions of the live range
+//                            for early iterations, falls back to
+//                            binary search when the offset would
+//                            round to zero. Aimed at the theoretical
+//                            log_φ_π_fibonacci(n) = ln(n) / ln(φ^π).
+//
+// binary_search is also exposed as a fair baseline. All three share
+// global comparison counters via get_search_stats() / reset_search_stats().
+//
+// Whether v2 actually wins on compare count is an empirical question
+// — see experiment_8_search_bench.omc for the head-to-head.
 
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Import PHI from value.rs to maintain single source of truth
 const PHI: f64 = 1.6180339887498948482045868343656;
+const PI: f64 = std::f64::consts::PI;
 
 /// Pre-computed Fibonacci sequence (first 40 terms fit in u64)
 const FIBONACCI: &[u64] = &[
@@ -133,6 +145,86 @@ pub fn fibonacci_search<T>(
     Err(offset)
 }
 
+/// phi_pi_fib_search_v2 — F(k) / phi^(pi*k) split-point search.
+///
+/// Implements the algorithm described in `PHI_PI_FIB_ALGORITHM.md`:
+/// at iteration k the probe offset (relative to the live range) is
+/// `offset = (high - low) * F(k) / phi^(pi*k)` where F(k) is the
+/// k-th Fibonacci number. F(k) grows like phi^k, so the ratio
+/// `F(k)/phi^(pi*k) ~= phi^((1-pi)*k)` decays rapidly. The early
+/// probes cluster near `low` at fractions 0.22, 0.049, 0.022,
+/// 0.0071, ... of the live range.
+///
+/// When the offset would round to zero (range too small for the
+/// current k), the search falls back to standard binary search on
+/// the remaining range. This guarantees termination and bounds the
+/// worst case by `binary_search` performance.
+///
+/// Whether the early iterations save enough work to beat binary
+/// search overall is an empirical question — that's the point of
+/// running the head-to-head benchmark in experiment 8.
+pub fn phi_pi_fib_search_v2<T>(
+    arr: &[T],
+    target: &T,
+    cmp: impl Fn(&T, &T) -> i32,
+) -> Result<usize, usize> {
+    if arr.is_empty() {
+        return Err(0);
+    }
+    TOTAL_SEARCHES.fetch_add(1, Ordering::Relaxed);
+
+    let mut low: usize = 0;
+    let mut high: usize = arr.len();
+    let mut k: usize = 1;
+    let mut comparisons: u64 = 0;
+
+    // Phase 1: phi-pi-fib probe-offset iterations.
+    // Stop once the offset rounds to zero — then phase 2 binary-searches.
+    while low + 1 < high {
+        let range = (high - low) as f64;
+        let fib_k = if k < FIBONACCI.len() {
+            FIBONACCI[k] as f64
+        } else {
+            FIBONACCI[FIBONACCI.len() - 1] as f64
+        };
+        let denom = (PI * (k as f64) * PHI.ln()).exp(); // = φ^(π·k)
+        let frac = (fib_k / denom).clamp(0.0, 0.999);
+        let offset = (range * frac).round() as usize;
+        if offset == 0 {
+            break;
+        }
+        let mid = (low + offset).min(high - 1);
+
+        comparisons += 1;
+        match cmp(&arr[mid], target) {
+            0 => {
+                TOTAL_COMPARISONS.fetch_add(comparisons, Ordering::Relaxed);
+                return Ok(mid);
+            }
+            n if n < 0 => low = mid + 1,
+            _ => high = mid,
+        }
+        k += 1;
+    }
+
+    // Phase 2: fall through to binary search on the (smaller) live range.
+    while low < high {
+        comparisons += 1;
+        let mid = low + (high - low) / 2;
+        match cmp(&arr[mid], target) {
+            0 => {
+                TOTAL_COMPARISONS.fetch_add(comparisons, Ordering::Relaxed);
+                return Ok(mid);
+            }
+            n if n < 0 => low = mid + 1,
+            _ => high = mid,
+        }
+    }
+
+    TOTAL_COMPARISONS.fetch_add(comparisons, Ordering::Relaxed);
+    Err(low)
+}
+
 /// Standard binary search (for comparison/benchmarking).
 ///
 /// This is provided as a reference implementation to compare against
@@ -172,7 +264,31 @@ pub fn binary_search<T>(
     Err(low)
 }
 
-/// Compute approximate log_phi(n) - the theoretical reduction factor
+/// log_phi_pi_fibonacci(n) — the theoretical compare-count bound for
+/// the phi_pi_fib_search_v2 algorithm.
+///
+/// Derivation: the F(k)/phi^(pi*k) split-point formula reduces the
+/// live range by a factor of ~phi^pi per iteration. Hence the
+/// iteration count to converge on a target satisfies
+/// `n / (phi^pi)^k = 1`, giving
+/// `k = ln(n) / ln(phi^pi) = ln(n) / (pi * ln(phi))`.
+///
+/// Numerically: phi^pi ~= 4.534, ln(phi^pi) ~= 1.511, so
+/// `log_phi_pi_fibonacci(n) ~= 0.459 * log2(n)`.
+///
+/// Whether the empirical compare count of phi_pi_fib_search_v2 actually
+/// hits this bound depends on how often the offset rounds to zero and
+/// the algorithm falls back to standard binary search; see the
+/// experiment_8_search_bench.omc head-to-head.
+pub fn log_phi_pi_fibonacci(n: f64) -> f64 {
+    n.ln() / (PI * PHI.ln())
+}
+
+/// log_phi(n) — kept as a deprecated alias for backwards compatibility.
+/// New code should use `log_phi_pi_fibonacci`. The naming change is
+/// architectural: the phi-pi-fibonacci substrate is the unit of
+/// measurement, not the golden ratio in isolation.
+#[deprecated(note = "use log_phi_pi_fibonacci instead — phi-alone is the outdated baseline, phi-pi-fibonacci is the substrate")]
 pub fn log_phi(n: f64) -> f64 {
     n.ln() / PHI.ln()
 }
