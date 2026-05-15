@@ -1,0 +1,29 @@
+[package]
+name = "omnimcode-codegen"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "OMNIcode native codegen — LLVM-backed JIT/AOT for @hbit-tagged hot paths"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+# Default OFF — non-codegen builds (WASM, LSP, the standalone
+# interpreter+VM) don't need LLVM and shouldn't pay its build cost.
+# Enable explicitly with `--features llvm-jit` when working on codegen.
+default = []
+llvm-jit = ["dep:inkwell"]
+
+[dependencies]
+# omnimcode-core supplies the bytecode definitions (Op, Const,
+# CompiledFunction) that codegen lowers into LLVM IR. We import
+# without python-embed because codegen targets the engine layer,
+# not the embedder layer.
+omnimcode-core = { path = "../omnimcode-core", default-features = false }
+
+# inkwell — type-safe Rust binding over LLVM-C. Pinned to LLVM 18
+# (system package: llvm-18-dev). LLVM 21 is too new for inkwell
+# stable; LLVM 18 is the highest version with full feature support.
+inkwell = { version = "0.5", features = ["llvm18-0"], optional = true }
