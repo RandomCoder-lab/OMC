@@ -42,7 +42,7 @@ return types (arr_len, str_len, fibonacci, etc).
 
 ---
 
-## HIGH-1: Value::Dict / Value::Array clone on every read+write
+## HIGH-1: Value::Dict / Value::Array clone on every read+write ✅ FIXED
 
 **Symptom:** Aggregating 10k records into a dict that grows to 3218
 entries takes 16 seconds. 100k records: hung — never completed in
@@ -87,6 +87,25 @@ arrays' existing semantics). At 10k+ scale it stops working. The
 architecture needs to choose: pass-by-value (O(N²) collections) or
 pass-by-reference (sharing, mutation surprises). Document the
 tradeoff and pick.
+
+**Resolution (same session):** Picked pass-by-reference. Wrapped
+HArray.items in Rc<RefCell<Vec<Value>>> and Value::Dict's BTreeMap
+similarly. Measured speedups on this exact workload:
+
+| Stage             | Before     | After     | Speedup |
+|-------------------|-----------:|----------:|--------:|
+| 10k load_csv      | 9899 ms    | 28 ms     | 354×    |
+| 10k aggregate     | 16018 ms   | 29 ms     | 552×    |
+| 10k agg_to_rows   | 2125 ms    | 8 ms      | 265×    |
+| 10k build_hidx    | 4883 ms    | 46 ms     | 106×    |
+| **10k total**     | ~33 sec    | ~0.12 sec | ~275×   |
+| **100k total**    | hung       | ~0.92 sec | ∞       |
+
+43/43 functional examples produce identical output under tree-walk
+and VM. 92/92 unit tests pass. Old `omc_arrays_by_value` memory
+record marked superseded — `fn fill(a) { arr_push(a, 1); }` now
+mutates the caller's array, matching Python/JS/Ruby. The old
+return-and-rebind idiom still works as a no-op.
 
 ---
 

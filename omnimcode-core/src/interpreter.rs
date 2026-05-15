@@ -551,10 +551,10 @@ impl Interpreter {
                 let idx = self.eval_expr(index)?.to_int() as usize;
                 let val = self.eval_expr(value)?;
                 
-                if let Some(Value::Array(mut arr)) = self.get_var(name) {
-                    if idx < arr.items.len() {
-                        arr.items[idx] = val;
-                        self.set_var(name.clone(), Value::Array(arr));
+                if let Some(Value::Array(arr)) = self.get_var(name) {
+                    let mut items = arr.items.borrow_mut();
+                    if idx < items.len() {
+                        items[idx] = val;
                     }
                 }
                 Ok(())
@@ -628,7 +628,11 @@ impl Interpreter {
                     }
                     ForIterable::Expr(expr) => {
                         if let Value::Array(arr) = self.eval_expr(expr)? {
-                            for item in arr.items {
+                            // Snapshot items so the loop body can mutate
+                            // the underlying Rc<RefCell<Vec>> without
+                            // tripping a borrow conflict.
+                            let items = arr.items.borrow().clone();
+                            for item in items {
                                 self.set_var(var.clone(), item);
                                 self.execute_block(body)?;
                                 if self.break_flag {
@@ -739,7 +743,7 @@ impl Interpreter {
                 for e in exprs {
                     items.push(self.eval_expr(e)?);
                 }
-                Ok(Value::Array(HArray { items }))
+                Ok(Value::Array(HArray::from_vec(items)))
             }
             Expression::Dict(pairs) => {
                 let mut map = std::collections::BTreeMap::new();
@@ -748,7 +752,7 @@ impl Interpreter {
                     let v = self.eval_expr(v_expr)?;
                     map.insert(k, v);
                 }
-                Ok(Value::Dict(map))
+                Ok(Value::dict_from(map))
             }
             Expression::Variable(name) => {
                 // First try variable lookup. If missing, fall back to the
@@ -775,7 +779,7 @@ impl Interpreter {
                 match container {
                     Value::Array(arr) => {
                         let idx = idx_v.to_int() as usize;
-                        arr.items.get(idx).cloned()
+                        arr.items.borrow().get(idx).cloned()
                             .ok_or_else(|| format!("Index out of bounds: {}", idx))
                     }
                     Value::Dict(d) => {
@@ -784,7 +788,7 @@ impl Interpreter {
                         // `d["42"]` — surprising for some, but matches
                         // OMC's "everything stringifies" stance.
                         let key = idx_v.to_display_string();
-                        Ok(d.get(&key).cloned().unwrap_or(Value::Null))
+                        Ok(d.borrow().get(&key).cloned().unwrap_or(Value::Null))
                     }
                     _ => Err(format!("Not indexable: {}", name)),
                 }
@@ -1381,11 +1385,11 @@ impl Interpreter {
                 if args.len() == 1 {
                     // Array form: forward to arr_min behavior
                     if let Value::Array(arr) = self.eval_expr(&args[0])? {
-                        if arr.items.is_empty() {
+                        if arr.items.borrow().is_empty() {
                             return Err("min: empty array".to_string());
                         }
                         return Ok(Value::HInt(HInt::new(
-                            arr.items.iter().map(|v| v.to_int()).min().unwrap(),
+                            arr.items.borrow().iter().map(|v| v.to_int()).min().unwrap(),
                         )));
                     }
                     return Err("min(x): single arg must be an array".to_string());
@@ -1404,11 +1408,11 @@ impl Interpreter {
                 }
                 if args.len() == 1 {
                     if let Value::Array(arr) = self.eval_expr(&args[0])? {
-                        if arr.items.is_empty() {
+                        if arr.items.borrow().is_empty() {
                             return Err("max: empty array".to_string());
                         }
                         return Ok(Value::HInt(HInt::new(
-                            arr.items.iter().map(|v| v.to_int()).max().unwrap(),
+                            arr.items.borrow().iter().map(|v| v.to_int()).max().unwrap(),
                         )));
                     }
                     return Err("max(x): single arg must be an array".to_string());
@@ -1500,8 +1504,9 @@ impl Interpreter {
                     0.5
                 };
                 if let Value::Array(arr) = arr_v {
-                    let mut new_items: Vec<Value> = Vec::with_capacity(arr.items.len());
-                    for v in &arr.items {
+                    let items_b = arr.items.borrow();
+                    let mut new_items: Vec<Value> = Vec::with_capacity(items_b.len());
+                    for v in items_b.iter() {
                         let n = v.to_int();
                         let folded = fold_to_fibonacci_const(n);
                         // OmniWeight between original and the candidate attractor.
@@ -1514,7 +1519,7 @@ impl Interpreter {
                             new_items.push(v.clone());
                         }
                     }
-                    Ok(Value::Array(HArray { items: new_items }))
+                    Ok(Value::Array(HArray::from_vec(new_items)))
                 } else {
                     Err("quantize: requires an array".to_string())
                 }
@@ -1534,11 +1539,12 @@ impl Interpreter {
                     0.5
                 };
                 if let Value::Array(arr) = arr_v {
-                    if arr.items.is_empty() {
+                    let items_b = arr.items.borrow();
+                    if items_b.is_empty() {
                         return Ok(Value::HFloat(0.0));
                     }
                     let mut count = 0usize;
-                    for v in &arr.items {
+                    for v in items_b.iter() {
                         let n = v.to_int();
                         let folded = fold_to_fibonacci_const(n);
                         let denom = (folded.abs() as f64).max(1.0);
@@ -1548,7 +1554,7 @@ impl Interpreter {
                             count += 1;
                         }
                     }
-                    Ok(Value::HFloat(count as f64 / arr.items.len() as f64))
+                    Ok(Value::HFloat(count as f64 / items_b.len() as f64))
                 } else {
                     Err("quantization_ratio: requires an array".to_string())
                 }
@@ -1562,18 +1568,19 @@ impl Interpreter {
                 }
                 let arr_v = self.eval_expr(&args[0])?;
                 if let Value::Array(arr) = arr_v {
-                    if arr.items.is_empty() {
+                    let items_b = arr.items.borrow();
+                    if items_b.is_empty() {
                         return Ok(Value::HFloat(0.0));
                     }
                     let mut sum: f64 = 0.0;
-                    for v in &arr.items {
+                    for v in items_b.iter() {
                         let n = v.to_int();
                         let folded = fold_to_fibonacci_const(n);
                         let denom = (folded.abs() as f64).max(1.0);
                         let e = ((n - folded).abs() as f64) / denom;
                         sum += crate::value::PHI.powf(-e);
                     }
-                    Ok(Value::HFloat(sum / arr.items.len() as f64))
+                    Ok(Value::HFloat(sum / items_b.len() as f64))
                 } else {
                     Err("mean_omni_weight: requires an array".to_string())
                 }
@@ -1692,9 +1699,14 @@ impl Interpreter {
             // Drop any Singularity elements from an array (Phase 6 idiom).
             "cleanup_array" => {
                 if let Value::Array(arr) = self.eval_expr(&args[0])? {
-                    let kept: Vec<Value> =
-                        arr.items.into_iter().filter(|v| !v.is_singularity()).collect();
-                    Ok(Value::Array(HArray { items: kept }))
+                    let kept: Vec<Value> = arr
+                        .items
+                        .borrow()
+                        .iter()
+                        .filter(|v| !v.is_singularity())
+                        .cloned()
+                        .collect();
+                    Ok(Value::Array(HArray::from_vec(kept)))
                 } else {
                     Err("cleanup_array: requires an array".to_string())
                 }
@@ -1780,10 +1792,12 @@ impl Interpreter {
                 if let Value::Array(arr) = arr_v {
                     let kept: Vec<Value> = arr
                         .items
-                        .into_iter()
+                        .borrow()
+                        .iter()
                         .filter(|v| HInt::compute_resonance(v.to_int()) >= threshold)
+                        .cloned()
                         .collect();
-                    Ok(Value::Array(HArray { items: kept }))
+                    Ok(Value::Array(HArray::from_vec(kept)))
                 } else {
                     Err("filter_by_resonance: first argument must be an array".to_string())
                 }
@@ -1810,7 +1824,7 @@ impl Interpreter {
                 let arr_v = self.eval_expr(&args[0])?;
                 if let Value::Array(arr) = arr_v {
                     let mut acc = 0i64;
-                    for v in &arr.items {
+                    for v in arr.items.borrow().iter() {
                         let n = v.to_int().abs();
                         let fibs: [i64; 15] = [
                             0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610,
@@ -2004,7 +2018,7 @@ impl Interpreter {
                 } else {
                     s.split(&sep).map(|p| Value::String(p.to_string())).collect()
                 };
-                Ok(Value::Array(HArray { items: parts }))
+                Ok(Value::Array(HArray::from_vec(parts)))
             }
             "str_join" => {
                 if args.len() < 2 {
@@ -2013,7 +2027,7 @@ impl Interpreter {
                 let arr_v = self.eval_expr(&args[0])?;
                 let sep = self.eval_expr(&args[1])?.to_string();
                 if let Value::Array(arr) = arr_v {
-                    let parts: Vec<String> = arr.items.iter().map(|v| match v {
+                    let parts: Vec<String> = arr.items.borrow().iter().map(|v| match v {
                         Value::HInt(h) => h.value.to_string(),
                         Value::HFloat(f) => format!("{}", f),
                         Value::String(s) => s.clone(),
@@ -2121,9 +2135,12 @@ impl Interpreter {
                 }
                 let size = self.eval_expr(&args[0])?.to_int() as usize;
                 let default = self.eval_expr(&args[1])?;
-                let mut arr = HArray::with_capacity(size);
-                for _ in 0..size {
-                    arr.items.push(default.clone());
+                let arr = HArray::with_capacity(size);
+                {
+                    let mut items = arr.items.borrow_mut();
+                    for _ in 0..size {
+                        items.push(default.clone());
+                    }
                 }
                 Ok(Value::Array(arr))
             }
@@ -2133,9 +2150,12 @@ impl Interpreter {
                 }
                 let start = self.eval_expr(&args[0])?.to_int();
                 let end = self.eval_expr(&args[1])?.to_int();
-                let mut arr = HArray::new();
-                for i in start..end {
-                    arr.items.push(Value::HInt(HInt::new(i)));
+                let arr = HArray::new();
+                {
+                    let mut items = arr.items.borrow_mut();
+                    for i in start..end {
+                        items.push(Value::HInt(HInt::new(i)));
+                    }
                 }
                 Ok(Value::Array(arr))
             }
@@ -2144,7 +2164,7 @@ impl Interpreter {
                     return Err("arr_len requires 1 argument".to_string());
                 }
                 if let Value::Array(a) = self.eval_expr(&args[0])? {
-                    Ok(Value::HInt(HInt::new(a.items.len() as i64)))
+                    Ok(Value::HInt(HInt::new(a.items.borrow().len() as i64)))
                 } else {
                     Err("arr_len requires an array".to_string())
                 }
@@ -2154,7 +2174,7 @@ impl Interpreter {
                     return Err("arr_sum requires 1 argument".to_string());
                 }
                 if let Value::Array(a) = self.eval_expr(&args[0])? {
-                    let sum: i64 = a.items.iter().map(|v| v.to_int()).sum();
+                    let sum: i64 = a.items.borrow().iter().map(|v| v.to_int()).sum();
                     Ok(Value::HInt(HInt::new(sum)))
                 } else {
                     Err("arr_sum requires an array".to_string())
@@ -2172,9 +2192,11 @@ impl Interpreter {
                 // discarded on return.
                 let val = self.eval_expr(&args[1])?;
                 if let Expression::Variable(name) = &args[0] {
-                    if let Some(Value::Array(mut arr)) = self.get_var(name) {
-                        arr.items.push(val);
-                        self.assign_var(name.clone(), Value::Array(arr));
+                    if let Some(Value::Array(arr)) = self.get_var(name) {
+                        // With Rc<RefCell> HArray, the borrow_mut hits the
+                        // shared collection — no assign_var write-back is
+                        // needed, the caller's binding sees the push.
+                        arr.items.borrow_mut().push(val);
                         return Ok(Value::Null);
                     }
                 }
@@ -2188,10 +2210,11 @@ impl Interpreter {
                 let idx = self.eval_expr(&args[1])?.to_int();
                 if let Value::Array(arr) = arr_v {
                     let i = idx as usize;
-                    arr.items
+                    let items = arr.items.borrow();
+                    items
                         .get(i)
                         .cloned()
-                        .ok_or_else(|| format!("arr_get: index {} out of bounds (len {})", idx, arr.items.len()))
+                        .ok_or_else(|| format!("arr_get: index {} out of bounds (len {})", idx, items.len()))
                 } else {
                     Err("arr_get: first argument must be an array".to_string())
                 }
@@ -2203,19 +2226,16 @@ impl Interpreter {
                 let idx = self.eval_expr(&args[1])?.to_int() as usize;
                 let val = self.eval_expr(&args[2])?;
                 if let Expression::Variable(name) = &args[0] {
-                    if let Some(Value::Array(mut arr)) = self.get_var(name) {
-                        if idx >= arr.items.len() {
+                    if let Some(Value::Array(arr)) = self.get_var(name) {
+                        let mut items = arr.items.borrow_mut();
+                        if idx >= items.len() {
                             return Err(format!(
                                 "arr_set: index {} out of bounds (len {})",
                                 idx,
-                                arr.items.len()
+                                items.len()
                             ));
                         }
-                        arr.items[idx] = val;
-                        // assign_var (not set_var) so mutations from inside a
-                        // closure body propagate into the captured env. Same
-                        // rationale as arr_push above.
-                        self.assign_var(name.clone(), Value::Array(arr));
+                        items[idx] = val;
                         return Ok(Value::Null);
                     }
                 }
@@ -2232,7 +2252,8 @@ impl Interpreter {
                 let arr_v = self.eval_expr(&args[0])?;
                 let raw_idx = self.eval_expr(&args[1])?.to_int();
                 if let Value::Array(arr) = arr_v {
-                    let len = arr.items.len();
+                    let items = arr.items.borrow();
+                    let len = items.len();
                     if len == 0 {
                         // No valid index for empty array. Return Null
                         // rather than error — keeps the access total.
@@ -2240,7 +2261,7 @@ impl Interpreter {
                     }
                     let folded = fold_to_fibonacci_const(raw_idx);
                     let healed = ((folded % (len as i64)) + (len as i64)) % (len as i64);
-                    Ok(arr.items[healed as usize].clone())
+                    Ok(items[healed as usize].clone())
                 } else {
                     Err("safe_arr_get: first argument must be an array".to_string())
                 }
@@ -2252,15 +2273,15 @@ impl Interpreter {
                 let raw_idx = self.eval_expr(&args[1])?.to_int();
                 let val = self.eval_expr(&args[2])?;
                 if let Expression::Variable(name) = &args[0] {
-                    if let Some(Value::Array(mut arr)) = self.get_var(name) {
-                        let len = arr.items.len();
+                    if let Some(Value::Array(arr)) = self.get_var(name) {
+                        let mut items = arr.items.borrow_mut();
+                        let len = items.len();
                         if len == 0 {
                             return Ok(Value::Null);
                         }
                         let folded = fold_to_fibonacci_const(raw_idx);
                         let healed = ((folded % (len as i64)) + (len as i64)) % (len as i64);
-                        arr.items[healed as usize] = val;
-                        self.set_var(name.clone(), Value::Array(arr));
+                        items[healed as usize] = val;
                         return Ok(Value::Null);
                     }
                 }
@@ -2274,7 +2295,9 @@ impl Interpreter {
                 if let Value::Array(arr) = self.eval_expr(&args[0])? {
                     // Sort by underlying numeric/lexicographic value.
                     // Mixed-type arrays sort by Value's natural ordering.
-                    let mut items = arr.items.clone();
+                    // Independent copy — sort returns a fresh array, doesn't
+                    // mutate the input.
+                    let mut items = arr.items.borrow().clone();
                     items.sort_by(|a, b| {
                         match (a, b) {
                             (Value::HInt(x), Value::HInt(y)) => x.value.cmp(&y.value),
@@ -2291,7 +2314,7 @@ impl Interpreter {
                             }
                         }
                     });
-                    Ok(Value::Array(HArray { items }))
+                    Ok(Value::Array(HArray::from_vec(items)))
                 } else {
                     Err("arr_sort: argument must be an array".to_string())
                 }
@@ -2302,9 +2325,10 @@ impl Interpreter {
                     return Err("arr_reverse requires 1 argument".to_string());
                 }
                 if let Value::Array(arr) = self.eval_expr(&args[0])? {
-                    let mut items = arr.items.clone();
+                    // Independent copy — reverse returns a fresh array.
+                    let mut items = arr.items.borrow().clone();
                     items.reverse();
-                    Ok(Value::Array(HArray { items }))
+                    Ok(Value::Array(HArray::from_vec(items)))
                 } else {
                     Err("arr_reverse: argument must be an array".to_string())
                 }
@@ -2319,7 +2343,7 @@ impl Interpreter {
                 let arr_v = self.eval_expr(&args[0])?;
                 let sep = self.eval_expr(&args[1])?.to_string();
                 if let Value::Array(arr) = arr_v {
-                    let parts: Vec<String> = arr.items.iter().map(|v| match v {
+                    let parts: Vec<String> = arr.items.borrow().iter().map(|v| match v {
                         Value::HInt(h) => h.value.to_string(),
                         Value::HFloat(f) => format!("{}", f),
                         Value::String(s) => s.clone(),
@@ -2344,12 +2368,13 @@ impl Interpreter {
                 let arr_v = self.eval_expr(&args[0])?;
                 let fn_v = self.eval_expr(&args[1])?;
                 if let Value::Array(arr) = arr_v {
-                    let mut out = Vec::with_capacity(arr.items.len());
-                    for item in arr.items {
+                    let items = arr.items.borrow().clone();
+                    let mut out = Vec::with_capacity(items.len());
+                    for item in items {
                         let mapped = self.call_first_class_function(&fn_v, vec![item])?;
                         out.push(mapped);
                     }
-                    Ok(Value::Array(HArray { items: out }))
+                    Ok(Value::Array(HArray::from_vec(out)))
                 } else {
                     Err("arr_map: first argument must be an array".to_string())
                 }
@@ -2361,14 +2386,15 @@ impl Interpreter {
                 let arr_v = self.eval_expr(&args[0])?;
                 let fn_v = self.eval_expr(&args[1])?;
                 if let Value::Array(arr) = arr_v {
+                    let items = arr.items.borrow().clone();
                     let mut out = Vec::new();
-                    for item in arr.items {
+                    for item in items {
                         let kept = self.call_first_class_function(&fn_v, vec![item.clone()])?;
                         if kept.to_bool() {
                             out.push(item);
                         }
                     }
-                    Ok(Value::Array(HArray { items: out }))
+                    Ok(Value::Array(HArray::from_vec(out)))
                 } else {
                     Err("arr_filter: first argument must be an array".to_string())
                 }
@@ -2383,7 +2409,8 @@ impl Interpreter {
                 let fn_v = self.eval_expr(&args[1])?;
                 let mut acc = self.eval_expr(&args[2])?;
                 if let Value::Array(arr) = arr_v {
-                    for item in arr.items {
+                    let items = arr.items.borrow().clone();
+                    for item in items {
                         acc = self.call_first_class_function(&fn_v, vec![acc, item])?;
                     }
                     Ok(acc)
@@ -2400,7 +2427,8 @@ impl Interpreter {
                 let arr_v = self.eval_expr(&args[0])?;
                 let fn_v = self.eval_expr(&args[1])?;
                 if let Value::Array(arr) = arr_v {
-                    for item in arr.items {
+                    let items = arr.items.borrow().clone();
+                    for item in items {
                         if self.call_first_class_function(&fn_v, vec![item])?.to_bool() {
                             return Ok(Value::HInt(HInt::new(1)));
                         }
@@ -2417,7 +2445,8 @@ impl Interpreter {
                 let arr_v = self.eval_expr(&args[0])?;
                 let fn_v = self.eval_expr(&args[1])?;
                 if let Value::Array(arr) = arr_v {
-                    for item in arr.items {
+                    let items = arr.items.borrow().clone();
+                    for item in items {
                         if !self.call_first_class_function(&fn_v, vec![item])?.to_bool() {
                             return Ok(Value::HInt(HInt::new(0)));
                         }
@@ -2435,7 +2464,8 @@ impl Interpreter {
                 let arr_v = self.eval_expr(&args[0])?;
                 let fn_v = self.eval_expr(&args[1])?;
                 if let Value::Array(arr) = arr_v {
-                    for item in arr.items {
+                    let items = arr.items.borrow().clone();
+                    for item in items {
                         if self.call_first_class_function(&fn_v, vec![item.clone()])?.to_bool() {
                             return Ok(item);
                         }
@@ -2451,7 +2481,7 @@ impl Interpreter {
             // mutation can write back. dict_get returns Null on missing key,
             // matching Python's d.get(k) sans default.
             "dict_new" => {
-                Ok(Value::Dict(std::collections::BTreeMap::new()))
+                Ok(Value::dict_empty())
             }
             "dict_get" => {
                 if args.len() < 2 {
@@ -2464,7 +2494,7 @@ impl Interpreter {
                     let default = if args.len() >= 3 {
                         Some(self.eval_expr(&args[2])?)
                     } else { None };
-                    Ok(d.get(&k).cloned().unwrap_or_else(|| default.unwrap_or(Value::Null)))
+                    Ok(d.borrow().get(&k).cloned().unwrap_or_else(|| default.unwrap_or(Value::Null)))
                 } else {
                     Err("dict_get: first argument must be a dict".to_string())
                 }
@@ -2476,9 +2506,9 @@ impl Interpreter {
                 let k = self.eval_expr(&args[1])?.to_display_string();
                 let val = self.eval_expr(&args[2])?;
                 if let Expression::Variable(name) = &args[0] {
-                    if let Some(Value::Dict(mut d)) = self.get_var(name) {
-                        d.insert(k, val);
-                        self.assign_var(name.clone(), Value::Dict(d));
+                    if let Some(Value::Dict(d)) = self.get_var(name) {
+                        // Rc<RefCell> Dict: borrow_mut hits the shared map.
+                        d.borrow_mut().insert(k, val);
                         return Ok(Value::Null);
                     }
                 }
@@ -2491,7 +2521,7 @@ impl Interpreter {
                 let d_v = self.eval_expr(&args[0])?;
                 let k = self.eval_expr(&args[1])?.to_display_string();
                 if let Value::Dict(d) = d_v {
-                    Ok(Value::HInt(HInt::new(if d.contains_key(&k) { 1 } else { 0 })))
+                    Ok(Value::HInt(HInt::new(if d.borrow().contains_key(&k) { 1 } else { 0 })))
                 } else {
                     Err("dict_has: first argument must be a dict".to_string())
                 }
@@ -2502,9 +2532,8 @@ impl Interpreter {
                 }
                 let k = self.eval_expr(&args[1])?.to_display_string();
                 if let Expression::Variable(name) = &args[0] {
-                    if let Some(Value::Dict(mut d)) = self.get_var(name) {
-                        d.remove(&k);
-                        self.assign_var(name.clone(), Value::Dict(d));
+                    if let Some(Value::Dict(d)) = self.get_var(name) {
+                        d.borrow_mut().remove(&k);
                         return Ok(Value::Null);
                     }
                 }
@@ -2515,8 +2544,8 @@ impl Interpreter {
                     return Err("dict_keys requires (dict)".to_string());
                 }
                 if let Value::Dict(d) = self.eval_expr(&args[0])? {
-                    let items: Vec<Value> = d.keys().map(|k| Value::String(k.clone())).collect();
-                    Ok(Value::Array(HArray { items }))
+                    let items: Vec<Value> = d.borrow().keys().map(|k| Value::String(k.clone())).collect();
+                    Ok(Value::Array(HArray::from_vec(items)))
                 } else {
                     Err("dict_keys: argument must be a dict".to_string())
                 }
@@ -2526,8 +2555,8 @@ impl Interpreter {
                     return Err("dict_values requires (dict)".to_string());
                 }
                 if let Value::Dict(d) = self.eval_expr(&args[0])? {
-                    let items: Vec<Value> = d.values().cloned().collect();
-                    Ok(Value::Array(HArray { items }))
+                    let items: Vec<Value> = d.borrow().values().cloned().collect();
+                    Ok(Value::Array(HArray::from_vec(items)))
                 } else {
                     Err("dict_values: argument must be a dict".to_string())
                 }
@@ -2537,7 +2566,7 @@ impl Interpreter {
                     return Err("dict_len requires (dict)".to_string());
                 }
                 if let Value::Dict(d) = self.eval_expr(&args[0])? {
-                    Ok(Value::HInt(HInt::new(d.len() as i64)))
+                    Ok(Value::HInt(HInt::new(d.borrow().len() as i64)))
                 } else {
                     Err("dict_len: argument must be a dict".to_string())
                 }
@@ -2553,9 +2582,11 @@ impl Interpreter {
                 let b_v = self.eval_expr(&args[1])?;
                 match (a_v, b_v) {
                     (Value::Dict(a), Value::Dict(b)) => {
-                        let mut out = a;
-                        for (k, v) in b { out.insert(k, v); }
-                        Ok(Value::Dict(out))
+                        // Fresh map — explicit copy semantics so the result
+                        // doesn't share state with either input.
+                        let mut out = a.borrow().clone();
+                        for (k, v) in b.borrow().iter() { out.insert(k.clone(), v.clone()); }
+                        Ok(Value::dict_from(out))
                     }
                     _ => Err("dict_merge: both arguments must be dicts".to_string()),
                 }
@@ -2682,9 +2713,9 @@ impl Interpreter {
                     .cloned()
                     .collect();
                 names.sort();
-                Ok(Value::Array(HArray {
-                    items: names.into_iter().map(Value::String).collect(),
-                }))
+                Ok(Value::Array(HArray::from_vec(
+                    names.into_iter().map(Value::String).collect(),
+                )))
             }
             // call(fn_or_name, args_array) — dispatch a function value
             // (or function-name string) with an arbitrary argument list
@@ -2698,7 +2729,7 @@ impl Interpreter {
                 let fn_v = self.eval_expr(&args[0])?;
                 let args_v = self.eval_expr(&args[1])?;
                 let arg_list = match args_v {
-                    Value::Array(a) => a.items,
+                    Value::Array(a) => a.items.borrow().clone(),
                     _ => return Err("call: second argument must be an array".to_string()),
                 };
                 self.call_first_class_function(&fn_v, arg_list)
@@ -2745,7 +2776,7 @@ impl Interpreter {
                     .iter()
                     .map(|s| Value::String(s.clone()))
                     .collect();
-                Ok(Value::Array(HArray { items }))
+                Ok(Value::Array(HArray::from_vec(items)))
             }
             "test_clear_failures" => {
                 self.test_failures.borrow_mut().clear();
@@ -2825,13 +2856,16 @@ impl Interpreter {
                 let b = self.eval_expr(&args[1])?;
                 match (a, b) {
                     (Value::Array(aa), Value::Array(bb)) => {
-                        let len = aa.items.len().min(bb.items.len());
+                        let aa_b = aa.items.borrow();
+                        let bb_b = bb.items.borrow();
+                        let len = aa_b.len().min(bb_b.len());
                         let pairs: Vec<Value> = (0..len).map(|i| {
-                            Value::Array(HArray {
-                                items: vec![aa.items[i].clone(), bb.items[i].clone()],
-                            })
+                            Value::Array(HArray::from_vec(vec![
+                                aa_b[i].clone(),
+                                bb_b[i].clone(),
+                            ]))
                         }).collect();
-                        Ok(Value::Array(HArray { items: pairs }))
+                        Ok(Value::Array(HArray::from_vec(pairs)))
                     }
                     _ => Err("arr_zip: both arguments must be arrays".to_string()),
                 }
@@ -2844,14 +2878,15 @@ impl Interpreter {
                     return Err("arr_unique requires (array)".to_string());
                 }
                 if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                    let items = arr.items.borrow().clone();
                     let mut seen: Vec<Value> = Vec::new();
-                    for v in arr.items {
+                    for v in items {
                         let dup = seen.iter().any(|s| values_equal(s, &v));
                         if !dup {
                             seen.push(v);
                         }
                     }
-                    Ok(Value::Array(HArray { items: seen }))
+                    Ok(Value::Array(HArray::from_vec(seen)))
                 } else {
                     Err("arr_unique: argument must be an array".to_string())
                 }
@@ -2983,9 +3018,10 @@ impl Interpreter {
                         .sum();
                     total / (n as f64)
                 };
-                Ok(Value::Array(HArray {
-                    items: vec![Value::String(content), Value::HFloat(mean)],
-                }))
+                Ok(Value::Array(HArray::from_vec(vec![
+                    Value::String(content),
+                    Value::HFloat(mean),
+                ])))
             }
             "harmonic_sort" => {
                 // Sort by harmony_value (φ-resonance) descending — highest
@@ -3000,7 +3036,8 @@ impl Interpreter {
                     return Err("harmonic_sort requires 1 argument".to_string());
                 }
                 if let Value::Array(arr) = self.eval_expr(&args[0])? {
-                    let scored: Vec<(f64, Value)> = arr.items.into_iter().map(|v| {
+                    let items_in = arr.items.borrow().clone();
+                    let scored: Vec<(f64, Value)> = items_in.into_iter().map(|v| {
                         let score = match &v {
                             Value::HInt(h) => h.resonance,
                             Value::HFloat(f) => HInt::compute_resonance(*f as i64),
@@ -3021,9 +3058,9 @@ impl Interpreter {
                     items_scored.sort_by(|a, b| {
                         b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
                     });
-                    Ok(Value::Array(HArray {
-                        items: items_scored.into_iter().map(|(_, v)| v).collect(),
-                    }))
+                    Ok(Value::Array(HArray::from_vec(
+                        items_scored.into_iter().map(|(_, v)| v).collect(),
+                    )))
                 } else {
                     Err("harmonic_sort: argument must be an array".to_string())
                 }
@@ -3071,7 +3108,7 @@ impl Interpreter {
                         pos += 1;
                     }
                 }
-                Ok(Value::Array(HArray { items: chunks }))
+                Ok(Value::Array(HArray::from_vec(chunks)))
             }
             "harmonic_partition" => {
                 // Group array elements by the Fibonacci attractor nearest
@@ -3092,7 +3129,8 @@ impl Interpreter {
                     ];
                     use std::collections::BTreeMap;
                     let mut buckets: BTreeMap<i64, Vec<Value>> = BTreeMap::new();
-                    for v in arr.items {
+                    let items_in = arr.items.borrow().clone();
+                    for v in items_in {
                         let n = v.to_int();
                         let abs_n = n.abs();
                         let nearest = fibs.iter()
@@ -3103,9 +3141,9 @@ impl Interpreter {
                         buckets.entry(key).or_insert_with(Vec::new).push(v);
                     }
                     let outer: Vec<Value> = buckets.into_iter().map(|(_, items)| {
-                        Value::Array(HArray { items })
+                        Value::Array(HArray::from_vec(items))
                     }).collect();
-                    Ok(Value::Array(HArray { items: outer }))
+                    Ok(Value::Array(HArray::from_vec(outer)))
                 } else {
                     Err("harmonic_partition: argument must be an array".to_string())
                 }
@@ -3189,9 +3227,10 @@ impl Interpreter {
                 let arr_v = self.eval_expr(&args[0])?;
                 let band = self.eval_expr(&args[1])?.to_float();
                 if let Value::Array(arr) = arr_v {
+                    let items_in = arr.items.borrow().clone();
                     let mut kept: Vec<Value> = Vec::new();
                     let mut kept_scores: Vec<f64> = Vec::new();
-                    for v in arr.items {
+                    for v in items_in {
                         let score = match &v {
                             Value::HInt(h) => h.resonance,
                             Value::HFloat(f) => HInt::compute_resonance(*f as i64),
@@ -3205,7 +3244,7 @@ impl Interpreter {
                             kept.push(v);
                         }
                     }
-                    Ok(Value::Array(HArray { items: kept }))
+                    Ok(Value::Array(HArray::from_vec(kept)))
                 } else {
                     Err("harmonic_dedupe: first argument must be an array".to_string())
                 }
@@ -3213,6 +3252,7 @@ impl Interpreter {
             "arr_first" => {
                 if let Value::Array(arr) = self.eval_expr(&args[0])? {
                     arr.items
+                        .borrow()
                         .first()
                         .cloned()
                         .ok_or_else(|| "arr_first: empty array".to_string())
@@ -3223,6 +3263,7 @@ impl Interpreter {
             "arr_last" => {
                 if let Value::Array(arr) = self.eval_expr(&args[0])? {
                     arr.items
+                        .borrow()
                         .last()
                         .cloned()
                         .ok_or_else(|| "arr_last: empty array".to_string())
@@ -3232,10 +3273,10 @@ impl Interpreter {
             }
             "arr_min" => {
                 if let Value::Array(arr) = self.eval_expr(&args[0])? {
-                    if arr.items.is_empty() {
+                    if arr.items.borrow().is_empty() {
                         return Err("arr_min: empty array".to_string());
                     }
-                    let min = arr.items.iter().map(|v| v.to_int()).min().unwrap();
+                    let min = arr.items.borrow().iter().map(|v| v.to_int()).min().unwrap();
                     Ok(Value::HInt(HInt::new(min)))
                 } else {
                     Err("arr_min: requires an array".to_string())
@@ -3243,10 +3284,10 @@ impl Interpreter {
             }
             "arr_max" => {
                 if let Value::Array(arr) = self.eval_expr(&args[0])? {
-                    if arr.items.is_empty() {
+                    if arr.items.borrow().is_empty() {
                         return Err("arr_max: empty array".to_string());
                     }
-                    let max = arr.items.iter().map(|v| v.to_int()).max().unwrap();
+                    let max = arr.items.borrow().iter().map(|v| v.to_int()).max().unwrap();
                     Ok(Value::HInt(HInt::new(max)))
                 } else {
                     Err("arr_max: requires an array".to_string())
@@ -3259,9 +3300,12 @@ impl Interpreter {
                 let a = self.eval_expr(&args[0])?;
                 let b = self.eval_expr(&args[1])?;
                 match (a, b) {
-                    (Value::Array(mut a), Value::Array(b)) => {
-                        a.items.extend(b.items);
-                        Ok(Value::Array(a))
+                    (Value::Array(a), Value::Array(b)) => {
+                        // Fresh Rc — explicit copy semantics so the result
+                        // doesn't share state with either input.
+                        let mut out = a.items.borrow().clone();
+                        out.extend(b.items.borrow().iter().cloned());
+                        Ok(Value::Array(HArray::from_vec(out)))
                     }
                     _ => Err("arr_concat: both arguments must be arrays".to_string()),
                 }
@@ -3273,7 +3317,7 @@ impl Interpreter {
                 let arr_v = self.eval_expr(&args[0])?;
                 let target = self.eval_expr(&args[1])?.to_int();
                 if let Value::Array(arr) = arr_v {
-                    let found = arr.items.iter().any(|v| v.to_int() == target);
+                    let found = arr.items.borrow().iter().any(|v| v.to_int() == target);
                     Ok(Value::HInt(HInt::new(if found { 1 } else { 0 })))
                 } else {
                     Err("arr_contains: first argument must be an array".to_string())
@@ -3286,7 +3330,7 @@ impl Interpreter {
                 let arr_v = self.eval_expr(&args[0])?;
                 let target = self.eval_expr(&args[1])?.to_int();
                 if let Value::Array(arr) = arr_v {
-                    let pos = arr.items.iter().position(|v| v.to_int() == target);
+                    let pos = arr.items.borrow().iter().position(|v| v.to_int() == target);
                     Ok(Value::HInt(HInt::new(match pos {
                         Some(i) => i as i64,
                         None => -1,
@@ -3303,10 +3347,11 @@ impl Interpreter {
                 let start = self.eval_expr(&args[1])?.to_int().max(0) as usize;
                 let end = self.eval_expr(&args[2])?.to_int().max(0) as usize;
                 if let Value::Array(arr) = arr_v {
-                    let end = end.min(arr.items.len());
+                    let items_b = arr.items.borrow();
+                    let end = end.min(items_b.len());
                     let start = start.min(end);
-                    let items: Vec<Value> = arr.items[start..end].to_vec();
-                    Ok(Value::Array(HArray { items }))
+                    let items: Vec<Value> = items_b[start..end].to_vec();
+                    Ok(Value::Array(HArray::from_vec(items)))
                 } else {
                     Err("arr_slice: first argument must be an array".to_string())
                 }
@@ -3315,7 +3360,7 @@ impl Interpreter {
             "len" => {
                 let v = self.eval_expr(&args[0])?;
                 match v {
-                    Value::Array(a) => Ok(Value::HInt(HInt::new(a.items.len() as i64))),
+                    Value::Array(a) => Ok(Value::HInt(HInt::new(a.items.borrow().len() as i64))),
                     Value::String(s) => Ok(Value::HInt(HInt::new(s.chars().count() as i64))),
                     other => Err(format!(
                         "len: requires array or string, got {:?}",
@@ -3326,15 +3371,15 @@ impl Interpreter {
             "arr_resonance" => {
                 // Mean resonance across all elements that are HInts.
                 if let Value::Array(arr) = self.eval_expr(&args[0])? {
-                    if arr.items.is_empty() {
+                    let items_b = arr.items.borrow();
+                    if items_b.is_empty() {
                         return Ok(Value::HFloat(0.0));
                     }
-                    let total: f64 = arr
-                        .items
+                    let total: f64 = items_b
                         .iter()
                         .map(|v| HInt::compute_resonance(v.to_int()))
                         .sum();
-                    Ok(Value::HFloat(total / arr.items.len() as f64))
+                    Ok(Value::HFloat(total / items_b.len() as f64))
                 } else {
                     Err("arr_resonance: requires an array".to_string())
                 }
@@ -3845,17 +3890,17 @@ fn vm_fast_dispatch(name: &str, args: &[Value]) -> Option<Result<Value, String>>
         }
         ("str_split", 2) => {
             if let (Value::String(s), Value::String(sep)) = (&args[0], &args[1]) {
-                let items = if sep.is_empty() {
+                let items: Vec<Value> = if sep.is_empty() {
                     s.chars().map(|c| Value::String(c.to_string())).collect()
                 } else {
                     s.split(sep.as_str()).map(|p| Value::String(p.to_string())).collect()
                 };
-                Some(Ok(Value::Array(HArray { items })))
+                Some(Ok(Value::Array(HArray::from_vec(items))))
             } else { None }
         }
         ("str_join", 2) => {
             if let (Value::Array(arr), Value::String(sep)) = (&args[0], &args[1]) {
-                let parts: Vec<String> = arr.items.iter()
+                let parts: Vec<String> = arr.items.borrow().iter()
                     .map(|v| v.to_display_string())
                     .collect();
                 Some(Ok(Value::String(parts.join(sep.as_str()))))
@@ -4008,12 +4053,13 @@ fn values_equal(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::String(x), Value::String(y)) => x == y,
         (Value::Array(x), Value::Array(y)) => {
-            if x.items.len() != y.items.len() {
+            let xb = x.items.borrow();
+            let yb = y.items.borrow();
+            if xb.len() != yb.len() {
                 return false;
             }
-            x.items
-                .iter()
-                .zip(y.items.iter())
+            xb.iter()
+                .zip(yb.iter())
                 .all(|(p, q)| values_equal(p, q))
         }
         (

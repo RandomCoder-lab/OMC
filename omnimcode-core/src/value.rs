@@ -154,21 +154,51 @@ impl HSingularity {
     }
 }
 
-/// Array wrapper for homogeneous collections
+/// Array wrapper for homogeneous collections.
+///
+/// `items` is wrapped in `Rc<RefCell<>>` so:
+/// 1. Cloning a Value::Array is O(1) (just bumps the Rc) — was O(N).
+///    This kills the n² runtime that any "build a collection in a
+///    loop" pattern used to have (PAIN_POINTS HIGH-1).
+/// 2. Mutation through arr_push / arr_set goes through borrow_mut()
+///    in-place, so the assign_var write-back dance the named
+///    opcodes did is no longer needed.
+///
+/// Semantic shift from the prior "pass by value" model (see the now
+/// outdated `omc_arrays_by_value` memory): callees CAN mutate a
+/// caller's array. Matches Python/JS/Ruby. The split between
+/// shared-mutation and explicit-copy is now in the bulk operations
+/// (arr_concat, arr_slice always produce a fresh Rc).
 #[derive(Clone, Debug)]
 pub struct HArray {
-    pub items: Vec<Value>,
+    pub items: std::rc::Rc<std::cell::RefCell<Vec<Value>>>,
 }
 
 impl HArray {
     pub fn new() -> Self {
-        HArray { items: Vec::new() }
+        HArray { items: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())) }
     }
 
     pub fn with_capacity(capacity: usize) -> Self {
         HArray {
-            items: Vec::with_capacity(capacity),
+            items: std::rc::Rc::new(std::cell::RefCell::new(Vec::with_capacity(capacity))),
         }
+    }
+
+    /// Construct an HArray from an owned Vec — the most common
+    /// builder shape (used by literals, splits, range expansion).
+    pub fn from_vec(v: Vec<Value>) -> Self {
+        HArray { items: std::rc::Rc::new(std::cell::RefCell::new(v)) }
+    }
+
+    /// Length without taking a guard for the caller. Borrows internally.
+    pub fn len(&self) -> usize {
+        self.items.borrow().len()
+    }
+
+    /// True iff the inner vec is empty.
+    pub fn is_empty(&self) -> bool {
+        self.items.borrow().is_empty()
     }
 }
 
@@ -211,21 +241,34 @@ pub enum Value {
     /// Hash-map / dictionary. Keys are always strings — OMC has no
     /// general hashable-value protocol yet, and string-keyed dicts
     /// cover virtually every use case (config maps, counter tables,
-    /// JSON-shaped data, named records). Insertion-order semantics
-    /// match Python 3.7+: iteration order is the order keys were
-    /// first inserted, regardless of later updates.
+    /// JSON-shaped data, named records).
     ///
-    /// Mutation lives entirely on the host side via dict_set —
-    /// dicts pass by VALUE across function calls (same model as
-    /// arrays) so callees can't mutate a caller's dict. The
-    /// arr_push / arr_set / assign_var pattern applies here too:
-    /// the dict_set builtin walks scopes outward for an existing
-    /// binding and writes back.
-    Dict(std::collections::BTreeMap<String, Value>),
+    /// Iteration order is BTreeMap's natural sort (alphabetical on
+    /// keys). NOT Python-3.7-style insertion order — we traded that
+    /// for deterministic iteration in tests and the harmonic_pq
+    /// trick (lex-sort on padded HIM keys = numeric priority order).
+    ///
+    /// Wrapped in Rc<RefCell<>> for the same reasons as HArray:
+    /// O(1) clone, in-place mutation via borrow_mut(). Pass-by-
+    /// reference semantics — callees CAN mutate a caller's dict.
+    /// dict_merge produces a fresh Rc to give explicit-copy when
+    /// the user wants it.
+    Dict(std::rc::Rc<std::cell::RefCell<std::collections::BTreeMap<String, Value>>>),
     Null,
 }
 
 impl Value {
+    /// Convenience constructor for a Dict from an owned BTreeMap.
+    /// Hides the Rc<RefCell<>> wrap from call sites.
+    pub fn dict_from(m: std::collections::BTreeMap<String, Value>) -> Self {
+        Value::Dict(std::rc::Rc::new(std::cell::RefCell::new(m)))
+    }
+
+    /// Convenience constructor for an empty Dict.
+    pub fn dict_empty() -> Self {
+        Value::dict_from(std::collections::BTreeMap::new())
+    }
+
     pub fn to_int(&self) -> i64 {
         match self {
             Value::HInt(h) => h.value,
@@ -256,8 +299,8 @@ impl Value {
             Value::HFloat(f) => *f != 0.0,
             Value::String(s) => !s.is_empty(),
             Value::Bool(b) => *b,
-            Value::Array(a) => !a.items.is_empty(),
-            Value::Dict(d) => !d.is_empty(),
+            Value::Array(a) => !a.is_empty(),
+            Value::Dict(d) => !d.borrow().is_empty(),
             Value::Circuit(_) => true,
             // A singularity is truthy in the same sense as Python OMNIcode treats it:
             // `if is_singularity(result) == 1` is the standard test, not `if result`.
@@ -282,13 +325,13 @@ impl Value {
             Value::Bool(b) => b.to_string(),
             Value::Null => "null".to_string(),
             Value::Array(a) => {
-                let items: Vec<String> = a.items.iter()
+                let items: Vec<String> = a.items.borrow().iter()
                     .map(|v| v.to_display_string())
                     .collect();
                 format!("[{}]", items.join(", "))
             }
             Value::Dict(d) => {
-                let pairs: Vec<String> = d.iter()
+                let pairs: Vec<String> = d.borrow().iter()
                     .map(|(k, v)| format!("\"{}\": {}", k, v.to_display_string()))
                     .collect();
                 format!("{{{}}}", pairs.join(", "))
@@ -306,11 +349,11 @@ impl Value {
             Value::Circuit(c) => c.to_string(),
             Value::Null => "null".to_string(),
             Value::Array(a) => {
-                let items: Vec<String> = a.items.iter().map(|v| v.to_string()).collect();
+                let items: Vec<String> = a.items.borrow().iter().map(|v| v.to_string()).collect();
                 format!("[{}]", items.join(", "))
             }
             Value::Dict(d) => {
-                let pairs: Vec<String> = d.iter()
+                let pairs: Vec<String> = d.borrow().iter()
                     .map(|(k, v)| format!("\"{}\": {}", k, v.to_string()))
                     .collect();
                 format!("{{{}}}", pairs.join(", "))

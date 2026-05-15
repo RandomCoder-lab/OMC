@@ -355,7 +355,7 @@ impl Vm {
                         // `call`).
                         let fn_v = &argvals[0];
                         let unpacked = match &argvals[1] {
-                            Value::Array(a) => Some(a.items.clone()),
+                            Value::Array(a) => Some(a.items.borrow().clone()),
                             _ => None,
                         };
                         match unpacked {
@@ -393,18 +393,18 @@ impl Vm {
                         items.push(stack.pop().ok_or("stack underflow")?);
                     }
                     items.reverse();
-                    stack.push(Value::Array(HArray { items }));
+                    stack.push(Value::Array(HArray::from_vec(items)));
                 }
                 Op::DictSetNamed(name) => {
-                    // Pop value then key; mutate the named dict via
-                    // assign_var so the change propagates into a
-                    // captured-env scope when run inside a closure.
+                    // Pop value then key; mutate the named dict in place.
+                    // With Rc<RefCell> Dict, the borrow_mut propagates the
+                    // change to all sharers (including a captured-env
+                    // binding), so no assign_var write-back is needed.
                     let val = stack.pop().ok_or("stack underflow")?;
                     let key = stack.pop().ok_or("stack underflow")?
                         .to_display_string();
-                    if let Some(Value::Dict(mut d)) = self.interp.vm_get_var(name) {
-                        d.insert(key, val);
-                        self.interp.vm_assign_var(name, Value::Dict(d));
+                    if let Some(Value::Dict(d)) = self.interp.vm_get_var(name) {
+                        d.borrow_mut().insert(key, val);
                     } else {
                         return Err(format!(
                             "DictSetNamed: {} is not a dict variable",
@@ -441,9 +441,8 @@ impl Vm {
                 Op::DictDelNamed(name) => {
                     let key = stack.pop().ok_or("stack underflow")?
                         .to_display_string();
-                    if let Some(Value::Dict(mut d)) = self.interp.vm_get_var(name) {
-                        d.remove(&key);
-                        self.interp.vm_assign_var(name, Value::Dict(d));
+                    if let Some(Value::Dict(d)) = self.interp.vm_get_var(name) {
+                        d.borrow_mut().remove(&key);
                     } else {
                         return Err(format!(
                             "DictDelNamed: {} is not a dict variable",
@@ -466,7 +465,7 @@ impl Vm {
                     pairs.reverse();
                     let mut map = std::collections::BTreeMap::new();
                     for (k, v) in pairs { map.insert(k, v); }
-                    stack.push(Value::Dict(map));
+                    stack.push(Value::dict_from(map));
                 }
                 Op::ArrayIndex => {
                     // Polymorphic: container on top is either Array
@@ -476,26 +475,24 @@ impl Vm {
                     match container {
                         Value::Array(a) => {
                             let idx = idx_v.to_int() as usize;
-                            let v = a.items.get(idx).cloned()
+                            let v = a.items.borrow().get(idx).cloned()
                                 .ok_or_else(|| format!("array index {} out of bounds", idx))?;
                             stack.push(v);
                         }
                         Value::Dict(d) => {
                             let key = idx_v.to_display_string();
-                            stack.push(d.get(&key).cloned().unwrap_or(Value::Null));
+                            stack.push(d.borrow().get(&key).cloned().unwrap_or(Value::Null));
                         }
                         _ => return Err("ArrayIndex: not indexable".to_string()),
                     }
                 }
                 Op::ArrPushNamed(name) => {
-                    // assign_var (walks outward) — not set_local — so pushes
-                    // from inside a closure body land in the captured env
-                    // where the array actually lives, not the closure's call
-                    // scope. Same rationale as tree-walk arr_push.
+                    // With Rc<RefCell> HArray, the borrow_mut propagates
+                    // the push to all sharers (including a captured-env
+                    // binding), so no assign_var write-back is needed.
                     let val = stack.pop().ok_or("stack underflow")?;
-                    if let Some(Value::Array(mut a)) = self.interp.vm_get_var(name) {
-                        a.items.push(val);
-                        self.interp.vm_assign_var(name, Value::Array(a));
+                    if let Some(Value::Array(a)) = self.interp.vm_get_var(name) {
+                        a.items.borrow_mut().push(val);
                     } else {
                         return Err(format!(
                             "ArrPushNamed: {} is not an array variable",
@@ -506,17 +503,16 @@ impl Vm {
                 Op::ArrSetNamed(name) => {
                     let val = stack.pop().ok_or("stack underflow")?;
                     let idx = stack.pop().ok_or("stack underflow")?.to_int() as usize;
-                    if let Some(Value::Array(mut a)) = self.interp.vm_get_var(name) {
-                        if idx >= a.items.len() {
+                    if let Some(Value::Array(a)) = self.interp.vm_get_var(name) {
+                        let mut items = a.items.borrow_mut();
+                        if idx >= items.len() {
                             return Err(format!(
                                 "ArrSetNamed: index {} out of bounds (len {})",
                                 idx,
-                                a.items.len()
+                                items.len()
                             ));
                         }
-                        a.items[idx] = val;
-                        // assign_var (walks outward) — see ArrPushNamed above.
-                        self.interp.vm_assign_var(name, Value::Array(a));
+                        items[idx] = val;
                     } else {
                         return Err(format!(
                             "ArrSetNamed: {} is not an array variable",
@@ -541,8 +537,9 @@ impl Vm {
                 Op::SafeArrSetNamed(name) => {
                     let val = stack.pop().ok_or("stack underflow")?;
                     let raw_idx = stack.pop().ok_or("stack underflow")?.to_int();
-                    if let Some(Value::Array(mut a)) = self.interp.vm_get_var(name) {
-                        let len = a.items.len();
+                    if let Some(Value::Array(a)) = self.interp.vm_get_var(name) {
+                        let mut items = a.items.borrow_mut();
+                        let len = items.len();
                         if len > 0 {
                             // Fold onto nearest Fibonacci attractor, then
                             // Euclidean mod by len.
@@ -552,8 +549,7 @@ impl Vm {
                             if healed < 0 {
                                 healed += len_i;
                             }
-                            a.items[healed as usize] = val;
-                            self.interp.vm_assign_var(name, Value::Array(a));
+                            items[healed as usize] = val;
                         }
                         // Empty arrays: silently drop the write (total
                         // semantics — never errors).
@@ -567,12 +563,10 @@ impl Vm {
                 Op::ArrayIndexAssign(name) => {
                     let idx = stack.pop().ok_or("stack underflow")?.to_int() as usize;
                     let val = stack.pop().ok_or("stack underflow")?;
-                    if let Some(Value::Array(mut a)) = self.interp.vm_get_var(name) {
-                        if idx < a.items.len() {
-                            a.items[idx] = val;
-                            // assign_var so the mutation hits the outer
-                            // binding when this runs inside a closure body.
-                            self.interp.vm_assign_var(name, Value::Array(a));
+                    if let Some(Value::Array(a)) = self.interp.vm_get_var(name) {
+                        let mut items = a.items.borrow_mut();
+                        if idx < items.len() {
+                            items[idx] = val;
                         } else {
                             return Err(format!("array {} index {} out of bounds", name, idx));
                         }
@@ -612,7 +606,7 @@ impl Vm {
                 Op::ArrayLen => {
                     let v = stack.pop().ok_or("stack underflow")?;
                     let n = match v {
-                        Value::Array(a) => a.items.len() as i64,
+                        Value::Array(a) => a.items.borrow().len() as i64,
                         Value::String(s) => s.chars().count() as i64,
                         _ => 0,
                     };
@@ -703,7 +697,7 @@ impl Vm {
             return Ok(None);
         }
         let arr_items: Vec<Value> = match &argvals[0] {
-            Value::Array(a) => a.items.clone(),
+            Value::Array(a) => a.items.borrow().clone(),
             _ => return Ok(None),
         };
 
@@ -715,7 +709,7 @@ impl Vm {
                         .expect("checked target above");
                     out.push(r?);
                 }
-                Ok(Some(Value::Array(HArray { items: out })))
+                Ok(Some(Value::Array(HArray::from_vec(out))))
             }
             "arr_filter" => {
                 let mut out = Vec::new();
@@ -726,7 +720,7 @@ impl Vm {
                         out.push(item);
                     }
                 }
-                Ok(Some(Value::Array(HArray { items: out })))
+                Ok(Some(Value::Array(HArray::from_vec(out))))
             }
             "arr_reduce" => {
                 if argvals.len() < 3 {
@@ -889,12 +883,13 @@ fn values_equal_vm(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::String(x), Value::String(y)) => x == y,
         (Value::Array(x), Value::Array(y)) => {
-            if x.items.len() != y.items.len() {
+            let xb = x.items.borrow();
+            let yb = y.items.borrow();
+            if xb.len() != yb.len() {
                 return false;
             }
-            x.items
-                .iter()
-                .zip(y.items.iter())
+            xb.iter()
+                .zip(yb.iter())
                 .all(|(p, q)| values_equal_vm(p, q))
         }
         (
