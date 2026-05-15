@@ -3391,7 +3391,7 @@ impl Interpreter {
             // up the stack does the same, so the final message lists
             // every frame innermost-first. Mirrors VM run_function's
             // error-path formatting.
-            return Err(format!("{}\n  at {}", e, name));
+            return Err(format!("{}\n  at {}", e, display_frame_name(name)));
         }
 
         let result = self.return_value.take().unwrap_or(Value::Null);
@@ -3536,7 +3536,7 @@ impl Interpreter {
         }
         let mut out = msg.to_string();
         for fname in self.call_stack.iter().rev() {
-            out.push_str(&format!("\n  at {}", fname));
+            out.push_str(&format!("\n  at {}", display_frame_name(fname)));
         }
         out
     }
@@ -3847,6 +3847,20 @@ fn vm_fast_dispatch(name: &str, args: &[Value]) -> Option<Result<Value, String>>
             Some(Ok(Value::Null))
         }
         _ => None,
+    }
+}
+
+/// Render a function name for display in stack traces. Internal
+/// auto-generated lambda identifiers (`__rt_lambda_N` from the tree-
+/// walk evaluator, `__lambda_N` from the bytecode compiler) collapse
+/// to a single "<lambda>" so traces don't leak the implementation
+/// detail of which engine assigned the counter — and so traces stay
+/// stable across tree-walk vs VM runs.
+pub fn display_frame_name(name: &str) -> &str {
+    if name.starts_with("__rt_lambda_") || name.starts_with("__lambda_") {
+        "<lambda>"
+    } else {
+        name
     }
 }
 

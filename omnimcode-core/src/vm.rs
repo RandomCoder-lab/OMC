@@ -64,7 +64,11 @@ impl Vm {
                 // a leaked scope frame.
                 self.interp.vm_pop_scope();
                 if track_frame {
-                    Err(format!("{}\n  at {}", e, func.name))
+                    Err(format!(
+                        "{}\n  at {}",
+                        e,
+                        crate::interpreter::display_frame_name(&func.name)
+                    ))
                 } else {
                     Err(e)
                 }

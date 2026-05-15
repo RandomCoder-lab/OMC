@@ -1,0 +1,614 @@
+# =============================================================================
+# Mini Lisp / Scheme interpreter in OMC
+# =============================================================================
+# A small Lisp dialect written in OMC, exercising every feature added in
+# the recent push: dicts (envs + tagged values), pattern matching (the
+# evaluator's dispatch on form), closures (lambdas capturing env), recursion
+# (the whole interpreter), try/catch (eval errors), and string + concat
+# (pretty-printing).
+#
+# Forms:
+#   (define name value)                        - bind
+#   (lambda (params...) body)                  - closure
+#   (if cond then else)                        - conditional
+#   (let ((name val) ...) body)                - local bindings
+#   (quote x), '                               - literal expression
+#   (begin expr ...)                           - sequence
+#
+# Built-ins:
+#   +, -, *, /, =, <, >, <=, >=
+#   car, cdr, cons, list, null?, pair?
+#   not, and, or
+#   display, newline
+#
+# Run:
+#   ./target/release/omnimcode-standalone examples/lisp.omc
+#   OMC_VM=1 ./target/release/omnimcode-standalone examples/lisp.omc
+# =============================================================================
+
+# ---- Tagged value constructors --------------------------------------------
+# Every Lisp value is an OMC dict with a "t" tag. This lets us distinguish
+# symbols from strings and treat lambdas/builtins uniformly.
+
+fn mk_int(n)            { return {"t": "int",     "v": n}; }
+fn mk_str(s)            { return {"t": "str",     "v": s}; }
+fn mk_sym(s)            { return {"t": "sym",     "v": s}; }
+fn mk_bool(b)           { return {"t": "bool",    "v": b}; }
+fn mk_nil()             { return {"t": "nil"}; }
+fn mk_list(xs)          { return {"t": "list",    "v": xs}; }
+fn mk_lambda(ps, b, e)  { return {"t": "lambda",  "params": ps, "body": b, "env": e}; }
+fn mk_builtin(name)     { return {"t": "builtin", "v": name}; }
+
+fn lt(v) { return dict_get(v, "t"); }   # type tag accessor
+
+# ---- Tokenizer ------------------------------------------------------------
+# Split source into a list of tokens. Tokens are OMC strings — `(`, `)`,
+# `'`, or atoms (symbols / numbers / quoted strings retained as-is).
+
+fn lisp_tokenize(src) {
+    h tokens = [];
+    h n = str_len(src);
+    h i = 0;
+    while i < n {
+        h c = str_slice(src, i, i + 1);
+        match c {
+            " " | "\t" | "\n" | "\r" => { i = i + 1; }
+            "(" => { arr_push(tokens, "("); i = i + 1; }
+            ")" => { arr_push(tokens, ")"); i = i + 1; }
+            "'" => { arr_push(tokens, "'"); i = i + 1; }
+            ";" => {
+                # Skip to end-of-line.
+                while i < n {
+                    h ch = str_slice(src, i, i + 1);
+                    if ch == "\n" {
+                        i = i + 1;
+                        break;
+                    }
+                    i = i + 1;
+                }
+            }
+            "\"" => {
+                # Quoted string — keep quotes attached so lisp_atom can
+                # recognise it as a string literal.
+                h start = i;
+                i = i + 1;
+                while i < n {
+                    h ch = str_slice(src, i, i + 1);
+                    if ch == "\"" {
+                        arr_push(tokens, str_slice(src, start, i + 1));
+                        i = i + 1;
+                        break;
+                    }
+                    i = i + 1;
+                }
+            }
+            _ => {
+                # Atom — read until whitespace or paren.
+                h start = i;
+                while i < n {
+                    h ch = str_slice(src, i, i + 1);
+                    match ch {
+                        " " | "\t" | "\n" | "\r" | "(" | ")" => { break; }
+                        _ => { i = i + 1; }
+                    }
+                }
+                arr_push(tokens, str_slice(src, start, i));
+            }
+        }
+    }
+    return tokens;
+}
+
+# ---- Parser ----------------------------------------------------------------
+# Returns [parsed_value, next_idx]. Recursive descent over the token list.
+
+fn lisp_parse(tokens, idx) {
+    if idx >= arr_len(tokens) {
+        error("unexpected end of input");
+    }
+    h tok = arr_get(tokens, idx);
+    match tok {
+        "(" => {
+            # List: read until ).
+            h items = [];
+            h i = idx + 1;
+            while i < arr_len(tokens) {
+                h next = arr_get(tokens, i);
+                match next {
+                    ")" => {
+                        return [mk_list(items), i + 1];
+                    }
+                    _ => {
+                        h pair = lisp_parse(tokens, i);
+                        arr_push(items, arr_get(pair, 0));
+                        i = arr_get(pair, 1);
+                    }
+                }
+            }
+            error("unclosed list");
+            return [mk_nil(), i];
+        }
+        ")" => {
+            error("unexpected close paren");
+            return [mk_nil(), idx + 1];
+        }
+        "'" => {
+            # Read next, wrap in (quote ...).
+            h pair = lisp_parse(tokens, idx + 1);
+            h quoted = mk_list([mk_sym("quote"), arr_get(pair, 0)]);
+            return [quoted, arr_get(pair, 1)];
+        }
+        _ => {
+            return [lisp_atom(tok), idx + 1];
+        }
+    }
+    return [mk_nil(), idx + 1];
+}
+
+# Classify an atom token into int, string, bool, or symbol.
+fn lisp_atom(tok) {
+    h n = str_len(tok);
+    if n == 0 { return mk_sym(tok); }
+    h first = str_slice(tok, 0, 1);
+    # Quoted string.
+    if first == "\"" {
+        # Strip quotes.
+        return mk_str(str_slice(tok, 1, n - 1));
+    }
+    # Bool literals.
+    if tok == "#t" { return mk_bool(1); }
+    if tok == "#f" { return mk_bool(0); }
+    # Numeric? Try parsing.
+    h is_num = lisp_looks_numeric(tok);
+    if is_num == 1 {
+        return mk_int(to_int(tok));
+    }
+    return mk_sym(tok);
+}
+
+fn lisp_looks_numeric(s) {
+    h n = str_len(s);
+    if n == 0 { return 0; }
+    h i = 0;
+    h c = str_slice(s, 0, 1);
+    if c == "-" {
+        if n == 1 { return 0; }
+        i = 1;
+    }
+    while i < n {
+        h ch = str_slice(s, i, i + 1);
+        match ch {
+            "0".."9" => { i = i + 1; }
+            _ => { return 0; }
+        }
+    }
+    return 1;
+}
+
+# ---- Environment ----------------------------------------------------------
+# OMC dicts pass by value, so mutating an env-dict through a function
+# parameter doesn't propagate. The trick that does work: wrap the env's
+# binding map in a CLOSURE pair [lookup_fn, define_fn] that captures the
+# dict by reference (mutable closures share their captured env via Rc).
+# All env operations go through the closures, so mutations stick no matter
+# how many call boundaries the env crosses.
+#
+# Parent chains: lookup falls through to the parent env's lookup closure
+# when a name isn't in this frame. Encoded as parent = the parent env's
+# [lookup, define] array, or "" for the root frame.
+
+fn env_new(parent) {
+    h vars = {};
+    h lookup = fn(name) {
+        if dict_has(vars, name) == 1 {
+            return dict_get(vars, name);
+        }
+        if type_of(parent) == "array" {
+            h plookup = arr_get(parent, 0);
+            return plookup(name);
+        }
+        error(concat_many("undefined: ", name));
+        return mk_nil();
+    };
+    h define = fn(name, value) {
+        dict_set(vars, name, value);
+        return mk_nil();
+    };
+    return [lookup, define];
+}
+
+fn env_lookup(env, name) {
+    h f = arr_get(env, 0);
+    return f(name);
+}
+
+fn env_define(env, name, value) {
+    h f = arr_get(env, 1);
+    return f(name, value);
+}
+
+# ---- Evaluator -------------------------------------------------------------
+
+fn lisp_eval(expr, env) {
+    h tag = lt(expr);
+    match tag {
+        "int" | "str" | "bool" | "nil" | "lambda" | "builtin" => {
+            return expr;   # self-evaluating
+        }
+        "sym" => {
+            return env_lookup(env, dict_get(expr, "v"));
+        }
+        "list" => {
+            h items = dict_get(expr, "v");
+            if arr_len(items) == 0 { return expr; }
+            h head = arr_get(items, 0);
+            # Special form? Check if head is a symbol with known name.
+            if lt(head) == "sym" {
+                h sname = dict_get(head, "v");
+                match sname {
+                    "quote" => { return arr_get(items, 1); }
+                    "if" => {
+                        h c = lisp_eval(arr_get(items, 1), env);
+                        if lisp_truthy(c) == 1 {
+                            return lisp_eval(arr_get(items, 2), env);
+                        }
+                        if arr_len(items) >= 4 {
+                            return lisp_eval(arr_get(items, 3), env);
+                        }
+                        return mk_nil();
+                    }
+                    "define" => {
+                        h name = dict_get(arr_get(items, 1), "v");
+                        h val = lisp_eval(arr_get(items, 2), env);
+                        env_define(env, name, val);
+                        return mk_nil();
+                    }
+                    "lambda" => {
+                        h param_list = dict_get(arr_get(items, 1), "v");
+                        h params = arr_map(param_list, lisp_param_name);
+                        h body = arr_get(items, 2);
+                        return mk_lambda(params, body, env);
+                    }
+                    "let" => {
+                        # (let ((n v) ...) body)
+                        h bindings = dict_get(arr_get(items, 1), "v");
+                        h body = arr_get(items, 2);
+                        h new_env = env_new(env);
+                        h k = 0;
+                        while k < arr_len(bindings) {
+                            h b = dict_get(arr_get(bindings, k), "v");
+                            h n = dict_get(arr_get(b, 0), "v");
+                            h v = lisp_eval(arr_get(b, 1), env);
+                            env_define(new_env, n, v);
+                            k = k + 1;
+                        }
+                        return lisp_eval(body, new_env);
+                    }
+                    "begin" => {
+                        h k = 1;
+                        h last = mk_nil();
+                        while k < arr_len(items) {
+                            last = lisp_eval(arr_get(items, k), env);
+                            k = k + 1;
+                        }
+                        return last;
+                    }
+                    _ => {}   # not a special form, fall through to apply
+                }
+            }
+            # Function application.
+            h fn_v = lisp_eval(head, env);
+            h argvs = [];
+            h k = 1;
+            while k < arr_len(items) {
+                arr_push(argvs, lisp_eval(arr_get(items, k), env));
+                k = k + 1;
+            }
+            return lisp_apply(fn_v, argvs);
+        }
+        _ => {
+            error(concat_many("eval: unknown value tag: ", tag));
+            return mk_nil();
+        }
+    }
+    return mk_nil();
+}
+
+fn lisp_param_name(p) { return dict_get(p, "v"); }
+
+fn lisp_truthy(v) {
+    match lt(v) {
+        "bool" => {
+            if dict_get(v, "v") == 1 { return 1; }
+            return 0;
+        }
+        "nil" => { return 0; }
+        _ => { return 1; }
+    }
+    return 1;
+}
+
+fn lisp_apply(fn_v, args) {
+    match lt(fn_v) {
+        "lambda" => {
+            h params = dict_get(fn_v, "params");
+            h body = dict_get(fn_v, "body");
+            h captured = dict_get(fn_v, "env");
+            h frame = env_new(captured);
+            h k = 0;
+            while k < arr_len(params) {
+                env_define(frame, arr_get(params, k), arr_get(args, k));
+                k = k + 1;
+            }
+            return lisp_eval(body, frame);
+        }
+        "builtin" => {
+            return lisp_builtin(dict_get(fn_v, "v"), args);
+        }
+        _ => {
+            error(concat_many("apply: not callable: tag=", lt(fn_v)));
+            return mk_nil();
+        }
+    }
+    return mk_nil();
+}
+
+# ---- Built-in dispatch -----------------------------------------------------
+
+fn lisp_builtin(name, args) {
+    match name {
+        "+" => { return lisp_arith(args, "+"); }
+        "-" => { return lisp_arith(args, "-"); }
+        "*" => { return lisp_arith(args, "*"); }
+        "/" => { return lisp_arith(args, "/"); }
+        "=" => { return mk_bool(lisp_eq(arr_get(args, 0), arr_get(args, 1))); }
+        "<" => { return mk_bool(lisp_int(arr_get(args, 0)) < lisp_int(arr_get(args, 1))); }
+        ">" => { return mk_bool(lisp_int(arr_get(args, 0)) > lisp_int(arr_get(args, 1))); }
+        "<=" => { return mk_bool(lisp_int(arr_get(args, 0)) <= lisp_int(arr_get(args, 1))); }
+        ">=" => { return mk_bool(lisp_int(arr_get(args, 0)) >= lisp_int(arr_get(args, 1))); }
+        "car" => {
+            h xs = dict_get(arr_get(args, 0), "v");
+            return arr_get(xs, 0);
+        }
+        "cdr" => {
+            h xs = dict_get(arr_get(args, 0), "v");
+            h rest = arr_slice(xs, 1, arr_len(xs));
+            return mk_list(rest);
+        }
+        "cons" => {
+            h h_v = arr_get(args, 0);
+            h t_v = arr_get(args, 1);
+            h tail = dict_get(t_v, "v");
+            h out = [h_v];
+            h k = 0;
+            while k < arr_len(tail) {
+                arr_push(out, arr_get(tail, k));
+                k = k + 1;
+            }
+            return mk_list(out);
+        }
+        "list" => { return mk_list(args); }
+        "null?" => {
+            h v = arr_get(args, 0);
+            match lt(v) {
+                "nil" => { return mk_bool(1); }
+                "list" => {
+                    if arr_len(dict_get(v, "v")) == 0 { return mk_bool(1); }
+                    return mk_bool(0);
+                }
+                _ => { return mk_bool(0); }
+            }
+            return mk_bool(0);
+        }
+        "pair?" => {
+            h v = arr_get(args, 0);
+            if lt(v) == "list" {
+                if arr_len(dict_get(v, "v")) > 0 { return mk_bool(1); }
+            }
+            return mk_bool(0);
+        }
+        "not" => { return mk_bool(1 - lisp_truthy(arr_get(args, 0))); }
+        "display" => {
+            print_raw(lisp_format(arr_get(args, 0)));
+            return mk_nil();
+        }
+        "newline" => { println(""); return mk_nil(); }
+        _ => {
+            error(concat_many("unknown builtin: ", name));
+            return mk_nil();
+        }
+    }
+    return mk_nil();
+}
+
+fn lisp_int(v) {
+    match lt(v) {
+        "int" => { return dict_get(v, "v"); }
+        _ => { return 0; }
+    }
+    return 0;
+}
+
+fn lisp_eq(a, b) {
+    if lt(a) != lt(b) { return 0; }
+    match lt(a) {
+        "int" | "str" | "sym" | "bool" => {
+            if dict_get(a, "v") == dict_get(b, "v") { return 1; }
+            return 0;
+        }
+        "nil" => { return 1; }
+        _ => { return 0; }
+    }
+    return 0;
+}
+
+fn lisp_arith(args, op) {
+    if arr_len(args) == 0 { return mk_int(0); }
+    h acc = lisp_int(arr_get(args, 0));
+    h k = 1;
+    while k < arr_len(args) {
+        h n = lisp_int(arr_get(args, k));
+        match op {
+            "+" => { acc = acc + n; }
+            "-" => { acc = acc - n; }
+            "*" => { acc = acc * n; }
+            "/" => { acc = acc / n; }
+            _ => {}
+        }
+        k = k + 1;
+    }
+    return mk_int(acc);
+}
+
+# ---- Pretty-printer --------------------------------------------------------
+
+fn lisp_format(v) {
+    match lt(v) {
+        "int" => { return concat_many("", dict_get(v, "v")); }
+        "str" => { return concat_many("\"", dict_get(v, "v"), "\""); }
+        "sym" => { return dict_get(v, "v"); }
+        "bool" => {
+            if dict_get(v, "v") == 1 { return "#t"; }
+            return "#f";
+        }
+        "nil" => { return "()"; }
+        "list" => {
+            h items = dict_get(v, "v");
+            h parts = arr_map(items, lisp_format);
+            return concat_many("(", arr_join(parts, " "), ")");
+        }
+        "lambda" => { return "#<lambda>"; }
+        "builtin" => { return concat_many("#<builtin:", dict_get(v, "v"), ">"); }
+        _ => { return "#<?>"; }
+    }
+    return "?";
+}
+
+# ---- Initial environment ---------------------------------------------------
+
+fn lisp_global_env() {
+    h e = env_new("");
+    env_define(e, "+", mk_builtin("+"));
+    env_define(e, "-", mk_builtin("-"));
+    env_define(e, "*", mk_builtin("*"));
+    env_define(e, "/", mk_builtin("/"));
+    env_define(e, "=", mk_builtin("="));
+    env_define(e, "<", mk_builtin("<"));
+    env_define(e, ">", mk_builtin(">"));
+    env_define(e, "<=", mk_builtin("<="));
+    env_define(e, ">=", mk_builtin(">="));
+    env_define(e, "car", mk_builtin("car"));
+    env_define(e, "cdr", mk_builtin("cdr"));
+    env_define(e, "cons", mk_builtin("cons"));
+    env_define(e, "list", mk_builtin("list"));
+    env_define(e, "null?", mk_builtin("null?"));
+    env_define(e, "pair?", mk_builtin("pair?"));
+    env_define(e, "not", mk_builtin("not"));
+    env_define(e, "display", mk_builtin("display"));
+    env_define(e, "newline", mk_builtin("newline"));
+    return e;
+}
+
+# ---- Top-level -------------------------------------------------------------
+
+fn lisp_run(src) {
+    h tokens = lisp_tokenize(src);
+    h env = lisp_global_env();
+    h i = 0;
+    h last = mk_nil();
+    while i < arr_len(tokens) {
+        h pair = lisp_parse(tokens, i);
+        h expr = arr_get(pair, 0);
+        i = arr_get(pair, 1);
+        last = lisp_eval(expr, env);
+    }
+    return last;
+}
+
+# ---- Demo ------------------------------------------------------------------
+
+println("=== Mini Lisp in OMC =======================================");
+println("");
+
+# 1. Arithmetic
+println(concat_many("(+ 1 2 3 4) = ", lisp_format(lisp_run("(+ 1 2 3 4)"))));
+println(concat_many("(* 6 7) = ", lisp_format(lisp_run("(* 6 7)"))));
+
+# 2. Conditional + comparison
+println(concat_many("(if (< 3 5) 'yes 'no) = ",
+    lisp_format(lisp_run("(if (< 3 5) (quote yes) (quote no))"))));
+
+# 3. Quote produces a list
+println(concat_many("'(1 2 3) = ",
+    lisp_format(lisp_run("'(1 2 3)"))));
+
+# 4. car / cdr / cons
+println(concat_many("(car '(1 2 3)) = ", lisp_format(lisp_run("(car '(1 2 3))"))));
+println(concat_many("(cdr '(1 2 3)) = ", lisp_format(lisp_run("(cdr '(1 2 3))"))));
+println(concat_many("(cons 0 '(1 2)) = ", lisp_format(lisp_run("(cons 0 '(1 2))"))));
+
+# 5. let
+println(concat_many("(let ((x 10) (y 20)) (+ x y)) = ",
+    lisp_format(lisp_run("(let ((x 10) (y 20)) (+ x y))"))));
+
+# 6. lambda + closure
+h closure_src = "
+(begin
+    (define adder (lambda (n) (lambda (x) (+ x n))))
+    (define add5 (adder 5))
+    (add5 37))
+";
+println(concat_many("closure (add5 37) = ", lisp_format(lisp_run(closure_src))));
+
+# 7. Recursion: factorial
+h fact_src = "
+(begin
+    (define fact (lambda (n)
+        (if (<= n 1)
+            1
+            (* n (fact (- n 1))))))
+    (fact 10))
+";
+println(concat_many("(fact 10) = ", lisp_format(lisp_run(fact_src))));
+
+# 8. Recursion: list length
+h len_src = "
+(begin
+    (define len (lambda (xs)
+        (if (null? xs)
+            0
+            (+ 1 (len (cdr xs))))))
+    (len '(a b c d e f g)))
+";
+println(concat_many("list length = ", lisp_format(lisp_run(len_src))));
+
+# 9. Higher-order: map (Lisp version)
+h map_src = "
+(begin
+    (define map (lambda (f xs)
+        (if (null? xs)
+            '()
+            (cons (f (car xs)) (map f (cdr xs))))))
+    (map (lambda (x) (* x x)) '(1 2 3 4 5)))
+";
+println(concat_many("(map sq '(1..5)) = ", lisp_format(lisp_run(map_src))));
+
+# 10. Comments + multiple top-level forms
+h comment_src = "
+; this is a comment
+(define x 100)  ; bind x
+(define y 23)
+(+ x y)
+";
+println(concat_many("after defines, (+ x y) = ", lisp_format(lisp_run(comment_src))));
+
+# 11. Error handling via OMC try/catch
+print_raw("undefined symbol → ");
+try {
+    lisp_run("(+ 1 ghost)");
+} catch err {
+    println(err);
+}
+
+println("");
+println("=== Done ====================================================");
