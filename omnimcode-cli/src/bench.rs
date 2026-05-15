@@ -87,6 +87,20 @@ fn no_pred_always_expensive(x) {
 fn no_pred_always_cheap(x) {
     return cheap_path(x);
 }
+
+# --- Path A.3: same workload, four execution modes ---
+# A loop wrapper around factorial(12). Lets the VM and tree-walk
+# benches measure on the same bytecode shape as JIT does. Per-iter
+# time = total_call_time / N_INNER.
+fn bench_loop(iters) {
+    h sum = 0;
+    h k = 0;
+    while k < iters {
+        sum = sum + factorial(12);
+        k = k + 1;
+    }
+    return sum;
+}
 "#;
 
 fn main() {
@@ -104,6 +118,12 @@ fn main() {
     bench_fn("factorial", iters, fn_arg);
     println!();
     bench_fn("sum_to", iters, 100);
+
+    println!();
+    println!("=== Path A.3: same workload, four execution modes ===");
+    println!("Workload: bench_loop(N) = sum factorial(12) over N inner iters.");
+    println!();
+    bench_four_modes(50_000);
 
     println!();
     println!("=== Path A.1: harmony-gated branch elision ===");
@@ -168,6 +188,126 @@ fn bench_fn(fn_name: &str, iters: usize, arg: i64) {
         println!(
             "  → JIT vs tree-walk: {:.1}x faster (median)",
             speedup
+        );
+    }
+}
+
+fn bench_four_modes(n_inner: usize) {
+    use omnimcode_codegen::JittedFn;
+    use omnimcode_core::value::HInt;
+    use std::collections::HashMap;
+    use std::rc::Rc;
+
+    let n_inner_i = n_inner as i64;
+    println!("--- N_INNER = {} (inner loop count) ---", n_inner);
+
+    // Mode 1: tree-walk only.
+    {
+        let mut parser = Parser::new(SOURCE);
+        let statements = parser.parse().expect("parse");
+        let mut interp = Interpreter::new();
+        interp.execute(statements).expect("exec");
+        let start = Instant::now();
+        let _ = interp
+            .call_function_with_values("bench_loop", &[Value::HInt(HInt::new(n_inner_i))])
+            .expect("call");
+        let total_ns = start.elapsed().as_nanos() as f64;
+        println!(
+            "  tree-walk          total={:>10.2}ms  per-iter={:>10.1}ns",
+            total_ns / 1.0e6,
+            total_ns / n_inner as f64
+        );
+    }
+
+    // Mode 2: bytecode VM. Compose a tiny program whose `__main__` is
+    // `bench_loop(N)` and run it through Vm::run_module. The VM sets
+    // up its own scope/dispatch, so we measure the run_module call.
+    {
+        let mut parser = Parser::new(SOURCE);
+        let mut statements = parser.parse().expect("parse");
+        // Append a top-level call so __main__ runs bench_loop(N).
+        let extra = format!("h __vm_result = bench_loop({});", n_inner_i);
+        let mut extra_stmts = Parser::new(&extra).parse().expect("parse extra");
+        statements.append(&mut extra_stmts);
+        let module = omnimcode_core::compiler::compile_program(&statements).expect("compile");
+        let mut vm = omnimcode_core::vm::Vm::new();
+        vm.interp_mut().register_user_functions(&statements);
+        let start = Instant::now();
+        let _ = vm.run_module(&module).expect("run_module");
+        let total_ns = start.elapsed().as_nanos() as f64;
+        println!(
+            "  bytecode VM        total={:>10.2}ms  per-iter={:>10.1}ns",
+            total_ns / 1.0e6,
+            total_ns / n_inner as f64
+        );
+    }
+
+    // Mode 3: JIT-via-dispatch. Tree-walk runs the outer loop; each
+    // factorial(12) call is intercepted by the JIT dispatch hook and
+    // routed through native code. This is what the CLI's
+    // OMC_HBIT_JIT=1 path produces for real OMC programs.
+    {
+        let mut parser = Parser::new(SOURCE);
+        let statements = parser.parse().expect("parse");
+        let module = omnimcode_core::compiler::compile_program(&statements).expect("compile");
+        let context = Context::create();
+        let jit = JitContext::new(&context).expect("jit");
+        let jitted = jit.jit_module(&module).expect("jit_module");
+        let jitted_for_hook: HashMap<String, JittedFn> = jitted.clone();
+        let dispatch: omnimcode_core::interpreter::JitDispatch = Rc::new(
+            move |name: &str, args: &[Value]| {
+                let jf = jitted_for_hook.get(name)?;
+                if args.len() != jf.arity {
+                    return None;
+                }
+                let mut int_args = Vec::with_capacity(args.len());
+                for a in args {
+                    match a {
+                        Value::HInt(h) => int_args.push(h.value),
+                        Value::Bool(b) => int_args.push(if *b { 1 } else { 0 }),
+                        _ => return None,
+                    }
+                }
+                jf.call(&int_args).map(|r| Ok(Value::HInt(HInt::new(r))))
+            },
+        );
+        let mut interp = Interpreter::new();
+        interp.set_jit_dispatch(Some(dispatch));
+        interp.execute(statements).expect("exec");
+        let start = Instant::now();
+        let _ = interp
+            .call_function_with_values("bench_loop", &[Value::HInt(HInt::new(n_inner_i))])
+            .expect("call");
+        let total_ns = start.elapsed().as_nanos() as f64;
+        println!(
+            "  JIT-via-dispatch   total={:>10.2}ms  per-iter={:>10.1}ns  (loop is tree-walk, factorial is JIT)",
+            total_ns / 1.0e6,
+            total_ns / n_inner as f64
+        );
+    }
+
+    // Mode 4: JIT-direct. Skip OMC entirely for the loop — call
+    // factorial's fn pointer in a native Rust loop. This is the
+    // theoretical best (no OMC dispatch on the hot path).
+    {
+        let mut parser = Parser::new(SOURCE);
+        let statements = parser.parse().expect("parse");
+        let module = omnimcode_core::compiler::compile_program(&statements).expect("compile");
+        let context = Context::create();
+        let jit = JitContext::new(&context).expect("jit");
+        let jitted = jit.jit_module(&module).expect("jit_module");
+        let factorial = jitted.get("factorial").expect("factorial JIT'd");
+        let start = Instant::now();
+        let mut sum: i64 = 0;
+        for _ in 0..n_inner {
+            sum = sum.wrapping_add(factorial.call(&[12]).expect("call"));
+        }
+        let total_ns = start.elapsed().as_nanos() as f64;
+        let _ = sum;
+        println!(
+            "  JIT-direct         total={:>10.2}ms  per-iter={:>10.1}ns  (Rust loop, no OMC dispatch)",
+            total_ns / 1.0e6,
+            total_ns / n_inner as f64
         );
     }
 }

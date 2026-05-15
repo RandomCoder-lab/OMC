@@ -52,6 +52,24 @@ Each function is called 200,000 times in a tight loop. Wall-clock per call is re
 | `factorial(12)` — 12 recursive calls + multiplies | 14,309 ns | 52.6 ns | **272×** |
 | `sum_to(100)` — 100-iter while loop with locals | 53,202 ns | 267 ns | **200×** |
 
+## Path A.3: same workload, four execution modes
+
+Closes the comparison gap from Session E (which only timed tree-walk vs JIT-direct). The same `bench_loop(N) = sum factorial(12) over N iters` workload runs through four execution strategies; per-iteration time reported as total/N.
+
+| Mode | Per-iter ns | Speedup vs tree-walk | Notes |
+|---|--:|--:|---|
+| Tree-walk only | 14,462 | 1.0× | reference |
+| Bytecode VM | 6,929 | 2.1× | OMC's existing fast-dispatch path |
+| JIT-via-dispatch | 58.2 | 249× | Tree-walk runs the loop; factorial routed through JIT |
+| JIT-direct (Rust loop) | 53.1 | 272× | Bypasses OMC entirely on the hot path |
+
+**Two findings:**
+
+1. **The bytecode VM is 2.1× faster than tree-walk, not 10×.** This matches the prior known costs of `vm_call_builtin`'s synthetic-arg shim and other VM-side dispatch overhead. The JIT's real comparison advantage is **119× faster than the bytecode VM**, on top of VM being 2× faster than tree-walk.
+2. **JIT-via-dispatch (58.2 ns) is essentially as fast as JIT-direct (53.1 ns)** — only ~9% overhead from routing through the Interpreter's dispatch hook. This means the 272× number from the Session E microbench is what real OMC programs experience; the OMC tree-walk loop wrapping a JIT'd fn body is negligible.
+
+The implication: enabling `OMC_HBIT_JIT=1` on a real OMC program where the hot fn is JIT-eligible (pure-int, no strings/arrays/builtins) will give close to the full ~250× speedup on that fn's invocations.
+
 ## Path A.1: `@hbit + @harmony + @predict` (Sessions F+G)
 
 After Sessions F (phi_shadow → divergent β) and G (harmony() intrinsic + extern call), an OMC fn can use harmony as a runtime signal to choose between cheap and expensive code paths. The bench source:
