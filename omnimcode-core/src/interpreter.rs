@@ -41,6 +41,21 @@ pub struct Interpreter {
     /// sees in stack traces. The fn's own internal line numbers don't
     /// belong here; they'd need per-statement position tracking.
     call_stack: Vec<(String, crate::ast::Pos)>,
+    /// Reverse-FFI: builtins registered by the embedder (Python /
+    /// Godot / a Rust host). When OMC code calls a name not found
+    /// in user fns, modules, or the built-in stdlib, dispatch
+    /// falls through to this map. Lets an embedder expose host-side
+    /// capabilities (numpy, godot signals, file pickers, etc.) to
+    /// OMC programs without baking them into the interpreter.
+    ///
+    /// Stored as `Rc<dyn Fn>` so handlers can be cheaply cloned
+    /// when the Interpreter itself is cloned (rare, but FFI wrappers
+    /// occasionally do it). Single-threaded — handlers don't need
+    /// to be Send/Sync, matching the rest of OMC's runtime.
+    host_builtins: HashMap<
+        String,
+        std::rc::Rc<dyn Fn(&[Value]) -> Result<Value, String>>,
+    >,
 }
 
 impl Interpreter {
@@ -64,7 +79,54 @@ impl Interpreter {
             test_failures: std::cell::RefCell::new(Vec::new()),
             test_current_name: std::cell::RefCell::new(String::new()),
             call_stack: Vec::new(),
+            host_builtins: HashMap::new(),
         }
+    }
+
+    /// Register a host-side builtin that OMC code can call by name.
+    /// The closure receives the evaluated argument values and returns
+    /// either a Value (success) or an error message that propagates
+    /// through OMC's normal Result chain (catchable via try/catch).
+    ///
+    /// Names registered here SHADOW user-defined functions of the
+    /// same name (so an embedder can hand OMC a custom `fetch_url`
+    /// that overrides any user `fn fetch_url(...)`). They're checked
+    /// AFTER user fns, BEFORE the built-in stdlib — same precedence
+    /// position the test runner's `test_*` overrides use.
+    ///
+    /// Type signatures are dynamic: the closure is responsible for
+    /// validating arg count and types. Use `args.len()` and
+    /// `matches!(args[0], Value::HInt(_))` etc. Errors are strings;
+    /// they appear in stack traces with the call site prefixed.
+    ///
+    /// Example:
+    /// ```ignore
+    /// let mut interp = Interpreter::new();
+    /// interp.register_builtin("double", |args| {
+    ///     if args.len() != 1 { return Err("double requires 1 arg".into()); }
+    ///     Ok(Value::HInt(HInt::new(args[0].to_int() * 2)))
+    /// });
+    /// // OMC code can now do `println(double(21));` and see "42".
+    /// ```
+    pub fn register_builtin<F>(&mut self, name: &str, handler: F)
+    where
+        F: Fn(&[Value]) -> Result<Value, String> + 'static,
+    {
+        self.host_builtins.insert(name.to_string(), std::rc::Rc::new(handler));
+    }
+
+    /// Remove a previously-registered host builtin. Returns true if
+    /// a handler was removed. Used by embedders that want to hand
+    /// OMC a temporary capability for a single call sequence.
+    pub fn unregister_builtin(&mut self, name: &str) -> bool {
+        self.host_builtins.remove(name).is_some()
+    }
+
+    /// True if a host builtin with this name is registered. Used by
+    /// the dispatch path; exposed publicly so embedders can check
+    /// before re-registering.
+    pub fn has_host_builtin(&self, name: &str) -> bool {
+        self.host_builtins.contains_key(name)
     }
 
     /// xorshift64* — fast and tiny, sufficient for OMC scripting needs.
@@ -1203,6 +1265,18 @@ impl Interpreter {
         // infinite-loop on the same name.
         if let Some((params, body)) = self.functions.get(name).cloned() {
             return self.invoke_user_function(name, &params, &body, args);
+        }
+        // Reverse-FFI: host-registered builtins. Checked BEFORE module
+        // dispatch and the built-in stdlib so an embedder can shadow
+        // anything (including `read_file`, `now_ms`, etc.). Eval args
+        // here — the host fn receives Values, not Expressions, since
+        // it lives outside OMC's eval context.
+        if let Some(handler) = self.host_builtins.get(name).cloned() {
+            let mut argvals = Vec::with_capacity(args.len());
+            for a in args {
+                argvals.push(self.eval_expr(a)?);
+            }
+            return handler(&argvals);
         }
         // Module-qualified calls (e.g., "phi.fold", "phi.res", "core.fib")
         if let Some((module, func)) = name.split_once('.') {
@@ -3750,6 +3824,15 @@ impl Interpreter {
         name: &str,
         args: &[Value],
     ) -> Result<Value, String> {
+        // Reverse-FFI host builtins fire FIRST so they can shadow
+        // anything (including stdlib names like `read_file`). Lets an
+        // embedder hand OMC code a sandboxed `read_file` that only
+        // sees /tmp, etc. Skipped if the host hasn't registered the
+        // name — the no-op cost is one HashMap lookup.
+        if let Some(handler) = self.host_builtins.get(name).cloned() {
+            return handler(args);
+        }
+
         // Phase 4 fast-path: hot builtins handled directly on values,
         // bypassing the synthetic-arg shim. Each one shaved ~50% off
         // its per-call time on the benchmark suite (str_concat went
