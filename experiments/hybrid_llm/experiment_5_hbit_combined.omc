@@ -1,0 +1,403 @@
+# =============================================================================
+# Experiment 5 — HBit cross-cutting OOD detection + combined gate.
+#
+# Motivation. Experiment 4 had two gates:
+#
+#   harmonic gate (marginal log-rarity): needs reference, measures
+#     "did this value land in a rare attractor bucket relative to
+#     the reference's frequency table?"
+#
+#   L2 nearest-neighbour: needs reference, measures "how far is
+#     this point from any reference point in raw Euclidean
+#     distance?"
+#
+# Both gates need a fitted reference distribution. Both miss the
+# CHEAPEST harmonic signal: HBit dual-band tension, which is a
+# REFERENCE-FREE measurement of how far a value is from the
+# Fibonacci-attractor manifold:
+#
+#   HBit tension per dim:  tau_d = | v[d] - phi.fold(v[d]) |
+#   HBit harmony per dim:  h_d   = 1 / (1 + tau_d)            ∈ (0, 1]
+#   vector tension:        T(v)  = sum over d of tau_d         (≥ 0)
+#
+# Key property: any value that IS a Fibonacci attractor has
+# tau_d = 0 and h_d = 1. Off-manifold values have nonzero tension.
+# The signal exists per-test-point with no fitting.
+#
+# Cross-cutting hypothesis:
+#
+#   - HBit tension owns OFF-MANIFOLD detection (free, no reference).
+#   - Marginal rarity owns WRONG-DISTRIBUTION detection (needs ref).
+#   - L2 NN owns WRONG-MAGNITUDE detection (needs ref).
+#
+# Each gate targets a different OOD failure mode. A combined gate
+# should beat any single gate when the OOD set hits ANY of those
+# failure modes.
+#
+# Scenarios re-used from experiment 4:
+#
+#   A — uniform [1, 90] OOD. Hits all three axes (magnitude shift,
+#       distribution shift, off-manifold values).
+#   B — magnitude-matched, on-manifold, inverted weights. Hits the
+#       distribution axis only.
+#
+# Run:
+#   ./target/release/omnimcode-standalone experiments/hybrid_llm/experiment_5_hbit_combined.omc
+# =============================================================================
+
+h D = 4;
+
+# ---------------------------------------------------------------------------
+# Data generation — identical to experiment 4 so numbers are comparable.
+# ---------------------------------------------------------------------------
+
+fn sample_in_dist_value() -> int {
+    h tier = random_int(0, 99);
+    if tier < 60 {
+        h pick = random_int(0, 4);
+        if pick == 0 { return 1; }
+        if pick == 1 { return 2; }
+        if pick == 2 { return 3; }
+        if pick == 3 { return 5; }
+        return 8;
+    }
+    if tier < 90 {
+        h pick = random_int(0, 2);
+        if pick == 0 { return 13; }
+        if pick == 1 { return 21; }
+        return 34;
+    }
+    h pick = random_int(0, 1);
+    if pick == 0 { return 55; }
+    return 89;
+}
+
+fn sample_hard_ood_value() -> int {
+    h tier = random_int(0, 99);
+    if tier < 10 {
+        h pick = random_int(0, 4);
+        if pick == 0 { return 1; }
+        if pick == 1 { return 2; }
+        if pick == 2 { return 3; }
+        if pick == 3 { return 5; }
+        return 8;
+    }
+    if tier < 40 {
+        h pick = random_int(0, 2);
+        if pick == 0 { return 13; }
+        if pick == 1 { return 21; }
+        return 34;
+    }
+    h pick = random_int(0, 1);
+    if pick == 0 { return 55; }
+    return 89;
+}
+
+fn sample_in_dist_vec() -> array {
+    h v = arr_new(D, 0);
+    h d = 0;
+    while d < D { arr_set(v, d, sample_in_dist_value()); d = d + 1; }
+    return v;
+}
+
+fn sample_ood_vec() -> array {
+    h v = arr_new(D, 0);
+    h d = 0;
+    while d < D { arr_set(v, d, random_int(1, 90)); d = d + 1; }
+    return v;
+}
+
+fn sample_hard_ood_vec() -> array {
+    h v = arr_new(D, 0);
+    h d = 0;
+    while d < D { arr_set(v, d, sample_hard_ood_value()); d = d + 1; }
+    return v;
+}
+
+# ---------------------------------------------------------------------------
+# Gates.
+# ---------------------------------------------------------------------------
+
+# HBit cross-cutting tension. NO reference needed.
+fn hbit_tension(vec) -> float {
+    h total = 0.0;
+    h d = 0;
+    while d < D {
+        h alpha = arr_get(vec, d);
+        h beta = phi.fold(alpha);
+        h diff = alpha - beta;
+        if diff < 0 { diff = 0 - diff; }
+        total = total + to_float(diff);
+        d = d + 1;
+    }
+    return total;
+}
+
+# Marginal log-rarity gate (same as exp 4).
+fn fit_freqs(corpus) -> array {
+    h freqs = arr_new(D, 0);
+    h d = 0;
+    while d < D { arr_set(freqs, d, dict_new()); d = d + 1; }
+    h n = arr_len(corpus);
+    h i = 0;
+    while i < n {
+        h vec = arr_get(corpus, i);
+        h di = 0;
+        while di < D {
+            h b = phi.fold(arr_get(vec, di));
+            h key = concat_many("", b);
+            h fd = arr_get(freqs, di);
+            dict_set(fd, key, dict_get(fd, key, 0) + 1);
+            di = di + 1;
+        }
+        i = i + 1;
+    }
+    return freqs;
+}
+
+fn marginal_score(vec, freqs, n_ref) -> float {
+    h total = 0.0;
+    h d = 0;
+    while d < D {
+        h b = phi.fold(arr_get(vec, d));
+        h key = concat_many("", b);
+        h fd = arr_get(freqs, d);
+        h count = dict_get(fd, key, 0);
+        h p = to_float(count + 1) / to_float(n_ref + 1);
+        total = total + (0.0 - log(p));
+        d = d + 1;
+    }
+    return total;
+}
+
+# L2 nearest-neighbour gate.
+fn l2_score(vec, ref_corpus) -> float {
+    h n = arr_len(ref_corpus);
+    h best = -1.0;
+    h i = 0;
+    while i < n {
+        h ref = arr_get(ref_corpus, i);
+        h s = 0.0;
+        h d = 0;
+        while d < D {
+            h diff = to_float(arr_get(vec, d) - arr_get(ref, d));
+            s = s + (diff * diff);
+            d = d + 1;
+        }
+        if best < 0.0 { best = s; }
+        if s < best { best = s; }
+        i = i + 1;
+    }
+    return best;
+}
+
+# ---------------------------------------------------------------------------
+# Build sets.
+# ---------------------------------------------------------------------------
+
+random_seed(7);
+
+h N_REF = 300;
+h N_TEST = 150;
+
+fn build_set(n, gen_kind) -> array {
+    h xs = arr_new(n, 0);
+    h i = 0;
+    while i < n {
+        h v = arr_new(D, 0);
+        if gen_kind == 0 { v = sample_in_dist_vec(); }
+        if gen_kind == 1 { v = sample_ood_vec(); }
+        if gen_kind == 2 { v = sample_hard_ood_vec(); }
+        arr_set(xs, i, v);
+        i = i + 1;
+    }
+    return xs;
+}
+
+h ref_set      = build_set(N_REF, 0);
+h in_test      = build_set(N_TEST, 0);
+h ood_a        = build_set(N_TEST, 1);
+h ood_b        = build_set(N_TEST, 2);
+
+h freqs = fit_freqs(ref_set);
+
+# Score all four gates on each set. Returns array of scores.
+fn score_all(xs, which) -> array {
+    h n = arr_len(xs);
+    h out = arr_new(n, 0);
+    h i = 0;
+    while i < n {
+        h v = arr_get(xs, i);
+        h s = 0.0;
+        if which == 0 { s = hbit_tension(v); }
+        if which == 1 { s = marginal_score(v, freqs, N_REF); }
+        if which == 2 { s = l2_score(v, ref_set); }
+        arr_set(out, i, s);
+        i = i + 1;
+    }
+    return out;
+}
+
+# ---------------------------------------------------------------------------
+# AUROC.
+# ---------------------------------------------------------------------------
+
+fn auroc(in_scores, ood_scores) -> float {
+    h n_in = arr_len(in_scores);
+    h n_ood = arr_len(ood_scores);
+    h correct = 0;
+    h ties = 0;
+    h i = 0;
+    while i < n_in {
+        h sin = arr_get(in_scores, i);
+        h j = 0;
+        while j < n_ood {
+            h sood = arr_get(ood_scores, j);
+            if sood > sin { correct = correct + 1; }
+            if sood == sin { ties = ties + 1; }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    h num = to_float(correct) + (0.5 * to_float(ties));
+    return num / to_float(n_in * n_ood);
+}
+
+# ---------------------------------------------------------------------------
+# Z-normalise (mean=0, std=1) so we can sum scores from different gates
+# without one dominating by scale.
+# ---------------------------------------------------------------------------
+
+fn mean_of(xs) -> float {
+    h n = arr_len(xs);
+    h s = 0.0;
+    h i = 0;
+    while i < n { s = s + arr_get(xs, i); i = i + 1; }
+    return s / to_float(n);
+}
+
+fn std_of(xs, mean) -> float {
+    h n = arr_len(xs);
+    h s = 0.0;
+    h i = 0;
+    while i < n {
+        h d = arr_get(xs, i) - mean;
+        s = s + (d * d);
+        i = i + 1;
+    }
+    h var = s / to_float(n);
+    return sqrt(var);
+}
+
+fn znorm(xs, mean, std) -> array {
+    h n = arr_len(xs);
+    h out = arr_new(n, 0);
+    h scale = std;
+    if scale == 0.0 { scale = 1.0; }
+    h i = 0;
+    while i < n {
+        arr_set(out, i, (arr_get(xs, i) - mean) / scale);
+        i = i + 1;
+    }
+    return out;
+}
+
+# Combined gate: equally weighted sum of z-normalised per-gate scores.
+# Normalisation parameters are estimated from REFERENCE in-dist scores
+# so the combiner doesn't peek at OOD data.
+fn combine3(zhbit, zmarg, zl2) -> array {
+    h n = arr_len(zhbit);
+    h out = arr_new(n, 0);
+    h i = 0;
+    while i < n {
+        arr_set(out, i,
+            arr_get(zhbit, i) + arr_get(zmarg, i) + arr_get(zl2, i));
+        i = i + 1;
+    }
+    return out;
+}
+
+# ---------------------------------------------------------------------------
+# Run.
+# ---------------------------------------------------------------------------
+
+print("== Experiment 5: HBit cross-cutting + combined OOD gate ==");
+print(concat_many("D=", D, " N_REF=", N_REF, " N_TEST=", N_TEST, " per side"));
+print("");
+
+# Raw scores.
+h hbit_in  = score_all(in_test, 0);
+h hbit_a   = score_all(ood_a,   0);
+h hbit_b   = score_all(ood_b,   0);
+
+h marg_in  = score_all(in_test, 1);
+h marg_a   = score_all(ood_a,   1);
+h marg_b   = score_all(ood_b,   1);
+
+h l2_in    = score_all(in_test, 2);
+h l2_a     = score_all(ood_a,   2);
+h l2_b     = score_all(ood_b,   2);
+
+# Z-norm using in-dist statistics (so the combiner is "trained" only on
+# the reference distribution — it doesn't see OOD scores during fitting).
+h hbit_mean = mean_of(hbit_in);  h hbit_std = std_of(hbit_in, hbit_mean);
+h marg_mean = mean_of(marg_in);  h marg_std = std_of(marg_in, marg_mean);
+h l2_mean   = mean_of(l2_in);    h l2_std   = std_of(l2_in, l2_mean);
+
+h zhbit_in = znorm(hbit_in, hbit_mean, hbit_std);
+h zhbit_a  = znorm(hbit_a,  hbit_mean, hbit_std);
+h zhbit_b  = znorm(hbit_b,  hbit_mean, hbit_std);
+h zmarg_in = znorm(marg_in, marg_mean, marg_std);
+h zmarg_a  = znorm(marg_a,  marg_mean, marg_std);
+h zmarg_b  = znorm(marg_b,  marg_mean, marg_std);
+h zl2_in   = znorm(l2_in,   l2_mean,   l2_std);
+h zl2_a    = znorm(l2_a,    l2_mean,   l2_std);
+h zl2_b    = znorm(l2_b,    l2_mean,   l2_std);
+
+h combo_in = combine3(zhbit_in, zmarg_in, zl2_in);
+h combo_a  = combine3(zhbit_a,  zmarg_a,  zl2_a);
+h combo_b  = combine3(zhbit_b,  zmarg_b,  zl2_b);
+
+# ---------------------------------------------------------------------------
+# Headline AUROC table.
+# ---------------------------------------------------------------------------
+
+print("Scenario A — uniform [1, 90] OOD (hits magnitude + manifold + distribution):");
+print(concat_many("  HBit tension (ref-free):  AUROC = ", auroc(hbit_in, hbit_a)));
+print(concat_many("  Marginal rarity:          AUROC = ", auroc(marg_in, marg_a)));
+print(concat_many("  L2 nearest-neighbour:     AUROC = ", auroc(l2_in,   l2_a)));
+print(concat_many("  Combined (sum of z-norms):AUROC = ", auroc(combo_in, combo_a)));
+print("");
+
+print("Scenario B — on-manifold, inverted attractor weights (distribution only):");
+print(concat_many("  HBit tension (ref-free):  AUROC = ", auroc(hbit_in, hbit_b)));
+print(concat_many("  Marginal rarity:          AUROC = ", auroc(marg_in, marg_b)));
+print(concat_many("  L2 nearest-neighbour:     AUROC = ", auroc(l2_in,   l2_b)));
+print(concat_many("  Combined (sum of z-norms):AUROC = ", auroc(combo_in, combo_b)));
+print("");
+
+# ---------------------------------------------------------------------------
+# Sanity: HBit tension should be ZERO on in-dist and Scenario B
+# (everything's a Fibonacci attractor). Confirm via mean scores.
+# ---------------------------------------------------------------------------
+
+print("== Sanity check on HBit tension ==");
+print(concat_many("  mean HBit tension, in-dist : ", mean_of(hbit_in)));
+print(concat_many("  mean HBit tension, OOD A   : ", mean_of(hbit_a)));
+print(concat_many("  mean HBit tension, OOD B   : ", mean_of(hbit_b)));
+print("");
+print("HBit tension is 0 by construction on any Fibonacci-attractor vector.");
+print("In-dist + Scenario B vectors ARE attractors, so their tension is 0.");
+print("Only Scenario A's uniform [1, 90] OOD lands off-manifold and gets a");
+print("nonzero score. That's exactly the 'free OOD signal with no reference'");
+print("property — but it's only useful when off-manifold IS the OOD direction.");
+print("");
+
+print("== Interpretation ==");
+print("");
+print("HBit owns Scenario A (off-manifold detection, no reference needed).");
+print("Marginal rarity owns Scenario B (distribution shift).");
+print("L2 contributes to both via magnitude / position information.");
+print("Combined gate should match the best single gate on each scenario and");
+print("ideally beat all three when multiple axes shift simultaneously.");
+print("== End ==");
