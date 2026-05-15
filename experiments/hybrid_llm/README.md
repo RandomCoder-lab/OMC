@@ -85,21 +85,48 @@ OMC_VM=1 ./target/release/omnimcode-standalone experiments/hybrid_llm/experiment
 |---|---|---|
 | 0 | Copy task, exact-match query, 100 trials | OmniWeight 82/100, softmax 82/100, 0 disagreements. Confirms both scorers agree on exact match (the 18 "misses" are duplicate-value trials, both tie-break to first occurrence). |
 | 1 | Perturbed query (query = true_val + noise), 200 trials per noise level | Softmax wins everywhere. noise=1: 189 vs 170. noise=7: 118 vs 99. noise=50: 42 vs 33. OmniWeight's |k|-normalised denominator pulls predictions toward smaller attractors regardless of perturbation direction, which hurts on a "recover the original value" metric. |
+| 2 | Single-channel positional-encoding distinctness + lookup at L = 8 / 14 / 24 / 48 | At small L sinusoidal wins (8/8 vs 6/8 at L=8). **At L=48 harmonic overtakes: 38/48 vs 26/48.** Despite harmonic having only 10 unique codes across 48 positions, its monotonic-saturating failure mode beats sinusoidal's clean periodic wraparound under a "closest integer code" lookup metric. |
 
-The headline lesson from experiment 1: **OmniWeight is scale-aware,
-softmax is scale-agnostic, and which one wins depends entirely on
-whether your target is "recover the true value" or "rank by relative
-error".** For a real LM token-prediction task we'd expect softmax to win
-straight-up here — the harmonic primitive's wins live elsewhere
-(multi-dim structural anomalies, exactly as the project README
-already documents). That gives us a clearer picture of where to plug
-OmniWeight into a larger architecture: not at the per-head attention
-scorer, but at a structural-anomaly gate or a regularisation term.
+### What experiment 2 actually shows
+
+Two failure modes, both interesting:
+
+- **Sinusoidal PE (period 17):** crisp at L ≤ 17 (perfect distinctness),
+  then wraps. At L=48 every position k ≥ 17 collides exactly with
+  position `k mod 17`, and the lookup confidently returns the wrong
+  token. Failure is *periodic* — predictable and recoverable if you
+  know the period.
+- **Harmonic PE (`phi.fold(pos*7 + 1)`):** collides early (first
+  collision at pos=5), saturates once `pos*7+1` exceeds the largest
+  Fibonacci attractor in range. Failure is *monotonic and clustered*
+  — positions land in attractor "basins" of growing size. Within a
+  basin, the lookup tie-breaks to the first member; across basins,
+  ordering is preserved. At long L this preserved ordering gives the
+  harmonic scheme a surprising 79% retrieval rate vs sinusoidal's 54%.
+
+**Caveat — metric dependency.** The lookup uses "closest by absolute
+integer code". That favours monotonic encodings (harmonic) over
+periodic ones (sin) at long L. With a cosine-similarity-style metric
+over a multi-channel vector, the comparison flips. Experiment 3 makes
+this explicit by giving both schemes multi-channel encodings and a
+proper vector-similarity lookup.
+
+### Concrete pivot
+
+Experiment 1 said: don't use OmniWeight at the per-head attention
+scorer. Experiment 2 says something more nuanced: **the harmonic
+substrate's "preserved monotonic structure under saturation" is a
+real positional-encoding property**, not just marketing copy. The
+right comparison is multi-channel harmonic vs multi-channel
+sinusoidal (matching what the transformer paper actually uses) on a
+length-extrapolation task that needs the encoding to stay
+distinguishable past the trained range.
 
 ## Roadmap on this branch
 
 - **0** Copy task: OmniWeight vs softmax scoring (no learning). ✓ done
 - **1** Perturbed-query divergence study. ✓ done
-- **2** `phi.fold`-based positional encoding vs sinusoidal PE on a sequence-repeat task. Test length extrapolation (train at len=N, eval at 2N) — sinusoidal is known to extrapolate poorly; does φ-fold do better because the attractor set is discrete?
-- **3** Extend `examples/lib/torch.omc` with embedding, softmax, layer-norm, cross-entropy. Port the experiment 2 result to a *learned* tiny-transformer setting (requires torch in the host env).
-- **4** Hybrid: standard softmax attention with an OmniWeight-based attention-entropy regulariser. Loss = CE + λ · (1 − mean(OmniWeight of attention peaks)). Test whether nudging attention toward harmonic peaks helps small models.
+- **2** Single-channel positional-encoding distinctness + lookup. ✓ done
+- **3** Multi-channel positional encoding: harmonic = `[phi.fold(pos*7), phi.fold(pos*11), phi.fold(pos*13), phi.fold(pos*17)]`, sinusoidal = `[sin(pos/p_0), cos(pos/p_0), sin(pos/p_1), cos(pos/p_1)]` with geometric `p_i`. Lookup by L2 distance over the vector. Re-run the length-extrapolation comparison.
+- **4** Extend `examples/lib/torch.omc` with embedding, softmax, layer-norm, cross-entropy. Port the winning experiment-3 PE to a *learned* tiny-transformer setting (requires torch in the host env).
+- **5** Hybrid: standard softmax attention with an OmniWeight-based attention-entropy regulariser. Loss = CE + λ · (1 − mean(OmniWeight of attention peaks)). Test whether nudging attention toward harmonic peaks helps small models.

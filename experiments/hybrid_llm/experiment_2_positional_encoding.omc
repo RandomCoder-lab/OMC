@@ -1,0 +1,240 @@
+# =============================================================================
+# Experiment 2 — Positional encoding under length extrapolation.
+#
+# Question: when a position-encoding scheme is "designed" for sequences
+# of length N, how does it behave at length 2N? This is the classic
+# length-extrapolation problem in transformers — sinusoidal PE
+# extrapolates poorly because higher positions fall outside the
+# frequency basis the model has effectively seen.
+#
+# We compare two single-channel encodings:
+#
+#   harmonic_pe(pos) = phi.fold(pos * 7 + 1)
+#       Maps a position to its nearest Fibonacci attractor.
+#       The attractor set is FINITE (~14 attractors in the int range
+#       we use), so positions WILL collide once the sequence is long
+#       enough. The question is whether the collisions are "structured"
+#       (positions K apart collide predictably) or "chaotic".
+#
+#   sin_pe(pos) = to_int(1000.0 * sin(pos * 2*pi / 17.0)) + 1000
+#       Single-channel sinusoidal with prime period 17 and quantised
+#       to integer for fair comparison. The period bounds the
+#       number of distinct values to ~17 (modulo quantisation).
+#       Extrapolation past pos=17 produces straight-up wraparound.
+#
+# Both encodings produce a single integer per position. Distinctness
+# at sequence length L is measured by:
+#
+#   1. unique values  — how many of L positions map to different codes
+#   2. max collisions — the largest group of positions sharing one code
+#   3. first collision — the smallest pos at which a code repeats from
+#                        an earlier position
+#
+# A real positional encoding needs `unique values == L`. The point at
+# which `first collision < L` is the point at which the scheme breaks
+# for "addressable" memory.
+#
+# Run:
+#   ./target/release/omnimcode-standalone experiments/hybrid_llm/experiment_2_positional_encoding.omc
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Encodings
+# ---------------------------------------------------------------------------
+
+fn harmonic_pe(pos) -> int {
+    return phi.fold(pos * 7 + 1);
+}
+
+fn sin_pe(pos) -> int {
+    h two_pi = 2.0 * pi();
+    h period = 17.0;
+    h theta = to_float(pos) * two_pi / period;
+    return to_int(1000.0 * sin(theta)) + 1000;
+}
+
+# ---------------------------------------------------------------------------
+# Distinctness over positions [0, L).
+#
+# We compute the PE for each position, then naive O(L^2) scan to count:
+#   - distinct codes
+#   - max group size
+#   - first collision position (or L if none)
+#
+# Returns [unique_codes, max_group, first_collision].
+# ---------------------------------------------------------------------------
+fn analyse_pe(L, which) -> array {
+    h codes = arr_new(L, 0);
+    h i = 0;
+    while i < L {
+        h c = 0;
+        if which == 0 { c = harmonic_pe(i); }
+        if which == 1 { c = sin_pe(i); }
+        arr_set(codes, i, c);
+        i = i + 1;
+    }
+
+    # Count unique codes via O(L^2) — fine for L <= 64.
+    h unique = 0;
+    h max_group = 0;
+    h first_collision = L;
+    h ii = 0;
+    while ii < L {
+        h is_unique = 1;
+        h group = 1;
+        h jj = 0;
+        while jj < L {
+            if jj != ii {
+                if arr_get(codes, jj) == arr_get(codes, ii) {
+                    group = group + 1;
+                    if jj < ii {
+                        # ii is a collision against an earlier position.
+                        is_unique = 0;
+                        if ii < first_collision { first_collision = ii; }
+                    }
+                }
+            }
+            jj = jj + 1;
+        }
+        if is_unique == 1 { unique = unique + 1; }
+        if group > max_group { max_group = group; }
+        ii = ii + 1;
+    }
+
+    h out = arr_new(3, 0);
+    arr_set(out, 0, unique);
+    arr_set(out, 1, max_group);
+    arr_set(out, 2, first_collision);
+    return out;
+}
+
+# ---------------------------------------------------------------------------
+# Sweep sequence length and tabulate distinctness.
+# ---------------------------------------------------------------------------
+print("== Experiment 2: positional-encoding distinctness vs sequence length ==");
+print("");
+print("L     | harmonic (unique / max_group / first_collision) | sinusoidal (unique / max_group / first_collision)");
+print("------+--------------------------------------------------+----------------------------------------------------");
+
+h lengths = [8, 14, 17, 22, 32, 48, 64];
+h n_lens = arr_len(lengths);
+h li = 0;
+while li < n_lens {
+    h L = arr_get(lengths, li);
+    h h_stats = analyse_pe(L, 0);
+    h s_stats = analyse_pe(L, 1);
+    print(concat_many(
+        "  ", L,
+        "  |       ", arr_get(h_stats, 0), " / ", arr_get(h_stats, 1), " / ", arr_get(h_stats, 2),
+        "                       |     ", arr_get(s_stats, 0), " / ", arr_get(s_stats, 1), " / ", arr_get(s_stats, 2)
+    ));
+    li = li + 1;
+}
+print("");
+
+# ---------------------------------------------------------------------------
+# Practical task: positional lookup.
+#   Given a sequence of 8 tokens and a query position k, retrieve token[k].
+#   "Retrieval" works by combining each token with its PE, then matching
+#   against (sentinel_token, pe(k)). Whichever stored pair matches the
+#   target PE wins. If two positions share a PE, the wrong token can win.
+#
+#   We run this at L=8 (where both PEs should be distinct) and L=24
+#   (well past sin's period and within harmonic's small attractor set).
+# ---------------------------------------------------------------------------
+
+fn vocab_token(i) -> int {
+    # Small fixed vocab for the lookup task — Fibonacci attractors again.
+    if i == 0 { return 1; }
+    if i == 1 { return 2; }
+    if i == 2 { return 3; }
+    if i == 3 { return 5; }
+    if i == 4 { return 8; }
+    if i == 5 { return 13; }
+    if i == 6 { return 21; }
+    if i == 7 { return 34; }
+    if i == 8 { return 55; }
+    if i == 9 { return 89; }
+    if i == 10 { return 144; }
+    if i == 11 { return 233; }
+    return 1;
+}
+
+# A "lookup" head: for each stored (token, pe(stored_pos)), pick the one
+# whose pe(stored_pos) is closest to pe(query). Ties broken by first.
+fn lookup(tokens, n, query_pos, which_pe) -> int {
+    h target_code = 0;
+    if which_pe == 0 { target_code = harmonic_pe(query_pos); }
+    if which_pe == 1 { target_code = sin_pe(query_pos); }
+
+    h best_idx = 0;
+    h best_diff = 999999;
+    h i = 0;
+    while i < n {
+        h stored_code = 0;
+        if which_pe == 0 { stored_code = harmonic_pe(i); }
+        if which_pe == 1 { stored_code = sin_pe(i); }
+        h d = stored_code - target_code;
+        if d < 0 { d = 0 - d; }
+        if d < best_diff {
+            best_diff = d;
+            best_idx = i;
+        }
+        i = i + 1;
+    }
+    return arr_get(tokens, best_idx);
+}
+
+fn run_lookup_suite(L) {
+    print(concat_many("-- Lookup task at L=", L, " (token = vocab[i]) --"));
+    h tokens = arr_new(L, 0);
+    h i = 0;
+    while i < L {
+        arr_set(tokens, i, vocab_token(i));   # deterministic: token[i] = vocab[i]
+        i = i + 1;
+    }
+
+    h h_correct = 0;
+    h s_correct = 0;
+    h k = 0;
+    while k < L {
+        h truth = arr_get(tokens, k);
+        h h_got = lookup(tokens, L, k, 0);
+        h s_got = lookup(tokens, L, k, 1);
+        if h_got == truth { h_correct = h_correct + 1; }
+        if s_got == truth { s_correct = s_correct + 1; }
+        k = k + 1;
+    }
+    print(concat_many("  harmonic_pe:   ", h_correct, " / ", L, " positions retrieved correctly"));
+    print(concat_many("  sin_pe:        ", s_correct, " / ", L, " positions retrieved correctly"));
+    print("");
+}
+
+run_lookup_suite(8);
+run_lookup_suite(14);
+run_lookup_suite(24);
+run_lookup_suite(48);
+
+print("== Interpretation ==");
+print("");
+print("Distinctness table:");
+print("  - harmonic_pe collides EARLY. phi.fold has ~14 attractors in this");
+print("    range, so once we ask for >14 positions, codes must repeat.");
+print("    first_collision tells us at what L this kicks in.");
+print("  - sin_pe with period 17 should be roughly distinct up to L=17");
+print("    then wrap. Quantisation can cause earlier collisions if two");
+print("    sin values land in the same int bucket.");
+print("");
+print("Lookup table:");
+print("  - At L=8, both PEs should retrieve perfectly (one code per position).");
+print("  - At L=14, harmonic is at the edge of its attractor budget.");
+print("  - At L=24, sin starts wrapping (24 > 17) — positions k and k+17");
+print("    collide and the wrong token wins.");
+print("  - At L=48, both should be heavily degraded but in different ways:");
+print("    sin wraps cleanly, harmonic collapses to a few attractor buckets.");
+print("");
+print("If harmonic_pe collides badly at modest L, the harmonic positional");
+print("scheme is NOT a drop-in for sinusoidal — you'd need a multi-channel");
+print("variant (several phi.fold(pos*k_i)) to get a unique per-position");
+print("vector. That extension is experiment 3.");
+print("== End ==");
