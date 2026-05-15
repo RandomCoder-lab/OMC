@@ -1,0 +1,401 @@
+# =============================================================================
+# Experiment 9 — Substrate self-consistency: phi.fold via phi_pi_fib search.
+#
+# The right question (per re-investigation): log_phi_pi_fibonacci is the
+# substrate's alignment measure, not its speed measure. It's about WHICH
+# positions the search trajectory touches, not how FEW.
+#
+# The current state of phi.fold (verified by inspection):
+#
+#   interpreter.rs:4980 fold_to_fibonacci_const(n)
+#     fibs: [i64; 15] = [0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610];
+#     for &f in &fibs {  ...track nearest...  }
+#
+#   value.rs:33 HInt::compute_resonance(value)
+#     fibs: [i64; 16] = [0, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610];
+#     for &f in &fibs { ... }
+#
+# Every HInt::new(), every res(x), every phi.fold(x), every harmonic_sort,
+# every healer-pass attractor check pays a linear scan over a duplicated
+# Fibonacci table. The substrate's foundational operation is implemented
+# OUTSIDE the substrate's own vocabulary.
+#
+# This experiment shows what changes if phi.fold uses phi_pi_fib_nearest
+# internally instead. Three metrics:
+#
+#   (A) Compare count — sublinear instead of linear over the attractor
+#       table.
+#
+#   (B) Step-size profile — what are the distances between consecutive
+#       probes? Fibonacci-step search produces Fibonacci-valued steps;
+#       binary produces power-of-2 halvings; linear produces step=1.
+#
+#   (C) Substrate coherence — fraction of step sizes that are themselves
+#       in the Fibonacci attractor set. This is the architectural metric:
+#       a search trajectory is substrate-coherent if each step describes
+#       itself in the substrate's native vocabulary.
+#
+# The headline is not "fib-step is faster than binary" (it isn't). It's
+# "fib-step is the only substrate-coherent search". For phi.fold —
+# THE foundational harmonic operation — using a non-coherent search is
+# the kind of architectural inconsistency that compounds.
+#
+# Run:
+#   ./target/release/omnimcode-standalone experiments/hybrid_llm/experiment_9_phi_fold_alignment.omc
+# =============================================================================
+
+# The canonical Fibonacci attractor table, sorted ascending.
+h FIBS = [0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610];
+h FIB_TABLE_SIZE = arr_len(FIBS);
+
+# ---------------------------------------------------------------------------
+# Three phi.fold variants, each instrumented to return a probe trace.
+#
+# Each returns [nearest_attractor, num_compares, probe_indices_array].
+# ---------------------------------------------------------------------------
+
+# Variant A: linear scan, today's implementation.
+fn phi_fold_linear(x) -> array {
+    h abs_x = x;
+    if abs_x < 0 { abs_x = 0 - abs_x; }
+    h nearest = arr_get(FIBS, 0);
+    h min_dist = abs_x - nearest;
+    if min_dist < 0 { min_dist = 0 - min_dist; }
+    h probes = [];
+    arr_push(probes, 0);
+    h i = 1;
+    while i < FIB_TABLE_SIZE {
+        h f = arr_get(FIBS, i);
+        h d = abs_x - f;
+        if d < 0 { d = 0 - d; }
+        arr_push(probes, i);
+        if d < min_dist {
+            min_dist = d;
+            nearest = f;
+        }
+        i = i + 1;
+    }
+    h out = arr_new(3, 0);
+    arr_set(out, 0, nearest);
+    arr_set(out, 1, FIB_TABLE_SIZE);    # always all of them
+    arr_set(out, 2, probes);
+    return out;
+}
+
+# Variant B: binary search via phi_pi_bin_search.
+# We trace probes by re-running an OMC-level binary search alongside
+# (the builtin doesn't expose its probe trace).
+fn phi_fold_binary(x) -> array {
+    h abs_x = x;
+    if abs_x < 0 { abs_x = 0 - abs_x; }
+    h probes = [];
+    h lo = 0;
+    h hi = FIB_TABLE_SIZE;
+    h compares = 0;
+    while lo < hi {
+        h mid = lo + (hi - lo) / 2;
+        arr_push(probes, mid);
+        compares = compares + 1;
+        h f = arr_get(FIBS, mid);
+        if f == abs_x { lo = mid; hi = mid; }
+        else { if f < abs_x { lo = mid + 1; } else { hi = mid; } }
+    }
+    # Nearest is at lo-1 or lo, whichever is closer.
+    h ins = lo;
+    h cand_a = 0; h cand_b = 0;
+    if ins == 0 { cand_a = arr_get(FIBS, 0); cand_b = cand_a; }
+    if ins >= FIB_TABLE_SIZE {
+        cand_a = arr_get(FIBS, FIB_TABLE_SIZE - 1);
+        cand_b = cand_a;
+    }
+    if ins > 0 {
+        if ins < FIB_TABLE_SIZE {
+            cand_a = arr_get(FIBS, ins - 1);
+            cand_b = arr_get(FIBS, ins);
+        } else {
+            cand_a = arr_get(FIBS, FIB_TABLE_SIZE - 1);
+            cand_b = cand_a;
+        }
+    }
+    h da = abs_x - cand_a; if da < 0 { da = 0 - da; }
+    h db = cand_b - abs_x; if db < 0 { db = 0 - db; }
+    h nearest = cand_a;
+    if db < da { nearest = cand_b; }
+    h out = arr_new(3, 0);
+    arr_set(out, 0, nearest);
+    arr_set(out, 1, compares);
+    arr_set(out, 2, probes);
+    return out;
+}
+
+# Variant C: Fibonacci-step search via the substrate's own algorithm.
+# We use phi_pi_fib_search but ALSO track compares via the shared counter.
+fn phi_fold_fibstep(x) -> array {
+    h abs_x = x;
+    if abs_x < 0 { abs_x = 0 - abs_x; }
+    phi_pi_fib_reset();
+    h idx = phi_pi_fib_nearest(FIBS, abs_x);
+    h s = phi_pi_fib_stats();
+    h compares = arr_get(s, 1);
+    h nearest = arr_get(FIBS, idx);
+    # We can't recover the probe trace from the builtin directly.
+    # Instead, emit the index returned + a synthetic trace marker.
+    h probes = [];
+    arr_push(probes, idx);
+    h out = arr_new(3, 0);
+    arr_set(out, 0, nearest);
+    arr_set(out, 1, compares);
+    arr_set(out, 2, probes);
+    return out;
+}
+
+# ---------------------------------------------------------------------------
+# Substrate-coherence metric.
+#
+# For a sequence of probe INDICES (positions into the attractor table),
+# the SUBSTRATE-COHERENCE is the fraction of step sizes (absolute
+# differences between consecutive probes) that are themselves Fibonacci
+# numbers.
+#
+# Step size = 1 counts (F_1 = 1).
+# Step size = 4 does NOT count (4 isn't Fibonacci).
+# Step size = 8 counts (F_6 = 8).
+# ---------------------------------------------------------------------------
+
+fn is_fibonacci_number(n) -> int {
+    if n < 0 { return 0; }
+    h i = 0;
+    while i < FIB_TABLE_SIZE {
+        if arr_get(FIBS, i) == n { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn coherence_of(probes) -> float {
+    h np = arr_len(probes);
+    if np < 2 { return 1.0; }
+    h coherent = 0;
+    h total = 0;
+    h i = 1;
+    while i < np {
+        h s = arr_get(probes, i) - arr_get(probes, i - 1);
+        if s < 0 { s = 0 - s; }
+        if is_fibonacci_number(s) == 1 { coherent = coherent + 1; }
+        total = total + 1;
+        i = i + 1;
+    }
+    return to_float(coherent) / to_float(total);
+}
+
+# ---------------------------------------------------------------------------
+# (A) Trace a single query through each algorithm.
+# ---------------------------------------------------------------------------
+
+print("== Experiment 9: phi.fold substrate alignment ==");
+print(concat_many("FIBS = ", FIBS));
+print(concat_many("(table size = ", FIB_TABLE_SIZE, ")"));
+print("");
+
+h query = 50;
+print(concat_many("Query: phi.fold(", query, ")"));
+print("");
+
+h res_lin = phi_fold_linear(query);
+h res_bin = phi_fold_binary(query);
+h res_fib = phi_fold_fibstep(query);
+
+print(concat_many(
+    "linear scan:    nearest=", arr_get(res_lin, 0),
+    "  compares=", arr_get(res_lin, 1),
+    "  probe indices=", arr_get(res_lin, 2)
+));
+print(concat_many(
+    "binary search:  nearest=", arr_get(res_bin, 0),
+    "  compares=", arr_get(res_bin, 1),
+    "  probe indices=", arr_get(res_bin, 2)
+));
+print(concat_many(
+    "phi_pi_fib:     nearest=", arr_get(res_fib, 0),
+    "  compares=", arr_get(res_fib, 1),
+    "  (final index)=", arr_get(res_fib, 2)
+));
+print("");
+
+# ---------------------------------------------------------------------------
+# (B) Step-size and (C) substrate-coherence over many queries.
+# ---------------------------------------------------------------------------
+
+print("== Aggregate metrics over 200 random queries on [0, 700] ==");
+print("");
+
+random_seed(42);
+
+fn aggregate(which) -> array {
+    h total_compares = 0;
+    h total_coherent_steps = 0;
+    h total_steps = 0;
+    h q = 0;
+    while q < 200 {
+        h x = random_int(0, 700);
+        h pres = arr_new(3, 0);
+        if which == 0 { pres = phi_fold_linear(x); }
+        if which == 1 { pres = phi_fold_binary(x); }
+        if which == 2 { pres = phi_fold_fibstep(x); }
+        total_compares = total_compares + arr_get(pres, 1);
+        h probes = arr_get(pres, 2);
+        h np = arr_len(probes);
+        h pi = 1;
+        while pi < np {
+            h s = arr_get(probes, pi) - arr_get(probes, pi - 1);
+            if s < 0 { s = 0 - s; }
+            if is_fibonacci_number(s) == 1 {
+                total_coherent_steps = total_coherent_steps + 1;
+            }
+            total_steps = total_steps + 1;
+            pi = pi + 1;
+        }
+        q = q + 1;
+    }
+    h out = arr_new(3, 0);
+    arr_set(out, 0, total_compares);
+    arr_set(out, 1, total_coherent_steps);
+    arr_set(out, 2, total_steps);
+    return out;
+}
+
+h agg_lin = aggregate(0);
+h agg_bin = aggregate(1);
+h agg_fib = aggregate(2);
+
+fn report(label, agg) {
+    h compares = arr_get(agg, 0);
+    h coh = arr_get(agg, 1);
+    h tot = arr_get(agg, 2);
+    h avg_c = to_float(compares) / 200.0;
+    h coh_frac = 0.0;
+    if tot > 0 { coh_frac = to_float(coh) / to_float(tot); }
+    print(concat_many(label,
+        "  total_compares=", compares,
+        "  avg/query=", avg_c,
+        "  step coherence=", coh, "/", tot, " = ", coh_frac
+    ));
+}
+
+report("linear scan: ", agg_lin);
+report("binary search:", agg_bin);
+report("phi_pi_fib:  ", agg_fib);
+print("");
+print("NOTE on phi_pi_fib coherence: 0/0 above is a MEASUREMENT GAP,");
+print("not a real zero. The builtin phi_pi_fib_nearest doesn't expose");
+print("its internal probe trace, so we can't externally tally its step");
+print("sizes. Analytically, the Rust implementation in phi_pi_fib.rs");
+print("decrements fib_idx by 1 or 2 each iteration and probes at");
+print("offset + F(fib_idx); step sizes between consecutive probes are");
+print("F(k) values, which ARE Fibonacci by construction. So the");
+print("coherence is ~1.0 by design even though this experiment can't");
+print("measure it directly. Fixing the gap requires either adding a");
+print("traced variant to the builtin surface, or porting the search");
+print("to OMC for tracing. Worthwhile follow-up; the compare-count");
+print("savings (and the architectural argument) hold either way.");
+print("");
+
+# ---------------------------------------------------------------------------
+# Now scale up: 200-element attractor table (extended Fibonacci-ish).
+# Linear scan should blow up; the other two should stay bounded.
+# ---------------------------------------------------------------------------
+
+print("== Scaling check: same query workload on a 200-entry attractor table ==");
+print("(sorted [1, 4, 9, 16, 25, ..., k^2] — illustrative, not Fibonacci)");
+print("");
+
+fn build_big_table(n) -> array {
+    h arr = arr_new(n, 0);
+    h i = 0;
+    while i < n {
+        arr_set(arr, i, (i + 1) * (i + 1));
+        i = i + 1;
+    }
+    return arr;
+}
+
+h BIG = build_big_table(200);
+
+random_seed(42);
+h compares_lin_big = 0;
+h compares_bin_big = 0;
+h compares_fib_big = 0;
+h q = 0;
+while q < 200 {
+    h x = random_int(0, 40000);
+
+    # Linear scan over BIG
+    h li = 0;
+    while li < 200 {
+        compares_lin_big = compares_lin_big + 1;
+        li = li + 1;
+    }
+
+    # Binary search
+    phi_pi_fib_reset();
+    h _bi = phi_pi_bin_search(BIG, x);
+    h sb = phi_pi_fib_stats();
+    compares_bin_big = compares_bin_big + arr_get(sb, 1);
+
+    # Phi-pi-fib search
+    phi_pi_fib_reset();
+    h _fi = phi_pi_fib_nearest(BIG, x);
+    h sf = phi_pi_fib_stats();
+    compares_fib_big = compares_fib_big + arr_get(sf, 1);
+
+    q = q + 1;
+}
+
+print(concat_many("linear scan total compares (200 entries, 200 queries):  ", compares_lin_big));
+print(concat_many("binary search total compares:                            ", compares_bin_big));
+print(concat_many("phi_pi_fib   total compares:                            ", compares_fib_big));
+print("");
+
+# ---------------------------------------------------------------------------
+# Interpretation.
+# ---------------------------------------------------------------------------
+
+print("== Interpretation ==");
+print("");
+print("On the 15-entry attractor table:");
+print("  - Linear scan: ALL 15 entries probed every call, step size always 1.");
+print("    Substrate coherence is trivially 1.0 (1 is F_1) but every step");
+print("    is the SAME step — the algorithm doesn't use the substrate's");
+print("    structure, it just lists it.");
+print("  - Binary search: ~4 compares per call, step sizes include 4 and 7");
+print("    which are NOT Fibonacci. Substrate coherence < 1.0.");
+print("  - phi_pi_fib: ~5 compares per call. Step sizes are Fibonacci by");
+print("    construction (each iteration moves by F_k). Substrate-coherent");
+print("    by design — the trajectory describes itself in the substrate's");
+print("    native vocabulary.");
+print("");
+print("On the 200-entry table, the gap explodes:");
+print("  - Linear: 200 compares * 200 queries = 40,000 compares.");
+print("  - Binary: ~log2(200) per query, ~1,500 total.");
+print("  - phi_pi_fib: ~log_phi(200) per query, ~2,200 total.");
+print("");
+print("The harmonic point: every HInt::new() and every phi.fold() call in");
+print("the OMC interpreter today pays a 15-compare linear scan when it");
+print("could pay ~5 substrate-coherent steps. That's a 3x compare reduction");
+print("AND a refactor that finally has the foundational op speak the");
+print("substrate's language.");
+print("");
+print("Refactor proposal (Phase 2 of the substrate unification):");
+print("  1. Promote phi_pi_fib::FIBONACCI to canonical (delete 17 dupes).");
+print("  2. Rewrite fold_to_fibonacci_const(n) to call");
+print("     phi_pi_fib_nearest on the canonical table.");
+print("  3. Rewrite HInt::compute_resonance to call");
+print("     phi_pi_fib_nearest, derive distance from the returned index.");
+print("  4. Audit conformance tests (res(89) == 1.0, etc.) stay byte-");
+print("     identical because both algorithms find the same nearest");
+print("     attractor.");
+print("");
+print("Net effect: every harmonic op in OMC becomes substrate-coherent");
+print("AND sublinear in attractor table size. The phi-pi-fib search");
+print("becomes load-bearing exactly where it should have always been.");
+print("== End ==");
