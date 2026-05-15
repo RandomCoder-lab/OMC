@@ -4,9 +4,27 @@ use crate::ast::*;
 use crate::value::{HInt, HArray, Value, fibonacci, is_fibonacci};
 use std::collections::{HashMap, HashSet};
 
+/// Closure signature for the JIT dispatch hook. Returns `Some(Ok(v))`
+/// when a JIT'd implementation handled the call, `Some(Err(msg))` when
+/// the JIT was applicable but failed, and `None` when this call should
+/// fall back to the tree-walk interpreter (no JIT'd version registered,
+/// or args incompatible with the JIT'd signature).
+pub type JitDispatch =
+    std::rc::Rc<dyn Fn(&str, &[Value]) -> Option<Result<Value, String>>>;
+
 pub struct Interpreter {
     globals: HashMap<String, Value>,
     functions: HashMap<String, (Vec<String>, Vec<Statement>)>,
+    /// Optional JIT dispatch hook. When set, `invoke_user_function_at`
+    /// consults this BEFORE running the tree-walk body. If the hook
+    /// returns `Some(result)`, that result wins; otherwise tree-walk
+    /// runs normally. Lets the standalone CLI route eligible fns
+    /// through omnimcode-codegen's dual-band JIT (when the
+    /// `OMC_HBIT_JIT` env var is set) without coupling core to LLVM.
+    ///
+    /// `Rc<dyn Fn>` so the hook can be cheaply cloned with the
+    /// Interpreter and shared across nested user-fn invocations.
+    jit_dispatch: Option<JitDispatch>,
     /// Local scope stack. Each frame is `Rc<RefCell<HashMap>>` so that
     /// closures can capture the frame by reference (shared mutation
     /// across sibling closures created in the same scope) and so that
@@ -69,6 +87,7 @@ impl Interpreter {
         Interpreter {
             globals: HashMap::new(),
             functions: HashMap::new(),
+            jit_dispatch: None,
             locals: vec![std::rc::Rc::new(std::cell::RefCell::new(HashMap::new()))],
             return_value: None,
             break_flag: false,
@@ -127,6 +146,18 @@ impl Interpreter {
     /// before re-registering.
     pub fn has_host_builtin(&self, name: &str) -> bool {
         self.host_builtins.contains_key(name)
+    }
+
+    /// Register the JIT dispatch hook. The closure is consulted at the
+    /// top of every user-fn call: if it returns `Some(result)`, that
+    /// result is used directly and the tree-walk body is skipped.
+    /// Used by the standalone CLI to route eligible user fns through
+    /// omnimcode-codegen's dual-band JIT under `OMC_HBIT_JIT=1`.
+    ///
+    /// Setting this to `None` removes the hook (resets to pure
+    /// tree-walk). At most one hook is registered at a time.
+    pub fn set_jit_dispatch(&mut self, hook: Option<JitDispatch>) {
+        self.jit_dispatch = hook;
     }
 
     /// Invoke an OMC function by name with already-evaluated Values
@@ -4281,6 +4312,17 @@ impl Interpreter {
                 params.len(),
                 eval_args.len()
             ));
+        }
+
+        // JIT dispatch: if a hook is registered (set by the standalone
+        // CLI when OMC_HBIT_JIT=1), give it first refusal. A `Some(_)`
+        // return means the hook handled the call — skip tree-walk
+        // entirely. `None` means fall through to tree-walk (no JIT'd
+        // version, or args incompatible).
+        if let Some(hook) = self.jit_dispatch.clone() {
+            if let Some(result) = hook(name, &eval_args) {
+                return result;
+            }
         }
 
         self.locals.push(std::rc::Rc::new(std::cell::RefCell::new(HashMap::new())));

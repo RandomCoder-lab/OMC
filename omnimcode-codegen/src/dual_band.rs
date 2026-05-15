@@ -103,8 +103,39 @@ impl<'ctx, 'a> DualBandLowerer<'ctx, 'a> {
 
         self.collect_leaders()?;
         self.collect_cleanup_pops();
+        self.bind_params_into_locals()?;
         self.emit_body()?;
         Ok(self.function)
+    }
+
+    /// Bind each fn parameter into a named local-variable slot. The
+    /// OMC bytecode compiler emits `LoadVar("x")` for parameter access
+    /// in fn bodies; we mirror what the bytecode VM does at fn entry
+    /// and pre-populate each parameter into a `<2 x i64>` alloca slot
+    /// keyed by the parameter name. β = α at entry (matched bands);
+    /// later sessions add explicit phi-shadow ops that diverge β.
+    fn bind_params_into_locals(&mut self) -> Result<(), CodegenError> {
+        for (i, pname) in self.f.params.clone().iter().enumerate() {
+            let param = self
+                .function
+                .get_nth_param(i as u32)
+                .ok_or_else(|| format!("hbit bind_params: no param at slot {}", i))?;
+            let iv = match param {
+                BasicValueEnum::IntValue(iv) => iv,
+                _ => {
+                    return Err(format!(
+                        "hbit bind_params: non-int param at slot {}",
+                        i
+                    ))
+                }
+            };
+            let v = self.splat(iv, &format!("{}_init", pname))?;
+            let slot = self.get_or_create_slot(pname)?;
+            self.builder
+                .build_store(slot, v)
+                .map_err(|e| format!("hbit bind_params store {}: {}", pname, e))?;
+        }
+        Ok(())
     }
 
     fn collect_leaders(&mut self) -> Result<(), CodegenError> {

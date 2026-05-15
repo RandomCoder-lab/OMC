@@ -56,6 +56,71 @@ pub struct JitContext<'ctx> {
 /// Error type for codegen failures. Keeps it simple — just a String.
 pub type CodegenError = String;
 
+/// A successfully JIT'd OMC function, presented as an arity-tagged
+/// raw function pointer. Callable via `JittedFn::call(args)` for
+/// the supported arities (0..=4); larger arities should be folded
+/// down via a future uniform-arg-array calling convention.
+///
+/// SAFETY: the underlying machine code is owned by the
+/// `JitContext`/`ExecutionEngine` that produced this struct. Calling
+/// after that JitContext is dropped is undefined behavior. In the
+/// current Session D design, the main CLI keeps the JitContext
+/// alive for the entire program duration (Box::leak), so the
+/// invariant holds for normal use.
+#[derive(Clone, Copy, Debug)]
+pub struct JittedFn {
+    pub arity: usize,
+    /// Erased fn pointer. Cast to the right `unsafe extern "C" fn`
+    /// signature at call time based on `arity`.
+    pub fn_ptr: *const (),
+}
+
+// SAFETY: a raw function pointer is `Send + Sync` — it's plain data.
+// The LLVM-generated machine code is read-only and re-entrant.
+unsafe impl Send for JittedFn {}
+unsafe impl Sync for JittedFn {}
+
+impl JittedFn {
+    /// Call this JITted fn with i64 args. Returns `Some(result)` when
+    /// arity matches a supported overload, `None` otherwise. Caller is
+    /// responsible for keeping the producing JitContext alive — that's
+    /// the unsafe invariant this method enforces minimally (it's
+    /// "safe" because we trust the pointer, but a use-after-free of
+    /// the JitContext would crash here).
+    pub fn call(&self, args: &[i64]) -> Option<i64> {
+        if args.len() != self.arity {
+            return None;
+        }
+        unsafe {
+            match self.arity {
+                0 => {
+                    let f: unsafe extern "C" fn() -> i64 = std::mem::transmute(self.fn_ptr);
+                    Some(f())
+                }
+                1 => {
+                    let f: unsafe extern "C" fn(i64) -> i64 = std::mem::transmute(self.fn_ptr);
+                    Some(f(args[0]))
+                }
+                2 => {
+                    let f: unsafe extern "C" fn(i64, i64) -> i64 = std::mem::transmute(self.fn_ptr);
+                    Some(f(args[0], args[1]))
+                }
+                3 => {
+                    let f: unsafe extern "C" fn(i64, i64, i64) -> i64 =
+                        std::mem::transmute(self.fn_ptr);
+                    Some(f(args[0], args[1], args[2]))
+                }
+                4 => {
+                    let f: unsafe extern "C" fn(i64, i64, i64, i64) -> i64 =
+                        std::mem::transmute(self.fn_ptr);
+                    Some(f(args[0], args[1], args[2], args[3]))
+                }
+                _ => None,
+            }
+        }
+    }
+}
+
 impl<'ctx> JitContext<'ctx> {
     pub fn new(context: &'ctx Context) -> Result<Self, CodegenError> {
         let module = context.create_module("omc_jit");
@@ -105,6 +170,88 @@ impl<'ctx> JitContext<'ctx> {
     ) -> Result<FunctionValue<'ctx>, CodegenError> {
         let lowerer = dual_band::DualBandLowerer::prepare(self.context, &self.module, f)?;
         lowerer.lower()
+    }
+
+    /// Try to JIT every user function in a bytecode `Module` in dual-band
+    /// mode. Functions whose bodies use ops the codegen layer doesn't
+    /// yet support (strings, dicts, builtins, cross-fn calls, etc.)
+    /// are silently skipped — they stay routed through the tree-walk
+    /// interpreter at runtime.
+    ///
+    /// Returns a map of `fn_name -> JittedFn` for every fn that did
+    /// lower successfully. The native function pointers inside
+    /// `JittedFn` are owned by `self` (the underlying ExecutionEngine);
+    /// callers must not invoke the returned fns after `self` is dropped.
+    ///
+    /// The returned name uses the ORIGINAL (un-suffixed) bytecode-side
+    /// fn name; under the hood the LLVM module sees `<name>_hbit` per
+    /// the dual-band lowerer's naming convention.
+    ///
+    /// Session D scope: every user fn is attempted. Sessions later
+    /// add explicit `@hbit` pragma filtering so non-tagged fns aren't
+    /// JIT'd even if they could be.
+    pub fn jit_module(
+        &self,
+        module: &omnimcode_core::bytecode::Module,
+    ) -> Result<HashMap<String, JittedFn>, CodegenError> {
+        let mut out: HashMap<String, JittedFn> = HashMap::new();
+        for (name, cf) in &module.functions {
+            let suffixed = format!("{}_hbit", name);
+            match self.lower_function_dual_band(cf) {
+                Ok(_) => {
+                    // get_function::<F> triggers JIT finalization and
+                    // returns a JitFunction wrapping the raw pointer.
+                    // We dispatch on arity to pick the right F so we
+                    // can extract the raw fn pointer for storage.
+                    let arity = cf.params.len();
+                    let fn_ptr = unsafe { self.extract_raw_fn_ptr(&suffixed, arity)? };
+                    out.insert(
+                        name.clone(),
+                        JittedFn { arity, fn_ptr },
+                    );
+                }
+                Err(_) => {
+                    // Lowering failed mid-emission. The LLVM module
+                    // now contains a partial / broken function — leaving
+                    // it in place would corrupt JIT finalization for
+                    // every subsequent fn (and crash on first call).
+                    // Erase it so the rest of the module stays valid.
+                    if let Some(broken) = self.module.get_function(&suffixed) {
+                        unsafe { broken.delete() };
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Erase a typed JitFunction down to a `*const ()` pointer for
+    /// arity-tagged storage in `JittedFn`. Internal helper for
+    /// `jit_module`; the caller is responsible for not invoking the
+    /// returned pointer after `self` is dropped.
+    unsafe fn extract_raw_fn_ptr(
+        &self,
+        name: &str,
+        arity: usize,
+    ) -> Result<*const (), CodegenError> {
+        macro_rules! by_arity {
+            ($t:ty) => {{
+                let jf: JitFunction<'ctx, $t> = self
+                    .engine
+                    .get_function(name)
+                    .map_err(|e| format!("get_function({}): {:?}", name, e))?;
+                jf.into_raw() as *const ()
+            }};
+        }
+        let ptr = match arity {
+            0 => by_arity!(unsafe extern "C" fn() -> i64),
+            1 => by_arity!(unsafe extern "C" fn(i64) -> i64),
+            2 => by_arity!(unsafe extern "C" fn(i64, i64) -> i64),
+            3 => by_arity!(unsafe extern "C" fn(i64, i64, i64) -> i64),
+            4 => by_arity!(unsafe extern "C" fn(i64, i64, i64, i64) -> i64),
+            _ => return Err(format!("arity {} not supported in Session D jit_module", arity)),
+        };
+        Ok(ptr)
     }
 
     /// JIT-lookup helper for single-arg i64 functions.
@@ -187,8 +334,34 @@ impl<'ctx, 'a> FunctionLowerer<'ctx, 'a> {
 
         self.collect_leaders()?;
         self.collect_cleanup_pops();
+        self.bind_params_into_locals()?;
         self.emit_body()?;
         Ok(self.function)
+    }
+
+    /// Bind each fn parameter into a named local-variable slot.
+    /// The OMC bytecode compiler emits `Op::LoadVar("x")` for parameter
+    /// access in the body (treating params as locals already in scope).
+    /// The bytecode VM and tree-walk interpreter both pre-populate
+    /// these bindings before executing the body; we mirror that here
+    /// so LoadVar resolves to the actual parameter value rather than
+    /// reading from an uninitialized alloca.
+    fn bind_params_into_locals(&mut self) -> Result<(), CodegenError> {
+        for (i, pname) in self.f.params.clone().iter().enumerate() {
+            let param = self
+                .function
+                .get_nth_param(i as u32)
+                .ok_or_else(|| format!("bind_params: no param at slot {}", i))?;
+            let iv = match param {
+                BasicValueEnum::IntValue(iv) => iv,
+                _ => return Err(format!("bind_params: non-int param at slot {}", i)),
+            };
+            let slot = self.get_or_create_slot(pname)?;
+            self.builder
+                .build_store(slot, iv)
+                .map_err(|e| format!("bind_params store {}: {}", pname, e))?;
+        }
+        Ok(())
     }
 
     /// First pass: find op-indices that begin a new basic block. An
