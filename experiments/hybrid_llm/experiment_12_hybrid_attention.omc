@@ -1,0 +1,229 @@
+# =============================================================================
+# Experiment 12 — Hybrid attention: softmax + HBit-tension residual gate (E1 pt 2).
+#
+# Context: experiment 11 showed that simple substrate-distance attention
+# fails architecturally (Fibonacci-differences-are-Fibonacci → systematic
+# ties). The remaining lead from the roadmap is the HYBRID approach:
+#
+#   hybrid_score(q, k) = softmax(q, k) × gate(k)
+#
+# where gate(k) measures how on-manifold the key is. Off-manifold keys
+# get attenuated; on-manifold keys pass through with full softmax weight.
+#
+# Architectural claim: in real-world workloads where keys can be ON or OFF
+# the harmonic manifold, attention shouldn't spend weight on off-manifold
+# keys. HBit tension is the cheap detector for this (experiment 5
+# demonstrated it as a reference-free OOD signal at AUROC 1.0).
+#
+# Gate definition:
+#   tension(k) = | k - phi.fold(k) |       (1-D HBit tension)
+#   gate(k)    = 1 / (1 + tension(k))      (perfect=1.0, off-attractor < 1)
+#
+# Test setup: contexts now contain a MIX of on-manifold (Fibonacci)
+# values AND off-manifold distractors. The target is always on-manifold.
+# Query = target + small noise.
+#
+# If softmax picks the wrong neighbour because a nearby distractor is
+# closer in raw distance, the hybrid should down-weight that distractor
+# (its gate is small) and steer the argmax back to the on-manifold
+# target — even if the target is slightly farther in raw distance.
+#
+# Measured at multiple noise levels.
+# =============================================================================
+
+# Inline approximation of phi.fold (snap to nearest Fibonacci attractor).
+h FIBS = [1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610];
+
+fn nearest_fib(v) -> int {
+    h abs_v = v;
+    if abs_v < 0 { abs_v = 0 - abs_v; }
+    h best = arr_get(FIBS, 0);
+    h best_dist = abs_v - best;
+    if best_dist < 0 { best_dist = 0 - best_dist; }
+    h n = arr_len(FIBS);
+    h i = 1;
+    while i < n {
+        h f = arr_get(FIBS, i);
+        h d = abs_v - f;
+        if d < 0 { d = 0 - d; }
+        if d < best_dist {
+            best_dist = d;
+            best = f;
+        }
+        i = i + 1;
+    }
+    return best;
+}
+
+# 1-D HBit tension: distance from value to its nearest Fibonacci.
+fn tension(k) -> int {
+    h fk = nearest_fib(k);
+    h t = k - fk;
+    if t < 0 { t = 0 - t; }
+    return t;
+}
+
+# Gate: smooth-decreasing function of tension. Perfect attractor → 1.0.
+# Off by 5 → 1/6 ≈ 0.167. Off by 50 → 1/51 ≈ 0.020.
+fn gate(k) -> float {
+    return 1.0 / (1.0 + to_float(tension(k)));
+}
+
+# Plain softmax score (no normalization needed — argmax is invariant
+# under the Z normalization).
+fn softmax_score(q, k) -> float {
+    h diff = to_float(q - k);
+    if diff < 0.0 { diff = 0.0 - diff; }
+    return exp(0.0 - diff);
+}
+
+fn hybrid_score(q, k) -> float {
+    return softmax_score(q, k) * gate(k);
+}
+
+# Pick argmax under one scorer (0=softmax, 1=hybrid).
+fn argmax(context, n, query, which) -> array {
+    h best_idx = 0;
+    h k0 = arr_get(context, 0);
+    h best_score = 0.0;
+    if which == 0 { best_score = softmax_score(query, k0); }
+    if which == 1 { best_score = hybrid_score(query, k0); }
+    h i = 1;
+    while i < n {
+        h k = arr_get(context, i);
+        h s = 0.0;
+        if which == 0 { s = softmax_score(query, k); }
+        if which == 1 { s = hybrid_score(query, k); }
+        if s > best_score {
+            best_score = s;
+            best_idx = i;
+        }
+        i = i + 1;
+    }
+    h out = arr_new(2, 0);
+    arr_set(out, 0, best_idx);
+    arr_set(out, 1, arr_get(context, best_idx));
+    return out;
+}
+
+h VOCAB_SIZE = 12;
+fn vocab_at(i) -> int {
+    if i == 0  { return 1; }
+    if i == 1  { return 2; }
+    if i == 2  { return 3; }
+    if i == 3  { return 5; }
+    if i == 4  { return 8; }
+    if i == 5  { return 13; }
+    if i == 6  { return 21; }
+    if i == 7  { return 34; }
+    if i == 8  { return 55; }
+    if i == 9  { return 89; }
+    if i == 10 { return 144; }
+    if i == 11 { return 233; }
+    return 1;
+}
+
+# Build a context with mixed on-manifold and off-manifold values.
+# pct_off ∈ {0, 25, 50, 75} controls the off-manifold fraction.
+# Target is always on-manifold (drawn from vocab).
+fn build_context(ctx_len, pct_off) -> array {
+    h ctx = arr_new(ctx_len, 0);
+    h i = 0;
+    while i < ctx_len {
+        h r = random_int(0, 99);
+        if r < pct_off {
+            # Off-manifold distractor in [10, 250], skipping Fibonacci values.
+            h v = random_int(10, 250);
+            # Nudge away from any Fibonacci by ±3 to ensure off-manifold.
+            h fv = nearest_fib(v);
+            h delta = v - fv;
+            if delta < 3 {
+                if delta >= 0 { v = fv + 3; }
+                if delta < 0  { v = fv - 3; }
+            }
+            arr_set(ctx, i, v);
+        } else {
+            arr_set(ctx, i, vocab_at(random_int(0, VOCAB_SIZE - 1)));
+        }
+        i = i + 1;
+    }
+    return ctx;
+}
+
+# Run one trial with given context-mix and noise. Returns:
+#   [softmax_idx, softmax_val, hybrid_idx, hybrid_val, true_val]
+# True target is randomly chosen from the on-manifold values in context.
+fn run_trial(ctx_len, pct_off, noise) -> array {
+    h ctx = build_context(ctx_len, pct_off);
+    # Find on-manifold positions (tension==0).
+    h on_positions = arr_new(0, 0);
+    h i = 0;
+    while i < ctx_len {
+        if tension(arr_get(ctx, i)) == 0 {
+            arr_push(on_positions, i);
+        }
+        i = i + 1;
+    }
+    # If no on-manifold candidates (rare), fall back to position 0.
+    h target_pos = 0;
+    h n_on = arr_len(on_positions);
+    if n_on > 0 {
+        h r = random_int(0, n_on - 1);
+        target_pos = arr_get(on_positions, r);
+    }
+    h true_val = arr_get(ctx, target_pos);
+    h query = true_val + noise;
+    h sm = argmax(ctx, ctx_len, query, 0);
+    h hy = argmax(ctx, ctx_len, query, 1);
+    h out = arr_new(5, 0);
+    arr_set(out, 0, arr_get(sm, 0));
+    arr_set(out, 1, arr_get(sm, 1));
+    arr_set(out, 2, arr_get(hy, 0));
+    arr_set(out, 3, arr_get(hy, 1));
+    arr_set(out, 4, true_val);
+    return out;
+}
+
+random_seed(42);
+h N_TRIALS = 200;
+h CTX_LEN = 8;
+
+println("Experiment 12: hybrid attention (softmax * HBit-tension gate)");
+println("Compared against pure softmax across off-manifold-distractor mixes.");
+println(concat_many("trials per cell = ", N_TRIALS, ", ctx_len = ", CTX_LEN));
+println("");
+println("pct_off  noise   softmax_recovers   hybrid_recovers");
+
+h pcts = [0, 25, 50, 75];
+h noises = [0, 1, 3, 7, 15];
+h pi = 0;
+while pi < arr_len(pcts) {
+    h pct = arr_get(pcts, pi);
+    h ni = 0;
+    while ni < arr_len(noises) {
+        h noise = arr_get(noises, ni);
+        h sm_hits = 0;
+        h hy_hits = 0;
+        h t = 0;
+        while t < N_TRIALS {
+            h r = run_trial(CTX_LEN, pct, noise);
+            h true_val = arr_get(r, 4);
+            if arr_get(r, 1) == true_val { sm_hits = sm_hits + 1; }
+            if arr_get(r, 3) == true_val { hy_hits = hy_hits + 1; }
+            t = t + 1;
+        }
+        println(concat_many("",
+            "pct=", pct, "  noise=", noise,
+            "    soft=", sm_hits, "/", N_TRIALS,
+            "    hybrid=", hy_hits, "/", N_TRIALS));
+        ni = ni + 1;
+    }
+    pi = pi + 1;
+}
+
+println("");
+println("If hybrid >= softmax at high pct_off (lots of distractors), the");
+println("HBit-tension gate is doing its job: filtering off-manifold candidates");
+println("so attention concentrates on on-manifold keys. This is the");
+println("'detector → auxiliary signal' framing from the cumulative read of");
+println("experiments 0-11.");
