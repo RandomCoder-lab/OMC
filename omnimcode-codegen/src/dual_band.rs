@@ -361,6 +361,38 @@ impl<'ctx, 'a> DualBandLowerer<'ctx, 'a> {
                 Op::Shl => self.bin_vec(&mut stack, i, |b, l, r| b.build_left_shift(l, r, "shl"))?,
                 Op::Shr => self.bin_vec(&mut stack, i, |b, l, r| b.build_right_shift(l, r, true, "shr"))?,
 
+                // Path A.4: read-only array support.
+                //
+                // Layout: `alloca [N+1 x i64]`. Slot 0 holds the
+                // length; slots 1..=N hold the elements. Self-describing
+                // so ArrayLen needs no side-channel.
+                //
+                // Operand-stack convention: arrays live as
+                // pointer-cast-to-i64 on the stack. ptrtoint at push;
+                // inttoptr at use. The bit pattern survives storage in
+                // user-level h-variables (which are <2 x i64> in
+                // dual-band) because lane 0 carries the pointer and
+                // matches what ArrayIndex / ArrayLen extract.
+                //
+                // Arrays live in the fn's stack frame. ArrayIndexAssign
+                // (mutable writes) and dynamic resize are out of scope
+                // for Path A.4 MVP — see Sessions later for those.
+                Op::NewArray(n_elems) => {
+                    let v = self.emit_new_array(&mut stack, i, *n_elems)?;
+                    stack.push(v);
+                }
+                Op::ArrayLen => {
+                    let arr_v = self.pop(&mut stack, i, "ArrayLen ptr")?;
+                    let len = self.emit_array_len(arr_v, i)?;
+                    stack.push(self.splat(len, "alen_v")?);
+                }
+                Op::ArrayIndex => {
+                    let idx_v = self.pop(&mut stack, i, "ArrayIndex idx")?;
+                    let arr_v = self.pop(&mut stack, i, "ArrayIndex ptr")?;
+                    let val = self.emit_array_index(arr_v, idx_v, i)?;
+                    stack.push(self.splat(val, "aidx_v")?);
+                }
+
                 Op::Eq => self.cmp_vec(&mut stack, i, IntPredicate::EQ)?,
                 Op::Ne => self.cmp_vec(&mut stack, i, IntPredicate::NE)?,
                 Op::Lt => self.cmp_vec(&mut stack, i, IntPredicate::SLT)?,
@@ -678,6 +710,184 @@ impl<'ctx, 'a> DualBandLowerer<'ctx, 'a> {
         match ret {
             BasicValueEnum::IntValue(iv) => Ok(iv),
             _ => Err(format!("harmony call ret not int at op{}", op_idx)),
+        }
+    }
+
+    /// Path A.4: NewArray — pop N values from the operand stack, build
+    /// a length-prefixed `[N+1 x i64]` alloca in the entry block, store
+    /// the popped values into slots 1..=N (in source order — bytecode
+    /// pushes elements left-to-right so popping gives reverse order),
+    /// store length N at slot 0, and return the pointer as a splat'd
+    /// `<2 x i64>` (lane 0 = ptr-as-i64, lane 1 = same).
+    fn emit_new_array(
+        &mut self,
+        stack: &mut Vec<VectorValue<'ctx>>,
+        op_idx: usize,
+        n: usize,
+    ) -> Result<VectorValue<'ctx>, CodegenError> {
+        let i64_type = self.ctx.i64_type();
+        // Pop N values (each is a <2 x i64>; we extract α as the
+        // user-visible scalar). Reverse to get source order.
+        let mut elems: Vec<IntValue<'ctx>> = Vec::with_capacity(n);
+        for k in 0..n {
+            let v_v = self
+                .pop(stack, op_idx, &format!("NewArray elem {}", k))?;
+            let alpha = self
+                .builder
+                .build_extract_element(v_v, i64_type.const_int(0, false), "narr_a")
+                .map_err(|e| format!("NewArray extract α at op{}: {}", op_idx, e))?;
+            let alpha_iv = match alpha {
+                BasicValueEnum::IntValue(iv) => iv,
+                _ => return Err(format!("NewArray elem {} not int at op{}", k, op_idx)),
+            };
+            elems.push(alpha_iv);
+        }
+        elems.reverse();
+
+        // Allocate [N+1 x i64] in the entry block so the alloca
+        // dominates all uses, regardless of which CFG block the
+        // NewArray op was emitted from.
+        let arr_ty = i64_type.array_type((n as u32) + 1);
+        let current_block = self
+            .builder
+            .get_insert_block()
+            .ok_or_else(|| format!("NewArray no insert block at op{}", op_idx))?;
+        let entry = self.function.get_first_basic_block().unwrap();
+        match entry.get_first_instruction() {
+            Some(first) => self.builder.position_before(&first),
+            None => self.builder.position_at_end(entry),
+        }
+        let arr_ptr = self
+            .builder
+            .build_alloca(arr_ty, &format!("arr_op{}", op_idx))
+            .map_err(|e| format!("NewArray alloca at op{}: {}", op_idx, e))?;
+        self.builder.position_at_end(current_block);
+
+        // Store length at slot 0.
+        let zero32 = self.ctx.i32_type().const_int(0, false);
+        let len_gep = unsafe {
+            self.builder
+                .build_in_bounds_gep(arr_ty, arr_ptr, &[zero32, zero32], "narr_len_gep")
+                .map_err(|e| format!("NewArray len gep at op{}: {}", op_idx, e))?
+        };
+        self.builder
+            .build_store(len_gep, i64_type.const_int(n as u64, false))
+            .map_err(|e| format!("NewArray len store at op{}: {}", op_idx, e))?;
+
+        // Store elements at slots 1..=N.
+        for (k, val) in elems.iter().enumerate() {
+            let idx32 = self.ctx.i32_type().const_int((k + 1) as u64, false);
+            let elem_gep = unsafe {
+                self.builder
+                    .build_in_bounds_gep(arr_ty, arr_ptr, &[zero32, idx32], "narr_e_gep")
+                    .map_err(|e| format!("NewArray elem{} gep at op{}: {}", k, op_idx, e))?
+            };
+            self.builder
+                .build_store(elem_gep, *val)
+                .map_err(|e| format!("NewArray elem{} store at op{}: {}", k, op_idx, e))?;
+        }
+
+        // Cast the pointer to i64 and splat into <2 x i64>.
+        let ptr_as_i64 = self
+            .builder
+            .build_ptr_to_int(arr_ptr, i64_type, "narr_ptr_i64")
+            .map_err(|e| format!("NewArray ptrtoint at op{}: {}", op_idx, e))?;
+        self.splat(ptr_as_i64, "narr_v")
+    }
+
+    /// Path A.4: ArrayLen — extract α (pointer-as-i64) from the
+    /// vector, inttoptr to a [N+1 x i64] pointer, GEP slot 0, load.
+    /// Returns the length as a scalar i64 (caller will splat it).
+    fn emit_array_len(
+        &self,
+        arr_v: VectorValue<'ctx>,
+        op_idx: usize,
+    ) -> Result<IntValue<'ctx>, CodegenError> {
+        let i64_type = self.ctx.i64_type();
+        let alpha = self
+            .builder
+            .build_extract_element(arr_v, i64_type.const_int(0, false), "alen_a")
+            .map_err(|e| format!("ArrayLen extract α at op{}: {}", op_idx, e))?;
+        let alpha_iv = match alpha {
+            BasicValueEnum::IntValue(iv) => iv,
+            _ => return Err(format!("ArrayLen ptr not int at op{}", op_idx)),
+        };
+        // For opaque pointers, GEP needs the element type. We use a
+        // single-element pointee `[1 x i64]` to GEP slot 0; the load
+        // returns the length we wrote at NewArray time.
+        let one_i64 = i64_type.array_type(1);
+        let ptr_ty = self.ctx.ptr_type(inkwell::AddressSpace::default());
+        let ptr = self
+            .builder
+            .build_int_to_ptr(alpha_iv, ptr_ty, "alen_ptr")
+            .map_err(|e| format!("ArrayLen inttoptr at op{}: {}", op_idx, e))?;
+        let zero32 = self.ctx.i32_type().const_int(0, false);
+        let len_gep = unsafe {
+            self.builder
+                .build_in_bounds_gep(one_i64, ptr, &[zero32, zero32], "alen_gep")
+                .map_err(|e| format!("ArrayLen gep at op{}: {}", op_idx, e))?
+        };
+        let len = self
+            .builder
+            .build_load(i64_type, len_gep, "alen_load")
+            .map_err(|e| format!("ArrayLen load at op{}: {}", op_idx, e))?;
+        match len {
+            BasicValueEnum::IntValue(iv) => Ok(iv),
+            _ => Err(format!("ArrayLen load not int at op{}", op_idx)),
+        }
+    }
+
+    /// Path A.4: ArrayIndex — extract α (pointer) and the user-given
+    /// scalar index, GEP to slot `idx + 1` (skipping the length
+    /// prefix), load the element. Returns the element as a scalar i64.
+    fn emit_array_index(
+        &self,
+        arr_v: VectorValue<'ctx>,
+        idx_v: VectorValue<'ctx>,
+        op_idx: usize,
+    ) -> Result<IntValue<'ctx>, CodegenError> {
+        let i64_type = self.ctx.i64_type();
+        let arr_alpha = self
+            .builder
+            .build_extract_element(arr_v, i64_type.const_int(0, false), "aidx_aptr")
+            .map_err(|e| format!("ArrayIndex extract α at op{}: {}", op_idx, e))?;
+        let idx_alpha = self
+            .builder
+            .build_extract_element(idx_v, i64_type.const_int(0, false), "aidx_aix")
+            .map_err(|e| format!("ArrayIndex extract idx α at op{}: {}", op_idx, e))?;
+        let arr_iv = match arr_alpha {
+            BasicValueEnum::IntValue(iv) => iv,
+            _ => return Err(format!("ArrayIndex ptr not int at op{}", op_idx)),
+        };
+        let idx_iv = match idx_alpha {
+            BasicValueEnum::IntValue(iv) => iv,
+            _ => return Err(format!("ArrayIndex idx not int at op{}", op_idx)),
+        };
+        let ptr_ty = self.ctx.ptr_type(inkwell::AddressSpace::default());
+        let ptr = self
+            .builder
+            .build_int_to_ptr(arr_iv, ptr_ty, "aidx_ptr")
+            .map_err(|e| format!("ArrayIndex inttoptr at op{}: {}", op_idx, e))?;
+        // Compute slot index = user_idx + 1 (skip the length prefix).
+        let one = i64_type.const_int(1, false);
+        let slot = self
+            .builder
+            .build_int_add(idx_iv, one, "aidx_slot")
+            .map_err(|e| format!("ArrayIndex slot calc at op{}: {}", op_idx, e))?;
+        // Use `i64` as the GEP element type — equivalent to "i64*"
+        // arithmetic. Each step is sizeof(i64) = 8 bytes.
+        let elem_gep = unsafe {
+            self.builder
+                .build_in_bounds_gep(i64_type, ptr, &[slot], "aidx_gep")
+                .map_err(|e| format!("ArrayIndex gep at op{}: {}", op_idx, e))?
+        };
+        let val = self
+            .builder
+            .build_load(i64_type, elem_gep, "aidx_load")
+            .map_err(|e| format!("ArrayIndex load at op{}: {}", op_idx, e))?;
+        match val {
+            BasicValueEnum::IntValue(iv) => Ok(iv),
+            _ => Err(format!("ArrayIndex load not int at op{}", op_idx)),
         }
     }
 
