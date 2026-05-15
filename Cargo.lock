@@ -642,6 +642,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "omnimcode-cli"
+version = "1.0.0"
+dependencies = [
+ "inkwell",
+ "omnimcode-codegen",
+ "omnimcode-core",
+]
+
+[[package]]
 name = "omnimcode-codegen"
 version = "1.0.0"
 dependencies = [

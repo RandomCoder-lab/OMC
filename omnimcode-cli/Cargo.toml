@@ -1,0 +1,30 @@
+[package]
+name = "omnimcode-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "OMNIcode standalone CLI — links the tree-walk interpreter, bytecode VM, optional Python embedding, and (under llvm-jit) the LLVM-backed dual-band JIT into one binary."
+
+# Preserve the historical binary name so scripts that invoke
+# `omnimcode-standalone` keep working after the Session D.5 split.
+[[bin]]
+name = "omnimcode-standalone"
+path = "src/main.rs"
+
+[features]
+default = ["python-embed"]
+# CPython embedding for `py_*` builtins. Forwards to core.
+python-embed = ["omnimcode-core/python-embed"]
+# LLVM-backed dual-band JIT. When set at compile time, the CLI
+# consults `OMC_HBIT_JIT=1` at runtime; if also set, eligible user
+# fns are routed through omnimcode-codegen instead of tree-walk/VM.
+llvm-jit = ["dep:omnimcode-codegen", "dep:inkwell"]
+
+[dependencies]
+omnimcode-core = { path = "../omnimcode-core", default-features = false }
+omnimcode-codegen = { path = "../omnimcode-codegen", optional = true, features = ["llvm-jit"] }
+# inkwell is needed at the CLI level only because we leak the LLVM
+# Context for process-lifetime; the dispatch closure lives on the
+# Interpreter and references the engine memory.
+inkwell = { version = "0.5", features = ["llvm18-0"], optional = true }

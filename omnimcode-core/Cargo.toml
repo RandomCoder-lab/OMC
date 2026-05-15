@@ -9,10 +9,6 @@ documentation = "https://docs.rs/omnimcode-core"
 repository = "https://github.com/sovereignlattice/omnimcode"
 readme = "README.md"
 
-[[bin]]
-name = "omnimcode-standalone"
-path = "src/main.rs"
-
 [lib]
 path = "src/lib.rs"
 

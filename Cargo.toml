@@ -5,6 +5,7 @@ members = [
     "omnimcode-wasm",
     "omnimcode-lsp",
     "omnimcode-codegen",
+    "omnimcode-cli",
 ]
 # omnimcode-python kept around but excluded from the default workspace.
 # It was the "Python embeds OMC" wrapper (extension-module mode); now
@@ -21,12 +22,25 @@ edition = "2021"
 authors = ["The Architect <architect@sovereign-lattice.io>"]
 license = "MIT"
 
-# Shared profile settings for all workspace members
+# Shared profile settings for all workspace members.
+#
+# LTO is OFF because the LLVM JIT runtime (omnimcode-codegen +
+# inkwell) does dlopen-style symbol resolution against the binary's
+# symbol table at runtime; `lto = "fat"` inlines/mangles those
+# symbols and causes a segfault during JitContext::new. The cost
+# of disabling LTO is mild (a few % slower release binary) and is
+# acceptable in exchange for the JIT working in shipped binaries.
+# Per-package `lto` overrides aren't supported by cargo, so this
+# is a workspace-wide setting.
+#
+# `strip = "debuginfo"` keeps the symbol table (which LLVM JIT
+# needs) but discards debug info (which it doesn't). Binary size
+# stays in the same ballpark as `strip = true`.
 [profile.release]
 opt-level = 3
-lto = "fat"
-codegen-units = 1
-strip = true
+lto = "off"
+codegen-units = 16
+strip = "debuginfo"
 
 [profile.dev]
 opt-level = 1

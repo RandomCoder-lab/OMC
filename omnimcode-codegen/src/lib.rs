@@ -194,21 +194,18 @@ impl<'ctx> JitContext<'ctx> {
         &self,
         module: &omnimcode_core::bytecode::Module,
     ) -> Result<HashMap<String, JittedFn>, CodegenError> {
-        let mut out: HashMap<String, JittedFn> = HashMap::new();
+        // Two-phase: lower ALL eligible fns into the LLVM module
+        // first, THEN extract fn pointers. Interleaving the phases
+        // makes get_function trigger JIT finalization on a partially-
+        // populated module, which can refuse to resolve recursive or
+        // cross-fn references that point to fns we haven't lowered
+        // yet (FunctionNotFound).
+        let mut to_extract: Vec<(String, String, usize)> = Vec::new(); // (orig, suffixed, arity)
         for (name, cf) in &module.functions {
             let suffixed = format!("{}_hbit", name);
             match self.lower_function_dual_band(cf) {
                 Ok(_) => {
-                    // get_function::<F> triggers JIT finalization and
-                    // returns a JitFunction wrapping the raw pointer.
-                    // We dispatch on arity to pick the right F so we
-                    // can extract the raw fn pointer for storage.
-                    let arity = cf.params.len();
-                    let fn_ptr = unsafe { self.extract_raw_fn_ptr(&suffixed, arity)? };
-                    out.insert(
-                        name.clone(),
-                        JittedFn { arity, fn_ptr },
-                    );
+                    to_extract.push((name.clone(), suffixed, cf.params.len()));
                 }
                 Err(_) => {
                     // Lowering failed mid-emission. The LLVM module
@@ -219,6 +216,18 @@ impl<'ctx> JitContext<'ctx> {
                     if let Some(broken) = self.module.get_function(&suffixed) {
                         unsafe { broken.delete() };
                     }
+                }
+            }
+        }
+        let mut out: HashMap<String, JittedFn> = HashMap::new();
+        for (name, suffixed, arity) in to_extract {
+            match unsafe { self.extract_raw_fn_ptr(&suffixed, arity) } {
+                Ok(fn_ptr) => {
+                    out.insert(name, JittedFn { arity, fn_ptr });
+                }
+                Err(_) => {
+                    // Extraction failure → skip this fn, keep going.
+                    // Tree-walk will handle it.
                 }
             }
         }

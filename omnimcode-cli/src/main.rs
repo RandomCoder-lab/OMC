@@ -97,6 +97,100 @@ fn maybe_register_python(interp: &mut Interpreter) {
 #[cfg(not(feature = "python-embed"))]
 fn maybe_register_python(_interp: &mut Interpreter) {}
 
+/// Wire the LLVM-backed dual-band JIT into the Interpreter when
+/// `OMC_HBIT_JIT=1` is set in the environment. Compiles the program
+/// to bytecode, attempts to JIT every user fn in dual-band mode, and
+/// installs a dispatch hook that routes future calls to the native
+/// code path.
+///
+/// The JIT context (LLVM Context + ExecutionEngine + native code
+/// pages) is `Box::leak`-ed because the compiled fn pointers must
+/// outlive the dispatch closure stored on the Interpreter, which in
+/// turn must live for the whole program. CLI tool process-lifetime
+/// is the right scope for this leak.
+///
+/// Functions whose bodies use ops the codegen layer doesn't yet
+/// support (strings, dicts, builtins, cross-fn calls) are silently
+/// skipped — they keep running through the tree-walk interpreter.
+#[cfg(feature = "llvm-jit")]
+fn maybe_register_jit(
+    interp: &mut Interpreter,
+    statements: &[omnimcode_core::ast::Statement],
+) {
+    if std::env::var("OMC_HBIT_JIT").as_deref() != Ok("1") {
+        return;
+    }
+    let module = match omnimcode_core::compiler::compile_program(statements) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("[OMC_HBIT_JIT] compile_program failed: {} — falling back to tree-walk", e);
+            return;
+        }
+    };
+    // Leak the LLVM Context to give it a 'static lifetime. Required
+    // because JitContext borrows from Context, and the dispatch
+    // closure holds raw fn pointers into the JitContext's
+    // ExecutionEngine. CLI process-lifetime is the right scope.
+    let context: &'static inkwell::context::Context =
+        Box::leak(Box::new(inkwell::context::Context::create()));
+    let jit = match omnimcode_codegen::JitContext::new(context) {
+        Ok(j) => j,
+        Err(e) => {
+            eprintln!("[OMC_HBIT_JIT] JitContext::new failed: {} — falling back", e);
+            return;
+        }
+    };
+    let jitted = match jit.jit_module(&module) {
+        Ok(map) => map,
+        Err(e) => {
+            eprintln!("[OMC_HBIT_JIT] jit_module failed: {} — falling back", e);
+            return;
+        }
+    };
+    let n_jitted = jitted.len();
+    let n_total = module.functions.len();
+    if std::env::var("OMC_HBIT_JIT_VERBOSE").as_deref() == Ok("1") {
+        eprintln!(
+            "[OMC_HBIT_JIT] JIT'd {}/{} user fns to dual-band native code",
+            n_jitted, n_total
+        );
+        for name in jitted.keys() {
+            eprintln!("  - {}", name);
+        }
+    }
+    // Leak the JitContext too — the dispatch closure references its
+    // engine memory.
+    let jit_static: &'static omnimcode_codegen::JitContext<'static> = Box::leak(Box::new(jit));
+    let _ = jit_static; // currently unused; kept for documentation
+    let dispatch: omnimcode_core::interpreter::JitDispatch = std::rc::Rc::new(
+        move |name: &str, args: &[omnimcode_core::value::Value]| {
+            use omnimcode_core::value::{HInt, Value};
+            let jf = jitted.get(name)?;
+            if args.len() != jf.arity {
+                return None;
+            }
+            let mut int_args: Vec<i64> = Vec::with_capacity(args.len());
+            for a in args {
+                match a {
+                    Value::HInt(h) => int_args.push(h.value),
+                    Value::Bool(b) => int_args.push(if *b { 1 } else { 0 }),
+                    _ => return None, // non-int arg → fall through to tree-walk
+                }
+            }
+            jf.call(&int_args)
+                .map(|r| Ok(Value::HInt(HInt::new(r))))
+        },
+    );
+    interp.set_jit_dispatch(Some(dispatch));
+}
+
+#[cfg(not(feature = "llvm-jit"))]
+fn maybe_register_jit(
+    _interp: &mut Interpreter,
+    _statements: &[omnimcode_core::ast::Statement],
+) {
+}
+
 /// `--install [SPEC]`. SPEC can be:
 ///
 ///   * a URL                 → fetch and store under that basename
@@ -504,6 +598,9 @@ fn print_help() {
     println!("  OMC_OPT_STATS=1        print optimizer pass statistics");
     println!("  OMC_STDLIB_PATH=...    colon-separated module search path");
     println!("  OMC_NO_PYTHON=1        skip embedded CPython initialisation");
+    println!("  OMC_HBIT_JIT=1         JIT eligible user fns through omnimcode-codegen");
+    println!("                         (dual-band <2 x i64> SSE2; LLVM-backed)");
+    println!("  OMC_HBIT_JIT_VERBOSE=1 print which fns got JIT'd at startup");
 }
 
 fn read_and_run(path: &str) -> Result<(), String> {
@@ -649,6 +746,7 @@ fn execute_program(source: &str) -> Result<(), String> {
 
     let mut interpreter = Interpreter::new();
     maybe_register_python(&mut interpreter);
+    maybe_register_jit(&mut interpreter, &statements);
     // OMC_HEAL_RETRY=1 — catch runtime errors after execution starts,
     // run the heal pass on a fresh copy of the AST, and retry. Captures
     // bugs that the static heal pass missed (e.g. dynamic /0, missing
