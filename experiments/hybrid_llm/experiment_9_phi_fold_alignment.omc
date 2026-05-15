@@ -129,19 +129,19 @@ fn phi_fold_binary(x) -> array {
 }
 
 # Variant C: Fibonacci-step search via the substrate's own algorithm.
-# We use phi_pi_fib_search but ALSO track compares via the shared counter.
+# Uses the traced builtin so we can measure step-size coherence
+# externally — this closes the measurement gap from the v1 of this
+# experiment.
 fn phi_fold_fibstep(x) -> array {
     h abs_x = x;
     if abs_x < 0 { abs_x = 0 - abs_x; }
     phi_pi_fib_reset();
-    h idx = phi_pi_fib_nearest(FIBS, abs_x);
+    h traced = phi_pi_fib_nearest_traced(FIBS, abs_x);
+    h idx = arr_get(traced, 0);
+    h probes = arr_get(traced, 1);
     h s = phi_pi_fib_stats();
     h compares = arr_get(s, 1);
     h nearest = arr_get(FIBS, idx);
-    # We can't recover the probe trace from the builtin directly.
-    # Instead, emit the index returned + a synthetic trace marker.
-    h probes = [];
-    arr_push(probes, idx);
     h out = arr_new(3, 0);
     arr_set(out, 0, nearest);
     arr_set(out, 1, compares);
@@ -286,18 +286,10 @@ report("linear scan: ", agg_lin);
 report("binary search:", agg_bin);
 report("phi_pi_fib:  ", agg_fib);
 print("");
-print("NOTE on phi_pi_fib coherence: 0/0 above is a MEASUREMENT GAP,");
-print("not a real zero. The builtin phi_pi_fib_nearest doesn't expose");
-print("its internal probe trace, so we can't externally tally its step");
-print("sizes. Analytically, the Rust implementation in phi_pi_fib.rs");
-print("decrements fib_idx by 1 or 2 each iteration and probes at");
-print("offset + F(fib_idx); step sizes between consecutive probes are");
-print("F(k) values, which ARE Fibonacci by construction. So the");
-print("coherence is ~1.0 by design even though this experiment can't");
-print("measure it directly. Fixing the gap requires either adding a");
-print("traced variant to the builtin surface, or porting the search");
-print("to OMC for tracing. Worthwhile follow-up; the compare-count");
-print("savings (and the architectural argument) hold either way.");
+print("Coherence is now measured directly for phi_pi_fib using the");
+print("phi_pi_fib_nearest_traced builtin (new in this commit). Each");
+print("call returns [nearest_index, probes_array]; step coherence is");
+print("computed on consecutive elements of probes_array.");
 print("");
 
 # ---------------------------------------------------------------------------

@@ -225,6 +225,56 @@ pub fn phi_pi_fib_search_v2<T>(
     Err(low)
 }
 
+/// fibonacci_search_with_trace — same as fibonacci_search but also
+/// returns the sequence of probed indices, in order. Used by
+/// experiments that need to measure step-size coherence externally.
+/// Counters are updated identically to fibonacci_search so combined
+/// runs still report meaningful totals.
+pub fn fibonacci_search_with_trace<T>(
+    arr: &[T],
+    target: &T,
+    cmp: impl Fn(&T, &T) -> i32,
+) -> (Result<usize, usize>, Vec<usize>) {
+    let mut probes: Vec<usize> = Vec::new();
+    if arr.is_empty() {
+        return (Err(0), probes);
+    }
+    TOTAL_SEARCHES.fetch_add(1, Ordering::Relaxed);
+
+    let mut fib_idx = find_fib_index(arr.len());
+    let mut offset = 0usize;
+    let mut comparisons = 0u64;
+
+    while fib_idx > 0 {
+        comparisons += 1;
+        let fib_val = get_fib(fib_idx) as usize;
+        let mid = (offset + fib_val.min(arr.len() - offset - 1)).min(arr.len() - 1);
+        probes.push(mid);
+
+        let cmp_result = cmp(&arr[mid], target);
+        match cmp_result {
+            0 => {
+                TOTAL_COMPARISONS.fetch_add(comparisons, Ordering::Relaxed);
+                return (Ok(mid), probes);
+            }
+            n if n < 0 => {
+                offset = mid + 1;
+                fib_idx = fib_idx.saturating_sub(2);
+            }
+            _ => {
+                fib_idx = fib_idx.saturating_sub(1);
+            }
+        }
+
+        if offset >= arr.len() {
+            break;
+        }
+    }
+
+    TOTAL_COMPARISONS.fetch_add(comparisons, Ordering::Relaxed);
+    (Err(offset), probes)
+}
+
 /// Standard binary search (for comparison/benchmarking).
 ///
 /// This is provided as a reference implementation to compare against

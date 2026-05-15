@@ -1666,6 +1666,8 @@ impl Interpreter {
             // Phi-Pi-Fib search v2 + binary baseline + theoretical bound
             | "phi_pi_fib_search_v2" | "phi_pi_fib_nearest_v2"
             | "phi_pi_bin_search" | "log_phi_pi_fibonacci"
+            // Traced variants — return [result, probe_indices_array]
+            | "phi_pi_fib_search_traced" | "phi_pi_fib_nearest_traced"
             // Self-healing
             | "safe_divide" | "safe_arr_get" | "safe_arr_set"
             | "safe_add" | "safe_sub" | "safe_mul" | "resolve_singularity"
@@ -4133,6 +4135,96 @@ impl Interpreter {
                 let n = self.eval_expr(&args[0])?.to_float();
                 Ok(Value::HFloat(crate::phi_pi_fib::log_phi_pi_fibonacci(n)))
             }
+            // phi_pi_fib_search_traced(sorted_arr, target)
+            //   Returns [result_int, probe_indices_array]. `result_int`
+            //   is the exact-match index when found, or -(insert_pos+1)
+            //   when not. `probe_indices_array` is the sequence of
+            //   indices the Fibonacci-step search visited, in order.
+            //   Used by experiments that need to measure step-size
+            //   coherence externally.
+            "phi_pi_fib_search_traced" => {
+                if args.len() < 2 {
+                    return Err("phi_pi_fib_search_traced requires (sorted_array, target)".to_string());
+                }
+                let arr_v = self.eval_expr(&args[0])?;
+                let target = self.eval_expr(&args[1])?.to_int();
+                if let Value::Array(arr) = arr_v {
+                    let items_b = arr.items.borrow();
+                    let ints: Vec<i64> = items_b.iter().map(|v| v.to_int()).collect();
+                    let (r, probes) = crate::phi_pi_fib::fibonacci_search_with_trace(
+                        &ints,
+                        &target,
+                        |a, b| if a < b { -1 } else if a > b { 1 } else { 0 },
+                    );
+                    let result_int = match r {
+                        Ok(i) => i as i64,
+                        Err(insert_pos) => -(insert_pos as i64 + 1),
+                    };
+                    let probe_vals: Vec<Value> = probes
+                        .into_iter()
+                        .map(|p| Value::HInt(HInt::new(p as i64)))
+                        .collect();
+                    let out = vec![
+                        Value::HInt(HInt::new(result_int)),
+                        Value::Array(HArray::from_vec(probe_vals)),
+                    ];
+                    Ok(Value::Array(HArray::from_vec(out)))
+                } else {
+                    Err("phi_pi_fib_search_traced: first argument must be an array".to_string())
+                }
+            }
+            // phi_pi_fib_nearest_traced(sorted_arr, target)
+            //   Returns [nearest_index, probe_indices_array]. Always
+            //   resolves to a valid nearest index (or -1 for empty arrays).
+            "phi_pi_fib_nearest_traced" => {
+                if args.len() < 2 {
+                    return Err("phi_pi_fib_nearest_traced requires (sorted_array, target)".to_string());
+                }
+                let arr_v = self.eval_expr(&args[0])?;
+                let target = self.eval_expr(&args[1])?.to_int();
+                if let Value::Array(arr) = arr_v {
+                    let items_b = arr.items.borrow();
+                    let ints: Vec<i64> = items_b.iter().map(|v| v.to_int()).collect();
+                    if ints.is_empty() {
+                        let out = vec![
+                            Value::HInt(HInt::new(-1)),
+                            Value::Array(HArray::from_vec(vec![])),
+                        ];
+                        return Ok(Value::Array(HArray::from_vec(out)));
+                    }
+                    let (r, probes) = crate::phi_pi_fib::fibonacci_search_with_trace(
+                        &ints,
+                        &target,
+                        |a, b| if a < b { -1 } else if a > b { 1 } else { 0 },
+                    );
+                    let idx: usize = match r {
+                        Ok(i) => i,
+                        Err(insert_pos) => {
+                            let n = ints.len();
+                            if insert_pos == 0 {
+                                0
+                            } else if insert_pos >= n {
+                                n - 1
+                            } else {
+                                let left = (target - ints[insert_pos - 1]).abs();
+                                let right = (ints[insert_pos] - target).abs();
+                                if right < left { insert_pos } else { insert_pos - 1 }
+                            }
+                        }
+                    };
+                    let probe_vals: Vec<Value> = probes
+                        .into_iter()
+                        .map(|p| Value::HInt(HInt::new(p as i64)))
+                        .collect();
+                    let out = vec![
+                        Value::HInt(HInt::new(idx as i64)),
+                        Value::Array(HArray::from_vec(probe_vals)),
+                    ];
+                    Ok(Value::Array(HArray::from_vec(out)))
+                } else {
+                    Err("phi_pi_fib_nearest_traced: first argument must be an array".to_string())
+                }
+            }
             "arr_slice" => {
                 if args.len() < 3 {
                     return Err("arr_slice requires (array, start, end)".to_string());
@@ -5102,6 +5194,7 @@ pub(crate) const HEAL_BUILTIN_NAMES: &[&str] = &[
     "phi_pi_fib_stats", "phi_pi_fib_reset",
     "phi_pi_fib_search_v2", "phi_pi_fib_nearest_v2",
     "phi_pi_bin_search", "log_phi_pi_fibonacci",
+    "phi_pi_fib_search_traced", "phi_pi_fib_nearest_traced",
     // Self-healing
     "safe_divide", "safe_arr_get", "safe_arr_set",
     "safe_add", "safe_sub", "safe_mul", "resolve_singularity",
