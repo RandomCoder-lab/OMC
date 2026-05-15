@@ -52,6 +52,41 @@ fn sum_to(n) {
     }
     return s;
 }
+
+# --- Path A.1: harmony-gated branch elision ---
+# Two execution paths: a cheap one (just doubles) and an expensive
+# one (sum-to-100, ~100 iter loop). The `predicted` fn uses harmony
+# of phi_shadow(x) as a runtime signal: if bands stay close to an
+# attractor, take the cheap path; otherwise fall to expensive.
+#
+# `no_pred_always_expensive` runs the expensive path unconditionally
+# (no harmony check, no shadow). Comparing predicted() to it tells
+# us what @predict actually buys when the harmony signal is high.
+fn cheap_path(x) {
+    return x + x;
+}
+fn expensive_path(x) {
+    h s = 0;
+    h k = 1;
+    while k <= 100 {
+        s = s + k;
+        k = k + 1;
+    }
+    return s + x;
+}
+fn predicted(x) {
+    h y = phi_shadow(x);
+    if harmony(y) >= 500 {
+        return cheap_path(x);
+    }
+    return expensive_path(x);
+}
+fn no_pred_always_expensive(x) {
+    return expensive_path(x);
+}
+fn no_pred_always_cheap(x) {
+    return cheap_path(x);
+}
 "#;
 
 fn main() {
@@ -69,6 +104,17 @@ fn main() {
     bench_fn("factorial", iters, fn_arg);
     println!();
     bench_fn("sum_to", iters, 100);
+
+    println!();
+    println!("=== Path A.1: harmony-gated branch elision ===");
+    println!("Two regimes:");
+    println!("  - HIGH-harmony input (x=0 → α=β=0 → harmony=1000)");
+    println!("    `predicted` should take the cheap branch.");
+    println!("  - LOW-harmony input (x=42 → α=42, β=phi_fold(42)*1000=957");
+    println!("    → diff 915, near attractor 987 dist 72 → harmony ≈ 14)");
+    println!("    `predicted` should fall to the expensive branch.");
+    println!();
+    bench_predict(iters);
 
     println!();
     println!("Notes:");
@@ -123,6 +169,102 @@ fn bench_fn(fn_name: &str, iters: usize, arg: i64) {
             "  → JIT vs tree-walk: {:.1}x faster (median)",
             speedup
         );
+    }
+}
+
+fn bench_predict(iters: usize) {
+    let mut parser = Parser::new(SOURCE);
+    let statements = parser.parse().expect("parse");
+    let module = omnimcode_core::compiler::compile_program(&statements).expect("compile");
+    let context = Context::create();
+    let jit = JitContext::new(&context).expect("jit");
+    let jitted = jit.jit_module(&module).expect("jit_module");
+
+    let predicted = jitted.get("predicted").expect("predicted JIT'd");
+    let always_exp = jitted
+        .get("no_pred_always_expensive")
+        .expect("no_pred_always_expensive JIT'd");
+    let always_cheap = jitted
+        .get("no_pred_always_cheap")
+        .expect("no_pred_always_cheap JIT'd");
+
+    println!("--- Direct path costs (no harmony check, no shadow) ---");
+    let (_, cheap_med, _) = time_loop(iters, || {
+        let _ = always_cheap.call(&[42]).expect("call");
+    });
+    println!("  cheap_path                 median={:>8.1}ns", cheap_med);
+    let (_, exp_med, _) = time_loop(iters, || {
+        let _ = always_exp.call(&[42]).expect("call");
+    });
+    println!("  expensive_path             median={:>8.1}ns", exp_med);
+    let cost_ratio = exp_med / cheap_med.max(1.0);
+    println!(
+        "  expensive/cheap ratio: {:.1}x  (cost-cut ceiling for @predict)",
+        cost_ratio
+    );
+
+    println!();
+    println!("--- Predicted path (phi_shadow + harmony gate) ---");
+    let (_, pred_high_med, _) = time_loop(iters, || {
+        let _ = predicted.call(&[0]).expect("call");
+    });
+    println!(
+        "  predicted(x=0)   high-harmony  median={:>8.1}ns  → expected: cheap branch",
+        pred_high_med
+    );
+    let (_, pred_low_med, _) = time_loop(iters, || {
+        let _ = predicted.call(&[42]).expect("call");
+    });
+    println!(
+        "  predicted(x=42)  low-harmony   median={:>8.1}ns  → expected: expensive branch",
+        pred_low_med
+    );
+
+    println!();
+    println!("--- The honest cost analysis ---");
+    let pred_overhead = pred_low_med - exp_med;
+    let pred_overhead_pct = (pred_overhead / exp_med) * 100.0;
+    println!(
+        "  Overhead of phi_shadow+harmony+branch on the LOW path: +{:.1}ns (+{:.1}%)",
+        pred_overhead, pred_overhead_pct
+    );
+    let pred_savings = exp_med - pred_high_med;
+    let pred_savings_pct = (pred_savings / exp_med) * 100.0;
+    println!(
+        "  Savings on the HIGH path vs expensive: -{:.1}ns ({:.1}% reduction)",
+        pred_savings, pred_savings_pct
+    );
+
+    println!();
+    println!("--- Break-even analysis ---");
+    // pred_low_med = expensive + overhead
+    // pred_high_med = cheap + overhead
+    // Break-even fraction p of inputs that hit cheap branch:
+    //   p * pred_high_med + (1-p) * pred_low_med  <  exp_med  (always expensive)
+    //   p * (pred_high_med - pred_low_med)  <  exp_med - pred_low_med
+    //   p * (pred_low_med - pred_high_med)  >  pred_low_med - exp_med
+    let numerator = pred_low_med - exp_med;
+    let denom = pred_low_med - pred_high_med;
+    if denom > 0.0 {
+        let p_breakeven = numerator / denom;
+        if p_breakeven < 0.0 {
+            println!(
+                "  Break-even fraction: predicted ALWAYS wins ({} < 0)",
+                p_breakeven
+            );
+        } else if p_breakeven > 1.0 {
+            println!(
+                "  Break-even fraction: predicted NEVER wins ({:.2} > 1.0)",
+                p_breakeven
+            );
+        } else {
+            println!(
+                "  Break-even fraction: predicted wins when ≥{:.1}% of inputs are high-harmony",
+                p_breakeven * 100.0
+            );
+        }
+    } else {
+        println!("  (cheap and low paths timed identically — can't compute break-even)");
     }
 }
 

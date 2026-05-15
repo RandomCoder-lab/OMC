@@ -1,6 +1,9 @@
-# OMC dual-band JIT — first benchmark results
+# OMC dual-band JIT — benchmark results
 
-**TL;DR:** 200–260× faster than tree-walk on pure-int hot loops. Microbenchmark caveats apply, but the architectural payoff that justified Sessions A–E is real.
+**TL;DR:**
+- `@hbit` alone (Session D wiring + dual-band lowerer): **200–270× faster** than tree-walk on pure-int hot loops.
+- `@hbit + @harmony + @predict` (Sessions F+G adding harmony-gated branch elision): **95.2% additional reduction** on high-harmony inputs vs always-expensive. The break-even is forgiving — `@predict` wins as long as at least 8.2% of inputs hit the cheap branch.
+- The architecture **compounds** in the regime where the harmony signal is informative.
 
 ## Setup
 
@@ -46,8 +49,49 @@ Each function is called 200,000 times in a tight loop. Wall-clock per call is re
 
 | Function | Tree-walk (median) | Dual-band JIT (median) | Speedup |
 |---|--:|--:|--:|
-| `factorial(12)` — 12 recursive calls + multiplies | 13,810 ns | 52.6 ns | **262×** |
-| `sum_to(100)` — 100-iter while loop with locals | 53,643 ns | 260 ns | **206×** |
+| `factorial(12)` — 12 recursive calls + multiplies | 14,309 ns | 52.6 ns | **272×** |
+| `sum_to(100)` — 100-iter while loop with locals | 53,202 ns | 267 ns | **200×** |
+
+## Path A.1: `@hbit + @harmony + @predict` (Sessions F+G)
+
+After Sessions F (phi_shadow → divergent β) and G (harmony() intrinsic + extern call), an OMC fn can use harmony as a runtime signal to choose between cheap and expensive code paths. The bench source:
+
+```omc
+fn cheap_path(x) {
+    return x + x;
+}
+fn expensive_path(x) {
+    h s = 0; h k = 1;
+    while k <= 100 { s = s + k; k = k + 1; }
+    return s + x;
+}
+fn predicted(x) {
+    h y = phi_shadow(x);
+    if harmony(y) >= 500 {
+        return cheap_path(x);
+    }
+    return expensive_path(x);
+}
+```
+
+Two regimes are tested:
+- **High-harmony input** `x = 0`: α=0, β=phi_fold(0)*1000=0, harmony=1000 → cheap branch wins.
+- **Low-harmony input** `x = 42`: α=42, β=phi_fold(42)*1000≈957, diff 915, near attractor 987 (dist 72), harmony ≈ 14 → expensive branch wins.
+
+| Path | Median ns/call |
+|---|--:|
+| `cheap_path(42)` direct | 4.5 |
+| `expensive_path(42)` direct | 279.1 |
+| Cheap/expensive ratio (cost-cut ceiling) | **62×** |
+| `predicted(0)` — high-harmony, cheap branch | 13.5 |
+| `predicted(42)` — low-harmony, expensive branch | 302.7 |
+
+**The honest cost analysis:**
+- **Overhead** when @predict is "wrong" (low-harmony input falls to expensive): +23.6 ns (+8.5% over plain expensive)
+- **Savings** when @predict is "right" (high-harmony input takes cheap): −265.6 ns (95.2% reduction over plain expensive)
+- **Break-even fraction:** @predict beats always-expensive when ≥**8.2%** of inputs hit the cheap branch
+
+**What this tells us:** the architecture compounds. `@hbit` alone gives ~270× over tree-walk. Stacking `@harmony + @predict` on top adds another ~20× on aligned inputs (cheap path inside the JIT'd fn), at the cost of ~8% on misaligned inputs. The break-even is forgiving enough that @predict is almost always a net win unless harmony is a useless signal for your workload.
 
 ## How honest is this comparison?
 
