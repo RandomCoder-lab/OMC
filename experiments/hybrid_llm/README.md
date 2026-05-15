@@ -90,6 +90,7 @@ OMC_VM=1 ./target/release/omnimcode-standalone experiments/hybrid_llm/experiment
 | 4A | Harmonic OOD gate vs L2-NN baseline on 4-dim synthetic vectors (N_REF=300, 150 in-dist test, 150 OOD test). OOD = uniform [1, 90]. | L2 wins. AUROC L2 0.961 vs harmonic 0.910. TPR @ FPR=10%: L2 0.91 vs harmonic 0.71. L2 has a trivial magnitude advantage — mean L2 score 87 (in-dist) vs 1313 (OOD), since OOD vectors are larger on average and harmonic gate's `phi.fold` discards magnitude. |
 | 4B | Same gates, **magnitude-matched** structural OOD (inverted attractor weights: 10%/30%/60% small/med/large vs in-dist's 60%/30%/10%). | **Harmonic edges past L2 in AUROC: 0.956 vs 0.946.** At low FPR L2 still wins (TPR@FPR=1%: L2 0.60 vs harmonic 0.48), but on overall ranking the structural rarity signal beats the L2 metric once magnitude is no longer a giveaway. |
 | 5 | HBit cross-cutting tension (no reference) + combined gate (sum of z-normalised HBit, marginal rarity, L2) on both scenarios. | **Scenario A: HBit tension AUROC = 1.0** (perfect — mean tension 0.0 in-dist vs 20.1 OOD). Combined: 0.999. **Scenario B: HBit AUROC = 0.5** (random — both sides on-manifold, tension = 0 everywhere). Combined: 0.967, beating every single gate. Each gate owns a different OOD axis: HBit→off-manifold, marginal→distribution-shift, L2→magnitude. |
+| 6 | Phi-Pi-Fib compression gate: model as `(library + chain of keys)` instead of dense weights. 12-primitive library keyed by Fibonacci attractors, gate = nearest-key lookup, chains = "parameters". | Composition: trace `[3, 8, 13, 5, 21]` on state 7 → 9. Compression: 29 ints (library+chain) vs ~1001 ints dense table over [0,1000] = ~34× smaller (extrapolates to 9 orders of magnitude at LLM scale). **Death tolerance: all 12 library deletions complete without crashing — biggest deltas: kill key=13 → +12, kill key=5 → +5, kill key=21 → +3. 8 of 12 deletions invisible to output (unused capabilities or path coincidence).** Interchangeability: 6 different chains over the same library yield 6 different outputs (9, 22, 9, 5, 5, 52). |
 
 ### Cumulative read across experiments 0–5
 
@@ -167,12 +168,21 @@ result.
 - **3** Multi-channel PE with L2 lookup. ✓ done
 - **4** Harmonic OOD gate vs L2-NN baseline, two scenarios. ✓ done
 - **5** HBit cross-cutting tension + 3-gate combined detector. ✓ done
-- **6** Layer-norm-matched setup: pre-normalise all vectors to unit L2.
-  Re-run scenarios A and B. Expected: HBit's perfect AUROC on A
-  survives (tension is magnitude-invariant by definition); L2's free
-  magnitude advantage on A disappears; the combined gate's edge on B
-  widens.
-- **7** Bake the combined gate into a reusable library:
+- **6** Phi-Pi-Fib compression gate: model = library + chain. ✓ done
+- **7** Wire `omnimcode-core/src/phi_pi_fib.rs::fibonacci_search` in
+  as an OMC builtin so the gate uses sublinear search instead of the
+  linear scan in experiment 6. Semantics identical at small library
+  size; necessary at 10^6+ entries.
+- **8** Learnable routing policy: a function `state -> chain` that
+  picks WHICH chain to run from input state. Start with a simple
+  hand-authored policy (if state on small attractor use chain A,
+  else chain B); then explore phi-folded state as a hash into a
+  policy table. This is the "compression gate as learned component"
+  half — exp 6 had only the library + nearest-key fallback.
+- **9** Layer-norm-matched OOD setup (was the old exp 6): pre-
+  normalise to unit L2 and re-run scenarios A and B from exp 4.
+  Confirms HBit's magnitude-invariance.
+- **10** Bake the combined OOD gate into a reusable library:
   `experiments/hybrid_llm/lib/ood_gate.omc` exposing
   `ood_gate.fit(ref_corpus)` and `ood_gate.score(vec)`. Then once
   torch is available, replicate on real transformer activations.
