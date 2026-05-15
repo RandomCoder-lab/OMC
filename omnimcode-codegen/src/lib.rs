@@ -30,6 +30,8 @@
 
 #![cfg(feature = "llvm-jit")]
 
+mod dual_band;
+
 use std::collections::HashMap;
 
 use inkwell::basic_block::BasicBlock;
@@ -80,6 +82,28 @@ impl<'ctx> JitContext<'ctx> {
         f: &CompiledFunction,
     ) -> Result<FunctionValue<'ctx>, CodegenError> {
         let lowerer = FunctionLowerer::prepare(self.context, &self.module, f)?;
+        lowerer.lower()
+    }
+
+    /// Lower one CompiledFunction in HBit dual-band mode. The emitted
+    /// LLVM IR uses `<2 x i64>` as the carrier for every bytecode-level
+    /// i64 value — element 0 is the α band (the classical value the
+    /// caller sees), element 1 is the β band (the harmonic shadow).
+    /// All ops apply to both lanes in parallel; on x86-64 this lowers
+    /// to 128-bit SSE2 vector instructions.
+    ///
+    /// The emitted function is named `<original_name>_hbit` so a
+    /// scalar version (from `lower_function`) and a dual-band version
+    /// can coexist in the same module for parity testing.
+    ///
+    /// Caller-facing signature is still scalar — params come in as
+    /// i64 and get splatted to `<α=p, β=p>` at fn entry; the return
+    /// extracts the α lane back to i64.
+    pub fn lower_function_dual_band(
+        &self,
+        f: &CompiledFunction,
+    ) -> Result<FunctionValue<'ctx>, CodegenError> {
+        let lowerer = dual_band::DualBandLowerer::prepare(self.context, &self.module, f)?;
         lowerer.lower()
     }
 
