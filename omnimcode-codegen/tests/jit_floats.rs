@@ -124,6 +124,55 @@ fn cross_fn_float_passing() {
 }
 
 #[test]
+fn float_div_and_compare_in_jit() {
+    // J4 verification: typed-float Div + comparisons compile cleanly
+    // and produce correct answers in the JIT path. Computes the
+    // partial harmonic series H_n that float_loop_accumulator's old
+    // version couldn't because Op::Div was integer-coercing the float
+    // bit-pattern.
+    //
+    // The compiler emits DivFloat when both operands are statically
+    // typed-float (the `1.0 / to_float(k)` shape).
+    let source = r#"
+        fn harmonic_x1000(n) {
+            h sum = 0.0;
+            h k = 1;
+            while k <= n {
+                sum = sum + 1.0 / to_float(k);
+                k = k + 1;
+            }
+            return to_int(sum * 1000.0);
+        }
+        fn float_lt(a, b) {
+            h af = to_float(a);
+            h bf = to_float(b);
+            if af < bf {
+                return 1;
+            }
+            return 0;
+        }
+    "#;
+    let mut parser = Parser::new(source);
+    let statements = parser.parse().expect("parse");
+    let module = omnimcode_core::compiler::compile_program(&statements).expect("compile");
+    let ctx = Context::create();
+    let jit = JitContext::new(&ctx).expect("jit");
+    let jitted = jit.jit_module(&module).expect("jit_module");
+
+    let h = jitted.get("harmonic_x1000").expect("harmonic_x1000 JIT'd");
+    assert_eq!(h.call(&[1]).expect("call"), 1000);
+    assert_eq!(h.call(&[2]).expect("call"), 1500);
+    assert_eq!(h.call(&[3]).expect("call"), 1833);
+    let h10 = h.call(&[10]).expect("call");
+    assert!(h10 >= 2928 && h10 <= 2930, "H_10*1000 ~= 2929; got {}", h10);
+
+    let lt = jitted.get("float_lt").expect("float_lt JIT'd");
+    assert_eq!(lt.call(&[1, 2]).expect("call"), 1);
+    assert_eq!(lt.call(&[5, 5]).expect("call"), 0);
+    assert_eq!(lt.call(&[10, 3]).expect("call"), 0);
+}
+
+#[test]
 fn float_loop_accumulator() {
     // Float Add/Sub/Mul in a loop. Computes
     //   sum_squares(n) = 1² + 2² + … + n²    (in float space)

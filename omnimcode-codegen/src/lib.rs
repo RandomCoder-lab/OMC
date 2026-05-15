@@ -632,6 +632,7 @@ impl<'ctx, 'a> FunctionLowerer<'ctx, 'a> {
                 Op::AddFloat => self.bin_float(&mut stack, i, |b, l, r| b.build_float_add(l, r, "fadd"))?,
                 Op::SubFloat => self.bin_float(&mut stack, i, |b, l, r| b.build_float_sub(l, r, "fsub"))?,
                 Op::MulFloat => self.bin_float(&mut stack, i, |b, l, r| b.build_float_mul(l, r, "fmul"))?,
+                Op::DivFloat => self.bin_float(&mut stack, i, |b, l, r| b.build_float_div(l, r, "fdiv"))?,
                 Op::Neg => {
                     let v = pop(&mut stack, i, "Neg")?;
                     let zero = i64_type.const_int(0, false);
@@ -662,6 +663,17 @@ impl<'ctx, 'a> FunctionLowerer<'ctx, 'a> {
                 Op::Le => self.cmp_op(&mut stack, i, IntPredicate::SLE)?,
                 Op::Gt => self.cmp_op(&mut stack, i, IntPredicate::SGT)?,
                 Op::Ge => self.cmp_op(&mut stack, i, IntPredicate::SGE)?,
+                // J4: float-typed comparisons. Bitcast i64 stack
+                // operands to f64, compare with FloatPredicate, zext
+                // result back to i64 for stack storage. OEQ/ONE/etc
+                // are "ordered" predicates — return false on NaN
+                // operands, matching standard float comparison semantics.
+                Op::EqFloat => self.cmp_op_float(&mut stack, i, inkwell::FloatPredicate::OEQ)?,
+                Op::NeFloat => self.cmp_op_float(&mut stack, i, inkwell::FloatPredicate::ONE)?,
+                Op::LtFloat => self.cmp_op_float(&mut stack, i, inkwell::FloatPredicate::OLT)?,
+                Op::LeFloat => self.cmp_op_float(&mut stack, i, inkwell::FloatPredicate::OLE)?,
+                Op::GtFloat => self.cmp_op_float(&mut stack, i, inkwell::FloatPredicate::OGT)?,
+                Op::GeFloat => self.cmp_op_float(&mut stack, i, inkwell::FloatPredicate::OGE)?,
 
                 Op::And => {
                     // Non-short-circuit: pop both, treat zero as false,
@@ -988,6 +1000,42 @@ impl<'ctx, 'a> FunctionLowerer<'ctx, 'a> {
             .builder
             .build_int_z_extend(i1, i64_type, "cmpi64")
             .map_err(|e| format!("cmp ext at op{}: {}", op_idx, e))?;
+        stack.push(i64v);
+        Ok(())
+    }
+
+    /// J4: float comparison. Bitcast i64 stack operands back to f64,
+    /// compare with FloatPredicate (ordered: O*), zext result to i64.
+    /// Symmetric to bin_float — operands live as bitcast-i64 on the
+    /// stack; we cast at the boundary.
+    fn cmp_op_float(
+        &self,
+        stack: &mut Vec<IntValue<'ctx>>,
+        op_idx: usize,
+        pred: inkwell::FloatPredicate,
+    ) -> Result<(), CodegenError> {
+        let rhs_i = pop(stack, op_idx, "fcmp rhs")?;
+        let lhs_i = pop(stack, op_idx, "fcmp lhs")?;
+        let f64_type = self.ctx.f64_type();
+        let i64_type = self.ctx.i64_type();
+        let lhs_f = self
+            .builder
+            .build_bit_cast(lhs_i, f64_type, "fcmp_lf")
+            .map_err(|e| format!("fcmp lhs cast at op{}: {}", op_idx, e))?
+            .into_float_value();
+        let rhs_f = self
+            .builder
+            .build_bit_cast(rhs_i, f64_type, "fcmp_rf")
+            .map_err(|e| format!("fcmp rhs cast at op{}: {}", op_idx, e))?
+            .into_float_value();
+        let i1 = self
+            .builder
+            .build_float_compare(pred, lhs_f, rhs_f, "fcmp")
+            .map_err(|e| format!("fcmp at op{}: {}", op_idx, e))?;
+        let i64v = self
+            .builder
+            .build_int_z_extend(i1, i64_type, "fcmp_i64")
+            .map_err(|e| format!("fcmp ext at op{}: {}", op_idx, e))?;
         stack.push(i64v);
         Ok(())
     }

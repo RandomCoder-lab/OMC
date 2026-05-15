@@ -35,6 +35,7 @@ fn op_mnemonic(op: &Op, ip: usize, constants: &[Const]) -> String {
         Op::AddFloat => "ADD_FLOAT".to_string(),
         Op::SubFloat => "SUB_FLOAT".to_string(),
         Op::MulFloat => "MUL_FLOAT".to_string(),
+        Op::DivFloat => "DIV_FLOAT".to_string(),
 
         Op::Eq => "EQ".to_string(),
         Op::Ne => "NE".to_string(),
@@ -42,6 +43,12 @@ fn op_mnemonic(op: &Op, ip: usize, constants: &[Const]) -> String {
         Op::Le => "LE".to_string(),
         Op::Gt => "GT".to_string(),
         Op::Ge => "GE".to_string(),
+        Op::EqFloat => "EQ_FLOAT".to_string(),
+        Op::NeFloat => "NE_FLOAT".to_string(),
+        Op::LtFloat => "LT_FLOAT".to_string(),
+        Op::LeFloat => "LE_FLOAT".to_string(),
+        Op::GtFloat => "GT_FLOAT".to_string(),
+        Op::GeFloat => "GE_FLOAT".to_string(),
 
         Op::And => "AND".to_string(),
         Op::Or => "OR".to_string(),

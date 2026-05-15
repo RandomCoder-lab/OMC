@@ -320,9 +320,14 @@ impl Compiler {
                 };
             }
             Expression::Div(l, r) => {
+                let lt = self.infer_type(l);
+                let rt = self.infer_type(r);
                 self.compile_expr(l)?;
                 self.compile_expr(r)?;
-                self.emit(Op::Div);
+                match (lt, rt) {
+                    (Some("float"), Some("float")) => self.emit(Op::DivFloat),
+                    _ => self.emit(Op::Div),
+                };
             }
             Expression::Mod(l, r) => {
                 self.compile_expr(l)?;
@@ -330,34 +335,64 @@ impl Compiler {
                 self.emit(Op::Mod);
             }
             Expression::Eq(l, r) => {
+                let lt = self.infer_type(l);
+                let rt = self.infer_type(r);
                 self.compile_expr(l)?;
                 self.compile_expr(r)?;
-                self.emit(Op::Eq);
+                match (lt, rt) {
+                    (Some("float"), Some("float")) => self.emit(Op::EqFloat),
+                    _ => self.emit(Op::Eq),
+                };
             }
             Expression::Ne(l, r) => {
+                let lt = self.infer_type(l);
+                let rt = self.infer_type(r);
                 self.compile_expr(l)?;
                 self.compile_expr(r)?;
-                self.emit(Op::Ne);
+                match (lt, rt) {
+                    (Some("float"), Some("float")) => self.emit(Op::NeFloat),
+                    _ => self.emit(Op::Ne),
+                };
             }
             Expression::Lt(l, r) => {
+                let lt = self.infer_type(l);
+                let rt = self.infer_type(r);
                 self.compile_expr(l)?;
                 self.compile_expr(r)?;
-                self.emit(Op::Lt);
+                match (lt, rt) {
+                    (Some("float"), Some("float")) => self.emit(Op::LtFloat),
+                    _ => self.emit(Op::Lt),
+                };
             }
             Expression::Le(l, r) => {
+                let lt = self.infer_type(l);
+                let rt = self.infer_type(r);
                 self.compile_expr(l)?;
                 self.compile_expr(r)?;
-                self.emit(Op::Le);
+                match (lt, rt) {
+                    (Some("float"), Some("float")) => self.emit(Op::LeFloat),
+                    _ => self.emit(Op::Le),
+                };
             }
             Expression::Gt(l, r) => {
+                let lt = self.infer_type(l);
+                let rt = self.infer_type(r);
                 self.compile_expr(l)?;
                 self.compile_expr(r)?;
-                self.emit(Op::Gt);
+                match (lt, rt) {
+                    (Some("float"), Some("float")) => self.emit(Op::GtFloat),
+                    _ => self.emit(Op::Gt),
+                };
             }
             Expression::Ge(l, r) => {
+                let lt = self.infer_type(l);
+                let rt = self.infer_type(r);
                 self.compile_expr(l)?;
                 self.compile_expr(r)?;
-                self.emit(Op::Ge);
+                match (lt, rt) {
+                    (Some("float"), Some("float")) => self.emit(Op::GeFloat),
+                    _ => self.emit(Op::Ge),
+                };
             }
             Expression::And(l, r) => {
                 // Short-circuit: eval l; if false, push false and skip r.

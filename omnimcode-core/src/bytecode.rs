@@ -61,6 +61,13 @@ pub enum Op {
     AddFloat,
     SubFloat,
     MulFloat,
+    /// J4: float division. Plain Op::Div coerces both operands to int
+    /// in the tree-walk and bytecode VM, giving wrong answers for
+    /// float operands. The JIT path also reads operands as int. This
+    /// op is emitted by the compiler when both sides are statically
+    /// typed-float; tree-walk and VM treat it as float div, JIT
+    /// bitcasts and emits build_float_div.
+    DivFloat,
 
     Eq,
     Ne,
@@ -68,6 +75,15 @@ pub enum Op {
     Le,
     Gt,
     Ge,
+    /// J4: float comparisons. Plain Eq/Ne/Lt/Le/Gt/Ge call values_equal
+    /// or to_int comparison; both wrong for float bit-patterns. Emitted
+    /// when both operands are statically typed-float.
+    EqFloat,
+    NeFloat,
+    LtFloat,
+    LeFloat,
+    GtFloat,
+    GeFloat,
 
     And,
     Or,

@@ -330,6 +330,7 @@ impl<'ctx, 'a> DualBandLowerer<'ctx, 'a> {
                 // through int math (matched-band semantics until an
                 // explicit phi_shadow re-derives β).
                 Op::AddFloat => self.bin_vec_float(&mut stack, i, |b, l, r| b.build_float_add(l, r, "fadd"))?,
+                Op::DivFloat => self.bin_vec_float(&mut stack, i, |b, l, r| b.build_float_div(l, r, "fdiv"))?,
                 Op::SubFloat => self.bin_vec_float(&mut stack, i, |b, l, r| b.build_float_sub(l, r, "fsub"))?,
                 Op::MulFloat => self.bin_vec_float(&mut stack, i, |b, l, r| b.build_float_mul(l, r, "fmul"))?,
                 Op::Sub | Op::SubInt => self.bin_vec(&mut stack, i, |b, l, r| b.build_int_sub(l, r, "sub"))?,
@@ -424,6 +425,13 @@ impl<'ctx, 'a> DualBandLowerer<'ctx, 'a> {
                 Op::Le => self.cmp_vec(&mut stack, i, IntPredicate::SLE)?,
                 Op::Gt => self.cmp_vec(&mut stack, i, IntPredicate::SGT)?,
                 Op::Ge => self.cmp_vec(&mut stack, i, IntPredicate::SGE)?,
+                // J4: parallel-lane float comparisons.
+                Op::EqFloat => self.cmp_vec_float(&mut stack, i, inkwell::FloatPredicate::OEQ)?,
+                Op::NeFloat => self.cmp_vec_float(&mut stack, i, inkwell::FloatPredicate::ONE)?,
+                Op::LtFloat => self.cmp_vec_float(&mut stack, i, inkwell::FloatPredicate::OLT)?,
+                Op::LeFloat => self.cmp_vec_float(&mut stack, i, inkwell::FloatPredicate::OLE)?,
+                Op::GtFloat => self.cmp_vec_float(&mut stack, i, inkwell::FloatPredicate::OGT)?,
+                Op::GeFloat => self.cmp_vec_float(&mut stack, i, inkwell::FloatPredicate::OGE)?,
 
                 Op::And => self.logical_vec(&mut stack, i, true)?,
                 Op::Or => self.logical_vec(&mut stack, i, false)?,
@@ -1219,6 +1227,41 @@ impl<'ctx, 'a> DualBandLowerer<'ctx, 'a> {
             .builder
             .build_int_z_extend(cmp_i1, self.v2i64, "cmpi64")
             .map_err(|e| format!("hbit cmp extend at op{}: {}", op_idx, e))?;
+        stack.push(cmp_i64);
+        Ok(())
+    }
+
+    /// J4: parallel-lane float comparison. Symmetric to bin_vec_float
+    /// — bitcast <2 x i64> stack operands to <2 x f64>, compare with
+    /// FloatPredicate, zext result back to <2 x i64>.
+    fn cmp_vec_float(
+        &self,
+        stack: &mut Vec<VectorValue<'ctx>>,
+        op_idx: usize,
+        pred: inkwell::FloatPredicate,
+    ) -> Result<(), CodegenError> {
+        let f64_type = self.ctx.f64_type();
+        let v2f64 = f64_type.vec_type(2);
+        let rhs = self.pop(stack, op_idx, "fcmp rhs")?;
+        let lhs = self.pop(stack, op_idx, "fcmp lhs")?;
+        let lhs_f = self
+            .builder
+            .build_bit_cast(lhs, v2f64, "fcmp_lf")
+            .map_err(|e| format!("hbit fcmp lhs cast at op{}: {}", op_idx, e))?
+            .into_vector_value();
+        let rhs_f = self
+            .builder
+            .build_bit_cast(rhs, v2f64, "fcmp_rf")
+            .map_err(|e| format!("hbit fcmp rhs cast at op{}: {}", op_idx, e))?
+            .into_vector_value();
+        let cmp_i1 = self
+            .builder
+            .build_float_compare(pred, lhs_f, rhs_f, "fcmp")
+            .map_err(|e| format!("hbit fcmp at op{}: {}", op_idx, e))?;
+        let cmp_i64 = self
+            .builder
+            .build_int_z_extend(cmp_i1, self.v2i64, "fcmp_i64")
+            .map_err(|e| format!("hbit fcmp extend at op{}: {}", op_idx, e))?;
         stack.push(cmp_i64);
         Ok(())
     }

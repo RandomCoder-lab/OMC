@@ -205,6 +205,24 @@ impl Vm {
                     let l = stack.pop().ok_or("stack underflow")?.to_float();
                     stack.push(Value::HFloat(l * r));
                 }
+                Op::DivFloat => {
+                    let r = stack.pop().ok_or("stack underflow")?.to_float();
+                    let l = stack.pop().ok_or("stack underflow")?.to_float();
+                    if r == 0.0 {
+                        // Match Op::Div's singularity semantics: divide
+                        // by zero produces a Singularity value carrying
+                        // the numerator. Tree-walk uses arith_div for
+                        // this; here we inline since DivFloat is purely
+                        // float-typed.
+                        stack.push(Value::Singularity {
+                            numerator: l as i64,
+                            denominator: 0,
+                            context: "divide by zero".to_string(),
+                        });
+                    } else {
+                        stack.push(Value::HFloat(l / r));
+                    }
+                }
                 Op::Neg => {
                     let v = stack.pop().ok_or("stack underflow")?;
                     if v.is_float() {
@@ -218,6 +236,39 @@ impl Vm {
                     let l = stack.pop().ok_or("stack underflow")?;
                     let cmp = cmp_op(&l, &r, op);
                     stack.push(Value::Bool(cmp));
+                }
+                // J4: float-typed comparisons. Skip the runtime
+                // is_float() probe in cmp_op — operands are statically
+                // typed-float by construction.
+                Op::EqFloat => {
+                    let r = stack.pop().ok_or("stack underflow")?.to_float();
+                    let l = stack.pop().ok_or("stack underflow")?.to_float();
+                    stack.push(Value::Bool(l == r));
+                }
+                Op::NeFloat => {
+                    let r = stack.pop().ok_or("stack underflow")?.to_float();
+                    let l = stack.pop().ok_or("stack underflow")?.to_float();
+                    stack.push(Value::Bool(l != r));
+                }
+                Op::LtFloat => {
+                    let r = stack.pop().ok_or("stack underflow")?.to_float();
+                    let l = stack.pop().ok_or("stack underflow")?.to_float();
+                    stack.push(Value::Bool(l < r));
+                }
+                Op::LeFloat => {
+                    let r = stack.pop().ok_or("stack underflow")?.to_float();
+                    let l = stack.pop().ok_or("stack underflow")?.to_float();
+                    stack.push(Value::Bool(l <= r));
+                }
+                Op::GtFloat => {
+                    let r = stack.pop().ok_or("stack underflow")?.to_float();
+                    let l = stack.pop().ok_or("stack underflow")?.to_float();
+                    stack.push(Value::Bool(l > r));
+                }
+                Op::GeFloat => {
+                    let r = stack.pop().ok_or("stack underflow")?.to_float();
+                    let l = stack.pop().ok_or("stack underflow")?.to_float();
+                    stack.push(Value::Bool(l >= r));
                 }
                 Op::And => {
                     let r = stack.pop().ok_or("stack underflow")?;
