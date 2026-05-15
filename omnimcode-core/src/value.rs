@@ -108,9 +108,22 @@ impl HBit {
         }
     }
 
+    /// Harmony — substrate-routed measure of how aligned α and β are
+    /// with OMC's φ-π-fibonacci attractor lattice. Equals
+    /// `1 / (1 + attractor_distance(|α - β|))`.
+    ///
+    /// Peak (1.0) when |α - β| is exactly on a Fibonacci attractor
+    /// (0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, …, up to 63,245,986).
+    /// Decays with distance from the nearest attractor.
+    ///
+    /// Pre-substrate-fill this was Euclidean `1 / (1 + |α - β|)`. The
+    /// substrate routing makes harmony a *coherence with the
+    /// attractor grid*, not a coincidence-coincidence signal — see
+    /// SUBSTRATE_CHANGES.md (D3 substrate-routing of HBit harmony).
     pub fn harmony(alpha: i64, beta: i64) -> f64 {
-        let diff = (alpha - beta).abs() as f64;
-        1.0 / (1.0 + diff)
+        let diff = (alpha - beta).abs();
+        let (_, attractor_dist) = crate::phi_pi_fib::nearest_attractor_with_dist(diff);
+        1.0 / (1.0 + attractor_dist as f64)
     }
 }
 

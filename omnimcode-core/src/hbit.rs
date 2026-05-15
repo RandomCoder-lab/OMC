@@ -37,11 +37,12 @@ impl HBitProcessor {
         self.track_harmony(harmony);
     }
 
-    /// Calculate harmony between two bands (from value.rs HBit)
-    /// Delegates to existing implementation to avoid duplication
+    /// Calculate harmony between two bands.
+    /// Delegates to the canonical substrate-routed formula in value.rs
+    /// (D3 substrate-fill — was a Euclidean duplicate here, now both
+    /// sites share the same attractor-distance computation).
     pub fn harmony(alpha: i64, beta: i64) -> f64 {
-        let diff = (alpha - beta).abs() as f64;
-        1.0 / (1.0 + diff)
+        crate::value::HBit::harmony(alpha, beta)
     }
 
     /// Calculate tension (complementary to harmony)
@@ -217,10 +218,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_hbit_harmony() {
-        assert_eq!(HBitProcessor::harmony(5, 5), 1.0); // Perfect harmony
-        assert!(HBitProcessor::harmony(5, 10) < 1.0); // Some discord
-        assert!(HBitProcessor::harmony(5, 10) > 0.0); // Still positive
+    fn test_hbit_harmony_substrate_routed() {
+        // Equal bands → diff 0 → on attractor 0 → perfect harmony.
+        assert_eq!(HBitProcessor::harmony(5, 5), 1.0);
+        // Diff lands ON a Fibonacci attractor → perfect harmony (this
+        // is the architecturally significant change vs the old
+        // Euclidean formula, where any nonzero diff dropped harmony).
+        // 10 - 5 = 5; 5 is an attractor; substrate-routed harmony = 1.0.
+        assert_eq!(HBitProcessor::harmony(5, 10), 1.0);
+        // Diff lands BETWEEN attractors → harmony < 1.0.
+        // 10 - 4 = 6; nearest attractor is 5 (dist 1) or 8 (dist 2);
+        // either way the distance is non-zero so harmony < 1.0.
+        let h = HBitProcessor::harmony(4, 10);
+        assert!(h < 1.0);
+        assert!(h > 0.0);
+        // Large off-attractor gap → very low harmony.
+        // 1000 - 0 = 1000; nearest attractor 987 (dist 13).
+        let h_far = HBitProcessor::harmony(0, 1000);
+        assert!(h_far < 0.1);
     }
 
     #[test]
