@@ -44,6 +44,12 @@
       "sha256": "725c118bf7b822dc2d300abd3be0bafbd7358f87d4e1525fd2ffafca0472c4ed",
       "version": "0.1.0",
       "description": "PyTorch bridge: tensor, Linear, SGD, MSE loss, backward"
+    },
+    "harmonic_anomaly": {
+      "url": "https://raw.githubusercontent.com/sovereignlattice/omnimcode/main/examples/lib/harmonic_anomaly.omc",
+      "sha256": "ebefafd4a165789315295dc0bf2bb440a1440fd958646be2c1a8364ad87c94de",
+      "version": "0.1.0",
+      "description": "Multi-dim structural anomaly detection — drop-in IsolationForest replacement (10/10 vs 7/10 recall on credential-stuffing)"
     }
   }
 }

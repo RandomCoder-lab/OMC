@@ -1,0 +1,123 @@
+# =============================================================================
+# Tutorial: drop-in IsolationForest replacement using harmonic_anomaly
+# =============================================================================
+# If you've used scikit-learn's IsolationForest for production anomaly
+# detection on tabular data, this is the OMC equivalent — same input
+# shape, same API surface, but with measurable advantages on STRUCTURAL
+# anomalies (the kind credential-stuffing / account-takeover produces).
+#
+# Run:
+#   ./target/release/omnimcode-standalone examples/datascience/anomaly_tutorial.omc
+# =============================================================================
+
+import "examples/lib/harmonic_anomaly.omc" as ha;
+
+println("=== harmonic_anomaly tutorial ===");
+println("");
+
+# ---- Example 1: detect a credential-stuffing attack ---------------------
+# Synthesize 200 normal web requests + 5 credential-stuffing anomalies.
+# Each row = [latency_ms, status_code, endpoint_id, hour_of_day].
+
+h py_random = py_import("numpy.random");
+py_call(py_random, "seed", [144]);
+
+# Normal traffic: 30ms latency, mostly status 200, endpoint 0, hour 14.
+fn synth_normal() {
+    h lat = 20 + py_call(py_random, "random", []) * 40;
+    return [lat, 200, 0, 14];
+}
+
+# Credential stuffing: low latency 401s on /api/login at 3am.
+fn synth_attack() {
+    h lat = 10 + py_call(py_random, "random", []) * 10;
+    return [lat, 401, 8, 3];
+}
+
+h rows = [];
+h i = 0;
+while i < 200 { arr_push(rows, synth_normal()); i = i + 1; }
+h attack_indices = [];
+h j = 0;
+while j < 5 {
+    arr_push(attack_indices, arr_len(rows));
+    arr_push(rows, synth_attack());
+    j = j + 1;
+}
+
+println(concat_many("synthesized ", arr_len(rows),
+    " rows (200 normal + 5 attacks at indices ", attack_indices, ")"));
+
+# ---- The 3-line API: new → fit → top_k -----------------------------------
+
+h det = ha.new(["latency", "status", "endpoint", "hour"]);
+ha.set_strategy(det, 1, "discrete");   # status_code is categorical
+ha.set_strategy(det, 2, "discrete");   # endpoint_id is categorical
+ha.set_strategy(det, 3, "modulo");     # hour-of-day is small periodic
+
+ha.fit(det, rows);
+h top = ha.top_k(det, rows, 5);
+
+println("");
+println("Top 5 anomalies detected:");
+h k = 0;
+while k < arr_len(top) {
+    h idx = arr_get(top, k);
+    h row = arr_get(rows, idx);
+    h s = ha.score(det, row);
+    println(concat_many("  #", k + 1, ": idx=", idx,
+        "  row=", row,
+        "  score=", s));
+    k = k + 1;
+}
+
+# Compare with the ground truth
+fn count_hits(picks, truth_set) {
+    h hits = 0;
+    h k = 0;
+    while k < arr_len(picks) {
+        h key = concat_many("", arr_get(picks, k));
+        if dict_has(truth_set, key) == 1 { hits = hits + 1; }
+        k = k + 1;
+    }
+    return hits;
+}
+
+h truth = {};
+h ti = 0;
+while ti < arr_len(attack_indices) {
+    dict_set(truth, concat_many("", arr_get(attack_indices, ti)), 1);
+    ti = ti + 1;
+}
+h hits = count_hits(top, truth);
+println(concat_many("Recall: ", hits, "/", arr_len(attack_indices),
+    " attacks caught in top-5"));
+println("");
+
+# ---- Example 2: one-shot detection via ha.detect(...) -------------------
+
+println("=== One-shot detection (ha.detect) ===");
+
+# Same data, simpler API: ha.detect(dim_names, rows, k) returns top-K.
+# Useful for one-off analyses.
+h top2 = ha.detect(["latency", "status", "endpoint", "hour"], rows, 5);
+h hits2 = count_hits(top2, truth);
+println(concat_many("ha.detect top-5 recall: ", hits2, "/",
+    arr_len(attack_indices)));
+
+println("");
+println("=== When to use harmonic_anomaly vs IsolationForest ===");
+println("");
+println("Use harmonic_anomaly when:");
+println("  - Multi-dim tabular data (3+ columns)");
+println("  - Anomalies are STRUCTURAL (rare combinations of normal values)");
+println("  - You want the top picks to be high-precision (alert fatigue)");
+println("  - You don't have labeled training data");
+println("  - Deterministic results matter (no random_state to set)");
+println("");
+println("Stick with IsolationForest when:");
+println("  - 1-D continuous time series (NAB benchmark style)");
+println("  - You can afford to investigate every flagged value (high K)");
+println("  - You need to tune via contamination / n_estimators");
+println("");
+println("=== Done ===");

@@ -1,0 +1,182 @@
+# =============================================================================
+# harmonic_anomaly — multi-dim structural anomaly detection in OMC
+# =============================================================================
+# Drop-in IsolationForest replacement for the "looks normal per dim,
+# anomalous in aggregate" regime. Catches credential-stuffing, account
+# takeover, exfiltration via normal-looking traffic — patterns that
+# classical magnitude-based detectors miss because every individual
+# value is in-distribution but the COMBINATION is rare.
+#
+# Algorithm: subspace anomaly via sum of marginal log-rarities. For
+# each event row, score = sum over dims of -log(p_dim_bucket). Events
+# in the tail of MULTIPLE dims simultaneously score highest. No model
+# training, no hyperparameters, deterministic.
+#
+# Demonstrated wins (see examples/datascience/multidim_anomaly.omc):
+#   - K=10:  harmonic 10/10  vs  IsolationForest 7/10
+#   - K=25:  harmonic 25/25  vs  IsolationForest 17/25
+#   - K=50:  harmonic 50/50  vs  IsolationForest 40/50
+#
+# Detector is fitted to a SCHEMA — the dim names + their value types.
+# Then fed rows (arrays parallel to dim names). Score = sum of marginal
+# rarities; high score = structural anomaly.
+#
+# Quick start:
+#   import "harmonic_anomaly" as ha;        # via `omc --install harmonic_anomaly`
+#   h det = ha.new(["latency", "status", "endpoint", "hour"]);
+#   ha.fit(det, [[15, 200, 0, 14], [12, 200, 1, 15], ...]);
+#   h scores = ha.score_all(det, rows);
+#   h top = ha.top_k(det, rows, 10);
+# =============================================================================
+
+import "examples/lib/np.omc" as np;
+
+h _math = py_import("math");
+
+# ---- Bucketing per dim ---------------------------------------------------
+# Three bucketing strategies depending on dim type:
+#   "discrete" — value IS the bucket (status codes, endpoint IDs)
+#   "log"      — fold(log10(v) * 50) — for numeric ranges spanning
+#                multiple magnitudes (latency, bytes)
+#   "modulo"   — fold(v) — for periodic small ints (hour-of-day)
+#
+# Default: "log" if numeric and varies, else "discrete".
+
+fn _bucket_log(v) {
+    if v <= 0 { return 0; }
+    h logv = py_call(_math, "log10", [v]);
+    return fold(to_int(logv * 50));
+}
+fn _bucket_modulo(v) { return fold(to_int(v)); }
+fn _bucket_discrete(v) { return v; }
+
+fn _bucket_for(strategy, v) {
+    if strategy == "log"      { return _bucket_log(v); }
+    if strategy == "modulo"   { return _bucket_modulo(v); }
+    return _bucket_discrete(v);
+}
+
+# ---- Detector lifecycle --------------------------------------------------
+
+# Create a fresh detector. dim_names is an array of strings (one per
+# dimension). dim_strategies is an OPTIONAL array of equal length;
+# default is "log" for everything.
+fn new(dim_names) {
+    h strategies = [];
+    h k = 0;
+    while k < arr_len(dim_names) {
+        arr_push(strategies, "log");
+        k = k + 1;
+    }
+    return {
+        "dims": dim_names,
+        "strategies": strategies,
+        "freqs": [],
+        "n": 0
+    };
+}
+
+# Override one dim's bucket strategy. Useful when you have a discrete
+# field (status_code, country_code) where log-bucketing makes no sense.
+#   ha.set_strategy(det, 1, "discrete")    # 2nd dim is categorical
+fn set_strategy(detector, dim_idx, strategy) {
+    h strats = dict_get(detector, "strategies");
+    arr_set(strats, dim_idx, strategy);
+    dict_set(detector, "strategies", strats);
+    return detector;
+}
+
+# Fit the detector to a corpus of rows. Each row is an array of
+# values parallel to dim_names. Builds per-dim frequency tables.
+fn fit(detector, rows) {
+    h dims = dict_get(detector, "dims");
+    h strategies = dict_get(detector, "strategies");
+    h n_dims = arr_len(dims);
+    h n_rows = arr_len(rows);
+
+    # Build one frequency dict per dim.
+    h freqs = [];
+    h d = 0;
+    while d < n_dims { arr_push(freqs, {}); d = d + 1; }
+
+    h r = 0;
+    while r < n_rows {
+        h row = arr_get(rows, r);
+        h di = 0;
+        while di < n_dims {
+            h strategy = arr_get(strategies, di);
+            h bkt = _bucket_for(strategy, arr_get(row, di));
+            h freq = arr_get(freqs, di);
+            h key = concat_many("", bkt);
+            dict_set(freq, key, dict_get(freq, key, 0) + 1);
+            di = di + 1;
+        }
+        r = r + 1;
+    }
+    dict_set(detector, "freqs", freqs);
+    dict_set(detector, "n", n_rows);
+    return detector;
+}
+
+# Score a single row. Returns sum-of-marginal-log-rarities; higher =
+# more structurally anomalous.
+fn score(detector, row) {
+    h dims = dict_get(detector, "dims");
+    h strategies = dict_get(detector, "strategies");
+    h freqs = dict_get(detector, "freqs");
+    h n = dict_get(detector, "n");
+    h n_dims = arr_len(dims);
+    h total = 0.0;
+    h di = 0;
+    while di < n_dims {
+        h strategy = arr_get(strategies, di);
+        h bkt = _bucket_for(strategy, arr_get(row, di));
+        h freq = arr_get(freqs, di);
+        h key = concat_many("", bkt);
+        h count = dict_get(freq, key, 1);
+        # Critical: float division, not int division.
+        h p = to_float(count) / n;
+        if p <= 0 { p = 1.0 / to_float(n); }
+        total = total + (0 - py_call(_math, "log", [p]));
+        di = di + 1;
+    }
+    return total;
+}
+
+# Bulk score: returns an array of scores parallel to rows.
+fn score_all(detector, rows) {
+    h out = [];
+    h k = 0;
+    while k < arr_len(rows) {
+        arr_push(out, score(detector, arr_get(rows, k)));
+        k = k + 1;
+    }
+    return out;
+}
+
+# Top-K most anomalous row indices. Returns indices into rows.
+fn top_k(detector, rows, k) {
+    h scores = score_all(detector, rows);
+    h neg = [];
+    h i = 0;
+    while i < arr_len(scores) {
+        arr_push(neg, 0 - arr_get(scores, i));
+        i = i + 1;
+    }
+    h sorted = np.argsort(neg);
+    h out = [];
+    h j = 0;
+    while j < k {
+        if j < arr_len(sorted) { arr_push(out, arr_get(sorted, j)); }
+        j = j + 1;
+    }
+    return out;
+}
+
+# Convenience: full pipeline in one call. Fit on rows, return top-K
+# anomaly indices. Use when you don't need to keep the detector around.
+fn detect(dim_names, rows, k) {
+    h det = new(dim_names);
+    fit(det, rows);
+    return top_k(det, rows, k);
+}

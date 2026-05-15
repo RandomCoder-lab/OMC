@@ -10,6 +10,7 @@ OMNIcode (OMC) treats φ-math (Fibonacci attractors, resonance scoring, harmonic
 - **Bidirectional callbacks** — Python can invoke OMC functions via `py_callback("name")`, useful for `df.apply(omc_fn)` patterns
 - **Package manager** — `omc --install np` resolves through a registry, sha256-verifies, caches under `omc_modules/`
 - **Harmonic-distinctive primitives** — `harmonic_index` (sub-linear lookup by attractor neighborhood), `harmonic_sort` (by HIM score), `harmonic_partition` (Fibonacci-bucketed), all in [`examples/harmonic_collections.omc`](examples/harmonic_collections.omc)
+- **Multi-dim anomaly detection that beats IsolationForest** on structural patterns — `harmonic_anomaly` library catches credential-stuffing 10/10 vs IF's 7/10 at top-K=10 ([`examples/datascience/multidim_anomaly.omc`](examples/datascience/multidim_anomaly.omc))
 
 Single binary, two engines (tree-walk + bytecode VM with byte-identical output across 43 functional examples), no opt-in flags for any of this.
 
@@ -83,8 +84,9 @@ For the full real-world demo, run `examples/datascience/titanic.omc` — Kaggle 
 - `requests.omc` — HTTP client (get, post, json, fetch_json)
 - `sqlite.omc` — embedded SQL via Python's sqlite3
 - `torch.omc` — PyTorch tensors, nn.Linear, optimizers
+- `harmonic_anomaly.omc` — multi-dim structural anomaly detection (drop-in IsolationForest replacement; wins on credential-stuffing patterns)
 
-Each one is 30-110 lines of OMC. Fork them or write your own.
+Each one is 30-110 lines of OMC. Fork them or write your own. All registered in [`registry/index.json`](registry/index.json) with sha256 verification.
 
 ### Harmonic primitives
 - `harmonic_set` — dedupe by Fibonacci attractor equivalence
@@ -108,6 +110,11 @@ Each one is 30-110 lines of OMC. Fork them or write your own.
 | [`examples/datascience/titanic.omc`](examples/datascience/titanic.omc) | Kaggle Titanic via seaborn → harmonic feature engineering → sklearn classifier |
 | [`examples/datascience/movielens_harmonic.omc`](examples/datascience/movielens_harmonic.omc) | pandas-loaded movielens → harmonic_partition → numpy stats per bucket |
 | [`examples/datascience/harmonic_ml.omc`](examples/datascience/harmonic_ml.omc) | sklearn wine + Python→OMC callback via `numpy.vectorize` |
+| [`examples/datascience/anomaly_detection.omc`](examples/datascience/anomaly_detection.omc) | Power-law anomaly detection: harmonic 4/5 vs IF 0/5 @ K=5 (alert-budget regime) |
+| [`examples/datascience/multidim_anomaly.omc`](examples/datascience/multidim_anomaly.omc) | Credential-stuffing detection: harmonic 10/10 vs IF 7/10 @ K=10 |
+| [`examples/datascience/anomaly_tutorial.omc`](examples/datascience/anomaly_tutorial.omc) | Tutorial — using `harmonic_anomaly` as drop-in IsolationForest replacement |
+| [`examples/datascience/nab_validation.omc`](examples/datascience/nab_validation.omc) | NAB benchmark: both detectors tie at 7/19 windows (naive baseline tier) |
+| [`examples/datascience/nab_time_aware.omc`](examples/datascience/nab_time_aware.omc) | Time-aware harmonic — honest negative result; needs CUSUM/seasonality to beat IF on NAB |
 
 ---
 
@@ -177,6 +184,41 @@ The full historical arc lives in [CHANGELOG.md](CHANGELOG.md). The φ-math subst
 | arr_map(double) over 1k × 200 reps | 131 ms | 59 ms | VM 2.22× faster |
 
 OMC is now usable for real-world data sizes (10k → 100k records routine). The architectural blocker (Value::Array clone-on-mutation) was killed in commit `d3c29b6` by switching to `Rc<RefCell<>>` semantics — collections now pass by reference like Python's mutable types.
+
+---
+
+## Where harmonic detection actually wins (vs scikit-learn)
+
+Real comparisons against scikit-learn's IsolationForest. Not synthetic glory — measured on real and reproducible workloads.
+
+| Workload | OMC harmonic | IsolationForest | Where it matters |
+|---|:---:|:---:|---|
+| **Power-law data, K=5** (alert-budget regime) | **4/5** | 0/5 | Top-of-queue precision: SRE oncall paging |
+| **Multi-dim credential stuffing, K=10** | **10/10** | 7/10 | Account-takeover, exfiltration, structural attacks |
+| Multi-dim K=25 | **25/25** | 17/25 | Subspace anomaly detection |
+| Multi-dim K=50 | **50/50** | 40/50 | Same as above, broader recall |
+| NAB realKnownCause (1-D time series) | 7/19 | 7/19 | Tie at naive baseline tier (SOTA needs CUSUM/HMM) |
+| Power-law K=30 (broad recall) | 5/30 | 15/30 | IF wins when you can investigate everything |
+
+The pattern: **harmonic decisively wins on multi-dim structural anomalies** (the credential-stuffing regime — values that look normal per-dim but rare in combination). Ties on simple time-series benchmarks where neither approach exploits temporal structure. Loses on broad-recall 1-D where IF's magnitude-based detection is the right tool.
+
+The harmonic_anomaly library at [`examples/lib/harmonic_anomaly.omc`](examples/lib/harmonic_anomaly.omc) packages the multi-dim detector with a clean `new` / `fit` / `top_k` API. Install it:
+
+```bash
+omnimcode-standalone --install harmonic_anomaly
+```
+
+Then in OMC:
+
+```omc
+import "harmonic_anomaly" as ha;
+h det = ha.new(["latency", "status", "endpoint", "hour"]);
+ha.set_strategy(det, 1, "discrete");   # status_code is categorical
+ha.fit(det, training_rows);
+h alerts = ha.top_k(det, all_rows, 10);
+```
+
+See [`examples/datascience/anomaly_tutorial.omc`](examples/datascience/anomaly_tutorial.omc) for the drop-in IsolationForest replacement walkthrough.
 
 ---
 
