@@ -120,7 +120,24 @@ fn maybe_register_jit(
     if std::env::var("OMC_HBIT_JIT").as_deref() != Ok("1") {
         return;
     }
-    let module = match omnimcode_core::compiler::compile_program(statements) {
+    // Inline imports BEFORE compile_program. The bytecode compiler
+    // treats Statement::Import as a no-op (the tree-walk interpreter
+    // normally handles imports at statement-execution time), so
+    // without inlining the JIT can only see top-level user fns and
+    // misses the entire imported library surface. This was the L1
+    // measurement gap on NSL-KDD: harmonic_anomaly's score/fit/top_k
+    // live in the imported library, so jit_module never saw them.
+    let inlined = match Interpreter::inline_imports(statements.to_vec()) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!(
+                "[OMC_HBIT_JIT] inline_imports failed: {} — falling back to tree-walk",
+                e
+            );
+            return;
+        }
+    };
+    let module = match omnimcode_core::compiler::compile_program(&inlined) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("[OMC_HBIT_JIT] compile_program failed: {} — falling back to tree-walk", e);

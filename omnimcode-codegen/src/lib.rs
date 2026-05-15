@@ -50,6 +50,28 @@ pub extern "C" fn omc_harmony(alpha: i64, beta: i64) -> i64 {
     (h * 1000.0).round() as i64
 }
 
+/// Path L1 runtime helper: call into the substrate's
+/// `log_phi_pi_fibonacci` from JIT'd code. Argument and return are
+/// passed as raw f64 bit patterns (i64 on the wire) to keep the
+/// calling convention pure-i64. The JIT bitcasts at the boundary.
+///
+/// Without this extern, OMC fns that call `log_phi_pi_fibonacci(x)`
+/// (the substrate-routed log) couldn't JIT — including the bucket
+/// fn at the heart of harmonic_anomaly.
+#[no_mangle]
+pub extern "C" fn omc_log_phi_pi_fibonacci(arg_bits: i64) -> i64 {
+    let x = f64::from_bits(arg_bits as u64);
+    let r = omnimcode_core::phi_pi_fib::log_phi_pi_fibonacci(x);
+    r.to_bits() as i64
+}
+
+/// Path L1 runtime helper: call into the substrate's
+/// `fold_to_nearest_attractor` from JIT'd code. Pure i64 in / out.
+#[no_mangle]
+pub extern "C" fn omc_fold(value: i64) -> i64 {
+    omnimcode_core::phi_pi_fib::fold_to_nearest_attractor(value)
+}
+
 use std::collections::HashMap;
 
 use inkwell::basic_block::BasicBlock;
@@ -158,6 +180,25 @@ impl<'ctx> JitContext<'ctx> {
             Some(inkwell::module::Linkage::External),
         );
         engine.add_global_mapping(&harmony_fn, omc_harmony as *const () as usize);
+        // Path L1 helpers: substrate primitives callable from JIT'd
+        // code. Same global-mapping idiom as omc_harmony.
+        let log_ty = i64_type.fn_type(&[i64_type.into()], false);
+        let log_fn = module.add_function(
+            "omc_log_phi_pi_fibonacci",
+            log_ty,
+            Some(inkwell::module::Linkage::External),
+        );
+        engine.add_global_mapping(
+            &log_fn,
+            omc_log_phi_pi_fibonacci as *const () as usize,
+        );
+        let fold_ty = i64_type.fn_type(&[i64_type.into()], false);
+        let fold_fn = module.add_function(
+            "omc_fold",
+            fold_ty,
+            Some(inkwell::module::Linkage::External),
+        );
+        engine.add_global_mapping(&fold_fn, omc_fold as *const () as usize);
         Ok(JitContext {
             context,
             module,
@@ -261,45 +302,114 @@ impl<'ctx> JitContext<'ctx> {
             }
         }
 
-        // Phase 2: lower bodies.
-        let mut to_extract: Vec<(String, String, usize)> = Vec::new();
+        // Phase 2: lower bodies. Track names that succeeded and
+        // names that failed so we can do dependency cleanup below.
+        let mut succeeded: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        let mut failed: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         for (name, cf) in &module.functions {
             let suffixed = format!("{}_hbit", name);
             match dual_band::DualBandLowerer::lower_existing(self.context, &self.module, cf) {
                 Ok(_) => {
-                    to_extract.push((name.clone(), suffixed, cf.params.len()));
+                    succeeded.insert(name.clone());
                 }
                 Err(_) => {
-                    // Body emission failed mid-way. Leave the
-                    // function declaration in place but it's now
-                    // an empty extern that anything else might
-                    // call into and segfault. Better: replace the
-                    // body with an unreachable instruction.
+                    failed.insert(name.clone());
+                    // Erase the broken declaration entirely. Any
+                    // already-lowered caller that referenced this
+                    // symbol will now have a dangling reference,
+                    // which the dependency-cleanup pass below
+                    // detects and erases. This is the fix for the
+                    // L1 silent-wrong-answer bug: previously failed
+                    // fns got a "broken stub returns 0" body that
+                    // produced wrong results in callers; now the
+                    // entire dependency chain is correctly removed
+                    // from the JIT registry.
                     if let Some(partial) = self.module.get_function(&suffixed) {
-                        // Erase any partial blocks and emit a single
-                        // entry that traps. This keeps the symbol
-                        // table valid (other fns can still link to
-                        // this name) but makes the call obviously
-                        // wrong if anyone reaches it.
-                        for bb in partial.get_basic_blocks() {
-                            unsafe { bb.delete().ok() };
-                        }
-                        let entry =
-                            self.context.append_basic_block(partial, "broken_entry");
-                        let builder = self.context.create_builder();
-                        builder.position_at_end(entry);
-                        let _ = builder.build_return(Some(&i64_type.const_int(0, false)));
+                        unsafe { partial.delete() };
                     }
                 }
             }
         }
 
-        // Phase 3: extract.
+        // Phase 2b: dependency-cleanup fixpoint. A fn that
+        // successfully lowered but whose body calls a `failed` fn is
+        // itself broken (its IR contains a dangling reference). Walk
+        // each succeeded fn's bytecode, look for Op::Call to failed
+        // targets, mark caller as failed too. Iterate until no new
+        // failures. Skip intrinsics / builtins (handled inline by the
+        // lowerer, not via cross-fn references).
+        let intrinsics: std::collections::HashSet<&'static str> = [
+            "phi_shadow",
+            "harmony",
+            "to_int",
+            "to_float",
+            "harmony_value",
+            // L1: substrate primitives lowered as extern Rust calls,
+            // not user-fn references.
+            "log_phi_pi_fibonacci",
+        ]
+        .iter()
+        .copied()
+        .collect();
+        loop {
+            let mut newly_failed: Vec<String> = Vec::new();
+            for name in succeeded.iter() {
+                if let Some(cf) = module.functions.get(name) {
+                    for op in &cf.ops {
+                        if let omnimcode_core::bytecode::Op::Call(target, _argc) = op {
+                            if intrinsics.contains(target.as_str()) {
+                                continue;
+                            }
+                            // Self-recursion is fine.
+                            if target == name {
+                                continue;
+                            }
+                            if failed.contains(target) {
+                                newly_failed.push(name.clone());
+                                break;
+                            }
+                            // Target isn't in the user-fn set at all
+                            // (probably a builtin). Trust the
+                            // lowerer's intrinsic handling — if it
+                            // didn't error during phase 2, the
+                            // builtin is supported.
+                            if !module.functions.contains_key(target) {
+                                continue;
+                            }
+                            // Target is a user fn but not in
+                            // succeeded — it failed. Cascade.
+                            if !succeeded.contains(target) {
+                                newly_failed.push(name.clone());
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            if newly_failed.is_empty() {
+                break;
+            }
+            for name in newly_failed {
+                let suffixed = format!("{}_hbit", name);
+                if let Some(broken) = self.module.get_function(&suffixed) {
+                    unsafe { broken.delete() };
+                }
+                succeeded.remove(&name);
+                failed.insert(name);
+            }
+        }
+
+        // Phase 3: extract fn pointers for everything that survived
+        // both lowering and dependency cleanup.
         let mut out: HashMap<String, JittedFn> = HashMap::new();
-        for (name, suffixed, arity) in to_extract {
+        for name in &succeeded {
+            let suffixed = format!("{}_hbit", name);
+            let arity = module.functions.get(name).map(|cf| cf.params.len()).unwrap_or(0);
             match unsafe { self.extract_raw_fn_ptr(&suffixed, arity) } {
                 Ok(fn_ptr) => {
-                    out.insert(name, JittedFn { arity, fn_ptr });
+                    out.insert(name.clone(), JittedFn { arity, fn_ptr });
                 }
                 Err(_) => {
                     // Extraction failure → skip; tree-walk handles it.

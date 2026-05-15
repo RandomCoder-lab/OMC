@@ -27,117 +27,198 @@
 #   ha.fit(det, [[15, 200, 0, 14], [12, 200, 1, 15], ...]);
 #   h scores = ha.score_all(det, rows);
 #   h top = ha.top_k(det, rows, 10);
+#
+# L1 rewrite (Path L1, 2026-05-15): the previous implementation used
+# dict-of-string-keys for per-dim frequency tables AND a dict for the
+# detector struct itself AND string-tagged strategies. None of those
+# JIT today. This rewrite makes the hot path (score) entirely JIT-
+# eligible by:
+#
+# 1. Detector is now an array indexed by constants:
+#       DET_N_DIMS=0, DET_STRATEGIES=1 (array of int codes),
+#       DET_FREQ_KEYS=2 (array of arrays), DET_FREQ_COUNTS=3, DET_N=4
+#    Read via arr_get(detector, INDEX) instead of dict_get(d, "key").
+# 2. Strategies are int codes (0=log, 1=modulo, 2=discrete). The
+#    public API (set_strategy / new) still accepts strings; we
+#    convert internally.
+# 3. Per-dim frequency tables are parallel arrays of int keys + int
+#    counts (no dict, no string concat).
+#
+# fit() (cold path) keeps a small dict for dim_names mapping and uses
+# arr_push for dynamic growth. score() (hot path) is dict-free,
+# string-free, and JIT-eligible end-to-end.
 # =============================================================================
 
 import "examples/lib/np.omc" as np;
 
+# Detector array indices (constants).
+fn _DET_N_DIMS()      { return 0; }
+fn _DET_STRATEGIES()  { return 1; }
+fn _DET_FREQ_KEYS()   { return 2; }
+fn _DET_FREQ_COUNTS() { return 3; }
+fn _DET_N()           { return 4; }
+
+# Strategy codes (constants).
+fn _STRAT_LOG()      { return 0; }
+fn _STRAT_MODULO()   { return 1; }
+fn _STRAT_DISCRETE() { return 2; }
+
 # ---- Bucketing per dim ---------------------------------------------------
 # Three bucketing strategies depending on dim type:
-#   "discrete" — value IS the bucket (status codes, endpoint IDs)
-#   "log"      — fold(log_phi_pi_fibonacci(v) * 50) — substrate-routed
-#                log bucketing for ranges spanning multiple magnitudes
-#                (latency, bytes). Uses OMC's canonical φ-π-fibonacci
-#                substrate so buckets align with the attractor lattice
-#                rather than arbitrary base-10 decades.
-#   "modulo"   — fold(v) — for periodic small ints (hour-of-day)
+#   0 = "log"       — fold(log_phi_pi_fibonacci(v) * 50) — substrate-routed
+#                     log bucketing for ranges spanning multiple magnitudes
+#                     (latency, bytes). Uses OMC's canonical φ-π-fibonacci
+#                     substrate so buckets align with the attractor lattice
+#                     rather than arbitrary base-10 decades.
+#   1 = "modulo"    — fold(v) — for periodic small ints (hour-of-day)
+#   2 = "discrete"  — value IS the bucket (status codes, endpoint IDs)
 #
-# Default: "log" if numeric and varies, else "discrete".
+# Default: 0 (log) for everything.
 
 fn _bucket_log(v) {
     if v <= 0 { return 0; }
     h logv = log_phi_pi_fibonacci(to_float(v));
-    return fold(to_int(logv * 50));
+    # 50.0 (not 50) so the compiler emits MulFloat — the JIT path
+    # treats float bit-patterns and ints differently for *. With the
+    # int literal `50`, the multiplication would be Op::Mul (untyped)
+    # which the JIT would treat as integer multiplication of a float
+    # bit-pattern (garbage).
+    return fold(to_int(logv * 50.0));
 }
 fn _bucket_modulo(v) { return fold(to_int(v)); }
 fn _bucket_discrete(v) { return v; }
 
-fn _bucket_for(strategy, v) {
-    if strategy == "log"      { return _bucket_log(v); }
-    if strategy == "modulo"   { return _bucket_modulo(v); }
+# Strategy-coded bucket lookup. JIT-eligible: pure int comparison +
+# arithmetic. No string equality.
+fn _bucket_for_code(code, v) {
+    if code == 0 { return _bucket_log(v); }
+    if code == 1 { return _bucket_modulo(v); }
     return _bucket_discrete(v);
+}
+
+# Convert public string strategy → internal int code.
+fn _strategy_to_code(s) {
+    if s == "log"      { return 0; }
+    if s == "modulo"   { return 1; }
+    if s == "discrete" { return 2; }
+    return 0;
+}
+
+# Linear scan: find the index of `target` in `keys`, or -1 if absent.
+# JIT-eligible (pure arr_get + comparison + while loop).
+fn _find_key(keys, target) {
+    h n = arr_len(keys);
+    h i = 0;
+    while i < n {
+        if arr_get(keys, i) == target { return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
 }
 
 # ---- Detector lifecycle --------------------------------------------------
 
 # Create a fresh detector. dim_names is an array of strings (one per
-# dimension). dim_strategies is an OPTIONAL array of equal length;
-# default is "log" for everything.
+# dimension). Default strategy is 0 (log) for every dim.
+#
+# Returns an array layout: [n_dims, strategies, freq_keys, freq_counts, n].
+# Use ha.set_strategy() / ha.fit() / ha.score_all() to interact.
 fn new(dim_names) {
+    h n_dims = arr_len(dim_names);
     h strategies = [];
     h k = 0;
-    while k < arr_len(dim_names) {
-        arr_push(strategies, "log");
+    while k < n_dims {
+        arr_push(strategies, 0);
         k = k + 1;
     }
-    return {
-        "dims": dim_names,
-        "strategies": strategies,
-        "freqs": [],
-        "n": 0
-    };
+    h freq_keys = [];
+    h freq_counts = [];
+    h d = 0;
+    while d < n_dims {
+        arr_push(freq_keys, []);
+        arr_push(freq_counts, []);
+        d = d + 1;
+    }
+    h det = [];
+    arr_push(det, n_dims);
+    arr_push(det, strategies);
+    arr_push(det, freq_keys);
+    arr_push(det, freq_counts);
+    arr_push(det, 0);
+    return det;
 }
 
 # Override one dim's bucket strategy. Useful when you have a discrete
 # field (status_code, country_code) where log-bucketing makes no sense.
 #   ha.set_strategy(det, 1, "discrete")    # 2nd dim is categorical
 fn set_strategy(detector, dim_idx, strategy) {
-    h strats = dict_get(detector, "strategies");
-    arr_set(strats, dim_idx, strategy);
-    dict_set(detector, "strategies", strats);
+    h strats = arr_get(detector, 1);
+    arr_set(strats, dim_idx, _strategy_to_code(strategy));
     return detector;
 }
 
 # Fit the detector to a corpus of rows. Each row is an array of
-# values parallel to dim_names. Builds per-dim frequency tables.
+# values parallel to dim_names. Builds per-dim frequency arrays.
+# Cold path — runs once at startup; uses arr_push for dynamic growth.
 fn fit(detector, rows) {
-    h dims = dict_get(detector, "dims");
-    h strategies = dict_get(detector, "strategies");
-    h n_dims = arr_len(dims);
+    h n_dims = arr_get(detector, 0);
+    h strategies = arr_get(detector, 1);
+    h freq_keys = arr_get(detector, 2);
+    h freq_counts = arr_get(detector, 3);
     h n_rows = arr_len(rows);
-
-    # Build one frequency dict per dim.
-    h freqs = [];
-    h d = 0;
-    while d < n_dims { arr_push(freqs, {}); d = d + 1; }
 
     h r = 0;
     while r < n_rows {
         h row = arr_get(rows, r);
         h di = 0;
         while di < n_dims {
-            h strategy = arr_get(strategies, di);
-            h bkt = _bucket_for(strategy, arr_get(row, di));
-            h freq = arr_get(freqs, di);
-            h key = concat_many("", bkt);
-            dict_set(freq, key, dict_get(freq, key, 0) + 1);
+            h code = arr_get(strategies, di);
+            h bkt = _bucket_for_code(code, arr_get(row, di));
+            h keys = arr_get(freq_keys, di);
+            h counts = arr_get(freq_counts, di);
+            h idx = _find_key(keys, bkt);
+            if idx < 0 {
+                arr_push(keys, bkt);
+                arr_push(counts, 1);
+            } else {
+                arr_set(counts, idx, arr_get(counts, idx) + 1);
+            }
             di = di + 1;
         }
         r = r + 1;
     }
-    dict_set(detector, "freqs", freqs);
-    dict_set(detector, "n", n_rows);
+    arr_set(detector, 4, n_rows);
     return detector;
 }
 
 # Score a single row. Returns sum-of-marginal-log-rarities; higher =
 # more structurally anomalous.
+#
+# Hot path — called once per scored row. Uses ONLY JIT-eligible ops:
+# arr_get, arr_len, while loop, arithmetic, log_phi_pi_fibonacci,
+# to_float, int comparison. No dict ops, no string ops. The whole
+# function compiles in dual-band mode.
 fn score(detector, row) {
-    h dims = dict_get(detector, "dims");
-    h strategies = dict_get(detector, "strategies");
-    h freqs = dict_get(detector, "freqs");
-    h n = dict_get(detector, "n");
-    h n_dims = arr_len(dims);
+    h n_dims = arr_get(detector, 0);
+    h strategies = arr_get(detector, 1);
+    h freq_keys = arr_get(detector, 2);
+    h freq_counts = arr_get(detector, 3);
+    h n = arr_get(detector, 4);
     h total = 0.0;
     h di = 0;
     while di < n_dims {
-        h strategy = arr_get(strategies, di);
-        h bkt = _bucket_for(strategy, arr_get(row, di));
-        h freq = arr_get(freqs, di);
-        h key = concat_many("", bkt);
-        h count = dict_get(freq, key, 1);
+        h code = arr_get(strategies, di);
+        h bkt = _bucket_for_code(code, arr_get(row, di));
+        h keys = arr_get(freq_keys, di);
+        h counts = arr_get(freq_counts, di);
+        h idx = _find_key(keys, bkt);
+        h count = 1;
+        if idx >= 0 {
+            count = arr_get(counts, idx);
+        }
         # Critical: float division, not int division.
-        h p = to_float(count) / n;
-        if p <= 0 { p = 1.0 / to_float(n); }
+        h p = to_float(count) / to_float(n);
+        if p <= 0.0 { p = 1.0 / to_float(n); }
         # Substrate-routed rarity. -log(p) = log(1/p); use the
         # φ-π-fibonacci substrate so rarity is measured in the same
         # units as resonance/HIM elsewhere in OMC. Monotonic transform

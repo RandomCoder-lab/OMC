@@ -393,6 +393,36 @@ impl<'ctx, 'a> DualBandLowerer<'ctx, 'a> {
                     let val = self.emit_array_index(arr_v, idx_v, i)?;
                     stack.push(self.splat(val, "aidx_v")?);
                 }
+                // L1: substrate fold (snap to nearest Fibonacci attractor).
+                // Calls the extern omc_fold helper with α; splats result.
+                Op::Fold1 => {
+                    let v_v = self.pop(&mut stack, i, "Fold1 arg")?;
+                    let alpha = self
+                        .builder
+                        .build_extract_element(v_v, i64_type.const_int(0, false), "fold_a")
+                        .map_err(|e| format!("hbit Fold1 extract at op{}: {}", i, e))?;
+                    let alpha_iv = match alpha {
+                        BasicValueEnum::IntValue(iv) => iv,
+                        _ => return Err(format!("hbit Fold1 α not int at op{}", i)),
+                    };
+                    let fold_fn = self
+                        .module
+                        .get_function("omc_fold")
+                        .ok_or_else(|| format!("omc_fold not declared at op{}", i))?;
+                    let call = self
+                        .builder
+                        .build_call(fold_fn, &[alpha_iv.into()], "fold_call")
+                        .map_err(|e| format!("hbit Fold1 call at op{}: {}", i, e))?;
+                    let ret = call
+                        .try_as_basic_value()
+                        .left()
+                        .ok_or_else(|| format!("hbit Fold1 call no value at op{}", i))?;
+                    let ret_iv = match ret {
+                        BasicValueEnum::IntValue(iv) => iv,
+                        _ => return Err(format!("hbit Fold1 call ret not int at op{}", i)),
+                    };
+                    stack.push(self.splat(ret_iv, "fold_ret_v")?);
+                }
                 // Path D: array writes. ArrSetNamed(name) is the
                 // optimized form the compiler emits for
                 // `arr_set(name, idx, val)` where `name` is a literal
@@ -591,6 +621,40 @@ impl<'ctx, 'a> DualBandLowerer<'ctx, 'a> {
                             .into_int_value();
                         let new_v = self.splat(ri, "tof_v")?;
                         stack.push(new_v);
+                        continue;
+                    }
+                    if name == "log_phi_pi_fibonacci" && *argc == 1 {
+                        // L1: substrate-routed log via extern Rust call.
+                        // Arg is float-bit-pattern in α lane; pass scalar
+                        // to the extern; splat the f64-bit-pattern result.
+                        let v_v = self.pop(&mut stack, i, "log_phi_pi_fibonacci arg")?;
+                        let alpha = self
+                            .builder
+                            .build_extract_element(v_v, i64_type.const_int(0, false), "log_a")
+                            .map_err(|e| format!("hbit log_phi extract at op{}: {}", i, e))?;
+                        let alpha_iv = match alpha {
+                            BasicValueEnum::IntValue(iv) => iv,
+                            _ => return Err(format!("hbit log_phi α not int at op{}", i)),
+                        };
+                        let log_fn = self
+                            .module
+                            .get_function("omc_log_phi_pi_fibonacci")
+                            .ok_or_else(|| {
+                                format!("omc_log_phi_pi_fibonacci not declared at op{}", i)
+                            })?;
+                        let call = self
+                            .builder
+                            .build_call(log_fn, &[alpha_iv.into()], "log_call")
+                            .map_err(|e| format!("hbit log_phi call at op{}: {}", i, e))?;
+                        let ret = call
+                            .try_as_basic_value()
+                            .left()
+                            .ok_or_else(|| format!("hbit log_phi call no value at op{}", i))?;
+                        let ret_iv = match ret {
+                            BasicValueEnum::IntValue(iv) => iv,
+                            _ => return Err(format!("hbit log_phi call ret not int at op{}", i)),
+                        };
+                        stack.push(self.splat(ret_iv, "log_ret_v")?);
                         continue;
                     }
                     if name == "to_int" && *argc == 1 {

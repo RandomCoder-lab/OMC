@@ -230,6 +230,137 @@ impl Interpreter {
         paths
     }
 
+    /// Public wrapper for the module resolver. Returns the file path
+    /// for the named import, or None if not found on the search path.
+    /// Exposed so the CLI's JIT-registration path can inline imports
+    /// into the AST before compile_program (the bytecode compiler
+    /// treats Statement::Import as a no-op since interpreter normally
+    /// handles imports at statement-execution time).
+    pub fn resolve_module_path(name: &str) -> Option<std::path::PathBuf> {
+        Self::resolve_module(name)
+    }
+
+    /// Walk `statements` recursively, replacing each `Statement::Import`
+    /// with the parsed AST of the imported file. Function defs from
+    /// the imported file get their names rewritten to `alias.fname`
+    /// when an alias is set, matching the runtime import semantics in
+    /// `import_module_with_alias`. For aliased imports, intra-module
+    /// calls within the inlined body get rewritten via the same
+    /// `rewrite_module_calls` helper.
+    ///
+    /// Used by the CLI's JIT registration to flatten the AST so
+    /// `compile_program` produces a Module that includes ALL fns —
+    /// including imported ones — so `jit_module` can compile them.
+    ///
+    /// Cyclic imports are guarded by `visited` so we don't loop.
+    /// Selective imports (`from "x" import a, b;`) inline only the
+    /// named fns.
+    pub fn inline_imports(
+        statements: Vec<Statement>,
+    ) -> Result<Vec<Statement>, String> {
+        let mut visited: HashSet<String> = HashSet::new();
+        Self::inline_imports_inner(statements, &mut visited)
+    }
+
+    fn inline_imports_inner(
+        statements: Vec<Statement>,
+        visited: &mut HashSet<String>,
+    ) -> Result<Vec<Statement>, String> {
+        let mut out: Vec<Statement> = Vec::with_capacity(statements.len());
+        for stmt in statements {
+            match stmt {
+                Statement::Import { module, alias, selected } => {
+                    if !visited.insert(module.clone()) {
+                        // Already inlined — skip the second occurrence.
+                        continue;
+                    }
+                    let path = Self::resolve_module(&module).ok_or_else(|| {
+                        format!(
+                            "inline_imports: could not resolve module `{}`",
+                            module
+                        )
+                    })?;
+                    let source = std::fs::read_to_string(&path).map_err(|e| {
+                        format!("inline_imports: read {}: {}", module, e)
+                    })?;
+                    let mut parser = crate::parser::Parser::new(&source);
+                    let raw_stmts = parser.parse().map_err(|e| {
+                        format!("inline_imports: parse {}: {}", module, e)
+                    })?;
+                    // Recurse to inline transitive imports first.
+                    let inner_stmts = Self::inline_imports_inner(raw_stmts, visited)?;
+
+                    // Apply aliasing / selective filtering.
+                    let processed = if let Some(prefix) = alias.as_deref() {
+                        // Rename fn defs to "alias.fname" and rewrite
+                        // intra-module calls. Skip names that already
+                        // contain a dot (transitively-imported aliases).
+                        let mut local_names: HashSet<String> = HashSet::new();
+                        for s in &inner_stmts {
+                            if let Statement::FunctionDef { name, .. } = s {
+                                if !name.contains('.') {
+                                    local_names.insert(name.clone());
+                                }
+                            }
+                        }
+                        let mut renamed: Vec<Statement> = Vec::new();
+                        for s in inner_stmts {
+                            match s {
+                                Statement::FunctionDef {
+                                    name,
+                                    params,
+                                    param_types,
+                                    body,
+                                    return_type,
+                                    pragmas,
+                                } if !name.contains('.') => {
+                                    let aliased = format!("{}.{}", prefix, name);
+                                    let body_rewritten: Vec<Statement> = body
+                                        .into_iter()
+                                        .map(|st| {
+                                            Self::rewrite_module_calls(
+                                                st,
+                                                &local_names,
+                                                prefix,
+                                            )
+                                        })
+                                        .collect();
+                                    renamed.push(Statement::FunctionDef {
+                                        name: aliased,
+                                        params,
+                                        param_types,
+                                        body: body_rewritten,
+                                        return_type,
+                                        pragmas,
+                                    });
+                                }
+                                other => renamed.push(other),
+                            }
+                        }
+                        renamed
+                    } else if let Some(names) = selected {
+                        // Selective: keep only the named fns at top level.
+                        inner_stmts
+                            .into_iter()
+                            .filter(|s| match s {
+                                Statement::FunctionDef { name, .. } => {
+                                    names.iter().any(|n| n == name)
+                                }
+                                _ => true,
+                            })
+                            .collect()
+                    } else {
+                        // Plain `import "x";` — flat merge.
+                        inner_stmts
+                    };
+                    out.extend(processed);
+                }
+                other => out.push(other),
+            }
+        }
+        Ok(out)
+    }
+
     fn resolve_module(name: &str) -> Option<std::path::PathBuf> {
         // 1. Literal path — if the argument looks like a file path
         //    (absolute, or starts with `./` or `../`, or already ends

@@ -167,6 +167,13 @@ impl Compiler {
                         | "harmonic_interfere" | "measure_coherence"
                         | "arr_resonance" | "collapse" | "res" | "phi.res"
                         | "phi.fold" | "phi.him"
+                        // L1: substrate-routed log; returns float in
+                        // [0, ~10] for typical input. Without this entry
+                        // the compiler emits Op::Mul (untyped) for
+                        // `log_phi_pi_fibonacci(x) * 50` which JIT
+                        // treats as int mul of float-bit-pattern,
+                        // producing garbage.
+                        | "log_phi_pi_fibonacci"
                         // polish round (floats)
                         | "random_float" => Some("float"),
                         "to_string" | "string" | "str_concat"
