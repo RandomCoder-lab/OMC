@@ -84,49 +84,79 @@ OMC_VM=1 ./target/release/omnimcode-standalone experiments/hybrid_llm/experiment
 | Experiment | Setting | Headline number |
 |---|---|---|
 | 0 | Copy task, exact-match query, 100 trials | OmniWeight 82/100, softmax 82/100, 0 disagreements. Confirms both scorers agree on exact match (the 18 "misses" are duplicate-value trials, both tie-break to first occurrence). |
-| 1 | Perturbed query (query = true_val + noise), 200 trials per noise level | Softmax wins everywhere. noise=1: 189 vs 170. noise=7: 118 vs 99. noise=50: 42 vs 33. OmniWeight's |k|-normalised denominator pulls predictions toward smaller attractors regardless of perturbation direction, which hurts on a "recover the original value" metric. |
-| 2 | Single-channel positional-encoding distinctness + lookup at L = 8 / 14 / 24 / 48 | At small L sinusoidal wins (8/8 vs 6/8 at L=8). **At L=48 harmonic overtakes: 38/48 vs 26/48.** Despite harmonic having only 10 unique codes across 48 positions, its monotonic-saturating failure mode beats sinusoidal's clean periodic wraparound under a "closest integer code" lookup metric. |
+| 1 | Perturbed query (query = true_val + noise), 200 trials per noise level | Softmax wins everywhere. noise=1: 189 vs 170. noise=7: 118 vs 99. noise=50: 42 vs 33. OmniWeight's |k|-normalised denominator pulls toward smaller-magnitude attractors regardless of perturbation direction, which hurts the "recover the original value" objective. |
+| 2 | Single-channel PE distinctness + lookup at L = 8 / 14 / 24 / 48 | Sinusoidal wins at short L (8/8 vs 6/8). At L=48 harmonic appears to overtake: 38/48 vs 26/48 (79% vs 54%). Flagged as a likely metric artefact — single-int "closest code" lookup favours monotonic over periodic encodings. |
+| 3 | 4-channel PE (harmonic primes 7/11/13/17, sin/cos periods 8/64), L2 lookup, L = 8 → 200 | **Sinusoidal regains its lead decisively at every L ≥ 16.** L=48: 48/48 vs 21/48. L=200: 72/200 vs 34/200. Harmonic saturates at 22 unique vectors by L=64; sinusoidal stays perfectly distinct up to L=64 then saturates at 64. The single-channel L=48 harmonic "win" was a metric artefact, exactly as suspected. |
 
-### What experiment 2 actually shows
+### Cumulative read across experiments 0–3
 
-Two failure modes, both interesting:
+The four experiments converge on a single picture:
 
-- **Sinusoidal PE (period 17):** crisp at L ≤ 17 (perfect distinctness),
-  then wraps. At L=48 every position k ≥ 17 collides exactly with
-  position `k mod 17`, and the lookup confidently returns the wrong
-  token. Failure is *periodic* — predictable and recoverable if you
-  know the period.
-- **Harmonic PE (`phi.fold(pos*7 + 1)`):** collides early (first
-  collision at pos=5), saturates once `pos*7+1` exceeds the largest
-  Fibonacci attractor in range. Failure is *monotonic and clustered*
-  — positions land in attractor "basins" of growing size. Within a
-  basin, the lookup tie-breaks to the first member; across basins,
-  ordering is preserved. At long L this preserved ordering gives the
-  harmonic scheme a surprising 79% retrieval rate vs sinusoidal's 54%.
+> **At every fair comparison so far, the standard transformer
+> building blocks (softmax attention scoring, sinusoidal positional
+> encoding) beat the harmonic alternatives on the specific tasks
+> tested.** The harmonic substrate's only apparent wins have been
+> traceable to metric artefacts that vanish under proper vector
+> similarity.
 
-**Caveat — metric dependency.** The lookup uses "closest by absolute
-integer code". That favours monotonic encodings (harmonic) over
-periodic ones (sin) at long L. With a cosine-similarity-style metric
-over a multi-channel vector, the comparison flips. Experiment 3 makes
-this explicit by giving both schemes multi-channel encodings and a
-proper vector-similarity lookup.
+This doesn't mean OMC's harmonic primitives are useless — the
+project's documented wins (the credential-stuffing detector beating
+IsolationForest at multi-dim structural anomalies, README's
+benchmark table) are real and reproducible. But it does mean:
 
-### Concrete pivot
+1. **Drop-replacing transformer components with harmonic ones is the
+   wrong play.** Per-head softmax → OmniWeight loses (exp 1).
+   Sinusoidal PE → multi-channel harmonic PE loses (exp 3). The
+   harmonic substrate is not a better-on-everything substitute.
 
-Experiment 1 said: don't use OmniWeight at the per-head attention
-scorer. Experiment 2 says something more nuanced: **the harmonic
-substrate's "preserved monotonic structure under saturation" is a
-real positional-encoding property**, not just marketing copy. The
-right comparison is multi-channel harmonic vs multi-channel
-sinusoidal (matching what the transformer paper actually uses) on a
-length-extrapolation task that needs the encoding to stay
-distinguishable past the trained range.
+2. **The harmonic substrate's home is structural-anomaly detection,
+   not next-token prediction.** That's where it's already shown
+   measurable wins in the existing codebase, and it's a different
+   computational task from "rank candidates by relative similarity".
+
+3. **The right hybrid architecture is auxiliary, not substitution.**
+   Use a standard transformer for the main next-token loss, and add
+   a harmonic structural-anomaly head as an auxiliary signal — for
+   detecting OOD inputs, attention-pattern anomalies, or
+   activations that have drifted off-attractor. That's the pivot
+   from the roadmap below.
+
+### What changed between experiment 2 and experiment 3
+
+Experiment 2 used **single-integer codes** and a **closest-int**
+lookup metric. Single-integer codes can't capture the geometric
+frequency layering that makes sinusoidal PE work in real
+transformers — once the period wraps, the encoding is dead.
+
+Experiment 3 used **4-channel vectors** and **L2 distance**. That
+gives sinusoidal a long-period channel (P=64) that stays distinct
+well past the short-period channel's wrap. Harmonic gets four
+prime-multiplier channels but they all saturate at the same
+Fibonacci ceiling, so the joint vector hits its uniqueness budget
+fast (22 unique vectors total) and stays there forever.
+
+The lesson is one of the project's existing themes spelled out
+again: **measure honestly, and let the measurement reshape the
+plan.** Experiment 2's headline number was reproducible and
+audited, but the framing was wrong. Adding experiment 3 — same
+question, fairer comparison — flipped the answer. The README is
+updated to reflect the cumulative read, not just the latest
+result.
 
 ## Roadmap on this branch
 
 - **0** Copy task: OmniWeight vs softmax scoring (no learning). ✓ done
 - **1** Perturbed-query divergence study. ✓ done
 - **2** Single-channel positional-encoding distinctness + lookup. ✓ done
-- **3** Multi-channel positional encoding: harmonic = `[phi.fold(pos*7), phi.fold(pos*11), phi.fold(pos*13), phi.fold(pos*17)]`, sinusoidal = `[sin(pos/p_0), cos(pos/p_0), sin(pos/p_1), cos(pos/p_1)]` with geometric `p_i`. Lookup by L2 distance over the vector. Re-run the length-extrapolation comparison.
-- **4** Extend `examples/lib/torch.omc` with embedding, softmax, layer-norm, cross-entropy. Port the winning experiment-3 PE to a *learned* tiny-transformer setting (requires torch in the host env).
-- **5** Hybrid: standard softmax attention with an OmniWeight-based attention-entropy regulariser. Loss = CE + λ · (1 − mean(OmniWeight of attention peaks)). Test whether nudging attention toward harmonic peaks helps small models.
+- **3** Multi-channel PE with L2 lookup — fair comparison. ✓ done
+- **4** *Pivot.* Stop trying to substitute transformer components.
+  Build a harmonic structural-anomaly head as an auxiliary signal:
+  given a sequence of intermediate activations from a tiny
+  transformer, flag tokens whose `harmonic_index` score against a
+  reference distribution is anomalous. Re-use the credential-stuffing
+  detector machinery (`harmonic_anomaly.omc`) over activation vectors
+  instead of request features. Pure-OMC first, torch port second.
+- **5** With torch available: train a 2-layer transformer on a tiny
+  char-level corpus. Add the experiment-4 anomaly head as an
+  auxiliary loss term and measure whether it improves loss curves,
+  OOD detection, or attention sharpness.
