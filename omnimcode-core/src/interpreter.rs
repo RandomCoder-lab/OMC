@@ -1690,6 +1690,11 @@ impl Interpreter {
             | "phi_pi_fib_search_traced" | "phi_pi_fib_nearest_traced"
             // Split-channel stats (explicit vs background substrate work)
             | "phi_pi_fib_stats_bg" | "phi_pi_fib_stats_all"
+            // HBit dual-band intrinsics. Tree-walk: pass-through
+            // returning the int value. Dual-band JIT (Sessions F+G):
+            // intercepted as intrinsics in the lowerer to manipulate
+            // the β shadow band and compute harmony respectively.
+            | "phi_shadow" | "harmony"
             // Self-healing
             | "safe_divide" | "safe_arr_get" | "safe_arr_set"
             | "safe_add" | "safe_sub" | "safe_mul" | "resolve_singularity"
@@ -4022,6 +4027,50 @@ impl Interpreter {
                 ];
                 Ok(Value::Array(HArray::from_vec(items)))
             }
+            // phi_shadow(x) - HBit β-divergence primitive.
+            //
+            // Tree-walk semantics: pass-through. Returns x unchanged
+            // because tree-walk has no concept of a shadow band; the
+            // value's semantic meaning is purely its α (classical).
+            //
+            // Dual-band JIT semantics (omnimcode-codegen): intercepted
+            // as an intrinsic and rewritten to replace the β lane of
+            // the value's `<2 x i64>` carrier with phi_fold(α) * 1000
+            // (cast to i64). After this op, harmony(x) is non-trivial.
+            //
+            // Use case: mark a value as "now subject to harmonic
+            // observation" so subsequent ops carry both bands through
+            // computation. A later harmony() check decides whether
+            // the value is behaving as predicted.
+            "phi_shadow" => {
+                if args.is_empty() {
+                    return Err("phi_shadow requires (value)".to_string());
+                }
+                let v = self.eval_expr(&args[0])?;
+                Ok(v)
+            }
+            // harmony(x) - HBit harmony reading.
+            //
+            // Tree-walk semantics: returns 1000 unconditionally. With
+            // no β to compare against, harmony is trivially perfect.
+            // The value's semantic content fits this — in tree-walk
+            // mode, "harmony" can be read as "agreement between α and
+            // α" which is always exact.
+            //
+            // Dual-band JIT semantics (omnimcode-codegen, Session G):
+            // intercepted as an intrinsic that emits a call to the
+            // extern Rust helper computing harmony from the two lanes.
+            //
+            // Return convention: i64 in [0, 1000]. 1000 = perfect
+            // harmony, 0 = maximally divergent. Floats avoided to
+            // keep the calling convention pure-i64.
+            "harmony" => {
+                if args.is_empty() {
+                    return Err("harmony requires (value)".to_string());
+                }
+                let _ = self.eval_expr(&args[0])?;
+                Ok(Value::HInt(HInt::new(1000)))
+            }
             // phi_pi_fib_search_v2(sorted_arr, target) -> int
             //   F(k)/φ^(π·k) split-point search. Same return convention
             //   as phi_pi_fib_search (exact match index, or -(insert+1)).
@@ -5184,6 +5233,8 @@ pub(crate) const HEAL_BUILTIN_NAMES: &[&str] = &[
     "phi_pi_bin_search", "log_phi_pi_fibonacci",
     "phi_pi_fib_search_traced", "phi_pi_fib_nearest_traced",
     "phi_pi_fib_stats_bg", "phi_pi_fib_stats_all",
+    // HBit dual-band intrinsics (Sessions F+G)
+    "phi_shadow", "harmony",
     // Self-healing
     "safe_divide", "safe_arr_get", "safe_arr_set",
     "safe_add", "safe_sub", "safe_mul", "resolve_singularity",

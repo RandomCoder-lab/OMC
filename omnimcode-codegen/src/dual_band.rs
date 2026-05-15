@@ -44,6 +44,10 @@ use crate::CodegenError;
 /// from `lib.rs` but with `<2 x i64>` as the carrier type throughout.
 pub(crate) struct DualBandLowerer<'ctx, 'a> {
     ctx: &'ctx Context,
+    /// The LLVM module emit-target. Held so intrinsics that need to
+    /// look up/declare external helper fns (llvm.floor.f64, harmony
+    /// callback, etc.) can do so without going through transmute.
+    module: &'a LlvmModule<'ctx>,
     builder: Builder<'ctx>,
     function: FunctionValue<'ctx>,
     f: &'a CompiledFunction,
@@ -86,6 +90,7 @@ impl<'ctx, 'a> DualBandLowerer<'ctx, 'a> {
 
         Ok(DualBandLowerer {
             ctx,
+            module,
             builder,
             function,
             f,
@@ -94,6 +99,46 @@ impl<'ctx, 'a> DualBandLowerer<'ctx, 'a> {
             var_slots: HashMap::new(),
             cleanup_pops: std::collections::HashSet::new(),
         })
+    }
+
+    /// Variant of `prepare` that reuses an already-declared
+    /// FunctionValue from the module instead of declaring a new one.
+    /// Used by `JitContext::jit_module`'s phase-2 body lowering, which
+    /// needs the declarations populated up-front so cross-fn calls
+    /// (Session H) can find their targets by name.
+    pub(crate) fn prepare_existing(
+        ctx: &'ctx Context,
+        module: &'a LlvmModule<'ctx>,
+        f: &'a CompiledFunction,
+    ) -> Result<Self, CodegenError> {
+        let i64_type = ctx.i64_type();
+        let v2i64 = i64_type.vec_type(2);
+        let suffixed = format!("{}_hbit", f.name);
+        let function = module
+            .get_function(&suffixed)
+            .ok_or_else(|| format!("prepare_existing: {} not declared", suffixed))?;
+        let builder = ctx.create_builder();
+        Ok(DualBandLowerer {
+            ctx,
+            module,
+            builder,
+            function,
+            f,
+            v2i64,
+            blocks: HashMap::new(),
+            var_slots: HashMap::new(),
+            cleanup_pops: std::collections::HashSet::new(),
+        })
+    }
+
+    /// Convenience wrapper used by `JitContext::jit_module` —
+    /// `prepare_existing` then `lower`.
+    pub(crate) fn lower_existing(
+        ctx: &'ctx Context,
+        module: &'a LlvmModule<'ctx>,
+        f: &'a CompiledFunction,
+    ) -> Result<FunctionValue<'ctx>, CodegenError> {
+        Self::prepare_existing(ctx, module, f)?.lower()
     }
 
     pub(crate) fn lower(mut self) -> Result<FunctionValue<'ctx>, CodegenError> {
@@ -418,16 +463,51 @@ impl<'ctx, 'a> DualBandLowerer<'ctx, 'a> {
                 }
 
                 Op::Call(name, argc) => {
-                    if name != &self.f.name {
-                        return Err(format!(
-                            "Session C hbit Call only supports recursive self-call; got call to {} at op{}",
-                            name, i
-                        ));
+                    // HBit intrinsics — intercepted before the generic
+                    // user-fn-call path. Pattern-match on (name, argc).
+                    if name == "phi_shadow" && *argc == 1 {
+                        // Session F: replace β with phi_fold(α) * 1000.
+                        // α stays untouched (the user-visible value is
+                        // unchanged), β becomes the harmonic shadow.
+                        let v = self.pop(&mut stack, i, "phi_shadow arg")?;
+                        let new_v = self.emit_phi_shadow(v, i)?;
+                        stack.push(new_v);
+                        continue;
                     }
-                    // The recursive self-call wants scalar i64 args
-                    // (because the caller-facing fn signature is scalar).
-                    // Extract α from each vector arg, pass as i64,
-                    // splat the scalar return back to a vector.
+                    if name == "harmony" && *argc == 1 {
+                        // Session G: harmony() calls the extern Rust
+                        // helper `omc_harmony(α, β) -> i64` which
+                        // computes the substrate-routed harmony in
+                        // [0, 1000]. Pre-declared in JitContext::new
+                        // and bound via global mapping.
+                        let v = self.pop(&mut stack, i, "harmony arg")?;
+                        let h_scalar = self.emit_harmony_call(v, i)?;
+                        let h_v = self.splat(h_scalar, "harmony_ret_v")?;
+                        stack.push(h_v);
+                        continue;
+                    }
+                    // Resolve the call target. Self-recursion uses
+                    // self.function directly. Cross-fn calls (Session
+                    // H) look up `<name>_hbit` in the module's symbol
+                    // table — populated by jit_module's phase-1
+                    // declaration pass before any body emission.
+                    let target_fn = if name == &self.f.name {
+                        self.function
+                    } else {
+                        let suffixed = format!("{}_hbit", name);
+                        match self.module.get_function(&suffixed) {
+                            Some(f) => f,
+                            None => {
+                                return Err(format!(
+                                    "hbit Call target {} not declared (not JIT-eligible) at op{}",
+                                    suffixed, i
+                                ));
+                            }
+                        }
+                    };
+                    // Args: extract α from each vector, pass scalars
+                    // (the called fn's caller-facing signature is
+                    // scalar i64; it splats internally).
                     let mut vec_args: Vec<VectorValue<'ctx>> = Vec::with_capacity(*argc);
                     for _ in 0..*argc {
                         vec_args.push(self.pop(&mut stack, i, "Call arg")?);
@@ -452,7 +532,7 @@ impl<'ctx, 'a> DualBandLowerer<'ctx, 'a> {
                     }
                     let call = self
                         .builder
-                        .build_call(self.function, &scalar_args, "callret")
+                        .build_call(target_fn, &scalar_args, "callret")
                         .map_err(|e| format!("hbit Call at op{}: {}", i, e))?;
                     let ret = call
                         .try_as_basic_value()
@@ -482,6 +562,141 @@ impl<'ctx, 'a> DualBandLowerer<'ctx, 'a> {
                 .map_err(|e| format!("hbit implicit ret: {}", e))?;
         }
         Ok(())
+    }
+
+    /// Session G intrinsic: read α and β out of the vector and call
+    /// the extern Rust helper `omc_harmony(α, β) -> i64` which
+    /// computes the substrate-routed harmony scaled to [0, 1000].
+    /// Returns the i64 result as a scalar — the caller is expected
+    /// to splat it back into a vector if needed.
+    fn emit_harmony_call(
+        &self,
+        v: VectorValue<'ctx>,
+        op_idx: usize,
+    ) -> Result<IntValue<'ctx>, CodegenError> {
+        let i64_type = self.ctx.i64_type();
+        let alpha = self
+            .builder
+            .build_extract_element(v, i64_type.const_int(0, false), "harmony_alpha")
+            .map_err(|e| format!("harmony extract α at op{}: {}", op_idx, e))?;
+        let beta = self
+            .builder
+            .build_extract_element(v, i64_type.const_int(1, false), "harmony_beta")
+            .map_err(|e| format!("harmony extract β at op{}: {}", op_idx, e))?;
+        let alpha_iv = match alpha {
+            BasicValueEnum::IntValue(iv) => iv,
+            _ => return Err(format!("harmony: α not int at op{}", op_idx)),
+        };
+        let beta_iv = match beta {
+            BasicValueEnum::IntValue(iv) => iv,
+            _ => return Err(format!("harmony: β not int at op{}", op_idx)),
+        };
+        // omc_harmony is pre-declared in the module by JitContext::new
+        // and bound via add_global_mapping. Look it up by name.
+        let harmony_fn = self
+            .module
+            .get_function("omc_harmony")
+            .ok_or_else(|| format!("harmony: omc_harmony not declared at op{}", op_idx))?;
+        let call = self
+            .builder
+            .build_call(
+                harmony_fn,
+                &[alpha_iv.into(), beta_iv.into()],
+                "harmony_call",
+            )
+            .map_err(|e| format!("harmony call at op{}: {}", op_idx, e))?;
+        let ret = call
+            .try_as_basic_value()
+            .left()
+            .ok_or_else(|| format!("harmony call no value at op{}", op_idx))?;
+        match ret {
+            BasicValueEnum::IntValue(iv) => Ok(iv),
+            _ => Err(format!("harmony call ret not int at op{}", op_idx)),
+        }
+    }
+
+    /// Session F intrinsic: replace the β lane of a `<2 x i64>`
+    /// vector value with the phi-shadow of α.
+    ///
+    /// phi_fold(α) = frac(α * PHI) — the fractional part of α scaled
+    /// by the golden ratio, in [0, 1). We multiply by 1000 to get an
+    /// integer-friendly range, then cast back to i64. This matches
+    /// the existing `HBitProcessor::phi_fold` semantics used by tree-
+    /// walk callers when they want a divergent β.
+    ///
+    /// After this op, harmony(α, β) is non-trivial: β depends on α
+    /// in a way that's stable under matched-band operations (Add a
+    /// constant to both → diff preserved → harmony unchanged) and
+    /// breaks under operations that touch only one band.
+    fn emit_phi_shadow(
+        &self,
+        v: VectorValue<'ctx>,
+        op_idx: usize,
+    ) -> Result<VectorValue<'ctx>, CodegenError> {
+        let i64_type = self.ctx.i64_type();
+        let f64_type = self.ctx.f64_type();
+        // Extract α from lane 0.
+        let alpha = self
+            .builder
+            .build_extract_element(v, i64_type.const_int(0, false), "shadow_alpha")
+            .map_err(|e| format!("phi_shadow extract α at op{}: {}", op_idx, e))?;
+        let alpha_iv = match alpha {
+            BasicValueEnum::IntValue(iv) => iv,
+            _ => return Err(format!("phi_shadow: α not int at op{}", op_idx)),
+        };
+        // α_d = (double) α
+        let alpha_d = self
+            .builder
+            .build_signed_int_to_float(alpha_iv, f64_type, "alpha_d")
+            .map_err(|e| format!("phi_shadow sitofp at op{}: {}", op_idx, e))?;
+        // α_phi = α_d * PHI
+        let phi_const = f64_type.const_float(crate::PHI);
+        let alpha_phi = self
+            .builder
+            .build_float_mul(alpha_d, phi_const, "alpha_phi")
+            .map_err(|e| format!("phi_shadow mul PHI at op{}: {}", op_idx, e))?;
+        // floor(α_phi) via llvm.floor.f64 intrinsic
+        let floor_fn = match self.module.get_function("llvm.floor.f64") {
+            Some(f) => f,
+            None => {
+                let ft = f64_type.fn_type(&[f64_type.into()], false);
+                self.module.add_function("llvm.floor.f64", ft, None)
+            }
+        };
+        let floor_call = self
+            .builder
+            .build_call(floor_fn, &[alpha_phi.into()], "alpha_phi_floor")
+            .map_err(|e| format!("phi_shadow floor at op{}: {}", op_idx, e))?;
+        let floor_val = floor_call
+            .try_as_basic_value()
+            .left()
+            .ok_or_else(|| format!("phi_shadow floor no value at op{}", op_idx))?;
+        let floor_f = match floor_val {
+            BasicValueEnum::FloatValue(fv) => fv,
+            _ => return Err(format!("phi_shadow floor not float at op{}", op_idx)),
+        };
+        // frac = α_phi - floor(α_phi)  ∈ [0, 1)
+        let frac = self
+            .builder
+            .build_float_sub(alpha_phi, floor_f, "alpha_frac")
+            .map_err(|e| format!("phi_shadow sub at op{}: {}", op_idx, e))?;
+        // β_d = frac * 1000.0
+        let one_thousand = f64_type.const_float(1000.0);
+        let beta_d = self
+            .builder
+            .build_float_mul(frac, one_thousand, "beta_d")
+            .map_err(|e| format!("phi_shadow mul1000 at op{}: {}", op_idx, e))?;
+        // β = (i64) β_d
+        let beta_iv = self
+            .builder
+            .build_float_to_signed_int(beta_d, i64_type, "beta_i64")
+            .map_err(|e| format!("phi_shadow fptosi at op{}: {}", op_idx, e))?;
+        // Replace lane 1 of v with β. α (lane 0) is preserved.
+        let new_v = self
+            .builder
+            .build_insert_element(v, beta_iv, i64_type.const_int(1, false), "shadow_v")
+            .map_err(|e| format!("phi_shadow insert β at op{}: {}", op_idx, e))?;
+        Ok(new_v)
     }
 
     fn splat(&self, scalar: IntValue<'ctx>, name: &str) -> Result<VectorValue<'ctx>, CodegenError> {

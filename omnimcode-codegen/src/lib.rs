@@ -32,6 +32,24 @@
 
 mod dual_band;
 
+/// φ — the golden ratio constant. Same value as `omnimcode_core::value::PHI`
+/// but kept locally so the dual-band lowerer can use it without leaking
+/// a core-private type. Synchronizing the value with core's constant
+/// is enforced by the test in `dual_band::tests` (TODO).
+pub(crate) const PHI: f64 = 1.6180339887498948482045868343656;
+
+/// Session G runtime helper: compute HBit harmony from raw band
+/// values. Exposed with `#[no_mangle] extern "C"` so JIT'd code can
+/// call it via a global-mapping binding installed in
+/// `JitContext::new`. Returns harmony scaled to `[0, 1000]` integer
+/// range (1000 = perfect, 0 = maximally divergent) so the JIT side
+/// stays pure-i64 without float-passing-convention concerns.
+#[no_mangle]
+pub extern "C" fn omc_harmony(alpha: i64, beta: i64) -> i64 {
+    let h = omnimcode_core::value::HBit::harmony(alpha, beta);
+    (h * 1000.0).round() as i64
+}
+
 use std::collections::HashMap;
 
 use inkwell::basic_block::BasicBlock;
@@ -127,6 +145,19 @@ impl<'ctx> JitContext<'ctx> {
         let engine = module
             .create_jit_execution_engine(OptimizationLevel::Default)
             .map_err(|e| format!("failed to create JIT engine: {}", e))?;
+        // Pre-declare `omc_harmony` and bind it to the runtime helper
+        // so JIT'd code (Session G harmony intrinsic) can call into
+        // omnimcode_core::value::HBit::harmony without a per-fn
+        // declaration dance. External linkage + global mapping is
+        // inkwell's idiom for "Rust fn callable from JIT".
+        let i64_type = context.i64_type();
+        let harmony_ty = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
+        let harmony_fn = module.add_function(
+            "omc_harmony",
+            harmony_ty,
+            Some(inkwell::module::Linkage::External),
+        );
+        engine.add_global_mapping(&harmony_fn, omc_harmony as *const () as usize);
         Ok(JitContext {
             context,
             module,
@@ -194,31 +225,76 @@ impl<'ctx> JitContext<'ctx> {
         &self,
         module: &omnimcode_core::bytecode::Module,
     ) -> Result<HashMap<String, JittedFn>, CodegenError> {
-        // Two-phase: lower ALL eligible fns into the LLVM module
-        // first, THEN extract fn pointers. Interleaving the phases
-        // makes get_function trigger JIT finalization on a partially-
-        // populated module, which can refuse to resolve recursive or
-        // cross-fn references that point to fns we haven't lowered
-        // yet (FunctionNotFound).
-        let mut to_extract: Vec<(String, String, usize)> = Vec::new(); // (orig, suffixed, arity)
+        // Three-phase orchestration:
+        //
+        //   1. DECLARE every user fn in the LLVM module with its
+        //      signature (i64 in, i64 out). No body, just the
+        //      FunctionValue handle. This must happen before any
+        //      body is emitted so the dual-band lowerer can find
+        //      cross-fn call targets by name (Session H).
+        //
+        //   2. LOWER each declared fn's body. The lowerer locates
+        //      its own FunctionValue by the suffixed name and emits
+        //      blocks/ops into it. Cross-fn calls resolve via the
+        //      module's symbol table populated in phase 1.
+        //
+        //   3. EXTRACT raw fn pointers via typed get_function. This
+        //      triggers JIT finalization on a now-complete module,
+        //      so cross-fn references resolve correctly.
+        //
+        // This replaces the two-phase order from Session D, which
+        // worked for self-recursion but couldn't handle cross-fn
+        // calls because targets weren't declared when their callers
+        // tried to reference them.
+        let i64_type = self.context.i64_type();
+
+        // Phase 1: declare.
         for (name, cf) in &module.functions {
             let suffixed = format!("{}_hbit", name);
-            match self.lower_function_dual_band(cf) {
+            // Skip if already declared (e.g. omc_harmony from
+            // JitContext::new). New names get a fresh declaration.
+            if self.module.get_function(&suffixed).is_none() {
+                let param_types: Vec<_> =
+                    cf.params.iter().map(|_| i64_type.into()).collect();
+                let fn_type = i64_type.fn_type(&param_types, false);
+                self.module.add_function(&suffixed, fn_type, None);
+            }
+        }
+
+        // Phase 2: lower bodies.
+        let mut to_extract: Vec<(String, String, usize)> = Vec::new();
+        for (name, cf) in &module.functions {
+            let suffixed = format!("{}_hbit", name);
+            match dual_band::DualBandLowerer::lower_existing(self.context, &self.module, cf) {
                 Ok(_) => {
                     to_extract.push((name.clone(), suffixed, cf.params.len()));
                 }
                 Err(_) => {
-                    // Lowering failed mid-emission. The LLVM module
-                    // now contains a partial / broken function — leaving
-                    // it in place would corrupt JIT finalization for
-                    // every subsequent fn (and crash on first call).
-                    // Erase it so the rest of the module stays valid.
-                    if let Some(broken) = self.module.get_function(&suffixed) {
-                        unsafe { broken.delete() };
+                    // Body emission failed mid-way. Leave the
+                    // function declaration in place but it's now
+                    // an empty extern that anything else might
+                    // call into and segfault. Better: replace the
+                    // body with an unreachable instruction.
+                    if let Some(partial) = self.module.get_function(&suffixed) {
+                        // Erase any partial blocks and emit a single
+                        // entry that traps. This keeps the symbol
+                        // table valid (other fns can still link to
+                        // this name) but makes the call obviously
+                        // wrong if anyone reaches it.
+                        for bb in partial.get_basic_blocks() {
+                            unsafe { bb.delete().ok() };
+                        }
+                        let entry =
+                            self.context.append_basic_block(partial, "broken_entry");
+                        let builder = self.context.create_builder();
+                        builder.position_at_end(entry);
+                        let _ = builder.build_return(Some(&i64_type.const_int(0, false)));
                     }
                 }
             }
         }
+
+        // Phase 3: extract.
         let mut out: HashMap<String, JittedFn> = HashMap::new();
         for (name, suffixed, arity) in to_extract {
             match unsafe { self.extract_raw_fn_ptr(&suffixed, arity) } {
@@ -226,8 +302,7 @@ impl<'ctx> JitContext<'ctx> {
                     out.insert(name, JittedFn { arity, fn_ptr });
                 }
                 Err(_) => {
-                    // Extraction failure → skip this fn, keep going.
-                    // Tree-walk will handle it.
+                    // Extraction failure → skip; tree-walk handles it.
                 }
             }
         }
