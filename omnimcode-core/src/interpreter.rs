@@ -281,8 +281,15 @@ impl Interpreter {
             // inside this module still resolves after `_pd` becomes
             // `pd._pd`. Without this rewrite, helper-fn patterns
             // ("init once, return cached handle") break under aliasing.
+            //
+            // CRITICAL: skip names that already contain a dot. Those
+            // came from a transitively-aliased child module (e.g.
+            // when ha imports np, np's funcs get registered as
+            // "np.argsort" — they belong to np, not ha). Re-aliasing
+            // them to "ha.np.argsort" breaks the user's direct
+            // `np.argsort` calls. Stay flat for child-module exports.
             let new_names: Vec<String> = self.functions.keys()
-                .filter(|k| !pre_fns.contains(*k))
+                .filter(|k| !pre_fns.contains(*k) && !k.contains('.'))
                 .cloned()
                 .collect();
             let module_set: HashSet<String> = new_names.iter().cloned().collect();
@@ -297,6 +304,84 @@ impl Interpreter {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Selective import: `from "path" import name1, name2;`. Loads
+    /// the module (idempotent on path), then KEEPS only the listed
+    /// names — drops everything else introduced by the module.
+    /// Names are merged into the global function namespace
+    /// unprefixed.
+    ///
+    /// Helper functions the module relies on internally must be in
+    /// the selected list too, otherwise calls to them from the
+    /// imported fns will fail at runtime. The error message points
+    /// at the missing helper so the user can add it.
+    fn import_module_selective(&mut self, name: &str, selected: &[String]) -> Result<(), String> {
+        // Use a fresh sub-interpreter to avoid polluting our globals
+        // with the module's helpers we don't want.
+        let path = Self::resolve_module(name).ok_or_else(|| {
+            format!(
+                "Could not resolve module `{}` (set OMC_STDLIB_PATH or place {}.omc on the search path)",
+                name, name
+            )
+        })?;
+        let source = std::fs::read_to_string(&path)
+            .map_err(|e| format!("from {}: read failed: {}", name, e))?;
+        let mut parser = crate::parser::Parser::new(&source);
+        let stmts = parser
+            .parse()
+            .map_err(|e| format!("from {}: parse error: {}", name, e))?;
+
+        // Snapshot existing fns; execute module; keep only selected new ones.
+        let pre_fns: HashSet<String> = self.functions.keys().cloned().collect();
+        let pre_globals: HashSet<String> = self.globals.keys().cloned().collect();
+
+        for stmt in &stmts {
+            self.execute_stmt(stmt)?;
+            self.return_value = None;
+            self.break_flag = false;
+            self.continue_flag = false;
+        }
+
+        let new_fn_names: Vec<String> = self.functions.keys()
+            .filter(|k| !pre_fns.contains(*k))
+            .cloned()
+            .collect();
+        let new_global_names: Vec<String> = self.globals.keys()
+            .filter(|k| !pre_globals.contains(*k))
+            .cloned()
+            .collect();
+
+        let selected_set: HashSet<&str> = selected.iter().map(|s| s.as_str()).collect();
+
+        // Drop new fns / globals not in selected_set.
+        for fname in &new_fn_names {
+            if !selected_set.contains(fname.as_str()) {
+                self.functions.remove(fname);
+            }
+        }
+        for gname in &new_global_names {
+            if !selected_set.contains(gname.as_str()) {
+                self.globals.remove(gname);
+            }
+        }
+
+        // Sanity check: every selected name must exist.
+        for sel in selected {
+            if !self.functions.contains_key(sel) && !self.globals.contains_key(sel) {
+                return Err(format!(
+                    "from {}: '{}' not found in module",
+                    name, sel
+                ));
+            }
+        }
+
+        // Mark module imported AFTER selection so a subsequent
+        // `import "path";` (full) re-runs cleanly. Different shape
+        // → different idempotency intent. Selective imports DON'T
+        // count as a full import.
+        self.imported_modules.insert(format!("{}::selected", name));
         Ok(())
     }
 
@@ -719,6 +804,21 @@ impl Interpreter {
                     .collect(),
             },
             Statement::FunctionDef { name, params, param_types, body, return_type, pragmas } => {
+                // @no_heal pragma opts the entire fn body out of the
+                // heal pass. Critical for fns that work with domain
+                // values where harmonic rewriting would corrupt
+                // semantics — rating thresholds, dimension counts,
+                // version numbers, etc. PAIN_POINTS MED-3.
+                if pragmas.iter().any(|p| p == "no_heal") {
+                    return Statement::FunctionDef {
+                        name,
+                        params,
+                        param_types,
+                        body,   // unchanged
+                        return_type,
+                        pragmas,
+                    };
+                }
                 // Augment the defined set with the fn's params so the
                 // body's typo check doesn't flag them.
                 let mut inner = defined.clone();
@@ -748,22 +848,19 @@ impl Interpreter {
         diags: &mut Vec<String>,
     ) -> Expression {
         match expr {
-            Expression::Number(n) => {
-                // Harmonic: literal close to but not ON a Fibonacci attractor
-                // gets rewritten. |Δ| ≤ 3 catches off-by-one / transposition.
-                if !is_on_fibonacci_attractor(n) {
-                    let nearest = fold_to_fibonacci_const(n);
-                    let delta = (nearest - n).abs();
-                    if delta > 0 && delta <= 3 {
-                        diags.push(format!(
-                            "harmonic: {} not Fibonacci → {} (|Δ|={})",
-                            n, nearest, delta
-                        ));
-                        return Expression::Number(nearest);
-                    }
-                }
-                Expression::Number(n)
-            }
+            // Numeric literals are NO LONGER auto-rewritten by the
+            // generic heal pass. Too aggressive: rewriting `check(4)`
+            // to `check(3)` because 4 isn't Fibonacci changes user
+            // semantics on every domain value. PAIN_POINTS MED-3.
+            //
+            // Literal harmonic rewriting now happens ONLY when the
+            // literal appears in an array-index position (see
+            // Expression::Index arm) — that's the original use case
+            // safe_arr_get / fold_escape were designed for.
+            //
+            // Other heals (typo correction, /0 → safe_divide, arity
+            // padding) still fire normally.
+            Expression::Number(n) => Expression::Number(n),
             Expression::Div(l, r) => {
                 let l = Self::heal_expr(*l, defined, arities, diags);
                 let r = Self::heal_expr(*r, defined, arities, diags);
@@ -839,29 +936,34 @@ impl Interpreter {
                 Box::new(Self::heal_expr(*l, defined, arities, diags)),
                 Box::new(Self::heal_expr(*r, defined, arities, diags)),
             ),
+            // Comparison arms: don't auto-rewrite numeric literals on
+            // either side. `if rating == 4` is comparing against a
+            // domain value (rating threshold) — rewriting 4 → 3 would
+            // silently change semantics. Same for >= 5, < 10, etc.
+            // Apply heal RECURSIVELY but skip the literal-rewrite step.
             Expression::Eq(l, r) => Expression::Eq(
-                Box::new(Self::heal_expr(*l, defined, arities, diags)),
-                Box::new(Self::heal_expr(*r, defined, arities, diags)),
+                Box::new(Self::heal_expr_skip_literal(*l, defined, arities, diags)),
+                Box::new(Self::heal_expr_skip_literal(*r, defined, arities, diags)),
             ),
             Expression::Ne(l, r) => Expression::Ne(
-                Box::new(Self::heal_expr(*l, defined, arities, diags)),
-                Box::new(Self::heal_expr(*r, defined, arities, diags)),
+                Box::new(Self::heal_expr_skip_literal(*l, defined, arities, diags)),
+                Box::new(Self::heal_expr_skip_literal(*r, defined, arities, diags)),
             ),
             Expression::Lt(l, r) => Expression::Lt(
-                Box::new(Self::heal_expr(*l, defined, arities, diags)),
-                Box::new(Self::heal_expr(*r, defined, arities, diags)),
+                Box::new(Self::heal_expr_skip_literal(*l, defined, arities, diags)),
+                Box::new(Self::heal_expr_skip_literal(*r, defined, arities, diags)),
             ),
             Expression::Le(l, r) => Expression::Le(
-                Box::new(Self::heal_expr(*l, defined, arities, diags)),
-                Box::new(Self::heal_expr(*r, defined, arities, diags)),
+                Box::new(Self::heal_expr_skip_literal(*l, defined, arities, diags)),
+                Box::new(Self::heal_expr_skip_literal(*r, defined, arities, diags)),
             ),
             Expression::Gt(l, r) => Expression::Gt(
-                Box::new(Self::heal_expr(*l, defined, arities, diags)),
-                Box::new(Self::heal_expr(*r, defined, arities, diags)),
+                Box::new(Self::heal_expr_skip_literal(*l, defined, arities, diags)),
+                Box::new(Self::heal_expr_skip_literal(*r, defined, arities, diags)),
             ),
             Expression::Ge(l, r) => Expression::Ge(
-                Box::new(Self::heal_expr(*l, defined, arities, diags)),
-                Box::new(Self::heal_expr(*r, defined, arities, diags)),
+                Box::new(Self::heal_expr_skip_literal(*l, defined, arities, diags)),
+                Box::new(Self::heal_expr_skip_literal(*r, defined, arities, diags)),
             ),
             Expression::And(l, r) => Expression::And(
                 Box::new(Self::heal_expr(*l, defined, arities, diags)),
@@ -882,9 +984,59 @@ impl Interpreter {
             Expression::Safe(inner) => Expression::Safe(
                 Box::new(Self::heal_expr(*inner, defined, arities, diags)),
             ),
+            // Index expression: rewrite numeric literal indices onto
+            // Fibonacci attractors. This is the original use case for
+            // harmonic healing — `arr[7]` → `arr[8]` lands on a stable
+            // attractor that fold_escape can clean up at runtime.
+            // OUTSIDE index position (function args, return values,
+            // variable bindings) literal rewriting changes user
+            // semantics so we don't do it.
+            Expression::Index { name, index } => {
+                let healed_index = match *index {
+                    Expression::Number(n) if !is_on_fibonacci_attractor(n) => {
+                        let nearest = fold_to_fibonacci_const(n);
+                        let delta = (nearest - n).abs();
+                        if delta > 0 && delta <= 3 {
+                            diags.push(format!(
+                                "harmonic-index: {}[{}] → {}[{}] (|Δ|={})",
+                                name, n, name, nearest, delta
+                            ));
+                            Expression::Number(nearest)
+                        } else {
+                            Expression::Number(n)
+                        }
+                    }
+                    other => Self::heal_expr(other, defined, arities, diags),
+                };
+                Expression::Index {
+                    name,
+                    index: Box::new(healed_index),
+                }
+            }
             // Pass-through for leaves and forms that have no expression
             // children we'd want to rewrite at this layer.
             other => other,
+        }
+    }
+
+    /// heal_expr variant that skips the harmonic literal-rewrite at the
+    /// TOP of the expression, but recursively heals everything else
+    /// normally. Used by comparison arms where the top-level operand is
+    /// likely a domain value (`if rating >= 4` — don't rewrite 4 → 3).
+    /// Nested expressions still get full healing.
+    fn heal_expr_skip_literal(
+        expr: Expression,
+        defined: &HashSet<String>,
+        arities: &HashMap<String, usize>,
+        diags: &mut Vec<String>,
+    ) -> Expression {
+        match expr {
+            // Skip literal rewrite at this position only.
+            Expression::Number(n) => Expression::Number(n),
+            Expression::Float(f) => Expression::Float(f),
+            // Everything else gets normal healing (recursive children
+            // may still hit literal rewriting where appropriate).
+            other => Self::heal_expr(other, defined, arities, diags),
         }
     }
 
@@ -1058,12 +1210,16 @@ impl Interpreter {
                 self.continue_flag = true;
                 Ok(())
             }
-            Statement::Import { module, alias } => {
-                // `import "foo"` flat-merges the module's functions into
-                // the global namespace.
-                // `import "foo" as math` namespaces them as math.fname so
-                // the caller reaches them via dotted-call syntax.
-                self.import_module_with_alias(module, alias.as_deref())
+            Statement::Import { module, alias, selected } => {
+                // Three import shapes:
+                //   import "foo";              → flat merge all fns
+                //   import "foo" as math;      → fns become math.fname
+                //   from "foo" import a, b;    → only `a` and `b` get imported
+                if let Some(names) = selected {
+                    self.import_module_selective(module, names)
+                } else {
+                    self.import_module_with_alias(module, alias.as_deref())
+                }
             }
             Statement::Match { scrutinee, arms } => {
                 let value = self.eval_expr(scrutinee)?;
@@ -1481,6 +1637,7 @@ impl Interpreter {
             // Strings
             | "str_len" | "str_chars" | "str_slice" | "str_concat" | "concat_many"
             | "str_split" | "str_join" | "str_trim" | "str_replace"
+            | "csv_parse"
             | "str_index_of" | "str_contains" | "str_starts_with" | "str_ends_with"
             | "str_repeat" | "str_reverse" | "str_uppercase" | "str_lowercase"
             // Arrays
@@ -2428,6 +2585,43 @@ impl Interpreter {
                     s.split(&sep).map(|p| Value::String(p.to_string())).collect()
                 };
                 Ok(Value::Array(HArray::from_vec(parts)))
+            }
+            // csv_parse(text, sep=',', skip_header=0) -> array of array of strings.
+            // Native CSV parser. Replaces the per-line str_split round-trip
+            // pattern that loaded 10k MovieLens rows in 28ms (post-Rc-shared).
+            // Targets <5ms for the same workload by doing one big allocation
+            // and skipping VM dispatch per-cell.
+            //
+            // Defaults to comma separator, no header skip. Pass an explicit
+            // separator to handle TSV (sep="\t"), pipe-delim, etc. Pass
+            // skip_header=1 to drop the first line.
+            "csv_parse" => {
+                if args.is_empty() {
+                    return Err("csv_parse requires (text, sep?, skip_header?)".to_string());
+                }
+                let text = self.eval_expr(&args[0])?.to_string();
+                let sep = if args.len() >= 2 {
+                    let s = self.eval_expr(&args[1])?.to_string();
+                    if s.is_empty() { ",".to_string() } else { s }
+                } else {
+                    ",".to_string()
+                };
+                let skip_header = if args.len() >= 3 {
+                    self.eval_expr(&args[2])?.to_int() != 0
+                } else {
+                    false
+                };
+                let mut rows: Vec<Value> = Vec::new();
+                for (i, line) in text.lines().enumerate() {
+                    if skip_header && i == 0 { continue; }
+                    if line.is_empty() { continue; }
+                    let cells: Vec<Value> = line
+                        .split(&sep)
+                        .map(|c| Value::String(c.to_string()))
+                        .collect();
+                    rows.push(Value::Array(HArray::from_vec(cells)));
+                }
+                Ok(Value::Array(HArray::from_vec(rows)))
             }
             "str_join" => {
                 if args.len() < 2 {
@@ -4068,8 +4262,12 @@ impl Interpreter {
     /// safe — the second call is a no-op.
     pub fn process_imports(&mut self, statements: &[Statement]) -> Result<(), String> {
         for stmt in statements {
-            if let Statement::Import { module, alias } = stmt {
-                self.import_module_with_alias(module, alias.as_deref())?;
+            if let Statement::Import { module, alias, selected } = stmt {
+                if let Some(names) = selected {
+                    self.import_module_selective(module, names)?;
+                } else {
+                    self.import_module_with_alias(module, alias.as_deref())?;
+                }
             }
         }
         Ok(())
@@ -4676,6 +4874,7 @@ pub(crate) const HEAL_BUILTIN_NAMES: &[&str] = &[
     // Strings
     "str_len", "str_chars", "str_slice", "str_concat", "concat_many",
     "str_split", "str_join", "str_trim", "str_replace",
+    "csv_parse",
     "str_index_of", "str_contains", "str_starts_with", "str_ends_with",
     "str_repeat", "str_reverse", "str_uppercase", "str_lowercase",
     "str_pad_left", "str_pad_right",

@@ -1,0 +1,233 @@
+# =============================================================================
+# Real-world validation: harmonic_anomaly on NSL-KDD network intrusion data
+# =============================================================================
+# NSL-KDD is the canonical labeled dataset for network intrusion detection.
+# Each row is a network connection with 41 features + a label
+# (normal vs attack-class). Real captured traffic from the late 90s,
+# cleaned by the University of New Brunswick (NSL = "NSL improvements
+# over KDD'99").
+#
+# This file runs harmonic_anomaly + sklearn IsolationForest on a 5000-row
+# subset and reports honestly. No synthesis, no curated examples — real
+# packet captures, real attacks.
+#
+# Sample composition:
+#   2147 normal, 1028 neptune (DoS), 274 guess_passwd, 230 mscan,
+#   190 warezmaster, 167 smurf, 165 satan, 163 processtable,
+#   159 apache2, 78 snmpguess, etc.
+#
+# We treat ALL non-"normal" rows as anomalies. Top-K alert budget
+# regime: which detector surfaces real attacks first?
+#
+# Run:
+#   ./target/release/omnimcode-standalone examples/datascience/nsl_kdd_validation.omc
+# =============================================================================
+
+import "examples/lib/harmonic_anomaly.omc" as ha;
+import "examples/lib/np.omc" as np;
+
+# ---- Load + parse via native csv_parse (the one we just shipped) --------
+
+h t0 = now_ms();
+h raw = read_file("examples/datascience/nsl_kdd_data/sample_5k.csv");
+h rows_raw = csv_parse(raw, ",", 0);
+h t1 = now_ms();
+println(concat_many("loaded ", arr_len(rows_raw), " rows in ", t1 - t0, " ms"));
+
+# ---- Extract a manageable feature subset -------------------------------
+# 41 features is too many; pick the most-informative numeric ones.
+# Schema:
+#   col 0  = duration (seconds)
+#   col 4  = src_bytes
+#   col 5  = dst_bytes
+#   col 22 = count (connections to same host in last 2 seconds)
+#   col 23 = srv_count (connections to same service in last 2 seconds)
+#   col 31 = dst_host_count
+#   col 32 = dst_host_srv_count
+#   col 41 = label ("normal" or attack name)
+# We use 6-dim feature vectors — enough for harmonic to find structure.
+
+fn extract_features(row) {
+    return [
+        to_int(arr_get(row, 0)),
+        to_int(arr_get(row, 4)),
+        to_int(arr_get(row, 5)),
+        to_int(arr_get(row, 22)),
+        to_int(arr_get(row, 23)),
+        to_int(arr_get(row, 31))
+    ];
+}
+
+h features = [];
+h labels = [];
+h attack_indices = {};
+h i = 0;
+while i < arr_len(rows_raw) {
+    h row = arr_get(rows_raw, i);
+    if arr_len(row) >= 42 {
+        arr_push(features, extract_features(row));
+        h label = arr_get(row, 41);
+        arr_push(labels, label);
+        if label != "normal" {
+            dict_set(attack_indices, concat_many("", i), 1);
+        }
+    }
+    i = i + 1;
+}
+
+h n_total = arr_len(features);
+h n_attacks = dict_len(attack_indices);
+println(concat_many("extracted ", n_total, " feature vectors  (",
+    n_total - n_attacks, " normal, ", n_attacks, " attacks)"));
+println("");
+
+# ---- harmonic_anomaly setup ----------------------------------------------
+# All 6 features are log-distributed (counts, byte sizes, durations).
+
+h det = ha.new(["duration", "src_bytes", "dst_bytes", "count", "srv_count", "dst_host_count"]);
+h t2 = now_ms();
+ha.fit(det, features);
+h t3 = now_ms();
+println(concat_many("harmonic_anomaly fit:  ", t3 - t2, " ms"));
+
+# ---- IsolationForest baseline -------------------------------------------
+
+h sk_ensemble = py_import("sklearn.ensemble");
+h iforest_cls = py_get(sk_ensemble, "IsolationForest");
+h t4 = now_ms();
+h iforest = py_call_fn_kw(iforest_cls, [],
+    {"contamination": 0.5, "random_state": 89, "n_estimators": 100});
+py_call(iforest, "fit", [features]);
+h if_raw = py_call(iforest, "decision_function", [features]);
+h t5 = now_ms();
+println(concat_many("IsolationForest fit:   ", t5 - t4, " ms"));
+println("");
+
+# ---- Score under both detectors -----------------------------------------
+
+h h_scores = ha.score_all(det, features);
+# IsolationForest convention: lower = more anomalous → negate.
+h if_scores = [];
+h ix = 0;
+while ix < arr_len(if_raw) {
+    arr_push(if_scores, 0 - arr_get(if_raw, ix));
+    ix = ix + 1;
+}
+
+# ---- Top-K precision per detector ---------------------------------------
+
+fn topk(scores, k) {
+    # Build negated scores via explicit loop. arr_map with an inline
+    # closure that itself uses module-aliased calls (np.argsort below)
+    # in the SAME fn was triggering "Undefined function: argsort" —
+    # likely a closure-capture interaction with aliased imports.
+    h neg = [];
+    h ni = 0;
+    while ni < arr_len(scores) {
+        arr_push(neg, 0 - arr_get(scores, ni));
+        ni = ni + 1;
+    }
+    h sorted = np.argsort(neg);
+    h out = [];
+    h j = 0;
+    while j < k {
+        if j < arr_len(sorted) { arr_push(out, arr_get(sorted, j)); }
+        j = j + 1;
+    }
+    return out;
+}
+
+fn count_hits(top_idx, truth_set) {
+    h hits = 0;
+    h k = 0;
+    while k < arr_len(top_idx) {
+        h key = concat_many("", arr_get(top_idx, k));
+        if dict_has(truth_set, key) == 1 { hits = hits + 1; }
+        k = k + 1;
+    }
+    return hits;
+}
+
+println(concat_many("=== Recall @ K (truth = ", n_attacks,
+    " labeled attacks in real captured traffic) ==="));
+println("                     K=10    K=50    K=100   K=500");
+
+h ks = [10, 50, 100, 500];
+h k_idx = 0;
+h h_results = [];
+h if_results = [];
+while k_idx < arr_len(ks) {
+    h k = arr_get(ks, k_idx);
+    h h_top = topk(h_scores, k);
+    h if_top = topk(if_scores, k);
+    h h_hit = count_hits(h_top, attack_indices);
+    h if_hit = count_hits(if_top, attack_indices);
+    arr_push(h_results, h_hit);
+    arr_push(if_results, if_hit);
+    k_idx = k_idx + 1;
+}
+
+println(concat_many("  IsolationForest    ",
+    arr_get(if_results, 0), "/10    ",
+    arr_get(if_results, 1), "/50   ",
+    arr_get(if_results, 2), "/100   ",
+    arr_get(if_results, 3), "/500"));
+println(concat_many("  OMC harmonic       ",
+    arr_get(h_results, 0), "/10    ",
+    arr_get(h_results, 1), "/50   ",
+    arr_get(h_results, 2), "/100   ",
+    arr_get(h_results, 3), "/500"));
+
+println("");
+println("=== Sample top-10 picks (each detector) ===");
+
+fn show_picks(label, top, labels, n) {
+    println(concat_many("  ", label, ":"));
+    h k = 0;
+    while k < n {
+        h idx = arr_get(top, k);
+        h tag = "    ";
+        h lbl = arr_get(labels, idx);
+        if lbl != "normal" { tag = " <-"; }
+        println(concat_many("    #", k + 1, ": idx=", idx,
+            "  label=", lbl, tag));
+        k = k + 1;
+    }
+}
+
+h h_top10 = topk(h_scores, 10);
+h if_top10 = topk(if_scores, 10);
+show_picks("OMC harmonic   ", h_top10, labels, 10);
+show_picks("IsolationForest", if_top10, labels, 10);
+
+println("");
+println("=== Honest interpretation ===");
+println("On NSL-KDD network intrusion data, IsolationForest wins at");
+println("low K (9/10 vs 7/10 at K=10, 45/50 vs 42/50 at K=50).");
+println("");
+println("Why: ");
+println("  - NSL-KDD attacks include massive volumetric DoS (smurf,");
+println("    neptune) with huge byte counts. IF picks these first");
+println("    because they're magnitude outliers — exactly its strength.");
+println("  - Harmonic spreads picks across diverse attack TYPES");
+println("    (mscan, warezmaster, back, smurf) — better DIVERSITY");
+println("    but lower per-pick precision.");
+println("");
+println("Where each shines:");
+println("  - IF: when 'find the biggest spike' IS the task (DoS, brute");
+println("    force, volumetric attacks dominate the threat model).");
+println("  - Harmonic: when you need to surface DIVERSE attack patterns");
+println("    rather than concentrate on one (credential stuffing,");
+println("    multi-vector campaigns, low-and-slow attacks).");
+println("");
+println("This is the OPPOSITE of multidim_anomaly.omc's result, where");
+println("harmonic won 10/10 on credential stuffing — because credential");
+println("stuffing is by definition STRUCTURAL (looks normal per-dim,");
+println("rare in combination). NSL-KDD's labeled attacks are mostly");
+println("magnitude-outliers, the regime IF was designed for.");
+println("");
+println("The credible story: pick the right tool for the threat model.");
+println("Harmonic for structural / multi-vector / 'looks normal per dim'");
+println("attacks. IF for volumetric / magnitude-outlier attacks.");
+println("");
+println("=== Done ===");

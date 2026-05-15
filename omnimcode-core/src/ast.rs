@@ -78,6 +78,13 @@ pub enum Statement {
     Import {
         module: String,
         alias: Option<String>,
+        /// Selective imports: `from "path" import name1, name2;`.
+        /// When `Some(names)`, only the listed names are imported into
+        /// the global namespace (no alias prefix). When `None`, the
+        /// whole module imports per `alias` (None = flat merge,
+        /// Some = prefix all with `alias.`). Mutually exclusive with
+        /// `alias` — parser enforces this.
+        selected: Option<Vec<String>>,
     },
     /// `try { ... } catch err { ... }`. If the try block raises an
     /// error (via `error("msg")` or any builtin failure), execution

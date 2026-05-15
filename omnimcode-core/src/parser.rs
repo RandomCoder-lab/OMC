@@ -21,6 +21,7 @@ pub enum Token {
     Range,
     Import,
     Load,
+    From,
     As,
     Res,
     Fold,
@@ -315,6 +316,7 @@ impl Lexer {
                         "print" => Token::Print,
                         "range" => Token::Range,
                         "import" => Token::Import,
+                        "from" => Token::From,
                         "load" => Token::Load,
                         "as" => Token::As,
                         "res" => Token::Res,
@@ -605,20 +607,21 @@ impl Parser {
     }
 
     fn parse_statement(&mut self) -> Result<Statement, String> {
-        // Collect any line-prefix pragmas: @pragma[name] above a fn
+        // Collect any line-prefix pragmas. Two syntaxes accepted:
+        //   @pragma[name]     — original verbose form
+        //   @name             — short form (matches Rust attributes)
+        // Both produce the same AST. The short form is friendlier for
+        // user-facing pragmas like @no_heal where the verbose form is
+        // boilerplate.
         let mut prefix_pragmas: Vec<String> = Vec::new();
         while self.current() == Token::At {
             self.advance();
-            // Expect 'pragma' ident
             match self.current() {
                 Token::Ident(ref s) if s == "pragma" => {
                     self.advance();
                     self.expect(Token::LBracket)?;
                     let name = match self.current() {
-                        Token::Ident(s) => {
-                            self.advance();
-                            s
-                        }
+                        Token::Ident(s) => { self.advance(); s }
                         other => {
                             return Err(format!(
                                 "Expected pragma name in @pragma[...], got {:?}",
@@ -629,9 +632,15 @@ impl Parser {
                     self.expect(Token::RBracket)?;
                     prefix_pragmas.push(name);
                 }
+                Token::Ident(s) => {
+                    // Short form: @name → pragma "name"
+                    let name = s.clone();
+                    self.advance();
+                    prefix_pragmas.push(name);
+                }
                 other => {
                     return Err(format!(
-                        "Expected 'pragma' after '@' at line-prefix, got {:?}",
+                        "Expected pragma name after '@' (e.g. @no_heal or @pragma[name]), got {:?}",
                         other
                     ))
                 }
@@ -737,7 +746,37 @@ impl Parser {
                     None
                 };
                 self.expect(Token::Semicolon)?;
-                Ok(Statement::Import { module, alias })
+                Ok(Statement::Import { module, alias, selected: None })
+            }
+            // Selective import: `from "path" import name1, name2;`.
+            // Pulls only the listed names into the global namespace,
+            // unprefixed. Mutually exclusive with the `as` alias form.
+            Token::From => {
+                self.advance();
+                let module = match self.current() {
+                    Token::Ident(s) => { self.advance(); s }
+                    Token::String(s) => { self.advance(); s }
+                    other => {
+                        return Err(format!(
+                            "Expected module path (ident or string) after `from`, got {:?}",
+                            other
+                        ))
+                    }
+                };
+                self.expect(Token::Import)?;
+                // Comma-separated identifier list.
+                let mut names = Vec::new();
+                names.push(self.parse_ident()?);
+                while self.current() == Token::Comma {
+                    self.advance();
+                    names.push(self.parse_ident()?);
+                }
+                self.expect(Token::Semicolon)?;
+                Ok(Statement::Import {
+                    module,
+                    alias: None,
+                    selected: Some(names),
+                })
             }
             Token::Return => {
                 self.advance();

@@ -160,15 +160,23 @@ fn format_stmt(stmt: &Statement, level: usize, out: &mut String) {
         }
         Statement::Break => out.push_str("break;\n"),
         Statement::Continue => out.push_str("continue;\n"),
-        Statement::Import { module, alias } => {
-            out.push_str("import \"");
-            out.push_str(module);
-            out.push('"');
-            if let Some(a) = alias {
-                out.push_str(" as ");
-                out.push_str(a);
+        Statement::Import { module, alias, selected } => {
+            if let Some(names) = selected {
+                out.push_str("from \"");
+                out.push_str(module);
+                out.push_str("\" import ");
+                out.push_str(&names.join(", "));
+                out.push_str(";\n");
+            } else {
+                out.push_str("import \"");
+                out.push_str(module);
+                out.push('"');
+                if let Some(a) = alias {
+                    out.push_str(" as ");
+                    out.push_str(a);
+                }
+                out.push_str(";\n");
             }
-            out.push_str(";\n");
         }
         Statement::Try { body, err_var, handler } => {
             out.push_str("try {\n");
