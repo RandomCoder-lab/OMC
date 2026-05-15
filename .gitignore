@@ -32,3 +32,8 @@ examples/enemy_ai.omc
 
 # Tooling caches
 omnimcode-ffi/.cargo/
+
+# Large dataset files (download via examples/recommend/README.md)
+examples/movielens_*.csv
+examples/recommend/sample_10k.csv
+examples/recommend/sample_100k.csv

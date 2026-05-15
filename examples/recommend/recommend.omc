@@ -1,0 +1,225 @@
+# =============================================================================
+# Movie recommendation engine — real MovieLens data, real OMC code
+# =============================================================================
+# CSV schema: userId,movieId,rating,timestamp
+#
+# Pipeline:
+#   1. Read CSV → parse → list of {user, movie, rating, ts}
+#   2. Aggregate: per-movie (avg_rating, count) → "popularity profile"
+#   3. Build harmonic_index keyed by avg_rating attractor
+#   4. Recommend: given a target rating R, find movies whose avg ≈ R
+#      via attractor lookup (sub-linear, fuzzy). Compare to linear scan.
+#
+# Run:
+#   ./target/release/omnimcode-standalone examples/recommend/recommend.omc
+#
+# CSV path is the first positional fact you need to change for scale tests.
+# =============================================================================
+
+# Inline the harmonic_collections we wrote in examples/harmonic_collections.omc.
+# (OMC doesn't have a "import this single function" yet — when the import
+# system grows, we'd `import "../harmonic_collections.omc";`. For now,
+# duplicate the small subset we use.)
+
+fn hidx_new() { return {}; }
+
+fn _hidx_key(v) { return concat_many("", fold(v)); }
+
+fn hidx_insert(idx, key, value) {
+    h k = _hidx_key(key);
+    h out = dict_merge(idx, {});
+    h existing = dict_get(out, k, []);
+    h pair = [key, value];
+    h fresh = arr_concat(existing, [pair]);
+    dict_set(out, k, fresh);
+    return out;
+}
+
+fn hidx_lookup(idx, query) {
+    return dict_get(idx, _hidx_key(query), []);
+}
+
+fn hidx_size(idx) {
+    h ks = dict_keys(idx);
+    h total = 0;
+    h i = 0;
+    while i < arr_len(ks) {
+        total = total + arr_len(dict_get(idx, arr_get(ks, i)));
+        i = i + 1;
+    }
+    return total;
+}
+
+# ---- CSV loader -----------------------------------------------------------
+
+fn load_ratings(path) {
+    h raw = read_file(path);
+    h lines = str_split(raw, "\n");
+    h out = [];
+    h i = 1;   # skip header
+    while i < arr_len(lines) {
+        h ln = arr_get(lines, i);
+        if str_len(ln) > 0 {
+            h parts = str_split(ln, ",");
+            if arr_len(parts) >= 4 {
+                arr_push(out, [
+                    to_int(arr_get(parts, 0)),
+                    to_int(arr_get(parts, 1)),
+                    to_float(arr_get(parts, 2)),
+                    to_int(arr_get(parts, 3))
+                ]);
+            }
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+# ---- Aggregation ----------------------------------------------------------
+# Per-movie aggregate: dict { movie_id_str : [count, sum_rating] }.
+# Two-pass would be cleaner with a per-movie struct but OMC doesn't have
+# named records; arrays-as-tuples are the idiom.
+
+fn aggregate_by_movie(ratings) {
+    h agg = {};
+    h i = 0;
+    while i < arr_len(ratings) {
+        h row = arr_get(ratings, i);
+        h movie = arr_get(row, 1);
+        h rating = arr_get(row, 2);
+        h k = concat_many("", movie);
+        h cur = dict_get(agg, k, [0, 0.0]);
+        dict_set(agg, k, [
+            arr_get(cur, 0) + 1,
+            arr_get(cur, 1) + rating
+        ]);
+        i = i + 1;
+    }
+    return agg;
+}
+
+# Convert aggregate dict → list of [movie_id, count, avg_rating].
+fn agg_to_rows(agg) {
+    h ks = dict_keys(agg);
+    h rows = [];
+    h i = 0;
+    while i < arr_len(ks) {
+        h k = arr_get(ks, i);
+        h pair = dict_get(agg, k);
+        h cnt = arr_get(pair, 0);
+        h sum = arr_get(pair, 1);
+        h avg = sum / cnt;
+        arr_push(rows, [to_int(k), cnt, avg]);
+        i = i + 1;
+    }
+    return rows;
+}
+
+# ---- Recommendation engines ----------------------------------------------
+
+# Harmonic engine: index by (avg_rating * 100) so attractor folding lands
+# on the natural rating clusters. Lookup folds the query rating × 100 too.
+fn build_harmonic_engine(movie_rows) {
+    h idx = hidx_new();
+    h i = 0;
+    while i < arr_len(movie_rows) {
+        h row = arr_get(movie_rows, i);
+        h avg = arr_get(row, 2);
+        h key = to_int(avg * 100);
+        idx = hidx_insert(idx, key, row);
+        i = i + 1;
+    }
+    return idx;
+}
+
+# Linear engine: O(N) scan, gathers everything within ±delta of target.
+fn linear_recommend(movie_rows, target_rating, delta) {
+    h hits = [];
+    h i = 0;
+    while i < arr_len(movie_rows) {
+        h row = arr_get(movie_rows, i);
+        h avg = arr_get(row, 2);
+        h diff = avg - target_rating;
+        if diff < 0 { diff = 0 - diff; }
+        if diff <= delta {
+            arr_push(hits, row);
+        }
+        i = i + 1;
+    }
+    return hits;
+}
+
+# Harmonic engine query: fold target × 100, return bucket.
+fn harmonic_recommend(idx, target_rating) {
+    h key = to_int(target_rating * 100);
+    h pairs = hidx_lookup(idx, key);
+    h rows = [];
+    h i = 0;
+    while i < arr_len(pairs) {
+        arr_push(rows, arr_get(arr_get(pairs, i), 1));
+        i = i + 1;
+    }
+    return rows;
+}
+
+# ---- Stress-test harness --------------------------------------------------
+
+fn stress_run(label, csv_path) {
+    println("");
+    println(concat_many("==== ", label, " : ", csv_path, " ===="));
+
+    h t0 = now_ms();
+    h ratings = load_ratings(csv_path);
+    h t1 = now_ms();
+    println(concat_many("  load_csv:        ", t1 - t0, " ms  (",
+        arr_len(ratings), " ratings)"));
+
+    h t2 = now_ms();
+    h agg = aggregate_by_movie(ratings);
+    h t3 = now_ms();
+    println(concat_many("  aggregate:       ", t3 - t2, " ms  (",
+        dict_len(agg), " unique movies)"));
+
+    h t4 = now_ms();
+    h rows = agg_to_rows(agg);
+    h t5 = now_ms();
+    println(concat_many("  agg_to_rows:     ", t5 - t4, " ms"));
+
+    h t6 = now_ms();
+    h hidx = build_harmonic_engine(rows);
+    h t7 = now_ms();
+    println(concat_many("  build_hidx:      ", t7 - t6,
+        " ms  (", hidx_size(hidx), " entries, ", dict_len(hidx),
+        " attractor buckets)"));
+
+    # Query both engines for "movies near rating 4.0"
+    h target = 4.0;
+    h delta = 0.1;
+
+    h t8 = now_ms();
+    h linear_hits = linear_recommend(rows, target, delta);
+    h t9 = now_ms();
+    println(concat_many("  linear  (R≈", target, " ±", delta, "):  ",
+        t9 - t8, " ms  (", arr_len(linear_hits), " hits)"));
+
+    h t10 = now_ms();
+    h harmonic_hits = harmonic_recommend(hidx, target);
+    h t11 = now_ms();
+    println(concat_many("  harmonic (R≈", target, " by attractor):  ",
+        t11 - t10, " ms  (", arr_len(harmonic_hits), " hits)"));
+
+    # Show a sample hit so we can sanity-check
+    if arr_len(harmonic_hits) > 0 {
+        h sample = arr_get(harmonic_hits, 0);
+        println(concat_many("  sample hit:  movie_id=", arr_get(sample, 0),
+            " count=", arr_get(sample, 1), " avg=", arr_get(sample, 2)));
+    }
+}
+
+stress_run("100 ratings",   "examples/recommend/sample_100.csv");
+stress_run("1k ratings",    "examples/recommend/sample_1k.csv");
+stress_run("10k ratings",   "examples/recommend/sample_10k.csv");
+stress_run("100k ratings",  "examples/recommend/sample_100k.csv");
+
+println("");
+println("=== Done ====================================================");
