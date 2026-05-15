@@ -1,0 +1,183 @@
+# =============================================================================
+# harmonic_clustering — drop-in KMeans replacement for attractor-aligned data
+# =============================================================================
+# Cluster multi-dim numeric data WITHOUT random initialization, WITHOUT
+# choosing K up-front, WITHOUT iterating to convergence. The clusters
+# fall out of `harmonic_partition` on log-magnitude features: each
+# row's cluster is the tuple of (log10(feature_i)*50 → fold). Rows
+# whose log-magnitude pattern is the same end up in the same cluster.
+#
+# Compared to sklearn KMeans:
+#   - No random_state → deterministic
+#   - No n_clusters → derived from data's attractor structure
+#   - No max_iter → single pass
+#   - Wins on data that naturally clusters by magnitude (latencies,
+#     prices, frequencies, anything log-distributed)
+#   - Loses on data with no inherent magnitude structure (uniform
+#     random in a fixed range — cluster the centroids manually)
+#
+# Quick start:
+#   import "harmonic_clustering" as hc;     # via omc --install
+#   h cl = hc.new(["latency", "fare", "duration"]);
+#   hc.fit(cl, rows);
+#   h labels = hc.predict(cl, rows);        # cluster ID per row
+#   h centroids = hc.centroids(cl);          # one per discovered cluster
+# =============================================================================
+
+import "examples/lib/np.omc" as np;
+h _math = py_import("math");
+
+# ---- Bucketing per dim ---------------------------------------------------
+# Same strategy palette as harmonic_anomaly: log/discrete/modulo.
+
+fn _bucket_log(v) {
+    # Bucket by log-decade. Values 1-9 → bucket 0; 10-99 → 1;
+    # 100-999 → 2. Coarser than the harmonic_anomaly bucketing on
+    # purpose: clustering wants "rows with similar order of magnitude
+    # in this dim", not "rows with the exact same Fibonacci attractor".
+    # Tried fold(log10(v)*50) — over-segments because Fibonacci
+    # spacing widens exponentially and adjacent decades land in
+    # different attractors. Plain decade is the right granularity.
+    if v <= 0 { return 0; }
+    h logv = py_call(_math, "log10", [v]);
+    return to_int(logv);
+}
+fn _bucket_modulo(v) { return fold(to_int(v)); }
+fn _bucket_discrete(v) { return v; }
+
+fn _bucket_for(strategy, v) {
+    if strategy == "log" { return _bucket_log(v); }
+    elif strategy == "modulo" { return _bucket_modulo(v); }
+    return _bucket_discrete(v);
+}
+
+# ---- Cluster lifecycle ---------------------------------------------------
+
+fn new(dim_names) {
+    h strategies = [];
+    h k = 0;
+    while k < arr_len(dim_names) {
+        arr_push(strategies, "log");
+        k = k + 1;
+    }
+    return {
+        "dims": dim_names,
+        "strategies": strategies,
+        "cluster_keys": [],     # canonical attractor-tuple per cluster
+        "cluster_centers": [],   # numeric centroid per cluster (averaged from training rows)
+        "cluster_counts": []     # how many training rows fell into each cluster
+    };
+}
+
+fn set_strategy(cl, dim_idx, strategy) {
+    h s = dict_get(cl, "strategies");
+    arr_set(s, dim_idx, strategy);
+    dict_set(cl, "strategies", s);
+    return cl;
+}
+
+# Compute the attractor-tuple key for a row.
+fn _row_key(strategies, row) {
+    h parts = [];
+    h n = arr_len(row);
+    h i = 0;
+    while i < n {
+        arr_push(parts, _bucket_for(arr_get(strategies, i), arr_get(row, i)));
+        i = i + 1;
+    }
+    return arr_join(parts, "|");
+}
+
+# ---- fit: discover clusters from training rows ---------------------------
+
+fn fit(cl, rows) {
+    h strategies = dict_get(cl, "strategies");
+    h dims = dict_get(cl, "dims");
+    h n_dims = arr_len(dims);
+
+    # First pass: count how many rows hit each attractor tuple.
+    h counts = {};            # key → count
+    h sums = {};              # key → array of per-dim sums (for centroid)
+    h r = 0;
+    h n_rows = arr_len(rows);
+    while r < n_rows {
+        h row = arr_get(rows, r);
+        h key = _row_key(strategies, row);
+        dict_set(counts, key, dict_get(counts, key, 0) + 1);
+        # Accumulate per-dim sums for centroid computation.
+        h sum = dict_get(sums, key, null);
+        if sum == null {
+            sum = [];
+            h d = 0;
+            while d < n_dims { arr_push(sum, 0.0); d = d + 1; }
+        }
+        h d = 0;
+        while d < n_dims {
+            arr_set(sum, d, arr_get(sum, d) + arr_get(row, d));
+            d = d + 1;
+        }
+        dict_set(sums, key, sum);
+        r = r + 1;
+    }
+
+    # Build the cluster table: one entry per distinct attractor tuple,
+    # ordered by population (largest cluster = id 0). Centroid =
+    # per-dim average from training rows that hit the cluster.
+    h keys = dict_keys(counts);
+    h cluster_keys = [];
+    h cluster_centers = [];
+    h cluster_counts = [];
+    h k = 0;
+    while k < arr_len(keys) {
+        h key = arr_get(keys, k);
+        h cnt = dict_get(counts, key);
+        h sum = dict_get(sums, key);
+        h centroid = [];
+        h d = 0;
+        while d < n_dims {
+            arr_push(centroid, arr_get(sum, d) / cnt);
+            d = d + 1;
+        }
+        arr_push(cluster_keys, key);
+        arr_push(cluster_centers, centroid);
+        arr_push(cluster_counts, cnt);
+        k = k + 1;
+    }
+
+    dict_set(cl, "cluster_keys", cluster_keys);
+    dict_set(cl, "cluster_centers", cluster_centers);
+    dict_set(cl, "cluster_counts", cluster_counts);
+    return cl;
+}
+
+# ---- predict: assign cluster id to each row ------------------------------
+
+fn predict_one(cl, row) {
+    h strategies = dict_get(cl, "strategies");
+    h key = _row_key(strategies, row);
+    h cluster_keys = dict_get(cl, "cluster_keys");
+    h k = 0;
+    while k < arr_len(cluster_keys) {
+        if arr_get(cluster_keys, k) == key { return k; }
+        k = k + 1;
+    }
+    # Unknown attractor tuple: return -1 (caller can treat as outlier).
+    return 0 - 1;
+}
+
+fn predict(cl, rows) {
+    h out = [];
+    h k = 0;
+    while k < arr_len(rows) {
+        arr_push(out, predict_one(cl, arr_get(rows, k)));
+        k = k + 1;
+    }
+    return out;
+}
+
+# ---- inspectors ----------------------------------------------------------
+
+fn n_clusters(cl) { return arr_len(dict_get(cl, "cluster_keys")); }
+fn centroids(cl)  { return dict_get(cl, "cluster_centers"); }
+fn cluster_counts(cl) { return dict_get(cl, "cluster_counts"); }
+fn cluster_keys(cl) { return dict_get(cl, "cluster_keys"); }

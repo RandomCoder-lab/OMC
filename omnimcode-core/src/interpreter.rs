@@ -4511,6 +4511,15 @@ pub(crate) fn pattern_matches(
 
 fn values_equal(a: &Value, b: &Value) -> bool {
     match (a, b) {
+        // ---- Null: equal ONLY to itself ------------------------------
+        // Without this explicit arm, (Dict, Null) and (Function, Null)
+        // fall through to the numeric-coercion path where to_int(any)
+        // = 0 = to_int(Null), making EVERY non-numeric value compare
+        // equal to null. Caught when `if dict == null` was always
+        // true in user code (harmonic_recommend's add_rating bug).
+        (Value::Null, Value::Null) => true,
+        (Value::Null, _) | (_, Value::Null) => false,
+
         (Value::String(x), Value::String(y)) => x == y,
         (Value::Array(x), Value::Array(y)) => {
             let xb = x.items.borrow();
@@ -4521,6 +4530,18 @@ fn values_equal(a: &Value, b: &Value) -> bool {
             xb.iter()
                 .zip(yb.iter())
                 .all(|(p, q)| values_equal(p, q))
+        }
+        (Value::Dict(x), Value::Dict(y)) => {
+            // Two dicts are equal iff same keys + values_equal at every
+            // key. BTreeMap iteration is sorted so we can zip.
+            let xb = x.borrow();
+            let yb = y.borrow();
+            if xb.len() != yb.len() {
+                return false;
+            }
+            xb.iter()
+                .zip(yb.iter())
+                .all(|((k1, v1), (k2, v2))| k1 == k2 && values_equal(v1, v2))
         }
         (
             Value::Singularity {
@@ -4534,12 +4555,16 @@ fn values_equal(a: &Value, b: &Value) -> bool {
                 ..
             },
         ) => na == nb && ca == cb,
+        // Mixing dict/array/function/circuit with anything else: never
+        // equal. Catches the same class of cross-type-coercion bug as
+        // the Null arm above for non-Null mismatches.
+        (Value::Dict(_), _) | (_, Value::Dict(_)) => false,
+        (Value::Array(_), _) | (_, Value::Array(_)) => false,
+        (Value::Function { .. }, _) | (_, Value::Function { .. }) => false,
         (Value::Circuit(_), _) | (_, Value::Circuit(_)) => false,
         // Mixing strings with non-strings: only equal if both coerce to
         // the same number AND the string is actually a numeric literal.
         (Value::String(s), _) | (_, Value::String(s)) => {
-            // Treat the string as numeric ONLY if parse succeeds; otherwise
-            // a string can never equal a non-string value.
             if s.parse::<i64>().is_ok() || s.parse::<f64>().is_ok() {
                 if a.is_float() || b.is_float() {
                     a.to_float() == b.to_float()
@@ -4550,9 +4575,7 @@ fn values_equal(a: &Value, b: &Value) -> bool {
                 false
             }
         }
-        // Arrays mixed with anything non-array: not equal.
-        (Value::Array(_), _) | (_, Value::Array(_)) => false,
-        // Numeric / bool / null all compare via coercion.
+        // Numeric / bool — actually coerce-comparable.
         _ => {
             if a.is_float() || b.is_float() {
                 a.to_float() == b.to_float()

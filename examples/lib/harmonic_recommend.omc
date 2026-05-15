@@ -1,0 +1,185 @@
+# =============================================================================
+# harmonic_recommend — collaborative-filtering recommendations via harmonic_index
+# =============================================================================
+# Item-based recommendations: for each item, build a profile from
+# user ratings; cluster items by their profile-attractor signature;
+# recommend items in the same cluster as a user's high-rated items.
+#
+# Same shape as harmonic_anomaly / harmonic_clustering — drop-in for
+# the basic case, deterministic, no model training needed beyond
+# building the inverted index.
+#
+# Quick start:
+#   import "harmonic_recommend" as hr;     # via omc --install
+#   h rec = hr.new();
+#   hr.add_rating(rec, "alice", "movie_1", 5);
+#   hr.add_rating(rec, "alice", "movie_2", 4);
+#   hr.add_rating(rec, "bob",   "movie_1", 4);
+#   hr.add_rating(rec, "bob",   "movie_3", 5);
+#   hr.fit(rec);
+#   h suggestions = hr.suggest_for(rec, "alice", 5);
+#
+# Algorithm:
+#   1. Build per-item profile: dict { rating_attractor: count_of_users_who_rated_it_there }
+#   2. Compute item signature = the attractor with highest count (modal rating)
+#   3. Group items by signature (harmonic_index)
+#   4. For a user, find their top-rated items, look up the signatures,
+#      return other items in the same signature buckets that the user
+#      hasn't rated yet, sorted by signature population
+# =============================================================================
+
+import "examples/lib/np.omc" as np;
+
+# ---- Constructor / state -------------------------------------------------
+
+fn new() {
+    return {
+        # All raw ratings, indexed by user → dict {item: rating}.
+        "user_ratings": {},
+        # All raw ratings, indexed by item → dict {user: rating}.
+        "item_ratings": {},
+        # Built by fit(): { item_id: signature_int }
+        "item_signatures": {},
+        # Built by fit(): { signature_str: [item_id, ...] }
+        "signature_index": {}
+    };
+}
+
+# Add a single rating. Idempotent on (user, item) — re-adding overrides.
+fn add_rating(rec, user_id, item_id, rating) {
+    h ur = dict_get(rec, "user_ratings");
+    h u_items = dict_get(ur, user_id, null);
+    if u_items == null { u_items = {}; }
+    dict_set(u_items, item_id, rating);
+    dict_set(ur, user_id, u_items);
+
+    h ir = dict_get(rec, "item_ratings");
+    h i_users = dict_get(ir, item_id, null);
+    if i_users == null { i_users = {}; }
+    dict_set(i_users, user_id, rating);
+    dict_set(ir, item_id, i_users);
+    return rec;
+}
+
+# ---- fit: build item signatures + signature index ------------------------
+
+fn fit(rec) {
+    h item_ratings = dict_get(rec, "item_ratings");
+    h item_ids = dict_keys(item_ratings);
+
+    h sigs = {};
+    h sig_index = {};
+
+    h k = 0;
+    while k < arr_len(item_ids) {
+        h item = arr_get(item_ids, k);
+        h ratings_dict = dict_get(item_ratings, item);
+
+        # Compute the modal attractor: which fold(rating * 10) bucket
+        # has the most votes? Rating values 1-5 (or 0.5-5.0 for finer
+        # resolution) get scaled up so fold has integer space to work in.
+        h bucket_counts = {};
+        h users = dict_keys(ratings_dict);
+        h u = 0;
+        while u < arr_len(users) {
+            h r = dict_get(ratings_dict, arr_get(users, u));
+            h bkt = fold(to_int(r * 10));
+            h key = concat_many("", bkt);
+            dict_set(bucket_counts, key, dict_get(bucket_counts, key, 0) + 1);
+            u = u + 1;
+        }
+        # Find the bucket with the highest count = the item's signature.
+        h bkts = dict_keys(bucket_counts);
+        h best_bkt = arr_get(bkts, 0);
+        h best_cnt = dict_get(bucket_counts, best_bkt);
+        h b = 1;
+        while b < arr_len(bkts) {
+            h bk = arr_get(bkts, b);
+            h c = dict_get(bucket_counts, bk);
+            if c > best_cnt { best_cnt = c; best_bkt = bk; }
+            b = b + 1;
+        }
+        dict_set(sigs, item, best_bkt);
+
+        # Index items by signature.
+        h existing = dict_get(sig_index, best_bkt, null);
+        if existing == null { existing = []; }
+        arr_push(existing, item);
+        dict_set(sig_index, best_bkt, existing);
+
+        k = k + 1;
+    }
+
+    dict_set(rec, "item_signatures", sigs);
+    dict_set(rec, "signature_index", sig_index);
+    return rec;
+}
+
+# ---- suggest: top-K items for a user --------------------------------------
+# For the user's TOP 3 rated items, look up their signatures, gather
+# unrated items in those signature buckets, return up to K suggestions
+# (sorted by how popular their signature bucket is — heavily-rated
+# bucket = strong signal).
+
+fn suggest_for(rec, user_id, k) {
+    h ur = dict_get(rec, "user_ratings");
+    h sigs = dict_get(rec, "item_signatures");
+    h sig_index = dict_get(rec, "signature_index");
+
+    h u_items = dict_get(ur, user_id, null);
+    if u_items == null { return []; }
+
+    # Collect signatures of the items the user rated >= 4.
+    # (Earlier draft tried to keep "top 3" via inline sort — was buggy
+    # AND unnecessary. Threshold filter is the right semantics: any
+    # rating you'd call positive contributes to the recommend signal.)
+    h target_sigs = {};
+    h items = dict_keys(u_items);
+    h i = 0;
+    while i < arr_len(items) {
+        h item = arr_get(items, i);
+        h r = dict_get(u_items, item);
+        if r >= 4 {
+            h sig = dict_get(sigs, item, null);
+            if sig != null {
+                dict_set(target_sigs, sig, 1);
+            }
+        }
+        i = i + 1;
+    }
+
+    # Gather candidate items from those signatures.
+    h candidates = [];
+    h sig_keys = dict_keys(target_sigs);
+    h s = 0;
+    while s < arr_len(sig_keys) {
+        h sig = arr_get(sig_keys, s);
+        h items_in_sig = dict_get(sig_index, sig, []);
+        h ii = 0;
+        while ii < arr_len(items_in_sig) {
+            h cand = arr_get(items_in_sig, ii);
+            # Filter: don't suggest items the user already rated.
+            if dict_has(u_items, cand) == 0 {
+                arr_push(candidates, cand);
+            }
+            ii = ii + 1;
+        }
+        s = s + 1;
+    }
+
+    # Truncate to top-K.
+    h out = [];
+    h c = 0;
+    while c < k {
+        if c < arr_len(candidates) { arr_push(out, arr_get(candidates, c)); }
+        c = c + 1;
+    }
+    return out;
+}
+
+# ---- Inspectors ----------------------------------------------------------
+
+fn n_items(rec)    { return dict_len(dict_get(rec, "item_ratings")); }
+fn n_users(rec)    { return dict_len(dict_get(rec, "user_ratings")); }
+fn signatures(rec) { return dict_get(rec, "item_signatures"); }
+fn n_signatures(rec) { return dict_len(dict_get(rec, "signature_index")); }

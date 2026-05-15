@@ -885,6 +885,13 @@ fn cmp_op(l: &Value, r: &Value, op: &Op) -> bool {
 /// duplicated rather than pub-exported to keep the VM self-contained.
 fn values_equal_vm(a: &Value, b: &Value) -> bool {
     match (a, b) {
+        // ---- Null: equal ONLY to itself (mirror tree-walk) -----------
+        // Without the explicit Null arms, (Dict, Null) etc fall through
+        // to numeric coercion (to_int(any non-numeric) = 0) and
+        // erroneously compare equal. See interpreter.rs values_equal.
+        (Value::Null, Value::Null) => true,
+        (Value::Null, _) | (_, Value::Null) => false,
+
         (Value::String(x), Value::String(y)) => x == y,
         (Value::Array(x), Value::Array(y)) => {
             let xb = x.items.borrow();
@@ -895,6 +902,16 @@ fn values_equal_vm(a: &Value, b: &Value) -> bool {
             xb.iter()
                 .zip(yb.iter())
                 .all(|(p, q)| values_equal_vm(p, q))
+        }
+        (Value::Dict(x), Value::Dict(y)) => {
+            let xb = x.borrow();
+            let yb = y.borrow();
+            if xb.len() != yb.len() {
+                return false;
+            }
+            xb.iter()
+                .zip(yb.iter())
+                .all(|((k1, v1), (k2, v2))| k1 == k2 && values_equal_vm(v1, v2))
         }
         (
             Value::Singularity {
@@ -908,6 +925,8 @@ fn values_equal_vm(a: &Value, b: &Value) -> bool {
                 ..
             },
         ) => na == nb && ca == cb,
+        (Value::Dict(_), _) | (_, Value::Dict(_)) => false,
+        (Value::Function { .. }, _) | (_, Value::Function { .. }) => false,
         (Value::Circuit(_), _) | (_, Value::Circuit(_)) => false,
         (Value::String(s), _) | (_, Value::String(s)) => {
             if s.parse::<i64>().is_ok() || s.parse::<f64>().is_ok() {

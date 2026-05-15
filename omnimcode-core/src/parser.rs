@@ -9,6 +9,7 @@ pub enum Token {
     Harmonic,    // 'h'
     If,
     Else,
+    Elif,
     While,
     For,
     In,
@@ -303,6 +304,7 @@ impl Lexer {
                         "h" => Token::Harmonic,
                         "if" => Token::If,
                         "else" => Token::Else,
+                        "elif" => Token::Elif,
                         "while" => Token::While,
                         "for" => Token::For,
                         "in" => Token::In,
@@ -836,17 +838,30 @@ impl Parser {
         let mut elif_parts = Vec::new();
         let mut else_body = None;
 
-        while self.current() == Token::Else {
-            self.advance();
-            if self.current() == Token::If {
+        // Accept both `else if COND { ... }` (old form, still works) and
+        // `elif COND { ... }` (the Python-style sugar). Both produce
+        // the same AST — Statement::If with elif_parts populated.
+        loop {
+            if self.current() == Token::Elif {
                 self.advance();
                 let elif_cond = self.parse_expression()?;
                 self.expect(Token::LBrace)?;
                 let elif_body = self.parse_block()?;
                 elif_parts.push((elif_cond, elif_body));
+            } else if self.current() == Token::Else {
+                self.advance();
+                if self.current() == Token::If {
+                    self.advance();
+                    let elif_cond = self.parse_expression()?;
+                    self.expect(Token::LBrace)?;
+                    let elif_body = self.parse_block()?;
+                    elif_parts.push((elif_cond, elif_body));
+                } else {
+                    self.expect(Token::LBrace)?;
+                    else_body = Some(self.parse_block()?);
+                    break;
+                }
             } else {
-                self.expect(Token::LBrace)?;
-                else_body = Some(self.parse_block()?);
                 break;
             }
         }

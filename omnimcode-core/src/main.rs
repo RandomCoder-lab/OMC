@@ -22,6 +22,8 @@ fn main() {
             "--install" | "-i" => mode = "install",
             "--list" | "-l" => mode = "list",
             "--init" => mode = "init",
+            "--test" | "-t" => mode = "test",
+            "--bench" | "-b" => mode = "bench",
             "--help" | "-h" => mode = "help",
             other if !other.starts_with('-') => file_arg = Some(other),
             other => {
@@ -56,6 +58,10 @@ fn main() {
         ("install", spec) => install_command(spec),
         ("list", _) => list_command(),
         ("init", _) => init_command(),
+        ("test", Some(path)) => test_command(path),
+        ("test", None) => { eprintln!("--test requires a file argument."); 2 }
+        ("bench", Some(path)) => bench_command(path),
+        ("bench", None) => { eprintln!("--bench requires a file argument."); 2 }
         _ => unreachable!(),
     };
     if exit_code != 0 {
@@ -197,6 +203,108 @@ fn install_command(spec: Option<&str>) -> i32 {
     }
 }
 
+/// `--test FILE`: load FILE, find every top-level `fn test_*()`,
+/// run each in a fresh interpreter scope, report pass/fail per test
+/// and a final summary. A test PASSES if it returns without raising;
+/// FAILS if it errors. Exit code = number of failures (clamped to 1).
+///
+/// Convention: test fns take no args, return anything (return value
+/// ignored). Use OMC's `error("msg")` to assert failure.
+fn test_command(path: &str) -> i32 {
+    let source = match fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => { eprintln!("test: read {}: {}", path, e); return 2; }
+    };
+    let test_names = match scan_fn_prefix(&source, "test_") {
+        Ok(n) => n,
+        Err(e) => { eprintln!("test: parse {}: {}", path, e); return 2; }
+    };
+    if test_names.is_empty() {
+        println!("test: no `fn test_*()` functions in {}", path);
+        return 0;
+    }
+    println!("running {} test(s) from {}", test_names.len(), path);
+    let mut passed = 0;
+    let mut failed: Vec<(String, String)> = Vec::new();
+    for name in &test_names {
+        // Re-parse + re-execute per-test so each gets a fresh state.
+        // Slower than reusing the interpreter, but means one test's
+        // mutations can't leak into the next.
+        match run_named_fn(&source, name) {
+            Ok(()) => { passed += 1; println!("  ok    {}", name); }
+            Err(e) => {
+                failed.push((name.clone(), e.clone()));
+                println!("  FAIL  {}", name);
+            }
+        }
+    }
+    println!("");
+    println!("result: {} passed, {} failed", passed, failed.len());
+    for (name, err) in &failed {
+        println!("  {}: {}", name, err.lines().next().unwrap_or(err));
+    }
+    if failed.is_empty() { 0 } else { 1 }
+}
+
+/// `--bench FILE`: load FILE, find every top-level `fn bench_*()`,
+/// run each, time it, report ms total. Convention: bench fns take
+/// no args, return anything. Use `now_ms()` inside if you want
+/// per-iteration breakdowns.
+fn bench_command(path: &str) -> i32 {
+    let source = match fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => { eprintln!("bench: read {}: {}", path, e); return 2; }
+    };
+    let bench_names = match scan_fn_prefix(&source, "bench_") {
+        Ok(n) => n,
+        Err(e) => { eprintln!("bench: parse {}: {}", path, e); return 2; }
+    };
+    if bench_names.is_empty() {
+        println!("bench: no `fn bench_*()` functions in {}", path);
+        return 0;
+    }
+    println!("running {} bench(es) from {}", bench_names.len(), path);
+    use std::time::Instant;
+    for name in &bench_names {
+        let start = Instant::now();
+        let res = run_named_fn(&source, name);
+        let elapsed = start.elapsed();
+        match res {
+            Ok(()) => println!("  {:30}  {:>8.2} ms", name, elapsed.as_secs_f64() * 1000.0),
+            Err(e) => println!("  {:30}  ERROR: {}", name, e.lines().next().unwrap_or(&e)),
+        }
+    }
+    0
+}
+
+/// Find every top-level `fn NAME(...)` whose name starts with `prefix`.
+/// Used by --test and --bench to discover their respective fn families.
+fn scan_fn_prefix(source: &str, prefix: &str) -> Result<Vec<String>, String> {
+    use omnimcode_core::ast::Statement;
+    let mut parser = Parser::new(source);
+    let stmts = parser.parse()?;
+    let mut out = Vec::new();
+    for s in &stmts {
+        if let Statement::FunctionDef { name, .. } = s {
+            if name.starts_with(prefix) {
+                out.push(name.clone());
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Run a single named fn from `source` with no args, in a fresh
+/// interpreter. Returns Ok(()) if the fn returns without raising,
+/// Err(msg) if any statement in the body errored.
+fn run_named_fn(source: &str, name: &str) -> Result<(), String> {
+    // Append a top-level call to the named fn so the regular
+    // execute_program path runs it after the rest of the file
+    // (including all other fn defs the test might depend on).
+    let augmented = format!("{}\n{}();\n", source, name);
+    execute_program(&augmented)
+}
+
 /// `--init`: scaffold a new OMC project in the current directory.
 /// Creates `omc.toml` (with no dependencies yet) and `main.omc`
 /// (a hello-world). Refuses to overwrite existing files.
@@ -309,6 +417,8 @@ fn print_help() {
     println!("  {} --install [SPEC]    install package into omc_modules/", prog);
     println!("                         SPEC = URL, registry name, or absent (reads omc.toml)");
     println!("  {} --list              list packages installed under omc_modules/", prog);
+    println!("  {} --test FILE         run every fn test_*() in FILE, report pass/fail", prog);
+    println!("  {} --bench FILE        run every fn bench_*() in FILE, report ms each", prog);
     println!("  {} --help              this message", prog);
     println!();
     println!("omc.toml format (for --install with no arg):");

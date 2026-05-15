@@ -50,6 +50,18 @@
       "sha256": "ebefafd4a165789315295dc0bf2bb440a1440fd958646be2c1a8364ad87c94de",
       "version": "0.1.0",
       "description": "Multi-dim structural anomaly detection — drop-in IsolationForest replacement (10/10 vs 7/10 recall on credential-stuffing)"
+    },
+    "harmonic_clustering": {
+      "url": "https://raw.githubusercontent.com/sovereignlattice/omnimcode/main/examples/lib/harmonic_clustering.omc",
+      "sha256": "5a0e1ca42629f0a8ce93fd68e8ca343decd3b7591e68825e6c80ca56a71b859e",
+      "version": "0.1.0",
+      "description": "Drop-in KMeans replacement — clusters by log-decade attractor signature, no random init, no n_clusters to choose"
+    },
+    "harmonic_recommend": {
+      "url": "https://raw.githubusercontent.com/sovereignlattice/omnimcode/main/examples/lib/harmonic_recommend.omc",
+      "sha256": "c2e3ee1de0669133e1d9c48b6eca32b855d5f1723cb2a80e8d6ff706dd9453f5",
+      "version": "0.1.0",
+      "description": "Item-based collaborative filtering via harmonic_index — recommends items in same attractor signature as user's high-rated items"
     }
   }
 }
