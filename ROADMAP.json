@@ -1,0 +1,425 @@
+{
+  "$schema_version": "1.0",
+  "project": "OMNIcode",
+  "generated": "2026-05-15",
+  "description": "Forward-looking roadmap for OMC. Each item carries effort estimate, priority, prerequisites, and rationale. Status moves left-to-right: exploratory → planned → in_progress → shipped. Items in the `shipped` section are kept for context — what got us here informs what's next.",
+
+  "vision": {
+    "tagline": "A small language with first-class φ-math, embedded Python, and a real package manager.",
+    "differentiators": [
+      "Self-hosting compiler with self-healing built into the math substrate (not a hand-written rule table)",
+      "Embedded CPython always-on — every pip-installable library is reachable from OMC",
+      "Multi-dim harmonic anomaly detection that demonstrably beats IsolationForest on structural anomalies",
+      "Two-engine architecture (tree-walk + bytecode VM) with byte-identical output",
+      "Package manager + registry + sha256 verification, comparable to npm/cargo for a single-author research project"
+    ],
+    "audience": [
+      "Researchers exploring substrate-based language design (φ-math as static analysis)",
+      "Engineers needing structural-anomaly detection on multi-dim telemetry (drop-in IsolationForest replacement)",
+      "Data scientists who want OMC's harmonic primitives layered on top of pandas/numpy/sklearn",
+      "Language hackers studying self-hosting + self-healing as a coupled system"
+    ]
+  },
+
+  "effort_levels": {
+    "small": "≤ 1 hour, mostly mechanical",
+    "medium": "1-3 hours, design + implement + verify",
+    "large": "1-2 sessions, multi-file refactor or new subsystem",
+    "research": "open-ended, may not converge in a single session"
+  },
+
+  "priority_levels": {
+    "1": "Critical path / blocker for downstream work",
+    "2": "High value, near-term",
+    "3": "Worth doing, no rush",
+    "4": "Nice to have",
+    "5": "Speculative / exploratory"
+  },
+
+  "phases": [
+    {
+      "id": "shipped",
+      "name": "Shipped",
+      "summary": "What's already in the repo on origin/master. Listed for context — useful to grep against when planning what builds on what.",
+      "items": [
+        { "id": "self-hosting-v9b", "title": "Self-hosting compiler fixpoint (gen2 == gen3)", "status": "shipped", "shipped_in": "examples/self_hosting_v9b.omc" },
+        { "id": "self-healing-h5", "title": "Five-class self-healing pass (harmonic, typo, /0, arity, parser)", "status": "shipped", "shipped_in": "examples/self_healing_h5.omc" },
+        { "id": "rc-shared-collections", "title": "Rc<RefCell> Value::Array/Dict — killed n² collection cliff", "status": "shipped", "shipped_in": "d3c29b6", "impact": "552× speedup on 10k MovieLens aggregate" },
+        { "id": "pyo3-embed", "title": "Embedded CPython always-on (py_import / py_call / py_eval / etc.)", "status": "shipped", "shipped_in": "49dd7b0+e6065b9" },
+        { "id": "py-callbacks", "title": "Bidirectional Python↔OMC callbacks (py_callback)", "status": "shipped", "shipped_in": "e857be1" },
+        { "id": "package-manager", "title": "omc --install + omc.toml + omc_modules/ + sha256 verification", "status": "shipped", "shipped_in": "a0c56c2+3feb0da" },
+        { "id": "registry", "title": "Central registry at registry/index.json (np, pd, sk, requests, sqlite, torch, harmonic_anomaly)", "status": "shipped", "shipped_in": "3feb0da+16f3458" },
+        { "id": "harmonic-anomaly-lib", "title": "harmonic_anomaly library — beats IF 10/10 vs 7/10 on credential-stuffing", "status": "shipped", "shipped_in": "16f3458" },
+        { "id": "pattern-matching", "title": "match expression with attractor ranges, type tags, alternation", "status": "shipped", "shipped_in": "2eb2c0c" },
+        { "id": "lisp-in-omc", "title": "Mini Scheme interpreter in OMC (closures, recursion, quote, let)", "status": "shipped", "shipped_in": "examples/lisp.omc" },
+        { "id": "json-in-omc", "title": "JSON parser+serializer in OMC (recursive descent, mutable-closure cursor)", "status": "shipped", "shipped_in": "examples/json.omc" },
+        { "id": "stack-traces", "title": "Stack traces with source line numbers, both engines", "status": "shipped", "shipped_in": "5dadbf4" }
+      ]
+    },
+
+    {
+      "id": "next-1-3-sessions",
+      "name": "Next (1-3 sessions)",
+      "summary": "Items I'd pick up immediately. Each one extends an existing strength rather than opening a new direction. Strong cost/value ratio.",
+      "items": [
+        {
+          "id": "harmonic-clustering-lib",
+          "title": "harmonic_clustering library — drop-in KMeans replacement",
+          "status": "planned",
+          "effort": "medium",
+          "priority": 2,
+          "prerequisites": ["harmonic-anomaly-lib"],
+          "rationale": "harmonic_partition naturally produces clusters keyed by Fibonacci attractor. Wrap as ha_clusters.fit(rows) → cluster_assignments. Comparison target: KMeans (deterministic, no random_state). Likely wins on attractor-aligned data, ties on uniform-random — same shape as harmonic_anomaly's win story.",
+          "deliverable": "examples/lib/harmonic_clustering.omc + tutorial + registry entry"
+        },
+        {
+          "id": "harmonic-recommend-lib",
+          "title": "harmonic_recommend library — CF-style recommendation",
+          "status": "planned",
+          "effort": "medium",
+          "priority": 2,
+          "prerequisites": ["harmonic-anomaly-lib"],
+          "rationale": "MovieLens demo already showed harmonic_index works for recommendations. Package as: ha_rec.fit(user_item_ratings); ha_rec.suggest(user, top_k). Comparison target: surprise/scikit-learn-recommender. Real adoption story for the harmonic_index primitive.",
+          "deliverable": "examples/lib/harmonic_recommend.omc"
+        },
+        {
+          "id": "omc-test-cli",
+          "title": "omc --test as standalone CLI mode",
+          "status": "planned",
+          "effort": "small",
+          "priority": 2,
+          "prerequisites": [],
+          "rationale": "test_runner.omc is already library-shaped. Wrap as a CLI subcommand: `omc --test FILE` runs every fn test_*() and reports. Crucial for treating OMC as a real engineering tool, not just a research toy.",
+          "deliverable": "main.rs --test path"
+        },
+        {
+          "id": "omc-bench-cli",
+          "title": "omc --bench as standalone CLI mode",
+          "status": "planned",
+          "effort": "small",
+          "priority": 3,
+          "prerequisites": [],
+          "rationale": "examples/benchmarks.omc has the right shape. CLI wrapper that runs `fn bench_*()` and reports per-op ns. Useful for performance regression CI.",
+          "deliverable": "main.rs --bench path"
+        },
+        {
+          "id": "more-multidim-demos",
+          "title": "Multi-dim harmonic detection on more datasets",
+          "status": "planned",
+          "effort": "medium",
+          "priority": 2,
+          "prerequisites": ["harmonic-anomaly-lib"],
+          "rationale": "Credential stuffing is one demo. Build at least 3 more: insider exfiltration (large download + off-hours + new device), API abuse (high request rate + uncommon endpoints + valid auth), DDoS pattern detection. Each one a standalone demo that proves the multi-dim story generalizes.",
+          "deliverable": "examples/datascience/anomaly_*.omc per scenario"
+        },
+        {
+          "id": "else-if-syntax",
+          "title": "elif as a parser-level shorthand for `else { if ... }`",
+          "status": "planned",
+          "effort": "small",
+          "priority": 3,
+          "prerequisites": [],
+          "rationale": "OMC has Statement::If with elif_parts already in the AST. Just need parser to accept `elif COND { ... }` as syntactic sugar. Removes the ugliest pattern in user code (deeply nested else-if chains in JSON parser, Lisp eval).",
+          "deliverable": "parser.rs token + parse_if_stmt extension"
+        }
+      ]
+    },
+
+    {
+      "id": "strategic-3-10-sessions",
+      "name": "Strategic (3-10 sessions)",
+      "summary": "Larger architectural moves. Each one unlocks a new capability tier.",
+      "items": [
+        {
+          "id": "lsp-server",
+          "title": "LSP server for IDE integration",
+          "status": "planned",
+          "effort": "large",
+          "priority": 2,
+          "prerequisites": [],
+          "rationale": "VS Code / nvim plugin is the difference between 'curious researchers try it' and 'engineers use it'. Token-level positions are already in the parser; the heal pass can become a code-action provider; type inference can drive completion. tower-lsp crate makes this tractable.",
+          "deliverable": "omnimcode-lsp/ crate + VS Code extension scaffolding"
+        },
+        {
+          "id": "wasm-target",
+          "title": "WASM target for browser/Node/edge deployment",
+          "status": "planned",
+          "effort": "large",
+          "priority": 3,
+          "prerequisites": [],
+          "rationale": "Two paths: (a) compile omnimcode-core to wasm32 via wasm-bindgen, ship to npm. (b) compile OMC bytecode to WASM directly (longer-term). Path (a) gets the embedded interpreter into browsers in days. Pyo3 won't work in the browser; ship a `--no-default-features` WASM build alongside the desktop binary.",
+          "deliverable": "omnimcode-wasm/ crate + npm package"
+        },
+        {
+          "id": "cusum-time-aware-anomaly",
+          "title": "CUSUM-based time-aware anomaly detection",
+          "status": "planned",
+          "effort": "research",
+          "priority": 3,
+          "prerequisites": ["harmonic-anomaly-lib"],
+          "rationale": "Phase B+1 documented honestly that simple top-K detectors (us included) hit a wall at NAB. Real wins need CUSUM (cumulative sum change-point detection), seasonality decomposition via FFT, or HMM/LSTM autoencoders. CUSUM with harmonic flavoring is the most tractable. Goal: beat IsolationForest on NAB realKnownCause windows-covered metric. Currently tied 7/19 each.",
+          "deliverable": "examples/lib/harmonic_change_point.omc + nab_cusum.omc"
+        },
+        {
+          "id": "central-registry-server",
+          "title": "Real central registry server (PR-able, versioned, hosted)",
+          "status": "planned",
+          "effort": "large",
+          "priority": 3,
+          "prerequisites": ["package-manager"],
+          "rationale": "Currently registry/index.json lives in the repo and updates require PR-and-merge. Real registry (a tiny Rocket/axum service backed by JSON files in a registry repo) supports: semver pinning, multiple versions per package, search, download counts. Modeled on cargo registry protocol.",
+          "deliverable": "omnimcode-registry/ service + registry deploy"
+        },
+        {
+          "id": "more-source-positions",
+          "title": "Source positions on every AST node, not just Call",
+          "status": "planned",
+          "effort": "large",
+          "priority": 3,
+          "prerequisites": ["stack-traces"],
+          "rationale": "Stack traces include line numbers but only for call sites. Errors INSIDE a function body show the function's call site, not the failing line. To fix: thread Pos through every Statement and Expression variant. Mechanical but voluminous (~80 sites). Unblocks proper debugger story.",
+          "deliverable": "ast.rs + interpreter.rs error formatting"
+        },
+        {
+          "id": "async-await",
+          "title": "async/await primitives + concurrent runtime",
+          "status": "exploratory",
+          "effort": "research",
+          "priority": 4,
+          "prerequisites": [],
+          "rationale": "Real network/IO programs need concurrency. Three options: (a) green threads via the interpreter, (b) tokio integration via pyo3 (every py_call returns a Future), (c) defer to Python's asyncio entirely. (c) is cheapest, (a) is most OMC-native. Significant design work.",
+          "deliverable": "TBD design doc first"
+        },
+        {
+          "id": "jit-compilation",
+          "title": "JIT compilation via cranelift",
+          "status": "exploratory",
+          "effort": "research",
+          "priority": 4,
+          "prerequisites": [],
+          "rationale": "Bytecode VM is ~2× tree-walk. JIT could be 10-100× on hot loops. cranelift is the right toolchain (used by wasmtime). Big architectural change; likely worth it once language stabilises and there's a real workload demanding it.",
+          "deliverable": "TBD"
+        }
+      ]
+    },
+
+    {
+      "id": "research-open-ended",
+      "name": "Research (open-ended)",
+      "summary": "Directions where the answer might be 'not worth it' and that's still a valid result. High variance, high upside.",
+      "items": [
+        {
+          "id": "no-std-kernel-embeddable",
+          "title": "no_std variant of omnimcode-core for kernel embedding",
+          "status": "exploratory",
+          "effort": "research",
+          "priority": 4,
+          "prerequisites": [],
+          "rationale": "User's stated long-term interest: 'micro/macro crossbreed → OS path'. Carve out a minimal no_std core (no Python, no file I/O, no regex), put behind a feature flag. Kernel modules / embedded firmware could embed it. Unclear if anyone actually needs this, but the architecture supports it now (Rc-shared collections work in no_std with a custom alloc).",
+          "deliverable": "omnimcode-core-mini/ feature-gated crate"
+        },
+        {
+          "id": "music-audio-integration",
+          "title": "Audio / music integration — literally harmonic primitives",
+          "status": "exploratory",
+          "effort": "research",
+          "priority": 4,
+          "prerequisites": ["pyo3-embed"],
+          "rationale": "OMC's φ-math is 'harmonic' in the abstract sense (Fibonacci attractors). Audio is harmonic in the literal sense (frequency ratios). py_import('librosa') gives us spectrograms; harmonic_index could fingerprint songs by attractor distribution; key/chord detection without ML training. Speculative but the math actually fits.",
+          "deliverable": "examples/datascience/audio_*.omc + harmonic_audio.omc"
+        },
+        {
+          "id": "ecg-arrhythmia-detector",
+          "title": "ECG arrhythmia detection on MIT-BIH dataset",
+          "status": "exploratory",
+          "effort": "research",
+          "priority": 3,
+          "prerequisites": ["harmonic-anomaly-lib"],
+          "rationale": "Heartbeats have natural attractor structure (RR intervals cluster on patient resting rate). Modern approaches use deep learning trained on labeled data; classical use threshold rules. Harmonic_index on RR-interval folds could surface arrhythmias as off-attractor beats without training. PhysioNet MIT-BIH database is public. If it works: 'lightweight on-device anomaly detection without trained models' — directly applicable to smartwatches.",
+          "deliverable": "examples/datascience/ecg_arrhythmia.omc"
+        },
+        {
+          "id": "attractor-compression",
+          "title": "Attractor-based compression for scientific data",
+          "status": "exploratory",
+          "effort": "research",
+          "priority": 5,
+          "prerequisites": [],
+          "rationale": "Data that naturally clusters on attractors (sensor readings discretised to calibration steps, RPM as multiples of 60, prices ending in .99) compresses worse than it should under gzip — entropy coding doesn't know about attractor structure. fold-then-delta encoding could beat gzip on this class. Niche but novel.",
+          "deliverable": "TBD whitepaper-style demo"
+        },
+        {
+          "id": "distributed-harmonic",
+          "title": "Distributed harmonic computing — CRDT-style attractor merging",
+          "status": "exploratory",
+          "effort": "research",
+          "priority": 5,
+          "prerequisites": [],
+          "rationale": "Speculative. fold(x) is associative-commutative on the same value: fold(fold(x)) == fold(x). This is exactly the property CRDTs need. A harmonic_set could be a CRDT — multi-node merging by attractor key produces convergent results. Far-future architecture for distributed anomaly detection.",
+          "deliverable": "design doc first"
+        }
+      ]
+    },
+
+    {
+      "id": "ecosystem-adoption",
+      "name": "Ecosystem & adoption",
+      "summary": "Not technical work — community, documentation, real users. Critical for the project to outlive its single-author phase.",
+      "items": [
+        {
+          "id": "real-pilot-deployment",
+          "title": "One real team using harmonic_anomaly in production",
+          "status": "planned",
+          "effort": "research",
+          "priority": 2,
+          "prerequisites": ["harmonic-anomaly-lib", "more-multidim-demos"],
+          "rationale": "The library beats IsolationForest on a benchmark. Next question is whether it beats it on someone's actual production telemetry. Find an SRE team running ML-driven alerting and offer to A/B their existing IF setup against harmonic_anomaly. Real-world signal is the hardest credibility check.",
+          "deliverable": "case study writeup"
+        },
+        {
+          "id": "tutorial-series",
+          "title": "Multi-part tutorial series (blog/video/docs)",
+          "status": "planned",
+          "effort": "large",
+          "priority": 3,
+          "prerequisites": [],
+          "rationale": "README is dense. New users need a path: 'hello world → first script → first harmonic primitive → first integration → first contribution'. Five tutorials total, each ~30 min. Bonus: each tutorial doubles as a regression-tested OMC file.",
+          "deliverable": "docs/tutorial/*.md + corresponding *.omc files"
+        },
+        {
+          "id": "research-paper",
+          "title": "Position paper: 'φ-math as a static analysis substrate'",
+          "status": "planned",
+          "effort": "large",
+          "priority": 3,
+          "prerequisites": [],
+          "rationale": "Self-hosting + self-healing + harmonic anomaly detection wins (10/10 vs 7/10) is enough material for a workshop paper at a PL or ML systems conference. Frame: language design where the static analysis substrate is mathematics rather than types. Cite NAB results, harmonic_anomaly comparison, and the Fibonacci-attractor primitive set.",
+          "deliverable": "draft paper + arxiv preprint"
+        },
+        {
+          "id": "conference-talk",
+          "title": "Talk at PL or systems conference",
+          "status": "exploratory",
+          "effort": "research",
+          "priority": 4,
+          "prerequisites": ["research-paper"],
+          "rationale": "Rust LATAM, Strange Loop (RIP), HYTRADBOI, RustConf — pick one, submit. Demos are concrete (live REPL doing harmonic anomaly detection on Wikimedia API logs); architecture story is novel (φ-math substrate); package manager makes the language plausibly real. Workshop submission window is shorter than full paper.",
+          "deliverable": "talk + slides"
+        },
+        {
+          "id": "community-channels",
+          "title": "Discord / Matrix / discussion forum",
+          "status": "exploratory",
+          "effort": "small",
+          "priority": 5,
+          "prerequisites": [],
+          "rationale": "Not yet — single-developer project doesn't need a chat room. Defer until there's >5 contributors or >1 real deployment. Premature community infrastructure is worse than none.",
+          "deliverable": "deferred"
+        }
+      ]
+    },
+
+    {
+      "id": "fixes-and-cleanup",
+      "name": "Known issues & cleanup",
+      "summary": "Real bugs and rough edges from PAIN_POINTS.md and accumulated session notes. Smaller items, mechanical fixes.",
+      "items": [
+        {
+          "id": "pain-med3-heal-context",
+          "title": "OMC_HEAL respects literal context (no auto-rewriting domain values)",
+          "status": "planned",
+          "effort": "medium",
+          "priority": 3,
+          "prerequisites": [],
+          "rationale": "From PAIN_POINTS MED-3: heal pass rewrites `target = 4.0` (rating=4 stars) to `target = 3` because 4 isn't Fibonacci. Need @no_heal decoration support OR position-aware heuristic that only fires on indices/array positions. Currently heal pass is unsafe-by-default for any program with domain semantics on small ints.",
+          "deliverable": "interpreter.rs heal_expr + ast.rs Pragma support"
+        },
+        {
+          "id": "pain-med4-selective-imports",
+          "title": "Selective imports (`from \"path\" import name1, name2`)",
+          "status": "planned",
+          "effort": "medium",
+          "priority": 3,
+          "prerequisites": [],
+          "rationale": "Currently `import \"path\" as alias;` imports the entire module. Selective imports avoid namespace pollution and make multi-file programs cleaner. Mechanical parser + interpreter change.",
+          "deliverable": "parser.rs + interpreter.rs import handling"
+        },
+        {
+          "id": "pain-low1-float-display",
+          "title": "Float display always shows decimal point",
+          "status": "planned",
+          "effort": "small",
+          "priority": 4,
+          "prerequisites": [],
+          "rationale": "PAIN_POINTS LOW-1: `println(3.0)` prints `3` (Rust's default float display). Adds int-vs-float ambiguity to user output. Fix: format as `{:?}` or special-case integer-valued floats.",
+          "deliverable": "value.rs to_display_string"
+        },
+        {
+          "id": "pain-low2-engine-divergence-audit",
+          "title": "omc --audit mode (runs both engines, diffs output)",
+          "status": "planned",
+          "effort": "small",
+          "priority": 4,
+          "prerequisites": [],
+          "rationale": "PAIN_POINTS LOW-2: when float-truncation bug landed, both engines silently produced different wrong answers. An audit CLI mode that runs both and flags divergence catches this class of bug instantly. Trivial to implement; reuses the regression sweep machinery.",
+          "deliverable": "main.rs --audit flag"
+        },
+        {
+          "id": "pain-high2-csv-parse-builtin",
+          "title": "csv_parse(text) builtin for fast CSV ingestion",
+          "status": "planned",
+          "effort": "medium",
+          "priority": 3,
+          "prerequisites": [],
+          "rationale": "PAIN_POINTS HIGH-2: load_csv is 28ms for 10k rows post-Rc-shared (was 9.9s). Most of remaining time is per-line str_split round trips through VM dispatch. A native csv_parse would bring 10k load to <5ms. Less critical now that Rc-shared closed the gap, but the long tail is still slow.",
+          "deliverable": "interpreter.rs csv_parse builtin"
+        },
+        {
+          "id": "vm-native-match",
+          "title": "Native VM lowering for match expression (currently tree-walk fallback)",
+          "status": "planned",
+          "effort": "medium",
+          "priority": 4,
+          "prerequisites": [],
+          "rationale": "match compiles to Op::ExecStmt (tree-walk fallback) right now. Works correctly but loses the bytecode-VM speedup for match-heavy code (e.g. the Lisp evaluator). Native lowering would emit guarded jump tables. Straightforward, ~50 lines per pattern variant.",
+          "deliverable": "compiler.rs Statement::Match arm + VM dispatch"
+        },
+        {
+          "id": "vm-native-try-catch",
+          "title": "Native VM lowering for try/catch (currently tree-walk fallback)",
+          "status": "planned",
+          "effort": "large",
+          "priority": 4,
+          "prerequisites": [],
+          "rationale": "Same as match — try/catch compiles to Op::ExecStmt. Native lowering needs a side try-stack and Result-aware op dispatch. Bigger refactor than match lowering. Defer until try/catch shows up in a hot path (it doesn't yet).",
+          "deliverable": "vm.rs try-stack + Op::EnterTry/Op::ExitTry"
+        },
+        {
+          "id": "rotate-pat-followup",
+          "title": "Confirm old GitHub PAT is revoked (user action only)",
+          "status": "in_progress",
+          "effort": "small",
+          "priority": 1,
+          "prerequisites": [],
+          "rationale": "Local cleanup done in this session: token stripped from .git/config, ~/.git-credentials deleted, gh auth set up via OAuth token in keychain. The OLD PAT (ghp_1zz...425YytI) was visible in this conversation transcript and any earlier git remote -v outputs. User must manually revoke at https://github.com/settings/tokens.",
+          "deliverable": "user clicks 'Delete' on the old token in GitHub settings"
+        }
+      ]
+    }
+  ],
+
+  "principles": [
+    "Honest results over flashy ones — document negative findings (NAB tied 7/19, harmonic features hurt Titanic survival). Negative results published cleanly are credibility, not loss.",
+    "Real datasets find real bugs — toy demos missed the float-truncation bug for months; one MovieLens run flushed it in 5 minutes.",
+    "Integration scripts get written in OMC, not Rust — np.omc is 30 lines on top of py_*. Users fork integrations without Rust knowledge.",
+    "Two-engine parity is non-negotiable — every feature lands in tree-walk and bytecode VM with byte-identical output.",
+    "Don't build features that no one needs yet — async, JIT, OS embedding all stay 'exploratory' until a real workload pulls on them."
+  ],
+
+  "anti_goals": [
+    "Becoming Python — Python wins on every axis except harmonic semantics. Don't compete with it; embed it.",
+    "Building features for hypothetical users — every shipped library has a measurable win story or it doesn't ship.",
+    "Premature ecosystem infrastructure — Discord/forum/CoC machinery before there are 5 contributors is dead weight.",
+    "Optimization for synthetic benchmarks — the only benchmarks that matter are real workloads (MovieLens, NAB, credential stuffing), not microbenches we tuned for."
+  ]
+}

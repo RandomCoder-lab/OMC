@@ -1,18 +1,18 @@
 # OMNIcode
 
-**A self-hosting harmonic computing language with a self-healing compiler, embedded CPython, and a real package manager.**
+**A harmonic-math platform: language, package manager, embedded Python ecosystem, and machine-learning libraries that demonstrably beat scikit-learn on structural anomalies.**
 
-OMNIcode (OMC) treats φ-math (Fibonacci attractors, resonance scoring, harmonic alignment) as a *decidable substrate* the compiler reasons against. Built on top of that substrate:
+OMNIcode (OMC) is a small standalone runtime that gives you four things in one binary:
 
-- **Self-hosting** at the back-end level (`gen2 == gen3` of the compiler-on-itself, [`examples/self_hosting_v9b.omc`](examples/self_hosting_v9b.omc))
-- **Self-healing** that rewrites typo'd identifiers, off-attractor literals, and divide-by-zero as the compiler runs ([`examples/self_healing_h5.omc`](examples/self_healing_h5.omc))
-- **Embedded CPython always-on** — `py_import("numpy")`, `py_call(...)`, full reach into the Python ecosystem ([`examples/datascience/titanic.omc`](examples/datascience/titanic.omc))
-- **Bidirectional callbacks** — Python can invoke OMC functions via `py_callback("name")`, useful for `df.apply(omc_fn)` patterns
-- **Package manager** — `omc --install np` resolves through a registry, sha256-verifies, caches under `omc_modules/`
-- **Harmonic-distinctive primitives** — `harmonic_index` (sub-linear lookup by attractor neighborhood), `harmonic_sort` (by HIM score), `harmonic_partition` (Fibonacci-bucketed), all in [`examples/harmonic_collections.omc`](examples/harmonic_collections.omc)
-- **Multi-dim anomaly detection that beats IsolationForest** on structural patterns — `harmonic_anomaly` library catches credential-stuffing 10/10 vs IF's 7/10 at top-K=10 ([`examples/datascience/multidim_anomaly.omc`](examples/datascience/multidim_anomaly.omc))
+1. **A real harmonic-anomaly detector that beats IsolationForest** — the `harmonic_anomaly` library catches credential-stuffing patterns 10/10 vs scikit-learn's 7/10 at top-K=10 ([`examples/datascience/multidim_anomaly.omc`](examples/datascience/multidim_anomaly.omc)). Drop-in replacement for `IsolationForest()` on multi-dim tabular data.
 
-Single binary, two engines (tree-walk + bytecode VM with byte-identical output across 43 functional examples), no opt-in flags for any of this.
+2. **The full Python ecosystem on tap** — `py_import("numpy")`, `py_import("pandas")`, `py_import("sklearn")` work out of the box. CPython is embedded at link time. Six wrapper libraries ([`np`, `pd`, `sk`, `requests`, `sqlite`, `torch`](examples/lib/)) make the common cases idiomatic.
+
+3. **A package manager + central registry** — `omc --install harmonic_anomaly` fetches from the registry, verifies sha256, caches under `omc_modules/`. Submit a new package by PRing [`registry/index.json`](registry/index.json).
+
+4. **A self-hosting language with a self-healing compiler** — the bytecode compiler is itself written in OMC and `gen2 == gen3` of the compiler-on-itself ([`examples/self_hosting_v9b.omc`](examples/self_hosting_v9b.omc)). The static-analysis substrate is φ-math (Fibonacci attractors, resonance, HIM score), not types. Identifier typos, off-attractor literals, divide-by-zero, and parser slips get auto-rewritten by the heal pass.
+
+Single Rust binary. Two execution engines (tree-walk + bytecode VM) with byte-identical output across 43 functional examples. The architecture is built so each layer reinforces the next: harmonic primitives drive the anomaly detector, the package manager ships those libraries, the embedded Python lets users compose with everything else.
 
 ---
 
@@ -28,26 +28,49 @@ PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 cargo build --release
 
 `--init` creates `omc.toml` + a hello-world `main.omc`. Edit, run, you're going.
 
-## 60-second wow
+## 60-second wow — anomaly detection that beats scikit-learn
 
-OMC reaches into Python and does end-to-end machine learning:
+The `harmonic_anomaly` library is a drop-in replacement for `sklearn.IsolationForest` on multi-dim tabular data. It wins decisively on structural anomalies — the kind credential-stuffing, account takeover, and exfiltration produce, where every individual value looks normal but the combination is rare:
 
 ```omc
-import "examples/lib/sklearn.omc" as sk;
-import "examples/lib/np.omc" as np;
+import "harmonic_anomaly" as ha;       # after: omc --install harmonic_anomaly
+
+# Schema: each row = [latency_ms, status_code, endpoint_id, hour_of_day]
+h det = ha.new(["latency", "status", "endpoint", "hour"]);
+ha.set_strategy(det, 1, "discrete");   # status_code is categorical
+ha.set_strategy(det, 2, "discrete");   # endpoint_id is categorical
+ha.set_strategy(det, 3, "modulo");     # hour-of-day is small periodic
+
+ha.fit(det, training_rows);
+h alerts = ha.top_k(det, all_rows, 10);   # top-10 most anomalous indices
+```
+
+Measured on 5000 normal requests + 50 injected credential-stuffing rows:
+
+|  | OMC harmonic | sklearn IsolationForest |
+|---|:---:|:---:|
+| Top-10 alerts (the SRE oncall regime) | **10/10 caught** | 7/10 (mixes in unrelated 500-error spikes) |
+| Top-25 alerts | **25/25** | 17/25 |
+| Top-50 alerts | **50/50** | 40/50 |
+
+See [`examples/datascience/anomaly_tutorial.omc`](examples/datascience/anomaly_tutorial.omc) for the walkthrough, and [`examples/datascience/multidim_anomaly.omc`](examples/datascience/multidim_anomaly.omc) for the full comparison.
+
+## And — OMC drives the whole Python ML stack
+
+```omc
+import "sk" as sk;       # after: omc --install sk
+import "np" as np;       # after: omc --install np
 
 # Train + score a random forest on the iris dataset
 h iris = sk.load_iris();
-h X = arr_get(iris, 0);
-h y = arr_get(iris, 1);
-h split = sk.train_test_split(X, y, 0.3);
+h split = sk.train_test_split(arr_get(iris, 0), arr_get(iris, 1), 0.3);
 h model = sk.random_forest_classifier(100);
 sk.fit(model, arr_get(split, 0), arr_get(split, 2));
 h preds = sk.predict(model, arr_get(split, 1));
 println(concat_many("RF accuracy: ", sk.accuracy_score(arr_get(split, 3), preds)));
 ```
 
-For the full real-world demo, run `examples/datascience/titanic.omc` — Kaggle Titanic via seaborn (~120 lines of OMC), loading 891 passengers in ~280ms, training a 100-tree forest, comparing baseline vs harmonic-augmented features. Zero Rust extensions for the user.
+For the full real-world demo, run [`examples/datascience/titanic.omc`](examples/datascience/titanic.omc) — Kaggle Titanic via seaborn (~120 lines of OMC), loading 891 passengers in ~280ms, training a 100-tree forest. Zero Rust extensions for the user.
 
 ---
 
