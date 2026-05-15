@@ -5070,30 +5070,17 @@ fn values_equal(a: &Value, b: &Value) -> bool {
 // Free function reused by quantize / quantization_ratio / mean_omni_weight.
 // Snap |n| to the nearest Fibonacci attractor, preserving sign.
 pub(crate) fn fold_to_fibonacci_const(n: i64) -> i64 {
-    let fibs: [i64; 15] = [0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610];
-    let abs_val = n.abs();
-    let mut nearest = fibs[0];
-    let mut min_dist = abs_val;
-    for &f in &fibs {
-        let d = (f - abs_val).abs();
-        if d < min_dist {
-            min_dist = d;
-            nearest = f;
-        }
-    }
-    if n < 0 { -nearest } else { nearest }
+    // Substrate-routed via phi_pi_fib::fold_to_nearest_attractor.
+    // Was: a 15-element local Fibonacci array + linear scan.
+    crate::phi_pi_fib::fold_to_nearest_attractor(n)
 }
 
 // Used by the host-side healer in heal_ast. Tests whether `n` falls on
-// the Fibonacci attractor table — same set as fold_to_fibonacci_const.
-// Renamed from `is_fibonacci` because `value.rs` already exports a
-// public function by that name (operating on i64 too — semantically
-// equivalent, but we keep a local copy here so the heal pass doesn't
-// depend on value.rs internals).
+// the Fibonacci attractor table. Substrate-routed via
+// phi_pi_fib::is_on_fibonacci_attractor — same canonical table as
+// every other harmonic op now uses.
 pub(crate) fn is_on_fibonacci_attractor(n: i64) -> bool {
-    let fibs: [i64; 15] = [0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610];
-    let abs_n = n.abs();
-    fibs.iter().any(|&f| f == abs_n)
+    crate::phi_pi_fib::is_on_fibonacci_attractor(n)
 }
 
 // Levenshtein edit distance for the heal-pass typo correction. Returns

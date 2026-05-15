@@ -314,6 +314,65 @@ pub fn binary_search<T>(
     Err(low)
 }
 
+/// nearest_attractor_with_dist(value) — the canonical
+/// "snap to nearest Fibonacci attractor" operation for the OMC
+/// substrate. Returns (nearest_attractor, |value - nearest|).
+/// Sign-preserving: negative inputs return negative attractors.
+///
+/// Backed by `fibonacci_search` over the canonical FIBONACCI table
+/// (40 entries up to 63,245,986). Used by `HInt::compute_resonance`,
+/// `fold_to_fibonacci_const`, `is_on_fibonacci_attractor`, and every
+/// other site in OMC that needs to fold a value to the attractor
+/// lattice.
+///
+/// Tie-break: when two attractors are equidistant, the LOWER one wins
+/// (matches the original linear-scan semantics: first match in
+/// ascending order).
+pub fn nearest_attractor_with_dist(value: i64) -> (i64, i64) {
+    let abs_v = value.abs();
+    if abs_v == 0 {
+        return (0, 0);
+    }
+    let target = abs_v as u64;
+    let r = fibonacci_search(FIBONACCI, &target, |a, b| {
+        if a < b { -1 } else if a > b { 1 } else { 0 }
+    });
+    let (nearest_abs, min_dist): (i64, i64) = match r {
+        Ok(i) => (FIBONACCI[i] as i64, 0),
+        Err(insert_pos) => {
+            let n = FIBONACCI.len();
+            if insert_pos == 0 {
+                let f = FIBONACCI[0] as i64;
+                (f, (abs_v - f).abs())
+            } else if insert_pos >= n {
+                let f = FIBONACCI[n - 1] as i64;
+                (f, (abs_v - f).abs())
+            } else {
+                let left = FIBONACCI[insert_pos - 1] as i64;
+                let right = FIBONACCI[insert_pos] as i64;
+                let left_d = (abs_v - left).abs();
+                let right_d = (right - abs_v).abs();
+                if left_d <= right_d { (left, left_d) } else { (right, right_d) }
+            }
+        }
+    };
+    let signed = if value < 0 { -nearest_abs } else { nearest_abs };
+    (signed, min_dist)
+}
+
+/// fold_to_nearest_attractor(value) — sign-preserving fold to the
+/// closest Fibonacci attractor. Wrapper around
+/// `nearest_attractor_with_dist` that discards the distance.
+pub fn fold_to_nearest_attractor(value: i64) -> i64 {
+    nearest_attractor_with_dist(value).0
+}
+
+/// is_on_fibonacci_attractor(value) — true iff |value| is exactly a
+/// Fibonacci number in the canonical attractor table.
+pub fn is_on_fibonacci_attractor(value: i64) -> bool {
+    nearest_attractor_with_dist(value).1 == 0
+}
+
 /// log_phi_pi_fibonacci(n) — the theoretical compare-count bound for
 /// the phi_pi_fib_search_v2 algorithm.
 ///

@@ -28,20 +28,20 @@ impl HInt {
         }
     }
 
-    /// Compute resonance (0-1) based on distance to nearest Fibonacci number
+    /// Compute resonance (0-1) based on distance to nearest Fibonacci number.
+    ///
+    /// Substrate-routed: goes through `phi_pi_fib::nearest_attractor_with_dist`,
+    /// which uses the canonical 40-entry FIBONACCI table and a
+    /// Fibonacci-step search. Replaces a 16-element local linear scan
+    /// that used to live here.
+    ///
+    /// Semantics are preserved for |value| <= 610 (the range the old
+    /// local table covered). For |value| > 610 the new resonance is
+    /// MORE accurate — the old table saturated at 610, scoring large
+    /// inputs unfairly low; the new one extends to 63,245,986.
     pub fn compute_resonance(value: i64) -> f64 {
-        let fibs: [i64; 16] = [0, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610];
+        let (_nearest, min_dist) = crate::phi_pi_fib::nearest_attractor_with_dist(value);
         let abs_val = value.abs();
-        
-        // Find nearest Fibonacci
-        let mut min_dist = i64::MAX;
-        for &f in &fibs {
-            let d = (f - abs_val).abs();
-            if d < min_dist {
-                min_dist = d;
-            }
-        }
-        
         if min_dist == 0 {
             1.0
         } else {
@@ -439,12 +439,14 @@ pub fn fibonacci(n: i64) -> i64 {
     b
 }
 
-/// Check if a number is Fibonacci
+/// Check if a number is Fibonacci.
+///
+/// Substrate-routed via `phi_pi_fib::is_on_fibonacci_attractor` —
+/// goes through the canonical FIBONACCI table (40 entries) and the
+/// Fibonacci-step search. Replaces a 20-element local array that
+/// used to live here.
 pub fn is_fibonacci(n: i64) -> bool {
-    let fibs: [i64; 20] = [
-        0, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610, 987, 1597, 2584, 4181,
-    ];
-    fibs.contains(&n)
+    crate::phi_pi_fib::is_on_fibonacci_attractor(n)
 }
 
 #[cfg(test)]
