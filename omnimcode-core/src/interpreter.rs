@@ -1660,6 +1660,9 @@ impl Interpreter {
             | "harmonic_checksum" | "harmonic_write_file" | "harmonic_read_file"
             | "harmonic_sort" | "harmonic_split" | "harmonic_partition"
             | "harmonic_hash" | "harmonic_diff" | "harmonic_dedupe"
+            // Phi-Pi-Fib search (Fibonacci-step binary search variant)
+            | "phi_pi_fib_search" | "phi_pi_fib_nearest"
+            | "phi_pi_fib_stats" | "phi_pi_fib_reset"
             // Self-healing
             | "safe_divide" | "safe_arr_get" | "safe_arr_set"
             | "safe_add" | "safe_sub" | "safe_mul" | "resolve_singularity"
@@ -3933,6 +3936,97 @@ impl Interpreter {
                     Err("arr_index_of: first argument must be an array".to_string())
                 }
             }
+            // phi_pi_fib_search(sorted_array, target)
+            //   Fibonacci-step binary search over a sorted integer array.
+            //   Returns the exact-match index when found, or -(insert_pos + 1)
+            //   when not found — same sign convention as Rust's binary_search.
+            //   Use phi_pi_fib_nearest if you want a "nearest entry" gate
+            //   that never returns a negative index.
+            "phi_pi_fib_search" => {
+                if args.len() < 2 {
+                    return Err("phi_pi_fib_search requires (sorted_array, target)".to_string());
+                }
+                let arr_v = self.eval_expr(&args[0])?;
+                let target = self.eval_expr(&args[1])?.to_int();
+                if let Value::Array(arr) = arr_v {
+                    let items_b = arr.items.borrow();
+                    let ints: Vec<i64> = items_b.iter().map(|v| v.to_int()).collect();
+                    let r = crate::phi_pi_fib::fibonacci_search(
+                        &ints,
+                        &target,
+                        |a, b| if a < b { -1 } else if a > b { 1 } else { 0 },
+                    );
+                    Ok(Value::HInt(HInt::new(match r {
+                        Ok(i) => i as i64,
+                        Err(insert_pos) => -(insert_pos as i64 + 1),
+                    })))
+                } else {
+                    Err("phi_pi_fib_search: first argument must be an array".to_string())
+                }
+            }
+            // phi_pi_fib_nearest(sorted_array, target)
+            //   Same as phi_pi_fib_search but returns the index of the
+            //   nearest entry by absolute integer distance. Always returns
+            //   a valid index (0..len) for non-empty arrays, or -1 if the
+            //   array is empty.
+            //
+            //   This is the gate primitive for the compression-gate
+            //   architecture: missing-key lookups route to the nearest
+            //   surviving library entry, giving "die gracefully" semantics.
+            "phi_pi_fib_nearest" => {
+                if args.len() < 2 {
+                    return Err("phi_pi_fib_nearest requires (sorted_array, target)".to_string());
+                }
+                let arr_v = self.eval_expr(&args[0])?;
+                let target = self.eval_expr(&args[1])?.to_int();
+                if let Value::Array(arr) = arr_v {
+                    let items_b = arr.items.borrow();
+                    let ints: Vec<i64> = items_b.iter().map(|v| v.to_int()).collect();
+                    if ints.is_empty() {
+                        return Ok(Value::HInt(HInt::new(-1)));
+                    }
+                    let r = crate::phi_pi_fib::fibonacci_search(
+                        &ints,
+                        &target,
+                        |a, b| if a < b { -1 } else if a > b { 1 } else { 0 },
+                    );
+                    let idx: usize = match r {
+                        Ok(i) => i,
+                        Err(insert_pos) => {
+                            let n = ints.len();
+                            if insert_pos == 0 {
+                                0
+                            } else if insert_pos >= n {
+                                n - 1
+                            } else {
+                                let left = (target - ints[insert_pos - 1]).abs();
+                                let right = (ints[insert_pos] - target).abs();
+                                if right < left { insert_pos } else { insert_pos - 1 }
+                            }
+                        }
+                    };
+                    Ok(Value::HInt(HInt::new(idx as i64)))
+                } else {
+                    Err("phi_pi_fib_nearest: first argument must be an array".to_string())
+                }
+            }
+            // phi_pi_fib_stats() -> [total_searches, total_comparisons]
+            //   Returns global counters for all phi_pi_fib_* calls since the
+            //   last phi_pi_fib_reset(). Use to measure how many compares the
+            //   gate cost — should grow as O(log_phi n), not O(n).
+            "phi_pi_fib_stats" => {
+                let s = crate::phi_pi_fib::get_search_stats();
+                let items = vec![
+                    Value::HInt(HInt::new(s.total_searches as i64)),
+                    Value::HInt(HInt::new(s.total_comparisons as i64)),
+                ];
+                Ok(Value::Array(HArray::from_vec(items)))
+            }
+            // phi_pi_fib_reset() -> null. Zero the phi_pi_fib counters.
+            "phi_pi_fib_reset" => {
+                crate::phi_pi_fib::reset_search_stats();
+                Ok(Value::Null)
+            }
             "arr_slice" => {
                 if args.len() < 3 {
                     return Err("arr_slice requires (array, start, end)".to_string());
@@ -4897,6 +4991,9 @@ pub(crate) const HEAL_BUILTIN_NAMES: &[&str] = &[
     "harmonic_checksum", "harmonic_write_file", "harmonic_read_file",
     "harmonic_sort", "harmonic_split", "harmonic_partition",
     "harmonic_hash", "harmonic_diff", "harmonic_dedupe",
+    // Phi-Pi-Fib search
+    "phi_pi_fib_search", "phi_pi_fib_nearest",
+    "phi_pi_fib_stats", "phi_pi_fib_reset",
     // Self-healing
     "safe_divide", "safe_arr_get", "safe_arr_set",
     "safe_add", "safe_sub", "safe_mul", "resolve_singularity",
