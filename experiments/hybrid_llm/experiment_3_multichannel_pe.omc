@@ -1,0 +1,284 @@
+# =============================================================================
+# Experiment 3 — Multi-channel positional encoding under length extrapolation.
+#
+# Experiment 2 used single-integer codes and a closest-int lookup metric,
+# which favours monotonic-saturating encodings (harmonic) over periodic
+# ones (sinusoidal). That's not how real transformers use PE — they
+# concatenate multiple channels and compute similarity over the full
+# vector.
+#
+# This experiment makes the comparison apples-to-apples:
+#
+#   harmonic_pe(pos) = [
+#       phi.fold(pos * 7  + 1),
+#       phi.fold(pos * 11 + 1),
+#       phi.fold(pos * 13 + 1),
+#       phi.fold(pos * 17 + 1),
+#   ]
+#       Four channels with prime multipliers. Each channel saturates
+#       at the largest Fibonacci attractor in range, but at DIFFERENT
+#       positions, so the joint vector stays distinguishable past the
+#       single-channel saturation point.
+#
+#   sinusoidal_pe(pos) = [
+#       to_int(1000 * sin(2π·pos / 8)),
+#       to_int(1000 * cos(2π·pos / 8)),
+#       to_int(1000 * sin(2π·pos / 64)),
+#       to_int(1000 * cos(2π·pos / 64)),
+#   ]
+#       Four channels, two geometric periods (8 and 64) — the
+#       transformer paper's geometric-frequency layout, scaled to a
+#       small d_model.
+#
+# Lookup uses squared L2 distance over the 4-vector. We sweep L from
+# 8 to 200 and measure:
+#   - distinctness (number of unique 4-vectors)
+#   - lookup recovery rate (queries that retrieve the correct token)
+#
+# The hypothesis from experiment 2 is that multi-channel sinusoidal
+# RECOVERS the win because L2 over the long-period channel keeps
+# positions distinguishable past the short period's wrap. If that
+# holds, the harmonic substrate doesn't actually beat sinusoidal at
+# this task — experiment 2's harmonic win was a metric artefact.
+#
+# Run:
+#   ./target/release/omnimcode-standalone experiments/hybrid_llm/experiment_3_multichannel_pe.omc
+# =============================================================================
+
+h D = 4;       # vector dimension (number of channels)
+
+# ---------------------------------------------------------------------------
+# Multi-channel encodings. Each returns an array of length D.
+# ---------------------------------------------------------------------------
+
+fn harmonic_pe(pos) -> array {
+    h v = arr_new(D, 0);
+    arr_set(v, 0, phi.fold(pos * 7  + 1));
+    arr_set(v, 1, phi.fold(pos * 11 + 1));
+    arr_set(v, 2, phi.fold(pos * 13 + 1));
+    arr_set(v, 3, phi.fold(pos * 17 + 1));
+    return v;
+}
+
+fn sin_channel(pos, period) -> int {
+    h two_pi = 2.0 * pi();
+    h theta = to_float(pos) * two_pi / to_float(period);
+    return to_int(1000.0 * sin(theta));
+}
+
+fn cos_channel(pos, period) -> int {
+    h two_pi = 2.0 * pi();
+    h theta = to_float(pos) * two_pi / to_float(period);
+    return to_int(1000.0 * cos(theta));
+}
+
+fn sinusoidal_pe(pos) -> array {
+    h v = arr_new(D, 0);
+    arr_set(v, 0, sin_channel(pos, 8));
+    arr_set(v, 1, cos_channel(pos, 8));
+    arr_set(v, 2, sin_channel(pos, 64));
+    arr_set(v, 3, cos_channel(pos, 64));
+    return v;
+}
+
+# ---------------------------------------------------------------------------
+# Squared L2 distance between two D-vectors. Squared = monotonic in
+# distance, so it's good enough for argmin.
+# ---------------------------------------------------------------------------
+fn l2sq(a, b) -> int {
+    h s = 0;
+    h i = 0;
+    while i < D {
+        h d = arr_get(a, i) - arr_get(b, i);
+        s = s + (d * d);
+        i = i + 1;
+    }
+    return s;
+}
+
+# Test whether two D-vectors are exactly equal.
+fn vec_eq(a, b) -> int {
+    h i = 0;
+    while i < D {
+        if arr_get(a, i) != arr_get(b, i) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# ---------------------------------------------------------------------------
+# Count unique vectors among the L stored vectors (O(L^2 D)).
+# `which` 0 = harmonic, 1 = sinusoidal.
+# ---------------------------------------------------------------------------
+fn count_unique(L, which) -> int {
+    h unique = 0;
+    h i = 0;
+    while i < L {
+        h vi = arr_new(D, 0);
+        if which == 0 { vi = harmonic_pe(i); }
+        if which == 1 { vi = sinusoidal_pe(i); }
+        h is_first = 1;
+        h j = 0;
+        while j < i {
+            h vj = arr_new(D, 0);
+            if which == 0 { vj = harmonic_pe(j); }
+            if which == 1 { vj = sinusoidal_pe(j); }
+            if vec_eq(vi, vj) == 1 { is_first = 0; }
+            j = j + 1;
+        }
+        if is_first == 1 { unique = unique + 1; }
+        i = i + 1;
+    }
+    return unique;
+}
+
+# ---------------------------------------------------------------------------
+# Vocabulary for the lookup task.
+# ---------------------------------------------------------------------------
+fn vocab_token(i) -> int {
+    h base = i % 12;
+    if base == 0 { return 1; }
+    if base == 1 { return 2; }
+    if base == 2 { return 3; }
+    if base == 3 { return 5; }
+    if base == 4 { return 8; }
+    if base == 5 { return 13; }
+    if base == 6 { return 21; }
+    if base == 7 { return 34; }
+    if base == 8 { return 55; }
+    if base == 9 { return 89; }
+    if base == 10 { return 144; }
+    if base == 11 { return 233; }
+    return 1;
+}
+
+# ---------------------------------------------------------------------------
+# Lookup head: for each stored position 0..L-1, compute its PE vector,
+# compare to the query PE vector by squared L2, return the token at
+# argmin position. Ties broken by first occurrence.
+# ---------------------------------------------------------------------------
+fn lookup(tokens, L, query_pos, which) -> int {
+    h q = arr_new(D, 0);
+    if which == 0 { q = harmonic_pe(query_pos); }
+    if which == 1 { q = sinusoidal_pe(query_pos); }
+
+    h best_idx = 0;
+    h best_d = -1;
+    h i = 0;
+    while i < L {
+        h vi = arr_new(D, 0);
+        if which == 0 { vi = harmonic_pe(i); }
+        if which == 1 { vi = sinusoidal_pe(i); }
+        h d = l2sq(vi, q);
+        if best_d < 0 {
+            best_d = d;
+            best_idx = i;
+        } else {
+            if d < best_d {
+                best_d = d;
+                best_idx = i;
+            }
+        }
+        i = i + 1;
+    }
+    return arr_get(tokens, best_idx);
+}
+
+# Run the full L-position lookup suite and return [harmonic_correct,
+# sinusoidal_correct] as a small array.
+fn run_lookup_suite(L) -> array {
+    h tokens = arr_new(L, 0);
+    h i = 0;
+    while i < L {
+        arr_set(tokens, i, vocab_token(i));
+        i = i + 1;
+    }
+    h h_correct = 0;
+    h s_correct = 0;
+    h k = 0;
+    while k < L {
+        h truth = arr_get(tokens, k);
+        if lookup(tokens, L, k, 0) == truth { h_correct = h_correct + 1; }
+        if lookup(tokens, L, k, 1) == truth { s_correct = s_correct + 1; }
+        k = k + 1;
+    }
+    h out = arr_new(2, 0);
+    arr_set(out, 0, h_correct);
+    arr_set(out, 1, s_correct);
+    return out;
+}
+
+# ---------------------------------------------------------------------------
+# Run the sweep.
+# ---------------------------------------------------------------------------
+print("== Experiment 3: 4-channel positional encoding under length extrapolation ==");
+print(concat_many("D = ", D, "; harmonic primes = [7, 11, 13, 17]; sinusoidal periods = [8, 64]"));
+print("");
+print("L     | harmonic (unique / lookup correct) | sinusoidal (unique / lookup correct)");
+print("------+------------------------------------+--------------------------------------");
+
+h lengths = [8, 16, 32, 48, 64, 96, 128, 200];
+h nL = arr_len(lengths);
+h li = 0;
+while li < nL {
+    h L = arr_get(lengths, li);
+    h h_unique = count_unique(L, 0);
+    h s_unique = count_unique(L, 1);
+    h lookup_out = run_lookup_suite(L);
+    h h_corr = arr_get(lookup_out, 0);
+    h s_corr = arr_get(lookup_out, 1);
+    print(concat_many(
+        "  ", L,
+        "   |         ", h_unique, " / ", h_corr, " / ", L,
+        "          |          ", s_unique, " / ", s_corr, " / ", L
+    ));
+    li = li + 1;
+}
+print("");
+
+# ---------------------------------------------------------------------------
+# Crossover analysis: at what L does each encoding's UNIQUE count
+# stop growing? (i.e., when has the encoding "saturated"?)
+# ---------------------------------------------------------------------------
+print("== Saturation summary ==");
+
+# Find the smallest L at which unique(L) < L for each scheme.
+fn first_saturation(which) -> int {
+    h L = 1;
+    while L <= 256 {
+        if count_unique(L, which) < L { return L; }
+        L = L + 1;
+    }
+    return -1;
+}
+
+h h_sat = first_saturation(0);
+h s_sat = first_saturation(1);
+print(concat_many("harmonic_pe   first L with unique < L: ", h_sat));
+print(concat_many("sinusoidal_pe first L with unique < L: ", s_sat));
+print("");
+
+# ---------------------------------------------------------------------------
+# Interpretation.
+# ---------------------------------------------------------------------------
+print("== Interpretation ==");
+print("");
+print("If harmonic_pe saturates LATER than experiment 2's single-channel did");
+print("(it should — the 4 prime-multiplier channels saturate independently),");
+print("the multi-channel approach genuinely buys length-extrapolation room.");
+print("");
+print("If sinusoidal_pe stays distinct longer than its short period (8) would");
+print("suggest, that's the long-period channel (64) doing its job. This is the");
+print("classic transformer-PE story: geometric frequencies layered to span a");
+print("wide range of positions with a small vector.");
+print("");
+print("If the lookup-correct numbers track unique counts on both sides, the");
+print("L2-vector metric is doing what it should — distinguishability translates");
+print("to retrieval. If lookup correct < unique, there's tie-breaking ambiguity");
+print("(two distinct vectors equidistant from the query).");
+print("");
+print("The key crossover from experiment 2 to verify: at L=48, single-channel");
+print("harmonic beat single-channel sinusoidal (38 vs 26). Does the 4-channel");
+print("comparison restore sinusoidal's lead (the metric-artefact hypothesis),");
+print("or does harmonic STILL win (a genuine structural property)?");
+print("== End ==");

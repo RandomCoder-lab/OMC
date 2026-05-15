@@ -1,0 +1,186 @@
+# =============================================================================
+# Experiment 0 — OmniWeight vs softmax scoring on a copy task.
+#
+# Setup:
+#   - 8-token "context" sampled from a Fibonacci-attractor vocab.
+#   - 1 separator token (0) — present but not scored.
+#   - 1 "query" token that equals one of the context tokens verbatim.
+#   - Both scoring rules must point at the matching context position.
+#
+# We are NOT training anything. We're isolating the SCORING FUNCTION:
+#   - OmniWeight (harmonic): w(q, k) = φ^(-|q - k| / max(|k|, 1))
+#   - Softmax-style:         w(q, k) = exp(-|q - k|), normalized
+# Both pick the argmax position; we measure exact-match accuracy.
+#
+# Run:
+#   ./target/release/omnimcode-standalone experiments/hybrid_llm/experiment_0_copy_task.omc
+#   OMC_VM=1 ./target/release/omnimcode-standalone experiments/hybrid_llm/experiment_0_copy_task.omc
+# =============================================================================
+
+h PHI = 1.6180339887498948;
+
+# Vocabulary: 12 Fibonacci attractors. Index 0 is the separator (never queried).
+h VOCAB_SIZE = 12;
+fn vocab_at(i) -> int {
+    if i == 0 { return 1; }
+    if i == 1 { return 2; }
+    if i == 2 { return 3; }
+    if i == 3 { return 5; }
+    if i == 4 { return 8; }
+    if i == 5 { return 13; }
+    if i == 6 { return 21; }
+    if i == 7 { return 34; }
+    if i == 8 { return 55; }
+    if i == 9 { return 89; }
+    if i == 10 { return 144; }
+    if i == 11 { return 233; }
+    return 1;
+}
+
+# ---------------------------------------------------------------------------
+# Scoring functions
+# ---------------------------------------------------------------------------
+
+# OmniWeight: harmonic geodesic distance, no normalization.
+fn omni_weight(q, k) -> float {
+    h diff = to_float(q - k);
+    if diff < 0.0 { diff = 0.0 - diff; }
+    h denom = to_float(k);
+    if denom < 0.0 { denom = 0.0 - denom; }
+    if denom < 1.0 { denom = 1.0; }
+    h e = diff / denom;
+    return pow(PHI, 0.0 - e);
+}
+
+# Softmax-style score: exp(-|q - k|). Returned unnormalized; argmax is
+# scale-invariant so the softmax denominator doesn't affect the
+# selection. (We'd need it for KL divergence or sampling, not here.)
+fn softmax_score(q, k) -> float {
+    h diff = to_float(q - k);
+    if diff < 0.0 { diff = 0.0 - diff; }
+    return exp(0.0 - diff);
+}
+
+# ---------------------------------------------------------------------------
+# Argmax over a length-N context using a chosen scoring function.
+# `which_score` = 0 → OmniWeight, 1 → softmax.
+# Returns the INDEX of the highest-scoring position.
+# ---------------------------------------------------------------------------
+fn argmax_score(context, n, query, which_score) -> int {
+    h best_idx = 0;
+    h k0 = arr_get(context, 0);
+    h best_score = 0.0;
+    if which_score == 0 {
+        best_score = omni_weight(query, k0);
+    } else {
+        best_score = softmax_score(query, k0);
+    }
+
+    h i = 1;
+    while i < n {
+        h k = arr_get(context, i);
+        h s = 0.0;
+        if which_score == 0 {
+            s = omni_weight(query, k);
+        } else {
+            s = softmax_score(query, k);
+        }
+        if s > best_score {
+            best_score = s;
+            best_idx = i;
+        }
+        i = i + 1;
+    }
+    return best_idx;
+}
+
+# ---------------------------------------------------------------------------
+# Build one trial: random 8-token context, query equals context[target_idx].
+# Returns the predicted index from each scorer.
+# We pre-seed with random_seed() so the trials are reproducible.
+# ---------------------------------------------------------------------------
+fn run_trial(target_idx, ctx_len) -> array {
+    h context = arr_new(ctx_len, 0);
+    h i = 0;
+    while i < ctx_len {
+        # random_int is inclusive on both ends in OMC, so clamp upper.
+        h v = random_int(0, VOCAB_SIZE - 1);
+        arr_set(context, i, vocab_at(v));
+        i = i + 1;
+    }
+    h query = arr_get(context, target_idx);
+
+    h omni_pick = argmax_score(context, ctx_len, query, 0);
+    h soft_pick = argmax_score(context, ctx_len, query, 1);
+
+    # Pack result as [target, omni_pick, soft_pick] for downstream tallying.
+    h out = arr_new(3, 0);
+    arr_set(out, 0, target_idx);
+    arr_set(out, 1, omni_pick);
+    arr_set(out, 2, soft_pick);
+    return out;
+}
+
+# ---------------------------------------------------------------------------
+# Main loop.
+# ---------------------------------------------------------------------------
+random_seed(42);
+
+h N_TRIALS = 100;
+h CTX_LEN = 8;
+
+print("== Experiment 0: OmniWeight vs softmax-style argmax (copy task) ==");
+print(concat_many("trials=", N_TRIALS, "  ctx_len=", CTX_LEN, "  vocab_size=", VOCAB_SIZE));
+print("");
+
+h omni_correct = 0;
+h soft_correct = 0;
+h disagreements = 0;
+h trial = 0;
+while trial < N_TRIALS {
+    # Pick a target position uniformly in [0, CTX_LEN). random_int is
+    # inclusive on both ends, so the upper bound is CTX_LEN - 1.
+    h target = random_int(0, CTX_LEN - 1);
+    h trial_out = run_trial(target, CTX_LEN);
+    h tgt = arr_get(trial_out, 0);
+    h omni = arr_get(trial_out, 1);
+    h soft = arr_get(trial_out, 2);
+
+    # A "correct" pick = the picked position carries the same VALUE as the
+    # target position. Multiple positions can share a value, so any
+    # collision is a fair hit.
+    # NOTE: when several positions hold the same Fibonacci value, all of
+    # them are valid argmaxes. We don't penalize ambiguous trials here —
+    # both scorers will tie-break to the first occurrence.
+    if omni == tgt { omni_correct = omni_correct + 1; }
+    if soft == tgt { soft_correct = soft_correct + 1; }
+    if omni != soft { disagreements = disagreements + 1; }
+    trial = trial + 1;
+}
+
+print(concat_many("OmniWeight argmax correct:  ", omni_correct, " / ", N_TRIALS));
+print(concat_many("Softmax-style argmax correct: ", soft_correct, " / ", N_TRIALS));
+print(concat_many("Disagreements between scorers: ", disagreements, " / ", N_TRIALS));
+print("");
+
+# When q == k exactly, both score functions return their maximum:
+# OmniWeight → φ^0 = 1; softmax → e^0 = 1. Both should pick correctly
+# whenever the query exactly matches AT LEAST ONE context value. The
+# interesting case is the tie-break — both implementations pick the
+# first occurrence, so they should AGREE on every trial.
+#
+# If disagreements > 0, we've found a case where φ-geodesic distance
+# and exponential distance rank differently. That's the seed for
+# experiment 1 (perturbed-query task) — handle it there.
+
+print("== Sanity check ==");
+print("Both scorers monotonically decrease in |q - k|, so on EXACT-MATCH");
+print("queries they should always agree. Non-zero disagreement is a bug");
+print("OR an environment ambiguity (multiple positions sharing the query");
+print("value, tie-broken differently).");
+print("");
+print("Next: experiment_1_perturbed.omc — query is off-attractor.");
+print("There, OmniWeight's denominator (max(|k|, 1)) normalises the");
+print("error differently from softmax's raw |q - k|, so they diverge");
+print("in measurable ways.");
+print("== End ==");

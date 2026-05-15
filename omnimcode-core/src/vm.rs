@@ -951,16 +951,6 @@ fn values_equal_vm(a: &Value, b: &Value) -> bool {
 }
 
 fn fold_to_fibonacci(n: i64) -> i64 {
-    let fibs: [i64; 15] = [0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610];
-    let abs_val = n.abs();
-    let mut nearest = fibs[0];
-    let mut min_dist = abs_val;
-    for &f in &fibs {
-        let d = (f - abs_val).abs();
-        if d < min_dist {
-            min_dist = d;
-            nearest = f;
-        }
-    }
-    if n < 0 { -nearest } else { nearest }
+    // Substrate-routed. Was: 15-element local Fibonacci array + linear scan.
+    crate::phi_pi_fib::fold_to_nearest_attractor(n)
 }

@@ -1,0 +1,340 @@
+# =============================================================================
+# Experiment 6 — Phi-Pi-Fib compression gate: model as library + chain.
+#
+# Architectural premise. Replace "trillions of dense weights" with:
+#
+#   library  : a finite set of permanent functions f_i: int -> int,
+#              each indexed by a Fibonacci-attractor KEY. Sorted
+#              ascending so phi-pi-fib search works.
+#
+#   chain    : a short sequence of TARGET KEYS. To execute the chain
+#              on state x, walk the keys left to right; for each key
+#              look up the library entry whose key is closest (via
+#              phi-pi-fib nearest-neighbour search), apply that
+#              entry's function to x, advance.
+#
+#   gate     : the lookup itself. The "compression gate" maps
+#              (state, target_key) -> nearest_living_function.
+#              When the target key matches an entry exactly, the
+#              gate is identity. When it doesn't, the gate folds
+#              to the nearest available attractor — this is what
+#              gives the model "act as if it died" robustness.
+#
+# Four claims this experiment tests, with concrete numbers:
+#
+#   (A) Composition.   Short chains over a small library compute
+#                      non-trivial behavior. (Run a chain, show
+#                      the trace, demonstrate intermediate state.)
+#
+#   (B) Compression.   Total bytes (library + chain) vs equivalent
+#                      direct (state -> output) lookup table over
+#                      the input range.
+#
+#   (C) Death tolerance. Delete one library function at a time,
+#                      re-run the SAME chain. The gate routes to
+#                      the nearest surviving function. Output
+#                      stays deterministic; the model degrades
+#                      gracefully instead of crashing.
+#
+#   (D) Interchangeability. Same library, different chains —
+#                      different behaviors. The "parameters"
+#                      ARE the chain; swapping the chain swaps
+#                      the model.
+#
+# Run:
+#   ./target/release/omnimcode-standalone experiments/hybrid_llm/experiment_6_compression_gate.omc
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Library: 12 primitive functions keyed by Fibonacci attractors.
+#
+# Each entry is (key, op_id). op_id dispatches in apply_op() below.
+# The library is implicitly sorted by key (ascending Fibonacci sequence)
+# so a Fibonacci-step search across it is well-defined.
+# ---------------------------------------------------------------------------
+
+h LIB_SIZE = 12;
+
+fn library_entry(i) -> array {
+    h e = arr_new(2, 0);
+    if i == 0  { arr_set(e, 0, 1);   arr_set(e, 1, 0);  return e; }
+    if i == 1  { arr_set(e, 0, 2);   arr_set(e, 1, 1);  return e; }
+    if i == 2  { arr_set(e, 0, 3);   arr_set(e, 1, 2);  return e; }
+    if i == 3  { arr_set(e, 0, 5);   arr_set(e, 1, 3);  return e; }
+    if i == 4  { arr_set(e, 0, 8);   arr_set(e, 1, 4);  return e; }
+    if i == 5  { arr_set(e, 0, 13);  arr_set(e, 1, 5);  return e; }
+    if i == 6  { arr_set(e, 0, 21);  arr_set(e, 1, 6);  return e; }
+    if i == 7  { arr_set(e, 0, 34);  arr_set(e, 1, 7);  return e; }
+    if i == 8  { arr_set(e, 0, 55);  arr_set(e, 1, 8);  return e; }
+    if i == 9  { arr_set(e, 0, 89);  arr_set(e, 1, 9);  return e; }
+    if i == 10 { arr_set(e, 0, 144); arr_set(e, 1, 10); return e; }
+    arr_set(e, 0, 233); arr_set(e, 1, 11); return e;
+}
+
+# Apply primitive operation by op_id. These are the "permanent functions" —
+# small, composable, deterministic. The library is content-addressable by
+# its phi-keys; the op_id is just the dispatch trampoline.
+fn apply_op(op, x) -> int {
+    if op == 0  { return x; }                                         # identity
+    if op == 1  { return x + 1; }                                     # increment
+    if op == 2  { return x * 2; }                                     # double
+    if op == 3  { return phi.fold(x); }                               # snap to nearest attractor
+    if op == 4  { return x + phi.fold(x); }                           # add fold-shadow
+    if op == 5  { return to_int(harmonic_interfere(x, 5)); }          # interfere with 5
+    if op == 6  { return to_int(harmonic_interfere(x, 13)); }         # interfere with 13
+    if op == 7  { return x * x; }                                     # square
+    if op == 8  { return phi.fold(x * 2); }                           # double then fold
+    if op == 9  { return x - phi.fold(x); }                           # residual from attractor
+    if op == 10 { return to_int(harmonic_interfere(x, 21)); }         # interfere with 21
+    if op == 11 { return phi.fold(x + 7); }                           # phi-shifted fold
+    return x;
+}
+
+# Pretty-print op so traces are readable.
+fn op_name(op) -> string {
+    if op == 0  { return "identity"; }
+    if op == 1  { return "increment"; }
+    if op == 2  { return "double"; }
+    if op == 3  { return "fold"; }
+    if op == 4  { return "add_fold"; }
+    if op == 5  { return "interfere_5"; }
+    if op == 6  { return "interfere_13"; }
+    if op == 7  { return "square"; }
+    if op == 8  { return "double_fold"; }
+    if op == 9  { return "residual"; }
+    if op == 10 { return "interfere_21"; }
+    if op == 11 { return "phi_shift_fold"; }
+    return "?";
+}
+
+# ---------------------------------------------------------------------------
+# THE GATE: phi-pi-fib nearest-key lookup over the (alive subset of the)
+# library. Returns the index of the entry whose key is closest to target,
+# among entries with alive_mask[i] == 1.
+#
+# A proper phi-fib search would walk Fibonacci-derived split points; for a
+# 12-entry library the linear scan is identical in effect (and exercises
+# the same nearest-when-missing semantics that give us death tolerance).
+# The bytecode VM-friendly version of phi-fib search lives in
+# omnimcode-core/src/phi_pi_fib.rs — wiring that in as an OMC builtin
+# is a follow-up.
+#
+# Returns -1 only if the entire library is dead, which we treat as a
+# total model failure.
+# ---------------------------------------------------------------------------
+fn gate(target_key, alive_mask) -> int {
+    h best_idx = -1;
+    h best_dist = -1;
+    h i = 0;
+    while i < LIB_SIZE {
+        if arr_get(alive_mask, i) == 1 {
+            h entry = library_entry(i);
+            h key = arr_get(entry, 0);
+            h d = key - target_key;
+            if d < 0 { d = 0 - d; }
+            if best_dist < 0 {
+                best_dist = d;
+                best_idx = i;
+            } else {
+                if d < best_dist {
+                    best_dist = d;
+                    best_idx = i;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return best_idx;
+}
+
+# ---------------------------------------------------------------------------
+# Run a chain. `keys` is a list of target keys (the "model parameters");
+# `alive_mask` records which library entries are still available.
+# Returns the final state.
+# ---------------------------------------------------------------------------
+fn run_chain(initial_state, keys, alive_mask) -> int {
+    h state = initial_state;
+    h n = arr_len(keys);
+    h i = 0;
+    while i < n {
+        h k = arr_get(keys, i);
+        h idx = gate(k, alive_mask);
+        if idx >= 0 {
+            h entry = library_entry(idx);
+            h op = arr_get(entry, 1);
+            state = apply_op(op, state);
+        }
+        i = i + 1;
+    }
+    return state;
+}
+
+# Same, but trace each step. Returns final state, prints each transition.
+fn run_chain_traced(initial_state, keys, alive_mask) -> int {
+    h state = initial_state;
+    h n = arr_len(keys);
+    h i = 0;
+    while i < n {
+        h target = arr_get(keys, i);
+        h idx = gate(target, alive_mask);
+        if idx >= 0 {
+            h entry = library_entry(idx);
+            h key_actual = arr_get(entry, 0);
+            h op = arr_get(entry, 1);
+            h prev = state;
+            state = apply_op(op, state);
+            print(concat_many(
+                "  step ", i, ": target_key=", target,
+                "  -> idx=", idx,
+                " (key=", key_actual, ", op=", op_name(op), ")",
+                "  state ", prev, " -> ", state
+            ));
+        } else {
+            print(concat_many("  step ", i, ": LIBRARY EXHAUSTED — chain breaks here."));
+            return state;
+        }
+        i = i + 1;
+    }
+    return state;
+}
+
+# Helper: build an all-alive mask.
+fn alive_all() -> array {
+    h m = arr_new(LIB_SIZE, 0);
+    h i = 0;
+    while i < LIB_SIZE {
+        arr_set(m, i, 1);
+        i = i + 1;
+    }
+    return m;
+}
+
+# Helper: copy a mask and kill the entry at index `idx`.
+fn alive_with_kill(base, kill_idx) -> array {
+    h m = arr_new(LIB_SIZE, 0);
+    h i = 0;
+    while i < LIB_SIZE {
+        arr_set(m, i, arr_get(base, i));
+        i = i + 1;
+    }
+    arr_set(m, kill_idx, 0);
+    return m;
+}
+
+# ===========================================================================
+# (A) COMPOSITION — run a chain, trace each step.
+# ===========================================================================
+
+print("== Experiment 6: Phi-Pi-Fib compression gate ==");
+print("");
+print("Library: 12 primitive functions keyed by Fibonacci attractors");
+print("Library keys = [1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233]");
+print("");
+
+h alive = alive_all();
+h chain_main = [3, 8, 13, 5, 21];
+h initial = 7;
+
+print(concat_many("Chain: [3, 8, 13, 5, 21]   initial state = ", initial));
+print("Trace (target_key -> library lookup -> state transition):");
+h final_main = run_chain_traced(initial, chain_main, alive);
+print(concat_many("Final state: ", final_main));
+print("");
+
+# ===========================================================================
+# (B) COMPRESSION — model storage vs equivalent direct lookup table.
+# ===========================================================================
+
+print("== (B) Compression analysis ==");
+print("");
+print("Model storage (this prototype):");
+h lib_entries = LIB_SIZE * 2;
+h chain_ints = arr_len(chain_main);
+h total_ints = lib_entries + chain_ints;
+print(concat_many("  library:  ", LIB_SIZE, " entries x 2 ints = ", lib_entries, " ints"));
+print(concat_many("  chain:    ", chain_ints, " ints"));
+print(concat_many("  total:    ", total_ints, " ints  (~", total_ints * 8, " bytes at i64)"));
+print("");
+print("Equivalent dense (state -> output) lookup for state range [0, 1000]:");
+print("  1001 ints  (~8008 bytes at i64)");
+h ratio_times_100 = (1001 * 100) / total_ints;
+print(concat_many("  compression ratio: ", ratio_times_100, " / 100  (i.e. ~", ratio_times_100 / 100, "x smaller)"));
+print("");
+print("Caveat: this prototype's input range is small; the compression ratio");
+print("scales with the size of the implicit dense table. For LLM-scale inputs,");
+print("the analogous comparison is library + chain (kilobytes) vs trillion-param");
+print("weight matrix (terabytes) — 9 orders of magnitude apart in principle.");
+print("");
+
+# ===========================================================================
+# (C) DEATH TOLERANCE — delete one library function at a time, re-run.
+# ===========================================================================
+
+print("== (C) Death tolerance: kill one library entry, re-run the same chain ==");
+print("");
+print(concat_many("Baseline (all alive):  final state = ", final_main));
+print("");
+print("Kill | final state | shift from baseline");
+print("-----+-------------+--------------------");
+
+h kill_idx = 0;
+while kill_idx < LIB_SIZE {
+    h kill_mask = alive_with_kill(alive, kill_idx);
+    h killed = run_chain(initial, chain_main, kill_mask);
+    h shift = killed - final_main;
+    if shift < 0 { shift = 0 - shift; }
+    h kill_entry = library_entry(kill_idx);
+    h kill_key = arr_get(kill_entry, 0);
+    h kill_op_id = arr_get(kill_entry, 1);
+    print(concat_many(
+        "  key=", kill_key, " (", op_name(kill_op_id), ")",
+        "  -> ", killed,
+        "    delta=", shift
+    ));
+    kill_idx = kill_idx + 1;
+}
+print("");
+print("Every single library deletion completes the chain — no crashes, no");
+print("undefined behaviour. The chain re-routes through the nearest surviving");
+print("library entry. Output shifts continuously; the model 'acts as if it died'");
+print("at that capability and falls back to the nearest available substitute.");
+print("");
+
+# ===========================================================================
+# (D) INTERCHANGEABILITY — same library, different chains, different models.
+# ===========================================================================
+
+print("== (D) Interchangeable chains: same library, swap the 'parameters' ==");
+print("");
+
+fn show_chain(label, keys, initial) {
+    h all = alive_all();
+    h out = run_chain(initial, keys, all);
+    print(concat_many(label, ": chain=", keys, "  state ", initial, " -> ", out));
+}
+
+print(concat_many("All chains start from state = ", initial));
+show_chain("Model M1", [3, 8, 13, 5, 21], initial);
+show_chain("Model M2", [21, 5, 13, 8, 3], initial);          # reverse order
+show_chain("Model M3", [1, 2, 3, 5, 8, 13, 21],   initial);  # ramp up
+show_chain("Model M4", [233, 144, 89, 55],         initial);  # high attractors
+show_chain("Model M5", [13, 13, 13, 13],           initial);  # single-op repeat
+show_chain("Model M6", [55, 21, 8, 3, 1],          initial);  # ramp down
+print("");
+print("Six 'models' from one library, total storage 24 ints for the library");
+print("plus 5-7 ints for each chain. Switching a model is a constant-time chain");
+print("swap; the library never moves. The 'trillion-parameter' picture flips:");
+print("permanent skills sit in the library, transient behaviour lives in chains.");
+print("");
+
+print("== Caveats ==");
+print("- The chain is hand-authored here. In a real deployment, you need a");
+print("  ROUTING POLICY that emits chains from inputs. That's the 'compression");
+print("  gate' as a learnable component — future work.");
+print("- The library has 12 ops; a real one needs orders of magnitude more,");
+print("  organised in a hierarchy. phi-pi-fib search becomes load-bearing");
+print("  there: with 10^6 library entries, the gate must run in microseconds.");
+print("- Death tolerance gives graceful degradation, NOT preserved semantics.");
+print("  Removing a critical primitive can change output dramatically; the");
+print("  guarantee is 'still deterministic and bounded', not 'still correct'.");
+print("== End ==");

@@ -1536,18 +1536,7 @@ impl Interpreter {
                 let v = self.eval_expr(e)?;
                 match v {
                     Value::HInt(h) => {
-                        let fibs: [i64; 15] = [0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610];
-                        let abs_val = h.value.abs();
-                        let mut nearest = fibs[0];
-                        let mut min_dist = abs_val;
-                        for &fib in &fibs {
-                            let d = (fib - abs_val).abs();
-                            if d < min_dist {
-                                min_dist = d;
-                                nearest = fib;
-                            }
-                        }
-                        let result = if h.value < 0 { -nearest } else { nearest };
+                        let result = crate::phi_pi_fib::fold_to_nearest_attractor(h.value);
                         Ok(Value::HInt(HInt::new(result)))
                     }
                     _ => Ok(Value::HInt(HInt::new(0))),
@@ -1660,6 +1649,16 @@ impl Interpreter {
             | "harmonic_checksum" | "harmonic_write_file" | "harmonic_read_file"
             | "harmonic_sort" | "harmonic_split" | "harmonic_partition"
             | "harmonic_hash" | "harmonic_diff" | "harmonic_dedupe"
+            // Phi-Pi-Fib search (Fibonacci-step binary search variant)
+            | "phi_pi_fib_search" | "phi_pi_fib_nearest"
+            | "phi_pi_fib_stats" | "phi_pi_fib_reset"
+            // Phi-Pi-Fib search v2 + binary baseline + theoretical bound
+            | "phi_pi_fib_search_v2" | "phi_pi_fib_nearest_v2"
+            | "phi_pi_bin_search" | "log_phi_pi_fibonacci"
+            // Traced variants — return [result, probe_indices_array]
+            | "phi_pi_fib_search_traced" | "phi_pi_fib_nearest_traced"
+            // Split-channel stats (explicit vs background substrate work)
+            | "phi_pi_fib_stats_bg" | "phi_pi_fib_stats_all"
             // Self-healing
             | "safe_divide" | "safe_arr_get" | "safe_arr_set"
             | "safe_add" | "safe_sub" | "safe_mul" | "resolve_singularity"
@@ -2173,20 +2172,7 @@ impl Interpreter {
                 if danger > 0.5 {
                     // Snap to nearest Fibonacci, preserve sign.
                     let n = v.to_int();
-                    let fibs: [i64; 15] = [
-                        0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610,
-                    ];
-                    let abs_n = n.abs();
-                    let mut nearest = fibs[0];
-                    let mut min_dist = abs_n;
-                    for &fib in &fibs {
-                        let d = (fib - abs_n).abs();
-                        if d < min_dist {
-                            min_dist = d;
-                            nearest = fib;
-                        }
-                    }
-                    let result = if n < 0 { -nearest } else { nearest };
+                    let result = crate::phi_pi_fib::fold_to_nearest_attractor(n);
                     // The point of fold_escape is to escape the zero-trap:
                     // if the nearest Fibonacci is 0 (which happens for x=0),
                     // jump to 1 instead. Otherwise we'd just heal back to
@@ -2225,20 +2211,7 @@ impl Interpreter {
                 let divisor = if danger > 0.5 {
                     // Fold b away from zero.
                     let n = b.to_int();
-                    let fibs: [i64; 15] = [
-                        0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610,
-                    ];
-                    let abs_n = n.abs();
-                    let mut nearest = fibs[0];
-                    let mut min_dist = abs_n;
-                    for &fib in &fibs {
-                        let d = (fib - abs_n).abs();
-                        if d < min_dist {
-                            min_dist = d;
-                            nearest = fib;
-                        }
-                    }
-                    let mut healed = if n < 0 { -nearest } else { nearest };
+                    let mut healed = crate::phi_pi_fib::fold_to_nearest_attractor(n);
                     if healed == 0 {
                         healed = 1;
                     }
@@ -2391,19 +2364,11 @@ impl Interpreter {
                 if let Value::Array(arr) = arr_v {
                     let mut acc = 0i64;
                     for v in arr.items.borrow().iter() {
-                        let n = v.to_int().abs();
-                        let fibs: [i64; 15] = [
-                            0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610,
-                        ];
-                        let mut nearest = fibs[0];
-                        let mut min_dist = n;
-                        for &f in &fibs {
-                            let d = (f - n).abs();
-                            if d < min_dist {
-                                min_dist = d;
-                                nearest = f;
-                            }
-                        }
+                        // .abs() before fold matches the prior behaviour
+                        // (always positive attractor accumulated).
+                        let nearest = crate::phi_pi_fib::fold_to_nearest_attractor(
+                            v.to_int().abs(),
+                        );
                         acc = acc.wrapping_add(nearest);
                     }
                     Ok(Value::HInt(HInt::new(acc)))
@@ -2468,20 +2433,7 @@ impl Interpreter {
                 let resolved = match mode.as_str() {
                     "fold" => {
                         // Snap |numerator| to nearest Fibonacci, preserve sign.
-                        let fibs: [i64; 15] = [
-                            0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610,
-                        ];
-                        let abs_n = numerator.abs();
-                        let mut nearest = fibs[0];
-                        let mut min_dist = abs_n;
-                        for &fib in &fibs {
-                            let d = (fib - abs_n).abs();
-                            if d < min_dist {
-                                min_dist = d;
-                                nearest = fib;
-                            }
-                        }
-                        if numerator < 0 { -nearest } else { nearest }
+                        crate::phi_pi_fib::fold_to_nearest_attractor(numerator)
                     }
                     "invert" => {
                         // 1/n style: return signed inverse magnitude.
@@ -3718,20 +3670,12 @@ impl Interpreter {
                     return Err("harmonic_partition requires (array)".to_string());
                 }
                 if let Value::Array(arr) = self.eval_expr(&args[0])? {
-                    let fibs: [i64; 15] = [
-                        0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610,
-                    ];
                     use std::collections::BTreeMap;
                     let mut buckets: BTreeMap<i64, Vec<Value>> = BTreeMap::new();
                     let items_in = arr.items.borrow().clone();
                     for v in items_in {
                         let n = v.to_int();
-                        let abs_n = n.abs();
-                        let nearest = fibs.iter()
-                            .min_by_key(|f| (**f - abs_n).abs())
-                            .copied()
-                            .unwrap_or(0);
-                        let key = if n < 0 { -nearest } else { nearest };
+                        let key = crate::phi_pi_fib::fold_to_nearest_attractor(n);
                         buckets.entry(key).or_insert_with(Vec::new).push(v);
                     }
                     let outer: Vec<Value> = buckets.into_iter().map(|(_, items)| {
@@ -3931,6 +3875,312 @@ impl Interpreter {
                     })))
                 } else {
                     Err("arr_index_of: first argument must be an array".to_string())
+                }
+            }
+            // phi_pi_fib_search(sorted_array, target)
+            //   Fibonacci-step binary search over a sorted integer array.
+            //   Returns the exact-match index when found, or -(insert_pos + 1)
+            //   when not found — same sign convention as Rust's binary_search.
+            //   Use phi_pi_fib_nearest if you want a "nearest entry" gate
+            //   that never returns a negative index.
+            "phi_pi_fib_search" => {
+                if args.len() < 2 {
+                    return Err("phi_pi_fib_search requires (sorted_array, target)".to_string());
+                }
+                let arr_v = self.eval_expr(&args[0])?;
+                let target = self.eval_expr(&args[1])?.to_int();
+                if let Value::Array(arr) = arr_v {
+                    let items_b = arr.items.borrow();
+                    let ints: Vec<i64> = items_b.iter().map(|v| v.to_int()).collect();
+                    let r = crate::phi_pi_fib::fibonacci_search(
+                        &ints,
+                        &target,
+                        |a, b| if a < b { -1 } else if a > b { 1 } else { 0 },
+                    );
+                    Ok(Value::HInt(HInt::new(match r {
+                        Ok(i) => i as i64,
+                        Err(insert_pos) => -(insert_pos as i64 + 1),
+                    })))
+                } else {
+                    Err("phi_pi_fib_search: first argument must be an array".to_string())
+                }
+            }
+            // phi_pi_fib_nearest(sorted_array, target)
+            //   Same as phi_pi_fib_search but returns the index of the
+            //   nearest entry by absolute integer distance. Always returns
+            //   a valid index (0..len) for non-empty arrays, or -1 if the
+            //   array is empty.
+            //
+            //   This is the gate primitive for the compression-gate
+            //   architecture: missing-key lookups route to the nearest
+            //   surviving library entry, giving "die gracefully" semantics.
+            "phi_pi_fib_nearest" => {
+                if args.len() < 2 {
+                    return Err("phi_pi_fib_nearest requires (sorted_array, target)".to_string());
+                }
+                let arr_v = self.eval_expr(&args[0])?;
+                let target = self.eval_expr(&args[1])?.to_int();
+                if let Value::Array(arr) = arr_v {
+                    let items_b = arr.items.borrow();
+                    let ints: Vec<i64> = items_b.iter().map(|v| v.to_int()).collect();
+                    if ints.is_empty() {
+                        return Ok(Value::HInt(HInt::new(-1)));
+                    }
+                    let r = crate::phi_pi_fib::fibonacci_search(
+                        &ints,
+                        &target,
+                        |a, b| if a < b { -1 } else if a > b { 1 } else { 0 },
+                    );
+                    let idx: usize = match r {
+                        Ok(i) => i,
+                        Err(insert_pos) => {
+                            let n = ints.len();
+                            if insert_pos == 0 {
+                                0
+                            } else if insert_pos >= n {
+                                n - 1
+                            } else {
+                                let left = (target - ints[insert_pos - 1]).abs();
+                                let right = (ints[insert_pos] - target).abs();
+                                if right < left { insert_pos } else { insert_pos - 1 }
+                            }
+                        }
+                    };
+                    Ok(Value::HInt(HInt::new(idx as i64)))
+                } else {
+                    Err("phi_pi_fib_nearest: first argument must be an array".to_string())
+                }
+            }
+            // phi_pi_fib_stats() -> [total_searches, total_comparisons]
+            //   Returns global counters for all phi_pi_fib_* calls since the
+            //   last phi_pi_fib_reset(). Use to measure how many compares the
+            //   gate cost — should grow as O(log_phi n), not O(n).
+            "phi_pi_fib_stats" => {
+                let s = crate::phi_pi_fib::get_search_stats();
+                let items = vec![
+                    Value::HInt(HInt::new(s.total_searches as i64)),
+                    Value::HInt(HInt::new(s.total_comparisons as i64)),
+                ];
+                Ok(Value::Array(HArray::from_vec(items)))
+            }
+            // phi_pi_fib_reset() -> null. Zero both phi_pi_fib counter
+            // channels (explicit AND background).
+            "phi_pi_fib_reset" => {
+                crate::phi_pi_fib::reset_search_stats();
+                Ok(Value::Null)
+            }
+            // phi_pi_fib_stats_bg() -> [searches, comparisons] for the
+            // BACKGROUND channel — substrate-internal calls
+            // (HInt::new -> compute_resonance -> nearest_attractor_with_dist).
+            "phi_pi_fib_stats_bg" => {
+                let s = crate::phi_pi_fib::get_search_stats_background();
+                let items = vec![
+                    Value::HInt(HInt::new(s.total_searches as i64)),
+                    Value::HInt(HInt::new(s.total_comparisons as i64)),
+                ];
+                Ok(Value::Array(HArray::from_vec(items)))
+            }
+            // phi_pi_fib_stats_all() -> [searches, comparisons] summed
+            // across explicit + background channels.
+            "phi_pi_fib_stats_all" => {
+                let s = crate::phi_pi_fib::get_search_stats_all();
+                let items = vec![
+                    Value::HInt(HInt::new(s.total_searches as i64)),
+                    Value::HInt(HInt::new(s.total_comparisons as i64)),
+                ];
+                Ok(Value::Array(HArray::from_vec(items)))
+            }
+            // phi_pi_fib_search_v2(sorted_arr, target) -> int
+            //   F(k)/φ^(π·k) split-point search. Same return convention
+            //   as phi_pi_fib_search (exact match index, or -(insert+1)).
+            //   Comparison counts are folded into the shared counters so
+            //   phi_pi_fib_stats() reports both algorithms' totals — call
+            //   phi_pi_fib_reset between runs when measuring head-to-head.
+            "phi_pi_fib_search_v2" => {
+                if args.len() < 2 {
+                    return Err("phi_pi_fib_search_v2 requires (sorted_array, target)".to_string());
+                }
+                let arr_v = self.eval_expr(&args[0])?;
+                let target = self.eval_expr(&args[1])?.to_int();
+                if let Value::Array(arr) = arr_v {
+                    let items_b = arr.items.borrow();
+                    let ints: Vec<i64> = items_b.iter().map(|v| v.to_int()).collect();
+                    let r = crate::phi_pi_fib::phi_pi_fib_search_v2(
+                        &ints,
+                        &target,
+                        |a, b| if a < b { -1 } else if a > b { 1 } else { 0 },
+                    );
+                    Ok(Value::HInt(HInt::new(match r {
+                        Ok(i) => i as i64,
+                        Err(insert_pos) => -(insert_pos as i64 + 1),
+                    })))
+                } else {
+                    Err("phi_pi_fib_search_v2: first argument must be an array".to_string())
+                }
+            }
+            // phi_pi_fib_nearest_v2(sorted_arr, target) -> int
+            //   Always-valid nearest-index variant of phi_pi_fib_search_v2.
+            "phi_pi_fib_nearest_v2" => {
+                if args.len() < 2 {
+                    return Err("phi_pi_fib_nearest_v2 requires (sorted_array, target)".to_string());
+                }
+                let arr_v = self.eval_expr(&args[0])?;
+                let target = self.eval_expr(&args[1])?.to_int();
+                if let Value::Array(arr) = arr_v {
+                    let items_b = arr.items.borrow();
+                    let ints: Vec<i64> = items_b.iter().map(|v| v.to_int()).collect();
+                    if ints.is_empty() {
+                        return Ok(Value::HInt(HInt::new(-1)));
+                    }
+                    let r = crate::phi_pi_fib::phi_pi_fib_search_v2(
+                        &ints,
+                        &target,
+                        |a, b| if a < b { -1 } else if a > b { 1 } else { 0 },
+                    );
+                    let idx: usize = match r {
+                        Ok(i) => i,
+                        Err(insert_pos) => {
+                            let n = ints.len();
+                            if insert_pos == 0 {
+                                0
+                            } else if insert_pos >= n {
+                                n - 1
+                            } else {
+                                let left = (target - ints[insert_pos - 1]).abs();
+                                let right = (ints[insert_pos] - target).abs();
+                                if right < left { insert_pos } else { insert_pos - 1 }
+                            }
+                        }
+                    };
+                    Ok(Value::HInt(HInt::new(idx as i64)))
+                } else {
+                    Err("phi_pi_fib_nearest_v2: first argument must be an array".to_string())
+                }
+            }
+            // phi_pi_bin_search(sorted_arr, target) -> int
+            //   Standard binary search baseline. Same return convention as
+            //   the phi_pi_fib_search variants. Shares the global compare
+            //   counter so head-to-head benches see all three algorithms.
+            "phi_pi_bin_search" => {
+                if args.len() < 2 {
+                    return Err("phi_pi_bin_search requires (sorted_array, target)".to_string());
+                }
+                let arr_v = self.eval_expr(&args[0])?;
+                let target = self.eval_expr(&args[1])?.to_int();
+                if let Value::Array(arr) = arr_v {
+                    let items_b = arr.items.borrow();
+                    let ints: Vec<i64> = items_b.iter().map(|v| v.to_int()).collect();
+                    let r = crate::phi_pi_fib::binary_search(
+                        &ints,
+                        &target,
+                        |a, b| if a < b { -1 } else if a > b { 1 } else { 0 },
+                    );
+                    Ok(Value::HInt(HInt::new(match r {
+                        Ok(i) => i as i64,
+                        Err(insert_pos) => -(insert_pos as i64 + 1),
+                    })))
+                } else {
+                    Err("phi_pi_bin_search: first argument must be an array".to_string())
+                }
+            }
+            // log_phi_pi_fibonacci(n) -> float
+            //   The theoretical compare-count bound for phi_pi_fib_search_v2.
+            //   Equals ln(n) / (π · ln(φ)) ≈ 0.459 · log₂(n).
+            "log_phi_pi_fibonacci" => {
+                if args.is_empty() {
+                    return Err("log_phi_pi_fibonacci requires (n)".to_string());
+                }
+                let n = self.eval_expr(&args[0])?.to_float();
+                Ok(Value::HFloat(crate::phi_pi_fib::log_phi_pi_fibonacci(n)))
+            }
+            // phi_pi_fib_search_traced(sorted_arr, target)
+            //   Returns [result_int, probe_indices_array]. `result_int`
+            //   is the exact-match index when found, or -(insert_pos+1)
+            //   when not. `probe_indices_array` is the sequence of
+            //   indices the Fibonacci-step search visited, in order.
+            //   Used by experiments that need to measure step-size
+            //   coherence externally.
+            "phi_pi_fib_search_traced" => {
+                if args.len() < 2 {
+                    return Err("phi_pi_fib_search_traced requires (sorted_array, target)".to_string());
+                }
+                let arr_v = self.eval_expr(&args[0])?;
+                let target = self.eval_expr(&args[1])?.to_int();
+                if let Value::Array(arr) = arr_v {
+                    let items_b = arr.items.borrow();
+                    let ints: Vec<i64> = items_b.iter().map(|v| v.to_int()).collect();
+                    let (r, probes) = crate::phi_pi_fib::fibonacci_search_with_trace(
+                        &ints,
+                        &target,
+                        |a, b| if a < b { -1 } else if a > b { 1 } else { 0 },
+                    );
+                    let result_int = match r {
+                        Ok(i) => i as i64,
+                        Err(insert_pos) => -(insert_pos as i64 + 1),
+                    };
+                    let probe_vals: Vec<Value> = probes
+                        .into_iter()
+                        .map(|p| Value::HInt(HInt::new(p as i64)))
+                        .collect();
+                    let out = vec![
+                        Value::HInt(HInt::new(result_int)),
+                        Value::Array(HArray::from_vec(probe_vals)),
+                    ];
+                    Ok(Value::Array(HArray::from_vec(out)))
+                } else {
+                    Err("phi_pi_fib_search_traced: first argument must be an array".to_string())
+                }
+            }
+            // phi_pi_fib_nearest_traced(sorted_arr, target)
+            //   Returns [nearest_index, probe_indices_array]. Always
+            //   resolves to a valid nearest index (or -1 for empty arrays).
+            "phi_pi_fib_nearest_traced" => {
+                if args.len() < 2 {
+                    return Err("phi_pi_fib_nearest_traced requires (sorted_array, target)".to_string());
+                }
+                let arr_v = self.eval_expr(&args[0])?;
+                let target = self.eval_expr(&args[1])?.to_int();
+                if let Value::Array(arr) = arr_v {
+                    let items_b = arr.items.borrow();
+                    let ints: Vec<i64> = items_b.iter().map(|v| v.to_int()).collect();
+                    if ints.is_empty() {
+                        let out = vec![
+                            Value::HInt(HInt::new(-1)),
+                            Value::Array(HArray::from_vec(vec![])),
+                        ];
+                        return Ok(Value::Array(HArray::from_vec(out)));
+                    }
+                    let (r, probes) = crate::phi_pi_fib::fibonacci_search_with_trace(
+                        &ints,
+                        &target,
+                        |a, b| if a < b { -1 } else if a > b { 1 } else { 0 },
+                    );
+                    let idx: usize = match r {
+                        Ok(i) => i,
+                        Err(insert_pos) => {
+                            let n = ints.len();
+                            if insert_pos == 0 {
+                                0
+                            } else if insert_pos >= n {
+                                n - 1
+                            } else {
+                                let left = (target - ints[insert_pos - 1]).abs();
+                                let right = (ints[insert_pos] - target).abs();
+                                if right < left { insert_pos } else { insert_pos - 1 }
+                            }
+                        }
+                    };
+                    let probe_vals: Vec<Value> = probes
+                        .into_iter()
+                        .map(|p| Value::HInt(HInt::new(p as i64)))
+                        .collect();
+                    let out = vec![
+                        Value::HInt(HInt::new(idx as i64)),
+                        Value::Array(HArray::from_vec(probe_vals)),
+                    ];
+                    Ok(Value::Array(HArray::from_vec(out)))
+                } else {
+                    Err("phi_pi_fib_nearest_traced: first argument must be an array".to_string())
                 }
             }
             "arr_slice" => {
@@ -4778,30 +5028,17 @@ fn values_equal(a: &Value, b: &Value) -> bool {
 // Free function reused by quantize / quantization_ratio / mean_omni_weight.
 // Snap |n| to the nearest Fibonacci attractor, preserving sign.
 pub(crate) fn fold_to_fibonacci_const(n: i64) -> i64 {
-    let fibs: [i64; 15] = [0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610];
-    let abs_val = n.abs();
-    let mut nearest = fibs[0];
-    let mut min_dist = abs_val;
-    for &f in &fibs {
-        let d = (f - abs_val).abs();
-        if d < min_dist {
-            min_dist = d;
-            nearest = f;
-        }
-    }
-    if n < 0 { -nearest } else { nearest }
+    // Substrate-routed via phi_pi_fib::fold_to_nearest_attractor.
+    // Was: a 15-element local Fibonacci array + linear scan.
+    crate::phi_pi_fib::fold_to_nearest_attractor(n)
 }
 
 // Used by the host-side healer in heal_ast. Tests whether `n` falls on
-// the Fibonacci attractor table — same set as fold_to_fibonacci_const.
-// Renamed from `is_fibonacci` because `value.rs` already exports a
-// public function by that name (operating on i64 too — semantically
-// equivalent, but we keep a local copy here so the heal pass doesn't
-// depend on value.rs internals).
+// the Fibonacci attractor table. Substrate-routed via
+// phi_pi_fib::is_on_fibonacci_attractor — same canonical table as
+// every other harmonic op now uses.
 pub(crate) fn is_on_fibonacci_attractor(n: i64) -> bool {
-    let fibs: [i64; 15] = [0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610];
-    let abs_n = n.abs();
-    fibs.iter().any(|&f| f == abs_n)
+    crate::phi_pi_fib::is_on_fibonacci_attractor(n)
 }
 
 // Levenshtein edit distance for the heal-pass typo correction. Returns
@@ -4897,6 +5134,13 @@ pub(crate) const HEAL_BUILTIN_NAMES: &[&str] = &[
     "harmonic_checksum", "harmonic_write_file", "harmonic_read_file",
     "harmonic_sort", "harmonic_split", "harmonic_partition",
     "harmonic_hash", "harmonic_diff", "harmonic_dedupe",
+    // Phi-Pi-Fib search
+    "phi_pi_fib_search", "phi_pi_fib_nearest",
+    "phi_pi_fib_stats", "phi_pi_fib_reset",
+    "phi_pi_fib_search_v2", "phi_pi_fib_nearest_v2",
+    "phi_pi_bin_search", "log_phi_pi_fibonacci",
+    "phi_pi_fib_search_traced", "phi_pi_fib_nearest_traced",
+    "phi_pi_fib_stats_bg", "phi_pi_fib_stats_all",
     // Self-healing
     "safe_divide", "safe_arr_get", "safe_arr_set",
     "safe_add", "safe_sub", "safe_mul", "resolve_singularity",
@@ -4920,21 +5164,8 @@ impl Interpreter {
         match v {
             Value::HInt(h) => {
                 let mut current = h.value;
-                let fibs: [i64; 15] = [
-                    0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610,
-                ];
                 for _ in 0..depth.max(1) {
-                    let abs_val = current.abs();
-                    let mut nearest = fibs[0];
-                    let mut min_dist = abs_val;
-                    for &fib in &fibs {
-                        let d = (fib - abs_val).abs();
-                        if d < min_dist {
-                            min_dist = d;
-                            nearest = fib;
-                        }
-                    }
-                    current = if current < 0 { -nearest } else { nearest };
+                    current = crate::phi_pi_fib::fold_to_nearest_attractor(current);
                 }
                 Value::HInt(HInt::new(current))
             }

@@ -1,0 +1,487 @@
+# =============================================================================
+# Experiment 4 — Harmonic OOD gate vs L2-nearest-neighbour baseline.
+#
+# The pivot from experiments 0-3: stop trying to substitute transformer
+# components with harmonic ones. The harmonic substrate's documented
+# strength is multi-dim STRUCTURAL ANOMALY DETECTION (per the README's
+# credential-stuffing benchmark: 10/10 vs IsolationForest's 7/10).
+#
+# An OOD gate is an instance of exactly that task: given a feature
+# vector, decide whether it came from the in-distribution corpus or
+# from somewhere else. Useful as an auxiliary signal on top of a
+# transformer — flag inputs the main model shouldn't be confident
+# about.
+#
+# Setup:
+#   D = 4 feature dims.
+#   Reference set: 300 in-distribution vectors. Each dim sampled
+#     from a non-uniform discrete distribution biased toward small
+#     Fibonacci attractors: 60% small {1,2,3,5,8}, 30% medium
+#     {13,21,34}, 10% large {55,89}. Mimics the kind of skewed
+#     distribution real LM activations have.
+#   In-dist test set:  150 fresh draws from the same distribution.
+#   OOD test set:      150 vectors with each dim uniform on [1, 90].
+#
+# Two gates:
+#
+#   harmonic_gate(vec):
+#       per-dim score = -log(freq[phi.fold(vec[d])] / n_ref)
+#       gate_score    = sum over dims (subspace anomaly, same as
+#                       examples/lib/harmonic_anomaly.omc)
+#       Higher = more OOD.
+#
+#   l2_baseline_gate(vec):
+#       gate_score    = min over reference points of L2(vec, ref)
+#       Higher = more OOD.
+#
+# Metrics:
+#   - AUROC (rank-based: for each pair of in-dist test, OOD test,
+#     count how often score(OOD) > score(in-dist)).
+#   - TPR @ FPR = 10% and TPR @ FPR = 1% (the regimes where an
+#     OOD gate is operationally useful — you can only afford to
+#     refuse a small fraction of in-dist queries).
+#
+# Run:
+#   ./target/release/omnimcode-standalone experiments/hybrid_llm/experiment_4_ood_gate.omc
+# =============================================================================
+
+h D = 4;
+
+# ---------------------------------------------------------------------------
+# Data generation.
+#
+# In-dist: each dim drawn from a 3-tier non-uniform distribution over
+# Fibonacci attractors. Mimics "activations cluster around a few
+# learned modes with rare large excursions".
+#
+# OOD: each dim uniform random on [1, 90]. Same magnitude range as
+# in-dist but no harmonic structure.
+# ---------------------------------------------------------------------------
+
+fn sample_in_dist_value() -> int {
+    h tier = random_int(0, 99);
+    if tier < 60 {
+        # small attractors
+        h pick = random_int(0, 4);
+        if pick == 0 { return 1; }
+        if pick == 1 { return 2; }
+        if pick == 2 { return 3; }
+        if pick == 3 { return 5; }
+        return 8;
+    }
+    if tier < 90 {
+        # medium attractors
+        h pick = random_int(0, 2);
+        if pick == 0 { return 13; }
+        if pick == 1 { return 21; }
+        return 34;
+    }
+    # large attractors
+    h pick = random_int(0, 1);
+    if pick == 0 { return 55; }
+    return 89;
+}
+
+fn sample_in_dist_vec() -> array {
+    h v = arr_new(D, 0);
+    h d = 0;
+    while d < D {
+        arr_set(v, d, sample_in_dist_value());
+        d = d + 1;
+    }
+    return v;
+}
+
+fn sample_ood_vec() -> array {
+    h v = arr_new(D, 0);
+    h d = 0;
+    while d < D {
+        arr_set(v, d, random_int(1, 90));
+        d = d + 1;
+    }
+    return v;
+}
+
+# ---------------------------------------------------------------------------
+# Build reference and test sets.
+# ---------------------------------------------------------------------------
+
+random_seed(7);
+
+h N_REF = 300;
+h N_IN_TEST = 150;
+h N_OOD_TEST = 150;
+
+fn build_set(n, gen_kind) -> array {
+    h xs = arr_new(n, 0);
+    h i = 0;
+    while i < n {
+        h v = arr_new(D, 0);
+        if gen_kind == 0 { v = sample_in_dist_vec(); }
+        if gen_kind == 1 { v = sample_ood_vec(); }
+        arr_set(xs, i, v);
+        i = i + 1;
+    }
+    return xs;
+}
+
+h ref_set      = build_set(N_REF,      0);
+h in_dist_test = build_set(N_IN_TEST,  0);
+h ood_test     = build_set(N_OOD_TEST, 1);
+
+# ---------------------------------------------------------------------------
+# HARMONIC GATE
+#
+# Per-dim frequency table over phi.fold(value) bucket.
+# Score(vec) = sum_d (-log(freq[fold(vec[d])] / N_REF)).
+# Higher score = rarer bucket pattern = more OOD.
+# ---------------------------------------------------------------------------
+
+fn fit_freqs(corpus) -> array {
+    # Returns an array of D dicts, one per dim. Each dict maps
+    # bucket_value_as_string → count.
+    h freqs = arr_new(D, 0);
+    h d = 0;
+    while d < D {
+        arr_set(freqs, d, dict_new());
+        d = d + 1;
+    }
+
+    h n = arr_len(corpus);
+    h i = 0;
+    while i < n {
+        h vec = arr_get(corpus, i);
+        h di = 0;
+        while di < D {
+            h b = phi.fold(arr_get(vec, di));
+            h key = concat_many("", b);
+            h fd = arr_get(freqs, di);
+            h prior = dict_get(fd, key, 0);
+            dict_set(fd, key, prior + 1);
+            di = di + 1;
+        }
+        i = i + 1;
+    }
+    return freqs;
+}
+
+fn harmonic_score(vec, freqs, n_ref) -> float {
+    h total = 0.0;
+    h d = 0;
+    while d < D {
+        h b = phi.fold(arr_get(vec, d));
+        h key = concat_many("", b);
+        h fd = arr_get(freqs, d);
+        h count = dict_get(fd, key, 0);
+        # Add-one smoothing: never let count = 0 produce -log(0).
+        h p = to_float(count + 1) / to_float(n_ref + 1);
+        total = total + (0.0 - log(p));
+        d = d + 1;
+    }
+    return total;
+}
+
+# ---------------------------------------------------------------------------
+# L2 BASELINE GATE
+#
+# Score(vec) = min over reference points of squared L2 distance.
+# Squared = monotonic, fine for ranking.
+# ---------------------------------------------------------------------------
+
+fn l2_score(vec, ref_corpus) -> float {
+    h n = arr_len(ref_corpus);
+    h best = -1.0;
+    h i = 0;
+    while i < n {
+        h ref = arr_get(ref_corpus, i);
+        h s = 0.0;
+        h d = 0;
+        while d < D {
+            h diff = to_float(arr_get(vec, d) - arr_get(ref, d));
+            s = s + (diff * diff);
+            d = d + 1;
+        }
+        if best < 0.0 { best = s; }
+        if s < best { best = s; }
+        i = i + 1;
+    }
+    return best;
+}
+
+# ---------------------------------------------------------------------------
+# Score everything.
+# ---------------------------------------------------------------------------
+
+h freqs = fit_freqs(ref_set);
+
+fn score_all_harmonic(xs, freqs, n_ref) -> array {
+    h n = arr_len(xs);
+    h out = arr_new(n, 0);
+    h i = 0;
+    while i < n {
+        arr_set(out, i, harmonic_score(arr_get(xs, i), freqs, n_ref));
+        i = i + 1;
+    }
+    return out;
+}
+
+fn score_all_l2(xs, ref_corpus) -> array {
+    h n = arr_len(xs);
+    h out = arr_new(n, 0);
+    h i = 0;
+    while i < n {
+        arr_set(out, i, l2_score(arr_get(xs, i), ref_corpus));
+        i = i + 1;
+    }
+    return out;
+}
+
+print("== Experiment 4: harmonic OOD gate vs L2-NN baseline ==");
+print(concat_many("D=", D, " N_REF=", N_REF, " N_IN_TEST=", N_IN_TEST, " N_OOD_TEST=", N_OOD_TEST));
+print("");
+print("Scoring (this is O(N_TEST * N_REF) for L2 — be patient)...");
+
+h h_in   = score_all_harmonic(in_dist_test, freqs, N_REF);
+h h_ood  = score_all_harmonic(ood_test,     freqs, N_REF);
+h l2_in  = score_all_l2(in_dist_test, ref_set);
+h l2_ood = score_all_l2(ood_test,     ref_set);
+
+# ---------------------------------------------------------------------------
+# AUROC via rank-based formula.
+# AUROC = P(score_ood > score_in), estimated by counting ordered pairs.
+# Ties contribute 0.5.
+# ---------------------------------------------------------------------------
+
+fn auroc(in_scores, ood_scores) -> float {
+    h n_in = arr_len(in_scores);
+    h n_ood = arr_len(ood_scores);
+    h correct = 0;
+    h ties = 0;
+    h i = 0;
+    while i < n_in {
+        h sin = arr_get(in_scores, i);
+        h j = 0;
+        while j < n_ood {
+            h sood = arr_get(ood_scores, j);
+            if sood > sin { correct = correct + 1; }
+            if sood == sin { ties = ties + 1; }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    h total = n_in * n_ood;
+    h num = to_float(correct) + (0.5 * to_float(ties));
+    return num / to_float(total);
+}
+
+h harmonic_auroc = auroc(h_in, h_ood);
+h l2_auroc       = auroc(l2_in, l2_ood);
+
+print("");
+print(concat_many("AUROC harmonic gate: ", harmonic_auroc));
+print(concat_many("AUROC L2 baseline:   ", l2_auroc));
+print("");
+
+# ---------------------------------------------------------------------------
+# TPR @ fixed FPR.
+#
+# Method: pick the threshold such that EXACTLY `target_fpr * N_IN_TEST`
+# in-dist scores exceed it. Then count what fraction of OOD scores
+# exceed the same threshold = TPR.
+#
+# We sort the in-dist scores via a simple selection-sort (O(n^2), fine
+# for N=150) to find the cutoff.
+# ---------------------------------------------------------------------------
+
+fn sort_floats_ascending(xs) -> array {
+    h n = arr_len(xs);
+    h out = arr_new(n, 0);
+    h i = 0;
+    while i < n {
+        arr_set(out, i, arr_get(xs, i));
+        i = i + 1;
+    }
+    # Insertion sort — quadratic but tiny n.
+    h k = 1;
+    while k < n {
+        h cur = arr_get(out, k);
+        h j = k - 1;
+        h placed = 0;
+        while j >= 0 {
+            if placed == 0 {
+                if arr_get(out, j) > cur {
+                    arr_set(out, j + 1, arr_get(out, j));
+                    j = j - 1;
+                } else {
+                    arr_set(out, j + 1, cur);
+                    placed = 1;
+                    j = -1;
+                }
+            }
+        }
+        if placed == 0 { arr_set(out, 0, cur); }
+        k = k + 1;
+    }
+    return out;
+}
+
+fn mean_of(xs) -> float {
+    h n = arr_len(xs);
+    h s = 0.0;
+    h i = 0;
+    while i < n {
+        s = s + arr_get(xs, i);
+        i = i + 1;
+    }
+    return s / to_float(n);
+}
+
+fn tpr_at_fpr(in_scores, ood_scores, target_fpr) -> float {
+    h n_in = arr_len(in_scores);
+    h n_ood = arr_len(ood_scores);
+    h sorted_in = sort_floats_ascending(in_scores);
+
+    # We want threshold such that approx target_fpr fraction of in-dist
+    # exceeds it. Equivalently, threshold = (1 - target_fpr)-quantile.
+    h k = to_int(to_float(n_in) * (1.0 - target_fpr));
+    if k < 0 { k = 0; }
+    if k >= n_in { k = n_in - 1; }
+    h threshold = arr_get(sorted_in, k);
+
+    h tp = 0;
+    h j = 0;
+    while j < n_ood {
+        if arr_get(ood_scores, j) > threshold { tp = tp + 1; }
+        j = j + 1;
+    }
+    return to_float(tp) / to_float(n_ood);
+}
+
+print("Operating points (TPR at fixed FPR):");
+print(concat_many("  harmonic gate, TPR @ FPR=10%: ", tpr_at_fpr(h_in,  h_ood,  0.10)));
+print(concat_many("  L2 baseline,   TPR @ FPR=10%: ", tpr_at_fpr(l2_in, l2_ood, 0.10)));
+print(concat_many("  harmonic gate, TPR @ FPR=5%:  ", tpr_at_fpr(h_in,  h_ood,  0.05)));
+print(concat_many("  L2 baseline,   TPR @ FPR=5%:  ", tpr_at_fpr(l2_in, l2_ood, 0.05)));
+print(concat_many("  harmonic gate, TPR @ FPR=1%:  ", tpr_at_fpr(h_in,  h_ood,  0.01)));
+print(concat_many("  L2 baseline,   TPR @ FPR=1%:  ", tpr_at_fpr(l2_in, l2_ood, 0.01)));
+print("");
+
+# ===========================================================================
+# Scenario B: magnitude-matched structural OOD.
+#
+# Scenario A above gave L2 a trivial advantage: OOD values are uniform on
+# [1, 90] while in-dist is heavily biased toward small attractors. L2
+# separates by mean magnitude; the harmonic gate can't because phi.fold
+# discards magnitude info above the attractor ceiling.
+#
+# Real LM activations are layer-normalised — the magnitude signal that
+# L2 leans on here doesn't exist there. To simulate that, scenario B
+# matches the marginal distribution per dim but DIFFERENT per-dim
+# weights:
+#
+#   In-dist:  60% small / 30% medium / 10% large (same as scenario A)
+#   Hard OOD: 10% small / 30% medium / 60% large  (INVERTED weights)
+#
+# Both draw from the same attractor set. Mean magnitudes differ less.
+# A per-dim rarity gate that's seen the in-dist frequency table should
+# light up on OOD because each dim's value distribution looks shifted;
+# L2 has a softer separation because the value sets overlap.
+# ===========================================================================
+
+fn sample_hard_ood_value() -> int {
+    h tier = random_int(0, 99);
+    if tier < 10 {
+        # small attractors — rare now
+        h pick = random_int(0, 4);
+        if pick == 0 { return 1; }
+        if pick == 1 { return 2; }
+        if pick == 2 { return 3; }
+        if pick == 3 { return 5; }
+        return 8;
+    }
+    if tier < 40 {
+        # medium attractors — same weight
+        h pick = random_int(0, 2);
+        if pick == 0 { return 13; }
+        if pick == 1 { return 21; }
+        return 34;
+    }
+    # large attractors — common now
+    h pick = random_int(0, 1);
+    if pick == 0 { return 55; }
+    return 89;
+}
+
+fn sample_hard_ood_vec() -> array {
+    h v = arr_new(D, 0);
+    h d = 0;
+    while d < D {
+        arr_set(v, d, sample_hard_ood_value());
+        d = d + 1;
+    }
+    return v;
+}
+
+h hard_ood_test = arr_new(N_OOD_TEST, 0);
+h hi = 0;
+while hi < N_OOD_TEST {
+    arr_set(hard_ood_test, hi, sample_hard_ood_vec());
+    hi = hi + 1;
+}
+
+h h_hard  = score_all_harmonic(hard_ood_test, freqs, N_REF);
+h l2_hard = score_all_l2(hard_ood_test, ref_set);
+
+h harmonic_auroc_B = auroc(h_in,  h_hard);
+h l2_auroc_B       = auroc(l2_in, l2_hard);
+
+print("== Scenario B: magnitude-matched structural OOD (inverted attractor weights) ==");
+print(concat_many("AUROC harmonic gate: ", harmonic_auroc_B));
+print(concat_many("AUROC L2 baseline:   ", l2_auroc_B));
+print("");
+print("Operating points (TPR at fixed FPR):");
+print(concat_many("  harmonic gate, TPR @ FPR=10%: ", tpr_at_fpr(h_in,  h_hard,  0.10)));
+print(concat_many("  L2 baseline,   TPR @ FPR=10%: ", tpr_at_fpr(l2_in, l2_hard, 0.10)));
+print(concat_many("  harmonic gate, TPR @ FPR=5%:  ", tpr_at_fpr(h_in,  h_hard,  0.05)));
+print(concat_many("  L2 baseline,   TPR @ FPR=5%:  ", tpr_at_fpr(l2_in, l2_hard, 0.05)));
+print(concat_many("  harmonic gate, TPR @ FPR=1%:  ", tpr_at_fpr(h_in,  h_hard,  0.01)));
+print(concat_many("  L2 baseline,   TPR @ FPR=1%:  ", tpr_at_fpr(l2_in, l2_hard, 0.01)));
+print("");
+print(concat_many("Mean harmonic score, hard OOD:  ", mean_of(h_hard)));
+print(concat_many("Mean L2 score, hard OOD:        ", mean_of(l2_hard)));
+print("");
+
+# ---------------------------------------------------------------------------
+# Score distribution summaries (so we can sanity-check the AUROC).
+# ---------------------------------------------------------------------------
+
+print("Mean scores:");
+print(concat_many("  harmonic gate in-dist: ", mean_of(h_in)));
+print(concat_many("  harmonic gate OOD:     ", mean_of(h_ood)));
+print(concat_many("  L2 baseline in-dist:   ", mean_of(l2_in)));
+print(concat_many("  L2 baseline OOD:       ", mean_of(l2_ood)));
+print("");
+
+# ---------------------------------------------------------------------------
+# Interpretation.
+# ---------------------------------------------------------------------------
+
+print("== Interpretation ==");
+print("");
+print("AUROC of 0.5 = random gating; 1.0 = perfect. TPR @ FPR=k = fraction");
+print("of OOD inputs we catch while only refusing k of in-dist inputs.");
+print("");
+print("The harmonic gate's hypothesis: per-dim phi.fold buckets carry");
+print("more information than raw L2 because they're already a 'compressed'");
+print("representation of the in-distribution structure (positions on the");
+print("learned attractor manifold). For data with harmonic structure —");
+print("which the in-dist generator deliberately produces — this should");
+print("translate to a measurably higher AUROC.");
+print("");
+print("If AUROC harmonic > AUROC L2 by a non-trivial margin, the");
+print("structural-anomaly thesis holds in the OOD-gating regime and we");
+print("can turn this into an auxiliary head on top of a real transformer.");
+print("If they tie or L2 wins, the harmonic gate offers no edge on this");
+print("synthetic setup and the next move is to test on real activation");
+print("vectors (experiment 5).");
+print("== End ==");
