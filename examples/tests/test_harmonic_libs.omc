@@ -1,0 +1,238 @@
+# =============================================================================
+# Tests for harmonic libraries — validates harmonic_anomaly,
+# harmonic_clustering, harmonic_recommend using OMC's --test mode.
+# =============================================================================
+# Run with:
+#   ./target/release/omnimcode-standalone --test examples/tests/test_harmonic_libs.omc
+#
+# Each `fn test_*()` is auto-discovered. Failures use error("msg")
+# to signal — the harness reports per-test pass/fail and a summary.
+# Exit code = number of failures (clamped to 1) for CI use.
+# =============================================================================
+
+import "examples/lib/harmonic_anomaly.omc" as ha;
+import "examples/lib/harmonic_clustering.omc" as hc;
+import "examples/lib/harmonic_recommend.omc" as hr;
+
+# ---- assertion helpers ---------------------------------------------------
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        error(concat_many("FAIL ", msg, ": expected ", expected, " got ", actual));
+    }
+}
+
+fn assert_true(cond, msg) {
+    if cond != 1 { error(concat_many("FAIL ", msg, ": expected truthy")); }
+}
+
+fn assert_in(needle, haystack, msg) {
+    h k = 0;
+    while k < arr_len(haystack) {
+        if arr_get(haystack, k) == needle { return 1; }
+        k = k + 1;
+    }
+    error(concat_many("FAIL ", msg, ": ", needle, " not in ", haystack));
+}
+
+# =============================================================================
+# harmonic_anomaly tests
+# =============================================================================
+
+fn test_anomaly_detect_credential_stuffing() {
+    # 100 normal requests + 5 credential-stuffing rows.
+    h rows = [];
+    h i = 0;
+    while i < 100 {
+        arr_push(rows, [40, 200, 0, 14]);   # latency, status, endpoint, hour
+        i = i + 1;
+    }
+    h attack_indices = [];
+    h j = 0;
+    while j < 5 {
+        arr_push(attack_indices, arr_len(rows));
+        arr_push(rows, [15, 401, 8, 3]);    # the structural attack
+        j = j + 1;
+    }
+
+    h det = ha.new(["latency", "status", "endpoint", "hour"]);
+    ha.set_strategy(det, 1, "discrete");
+    ha.set_strategy(det, 2, "discrete");
+    ha.set_strategy(det, 3, "modulo");
+    ha.fit(det, rows);
+
+    h top = ha.top_k(det, rows, 5);
+    # All top 5 must be in the attack set.
+    h k = 0;
+    while k < arr_len(top) {
+        assert_in(arr_get(top, k), attack_indices,
+            concat_many("attack at top ", k));
+        k = k + 1;
+    }
+}
+
+fn test_anomaly_detect_returns_correct_arity() {
+    h rows = [[1, 2, 3], [4, 5, 6], [7, 8, 9]];
+    h det = ha.new(["a", "b", "c"]);
+    ha.fit(det, rows);
+    h top = ha.top_k(det, rows, 2);
+    assert_eq(arr_len(top), 2, "top_k respects k");
+}
+
+fn test_anomaly_score_is_deterministic() {
+    h rows = [[1, 2], [10, 20], [100, 200], [1000, 2000]];
+    h det = ha.new(["x", "y"]);
+    ha.fit(det, rows);
+    h s1 = ha.score(det, [1, 2]);
+    h s2 = ha.score(det, [1, 2]);
+    assert_eq(s1, s2, "score is deterministic for same input");
+}
+
+fn test_anomaly_one_shot_api() {
+    # ha.detect should equal ha.new + fit + top_k.
+    h rows = [[1, 1], [2, 2], [3, 3], [99, 99]];
+    h via_one_shot = ha.detect(["x", "y"], rows, 1);
+    h det = ha.new(["x", "y"]);
+    ha.fit(det, rows);
+    h via_steps = ha.top_k(det, rows, 1);
+    assert_eq(arr_get(via_one_shot, 0), arr_get(via_steps, 0),
+        "one-shot detect matches new+fit+top_k");
+}
+
+# =============================================================================
+# harmonic_clustering tests
+# =============================================================================
+
+fn test_clustering_three_decades() {
+    # Three obvious clusters by magnitude.
+    h rows = [
+        [3, 5], [7, 2], [4, 8], [6, 1], [2, 9],            # tiny
+        [12, 35], [45, 18], [88, 27], [33, 76], [55, 14],  # mid
+        [144, 233], [200, 377], [300, 144], [500, 233]     # big
+    ];
+    h cl = hc.new(["x", "y"]);
+    hc.fit(cl, rows);
+    assert_eq(hc.n_clusters(cl), 3, "discovered 3 clusters by decade");
+}
+
+fn test_clustering_predict_assigns_existing_rows() {
+    h rows = [[5, 5], [50, 50], [500, 500]];
+    h cl = hc.new(["a", "b"]);
+    hc.fit(cl, rows);
+    h labels = hc.predict(cl, rows);
+    # Each row must get a non-negative label (it's in the training set).
+    h k = 0;
+    while k < arr_len(labels) {
+        assert_true(arr_get(labels, k) >= 0,
+            concat_many("row ", k, " gets a cluster"));
+        k = k + 1;
+    }
+}
+
+fn test_clustering_predict_unseen_returns_negative() {
+    h rows = [[5, 5], [50, 50]];
+    h cl = hc.new(["a", "b"]);
+    hc.fit(cl, rows);
+    # 5000 falls in an attractor bucket (decade 3) we never saw.
+    h label = hc.predict_one(cl, [5000, 5000]);
+    assert_eq(label, 0 - 1, "unseen attractor returns -1");
+}
+
+fn test_clustering_centroid_count_matches_cluster_count() {
+    h rows = [[1, 1], [10, 10], [100, 100]];
+    h cl = hc.new(["x", "y"]);
+    hc.fit(cl, rows);
+    assert_eq(arr_len(hc.centroids(cl)), hc.n_clusters(cl),
+        "one centroid per cluster");
+}
+
+# =============================================================================
+# harmonic_recommend tests
+# =============================================================================
+
+fn test_recommend_basic_suggestion() {
+    h rec = hr.new();
+    hr.add_rating(rec, "alice", "movie_1", 5);
+    hr.add_rating(rec, "alice", "movie_2", 4);
+    hr.add_rating(rec, "bob",   "movie_1", 4);
+    hr.add_rating(rec, "bob",   "movie_3", 5);
+    hr.add_rating(rec, "carol", "movie_2", 5);
+    hr.add_rating(rec, "carol", "movie_3", 4);
+    hr.fit(rec);
+
+    h suggestions = hr.suggest_for(rec, "alice", 5);
+    # Alice rated movie_1 (5) and movie_2 (4) highly. movie_3 should
+    # be suggested (rated highly by bob+carol). Alice's already-rated
+    # items should NOT appear.
+    assert_in("movie_3", suggestions, "movie_3 in alice's suggestions");
+    h k = 0;
+    while k < arr_len(suggestions) {
+        h s = arr_get(suggestions, k);
+        assert_true(s != "movie_1", "no already-rated movie_1");
+        assert_true(s != "movie_2", "no already-rated movie_2");
+        k = k + 1;
+    }
+}
+
+fn test_recommend_state_persists_across_add_ratings() {
+    # Regression test for the equality bug: adding multiple ratings
+    # for the same user used to clobber the user's previous items
+    # because dict_value == null erroneously returned true.
+    h rec = hr.new();
+    hr.add_rating(rec, "alice", "movie_1", 5);
+    hr.add_rating(rec, "alice", "movie_2", 4);
+    hr.add_rating(rec, "alice", "movie_3", 3);
+
+    h ur = dict_get(rec, "user_ratings");
+    h alice_items = dict_get(ur, "alice");
+    assert_eq(dict_len(alice_items), 3, "alice has 3 ratings, not 1");
+}
+
+fn test_recommend_n_users_n_items_correct() {
+    h rec = hr.new();
+    hr.add_rating(rec, "u1", "i1", 5);
+    hr.add_rating(rec, "u2", "i2", 5);
+    hr.add_rating(rec, "u3", "i3", 5);
+    hr.fit(rec);
+    assert_eq(hr.n_users(rec), 3, "3 users tracked");
+    assert_eq(hr.n_items(rec), 3, "3 items tracked");
+}
+
+# =============================================================================
+# Cross-language regression tests for the equality bug fix
+# =============================================================================
+
+fn test_dict_not_equal_to_null() {
+    h d = {"a": 1};
+    assert_true(d != null, "non-null dict != null");
+}
+
+fn test_empty_dict_not_equal_to_null() {
+    h d = {};
+    assert_true(d != null, "empty dict != null");
+}
+
+fn test_array_not_equal_to_null() {
+    h a = [1, 2, 3];
+    assert_true(a != null, "array != null");
+}
+
+fn test_function_not_equal_to_null() {
+    h f = fn(x) { return x * 2; };
+    assert_true(f != null, "function != null");
+}
+
+fn test_null_equal_to_null() {
+    assert_eq(null, null, "null == null");
+}
+
+fn test_zero_int_not_equal_to_null() {
+    # 0 == null was harder to catch but worth pinning down — both
+    # coerce to to_int=0 in the old code path.
+    assert_true(0 != null, "0 != null");
+}
+
+fn test_empty_string_not_equal_to_null() {
+    h s = "";
+    assert_true(s != null, "empty string != null");
+}

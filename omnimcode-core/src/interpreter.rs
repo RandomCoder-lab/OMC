@@ -3306,19 +3306,17 @@ impl Interpreter {
             // The original `print` is preserved as a statement keyword for
             // debug-format introspection.
             "println" => {
+                // Use to_display_string for ALL types — keeps float
+                // display consistent with concat_many / str_concat /
+                // string-+-concat. Was inlining a hand-written match
+                // that bypassed format_float, so println(3.0) printed
+                // "3" instead of "3.0".
                 if args.is_empty() {
                     println!();
                     return Ok(Value::Null);
                 }
                 let v = self.eval_expr(&args[0])?;
-                let s = match &v {
-                    Value::HInt(h) => h.value.to_string(),
-                    Value::HFloat(f) => format!("{}", f),
-                    Value::String(s) => s.clone(),
-                    Value::Bool(b) => b.to_string(),
-                    other => other.to_string(),
-                };
-                println!("{}", s);
+                println!("{}", v.to_display_string());
                 Ok(Value::Null)
             }
             // print_raw — same as println but no trailing newline. Pairs.
@@ -3327,15 +3325,8 @@ impl Interpreter {
                     return Ok(Value::Null);
                 }
                 let v = self.eval_expr(&args[0])?;
-                let s = match &v {
-                    Value::HInt(h) => h.value.to_string(),
-                    Value::HFloat(f) => format!("{}", f),
-                    Value::String(s) => s.clone(),
-                    Value::Bool(b) => b.to_string(),
-                    other => other.to_string(),
-                };
                 use std::io::Write;
-                print!("{}", s);
+                print!("{}", v.to_display_string());
                 let _ = std::io::stdout().flush();
                 Ok(Value::Null)
             }

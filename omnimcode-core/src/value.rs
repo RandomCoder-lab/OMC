@@ -320,7 +320,7 @@ impl Value {
     pub fn to_display_string(&self) -> String {
         match self {
             Value::HInt(h) => h.value.to_string(),
-            Value::HFloat(f) => format!("{}", f),
+            Value::HFloat(f) => format_float(*f),
             Value::String(s) => s.clone(),
             Value::Bool(b) => b.to_string(),
             Value::Null => "null".to_string(),
@@ -343,7 +343,7 @@ impl Value {
     pub fn to_string(&self) -> String {
         match self {
             Value::HInt(h) => h.to_string(),
-            Value::HFloat(f) => format!("{}", f),
+            Value::HFloat(f) => format_float(*f),
             Value::String(s) => s.clone(),
             Value::Bool(b) => b.to_string(),
             Value::Circuit(c) => c.to_string(),
@@ -404,6 +404,20 @@ impl fmt::Display for Value {
 }
 
 /// Simple pseudo-random generator (deterministic for reproducibility)
+/// Format a float keeping the type visible: `3.0` not `3`. Default
+/// `format!("{}", 3.0_f64)` drops the decimal point for whole-number
+/// floats, which makes int-vs-float ambiguity slip into user output
+/// (PAIN_POINTS LOW-1). Add a trailing `.0` only when the natural
+/// representation has no decimal already.
+fn format_float(f: f64) -> String {
+    let s = format!("{}", f);
+    if s.contains('.') || s.contains('e') || s.contains('E') || s == "inf" || s == "-inf" || s == "NaN" {
+        s
+    } else {
+        format!("{}.0", s)
+    }
+}
+
 fn rand_like(seed: u64) -> u64 {
     let mut x = seed.wrapping_mul(6364136223846793005);
     x ^= x >> 33;

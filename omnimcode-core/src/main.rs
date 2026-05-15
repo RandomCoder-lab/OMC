@@ -24,6 +24,7 @@ fn main() {
             "--init" => mode = "init",
             "--test" | "-t" => mode = "test",
             "--bench" | "-b" => mode = "bench",
+            "--audit" | "-a" => mode = "audit",
             "--help" | "-h" => mode = "help",
             other if !other.starts_with('-') => file_arg = Some(other),
             other => {
@@ -62,6 +63,8 @@ fn main() {
         ("test", None) => { eprintln!("--test requires a file argument."); 2 }
         ("bench", Some(path)) => bench_command(path),
         ("bench", None) => { eprintln!("--bench requires a file argument."); 2 }
+        ("audit", Some(path)) => audit_command(path),
+        ("audit", None) => { eprintln!("--audit requires a file argument."); 2 }
         _ => unreachable!(),
     };
     if exit_code != 0 {
@@ -305,6 +308,52 @@ fn run_named_fn(source: &str, name: &str) -> Result<(), String> {
     execute_program(&augmented)
 }
 
+/// `--audit FILE`: run FILE under both engines (tree-walk + VM)
+/// and exit with code 1 if their stdout differs. Catches the class
+/// of bug that originally surfaced via the float-truncation issue:
+/// both engines silently produced different wrong answers, with no
+/// signal that anything was broken.
+///
+/// Used in CI / pre-merge to guarantee parity. Captures stdout via
+/// std::process::Command rather than re-implementing the run path,
+/// so it works on any program (and uses the SAME binary the user
+/// would run normally).
+fn audit_command(path: &str) -> i32 {
+    use std::process::Command;
+    let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("omnimcode-standalone"));
+    let tw_out = match Command::new(&exe).arg(path).output() {
+        Ok(o) => String::from_utf8_lossy(&o.stdout).to_string(),
+        Err(e) => { eprintln!("audit: tree-walk run failed: {}", e); return 2; }
+    };
+    let vm_out = match Command::new(&exe).env("OMC_VM", "1").arg(path).output() {
+        Ok(o) => String::from_utf8_lossy(&o.stdout).to_string(),
+        Err(e) => { eprintln!("audit: VM run failed: {}", e); return 2; }
+    };
+    if tw_out == vm_out {
+        println!("audit: tree-walk and VM produce identical output ({} bytes)", tw_out.len());
+        0
+    } else {
+        eprintln!("audit: ENGINE DIVERGENCE on {}", path);
+        // Show first ~10 lines of diff so the user can see where.
+        let tw_lines: Vec<&str> = tw_out.lines().collect();
+        let vm_lines: Vec<&str> = vm_out.lines().collect();
+        let max = tw_lines.len().max(vm_lines.len());
+        let mut shown = 0;
+        for i in 0..max {
+            let tw_l = tw_lines.get(i).copied().unwrap_or("<eof>");
+            let vm_l = vm_lines.get(i).copied().unwrap_or("<eof>");
+            if tw_l != vm_l {
+                eprintln!("  line {}:", i + 1);
+                eprintln!("    tree-walk: {}", tw_l);
+                eprintln!("    VM:        {}", vm_l);
+                shown += 1;
+                if shown >= 10 { eprintln!("  (truncated)"); break; }
+            }
+        }
+        1
+    }
+}
+
 /// `--init`: scaffold a new OMC project in the current directory.
 /// Creates `omc.toml` (with no dependencies yet) and `main.omc`
 /// (a hello-world). Refuses to overwrite existing files.
@@ -419,6 +468,7 @@ fn print_help() {
     println!("  {} --list              list packages installed under omc_modules/", prog);
     println!("  {} --test FILE         run every fn test_*() in FILE, report pass/fail", prog);
     println!("  {} --bench FILE        run every fn bench_*() in FILE, report ms each", prog);
+    println!("  {} --audit FILE        run FILE under both engines, exit 1 on output divergence", prog);
     println!("  {} --help              this message", prog);
     println!();
     println!("omc.toml format (for --install with no arg):");
