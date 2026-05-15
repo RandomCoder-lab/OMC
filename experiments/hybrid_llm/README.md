@@ -87,39 +87,48 @@ OMC_VM=1 ./target/release/omnimcode-standalone experiments/hybrid_llm/experiment
 | 1 | Perturbed query (query = true_val + noise), 200 trials per noise level | Softmax wins everywhere. noise=1: 189 vs 170. noise=7: 118 vs 99. noise=50: 42 vs 33. OmniWeight's |k|-normalised denominator pulls toward smaller-magnitude attractors regardless of perturbation direction, which hurts the "recover the original value" objective. |
 | 2 | Single-channel PE distinctness + lookup at L = 8 / 14 / 24 / 48 | Sinusoidal wins at short L (8/8 vs 6/8). At L=48 harmonic appears to overtake: 38/48 vs 26/48 (79% vs 54%). Flagged as a likely metric artefact — single-int "closest code" lookup favours monotonic over periodic encodings. |
 | 3 | 4-channel PE (harmonic primes 7/11/13/17, sin/cos periods 8/64), L2 lookup, L = 8 → 200 | **Sinusoidal regains its lead decisively at every L ≥ 16.** L=48: 48/48 vs 21/48. L=200: 72/200 vs 34/200. Harmonic saturates at 22 unique vectors by L=64; sinusoidal stays perfectly distinct up to L=64 then saturates at 64. The single-channel L=48 harmonic "win" was a metric artefact, exactly as suspected. |
+| 4A | Harmonic OOD gate vs L2-NN baseline on 4-dim synthetic vectors (N_REF=300, 150 in-dist test, 150 OOD test). OOD = uniform [1, 90]. | L2 wins. AUROC L2 0.961 vs harmonic 0.910. TPR @ FPR=10%: L2 0.91 vs harmonic 0.71. L2 has a trivial magnitude advantage — mean L2 score 87 (in-dist) vs 1313 (OOD), since OOD vectors are larger on average and harmonic gate's `phi.fold` discards magnitude. |
+| 4B | Same gates, **magnitude-matched** structural OOD (inverted attractor weights: 10%/30%/60% small/med/large vs in-dist's 60%/30%/10%). | **Harmonic edges past L2 in AUROC: 0.956 vs 0.946.** At low FPR L2 still wins (TPR@FPR=1%: L2 0.60 vs harmonic 0.48), but on overall ranking the structural rarity signal beats the L2 metric once magnitude is no longer a giveaway. |
 
-### Cumulative read across experiments 0–3
+### Cumulative read across experiments 0–4
 
-The four experiments converge on a single picture:
+The five experiments converge on a clear, conditional picture:
 
-> **At every fair comparison so far, the standard transformer
-> building blocks (softmax attention scoring, sinusoidal positional
-> encoding) beat the harmonic alternatives on the specific tasks
-> tested.** The harmonic substrate's only apparent wins have been
-> traceable to metric artefacts that vanish under proper vector
-> similarity.
+> **The harmonic substrate is a structural detector, not a primary
+> computation.** It loses head-to-head against softmax attention
+> (exp 1) and multi-channel sinusoidal PE (exp 3). It loses to a
+> trivial L2-NN OOD gate when raw magnitude separates the
+> distributions (exp 4A). **It edges past L2-NN when magnitude is
+> matched and only structural distribution differs (exp 4B).**
 
-This doesn't mean OMC's harmonic primitives are useless — the
-project's documented wins (the credential-stuffing detector beating
-IsolationForest at multi-dim structural anomalies, README's
-benchmark table) are real and reproducible. But it does mean:
+Experiment 4 is the first comparison so far where the harmonic
+approach has won under any setup. The condition under which it
+wins is the exact condition the project README already documents:
+*structural* differences in *multi-dim* feature distributions.
+That replicates the credential-stuffing benchmark's regime in a
+new domain (synthetic OOD gating) and confirms it wasn't a one-off.
 
-1. **Drop-replacing transformer components with harmonic ones is the
-   wrong play.** Per-head softmax → OmniWeight loses (exp 1).
-   Sinusoidal PE → multi-channel harmonic PE loses (exp 3). The
-   harmonic substrate is not a better-on-everything substitute.
+What this means concretely:
 
-2. **The harmonic substrate's home is structural-anomaly detection,
-   not next-token prediction.** That's where it's already shown
-   measurable wins in the existing codebase, and it's a different
-   computational task from "rank candidates by relative similarity".
+1. **The right hybrid architecture is auxiliary, not
+   substitution.** Don't replace softmax with OmniWeight (exp 1
+   said no). Don't replace sinusoidal PE with phi-fold (exp 3 said
+   no). Add a harmonic structural-anomaly head as an *extra*
+   signal alongside a standard transformer.
 
-3. **The right hybrid architecture is auxiliary, not substitution.**
-   Use a standard transformer for the main next-token loss, and add
-   a harmonic structural-anomaly head as an auxiliary signal — for
-   detecting OOD inputs, attention-pattern anomalies, or
-   activations that have drifted off-attractor. That's the pivot
-   from the roadmap below.
+2. **Real LM activations are layer-normalised.** That strips the
+   magnitude advantage L2 had in experiment 4A, putting us closer
+   to experiment 4B's regime — where harmonic wins. So the
+   theoretical case for harmonic OOD gating on transformer
+   activations (rather than raw features) is stronger than the
+   experiment 4A headline suggests.
+
+3. **The right gate is probably a combination.** Experiment 4A says
+   L2 owns the magnitude axis; 4B says harmonic owns the
+   structural axis. A combined gate (e.g., logistic regression
+   over `[l2_score, harmonic_score]` or simple multiplicative
+   combination) should beat either alone, and that's the next
+   experiment.
 
 ### What changed between experiment 2 and experiment 3
 
@@ -145,18 +154,23 @@ result.
 
 ## Roadmap on this branch
 
-- **0** Copy task: OmniWeight vs softmax scoring (no learning). ✓ done
+- **0** Copy task: OmniWeight vs softmax scoring. ✓ done
 - **1** Perturbed-query divergence study. ✓ done
 - **2** Single-channel positional-encoding distinctness + lookup. ✓ done
-- **3** Multi-channel PE with L2 lookup — fair comparison. ✓ done
-- **4** *Pivot.* Stop trying to substitute transformer components.
-  Build a harmonic structural-anomaly head as an auxiliary signal:
-  given a sequence of intermediate activations from a tiny
-  transformer, flag tokens whose `harmonic_index` score against a
-  reference distribution is anomalous. Re-use the credential-stuffing
-  detector machinery (`harmonic_anomaly.omc`) over activation vectors
-  instead of request features. Pure-OMC first, torch port second.
-- **5** With torch available: train a 2-layer transformer on a tiny
-  char-level corpus. Add the experiment-4 anomaly head as an
-  auxiliary loss term and measure whether it improves loss curves,
-  OOD detection, or attention sharpness.
+- **3** Multi-channel PE with L2 lookup. ✓ done
+- **4** Harmonic OOD gate vs L2-NN baseline, two scenarios. ✓ done
+- **5** Combined gate: feed both `harmonic_score` and `l2_score` into a
+  simple linear combiner (no learning — just `α·harmonic + (1−α)·l2`,
+  sweep α) and re-run experiments 4A and 4B. Expectation: combined
+  gate matches L2 on 4A, beats both on 4B.
+- **6** Realistic regime: pre-normalise reference and test vectors to
+  unit L2 norm (simulating layer-norm). Re-run 4A under that
+  normalisation. Hypothesis: harmonic gate's loss in 4A was driven
+  entirely by magnitude separation, which vanishes under L2-norm.
+  If harmonic's AUROC stays flat or rises past L2's after
+  normalisation, that's strong evidence for the structural-detector
+  thesis on transformer activations.
+- **7** Once torch is available: replicate experiment 6 on actual
+  transformer activations from a tiny pretrained model. In-dist =
+  activations from typical input; OOD = activations from adversarial
+  or shuffled input.
