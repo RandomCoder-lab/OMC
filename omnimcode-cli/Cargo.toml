@@ -12,6 +12,15 @@ description = "OMNIcode standalone CLI — links the tree-walk interpreter, byte
 name = "omnimcode-standalone"
 path = "src/main.rs"
 
+# Session E bench harness — compares tree-walk, bytecode VM, and
+# dual-band JIT execution times for a hot OMC fn. Only meaningful
+# with `--features llvm-jit` (otherwise JIT mode short-circuits to
+# tree-walk).
+[[bin]]
+name = "omc-bench"
+path = "src/bench.rs"
+required-features = ["llvm-jit"]
+
 [features]
 default = ["python-embed"]
 # CPython embedding for `py_*` builtins. Forwards to core.
