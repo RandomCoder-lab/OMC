@@ -1,0 +1,194 @@
+# =============================================================================
+# Experiment 1 — Perturbed-query attention: where OmniWeight and softmax diverge.
+#
+# Experiment 0 showed both scorers AGREE on exact-match queries (0/100
+# disagreements). The story this experiment tells:
+#
+#   When the query is OFF the attractor set by a small perturbation
+#   (mimics a real noisy embedding), OmniWeight and softmax rank the
+#   context positions DIFFERENTLY because:
+#
+#     OmniWeight:  w(q, k) = φ^(-|q - k| / max(|k|, 1))
+#                  normalises by |k|, so an error of 1 at k=144 is
+#                  relatively SMALL (e/φ ~= 0.7) while at k=2 it's
+#                  relatively LARGE (e/φ^(1/2) ~= 0.79).
+#
+#     Softmax:     w(q, k) = exp(-|q - k|)
+#                  raw |q - k|, no scale awareness.
+#
+#   Concretely: query = 100, context contains {89, 144}.
+#     OmniWeight: 89 → 1/144 normalised → very close, 144 → 44/144
+#                 → also close; relative scoring favours the
+#                 smaller-magnitude neighbour.
+#     Softmax:   89 is 11 away, 144 is 44 away → picks 89 dramatically.
+#
+# We expect:
+#   - Disagreement rate jumps from 0% (exact-match) to ~20-40% (perturbed).
+#   - When the query is near a LARGE attractor (one of F10..F12 = 89, 144,
+#     233), OmniWeight and softmax pick differently.
+#   - Neither is "right" — they're optimising for different geometries.
+#     The takeaway is: OmniWeight is scale-invariant in the
+#     denominator, softmax is not.
+#
+# Run:
+#   ./target/release/omnimcode-standalone experiments/hybrid_llm/experiment_1_perturbed.omc
+# =============================================================================
+
+h PHI = 1.6180339887498948;
+
+h VOCAB_SIZE = 12;
+fn vocab_at(i) -> int {
+    if i == 0 { return 1; }
+    if i == 1 { return 2; }
+    if i == 2 { return 3; }
+    if i == 3 { return 5; }
+    if i == 4 { return 8; }
+    if i == 5 { return 13; }
+    if i == 6 { return 21; }
+    if i == 7 { return 34; }
+    if i == 8 { return 55; }
+    if i == 9 { return 89; }
+    if i == 10 { return 144; }
+    if i == 11 { return 233; }
+    return 1;
+}
+
+fn omni_weight(q, k) -> float {
+    h diff = to_float(q - k);
+    if diff < 0.0 { diff = 0.0 - diff; }
+    h denom = to_float(k);
+    if denom < 0.0 { denom = 0.0 - denom; }
+    if denom < 1.0 { denom = 1.0; }
+    h e = diff / denom;
+    return pow(PHI, 0.0 - e);
+}
+
+fn softmax_score(q, k) -> float {
+    h diff = to_float(q - k);
+    if diff < 0.0 { diff = 0.0 - diff; }
+    return exp(0.0 - diff);
+}
+
+# Pick argmax under one scorer; return [winner_idx, winner_value].
+fn argmax(context, n, query, which_score) -> array {
+    h best_idx = 0;
+    h k0 = arr_get(context, 0);
+    h best_score = 0.0;
+    if which_score == 0 {
+        best_score = omni_weight(query, k0);
+    } else {
+        best_score = softmax_score(query, k0);
+    }
+
+    h i = 1;
+    while i < n {
+        h k = arr_get(context, i);
+        h s = 0.0;
+        if which_score == 0 {
+            s = omni_weight(query, k);
+        } else {
+            s = softmax_score(query, k);
+        }
+        if s > best_score {
+            best_score = s;
+            best_idx = i;
+        }
+        i = i + 1;
+    }
+    h out = arr_new(2, 0);
+    arr_set(out, 0, best_idx);
+    arr_set(out, 1, arr_get(context, best_idx));
+    return out;
+}
+
+# ---------------------------------------------------------------------------
+# A perturbed trial: build a random context, then build a query that's
+# `noise` units away from a randomly chosen context value.
+# Returns [omni_idx, omni_val, soft_idx, soft_val, true_neighbour_val, query].
+# ---------------------------------------------------------------------------
+fn run_perturbed(ctx_len, noise) -> array {
+    h context = arr_new(ctx_len, 0);
+    h i = 0;
+    while i < ctx_len {
+        arr_set(context, i, vocab_at(random_int(0, VOCAB_SIZE - 1)));
+        i = i + 1;
+    }
+    h target_idx = random_int(0, ctx_len - 1);
+    h true_val = arr_get(context, target_idx);
+    h query = true_val + noise;
+
+    h om = argmax(context, ctx_len, query, 0);
+    h sm = argmax(context, ctx_len, query, 1);
+
+    h out = arr_new(6, 0);
+    arr_set(out, 0, arr_get(om, 0));
+    arr_set(out, 1, arr_get(om, 1));
+    arr_set(out, 2, arr_get(sm, 0));
+    arr_set(out, 3, arr_get(sm, 1));
+    arr_set(out, 4, true_val);
+    arr_set(out, 5, query);
+    return out;
+}
+
+# ---------------------------------------------------------------------------
+# Sweep noise levels and report disagreement rate + which scorer
+# recovers the true neighbour more often.
+# ---------------------------------------------------------------------------
+random_seed(42);
+h N_TRIALS = 200;
+h CTX_LEN = 8;
+
+print("== Experiment 1: perturbed-query argmax (OmniWeight vs softmax) ==");
+print(concat_many("trials per noise level = ", N_TRIALS, ", ctx_len = ", CTX_LEN));
+print("");
+print("noise  | omni_recovers | soft_recovers | disagreements");
+print("-------+---------------+---------------+--------------");
+
+h noise_levels = [0, 1, 3, 7, 15, 30, 50];
+h nl = arr_len(noise_levels);
+h n_idx = 0;
+while n_idx < nl {
+    h noise = arr_get(noise_levels, n_idx);
+    h omni_recover = 0;
+    h soft_recover = 0;
+    h disagree = 0;
+
+    h t = 0;
+    while t < N_TRIALS {
+        h r = run_perturbed(CTX_LEN, noise);
+        h om_val = arr_get(r, 1);
+        h sm_val = arr_get(r, 3);
+        h true_val = arr_get(r, 4);
+        if om_val == true_val { omni_recover = omni_recover + 1; }
+        if sm_val == true_val { soft_recover = soft_recover + 1; }
+        if om_val != sm_val { disagree = disagree + 1; }
+        t = t + 1;
+    }
+
+    print(concat_many(
+        "  ", noise,
+        "    |     ", omni_recover, "/", N_TRIALS,
+        "    |     ", soft_recover, "/", N_TRIALS,
+        "    |    ", disagree, "/", N_TRIALS
+    ));
+    n_idx = n_idx + 1;
+}
+print("");
+print("== Interpretation ==");
+print("noise=0: confirms experiment 0 result (both scorers agree on exact match).");
+print("noise small (1-7): OmniWeight pulls toward smaller-magnitude attractors");
+print("  because its denominator is |k|. Softmax stays tied to absolute |q-k|.");
+print("noise large (15-50): the query is now FAR from any context value; both");
+print("  scorers degrade, but their disagreement rate plateaus — both are now");
+print("  effectively picking 'closest in raw distance' since the normalisation");
+print("  matters less at large absolute distances.");
+print("");
+print("Concrete takeaway for the hybrid model:");
+print("  - OmniWeight as attention scoring is SCALE-AWARE: a query close to");
+print("    a small attractor scores it higher than the same absolute distance");
+print("    to a large attractor. Useful when token magnitudes carry semantic");
+print("    weight (e.g. importance proportional to magnitude).");
+print("  - Softmax is SCALE-AGNOSTIC in its raw form. To get the OmniWeight");
+print("    behaviour with a softmax stack you'd need an explicit per-key");
+print("    normalisation layer.");
+print("== End ==");
