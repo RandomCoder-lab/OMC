@@ -36,27 +36,65 @@ const FIBONACCI: &[u64] = &[
     14930352, 24157817, 39088169, 63245986,
 ];
 
-/// Thread-safe statistics for search operations
+/// Thread-safe statistics for search operations.
+///
+/// The counters are split into two channels so the substrate's internal
+/// work (compute_resonance -> nearest_attractor_with_dist -> ...) doesn't
+/// pollute the numbers an experiment is trying to attribute to its own
+/// explicit search calls:
+///
+///   EXPLICIT   — bumped by direct calls into the public search
+///                functions (fibonacci_search, fibonacci_search_with_trace,
+///                phi_pi_fib_search_v2, binary_search). These are the
+///                searches an OMC program asks for explicitly via the
+///                phi_pi_fib_* / phi_pi_bin_search builtins.
+///
+///   BACKGROUND — bumped by substrate-internal callers
+///                (nearest_attractor_with_dist and friends). Every
+///                HInt::new() -> compute_resonance -> ... goes here.
 pub struct SearchStats {
     pub total_searches: u64,
     pub total_comparisons: u64,
 }
 
-static TOTAL_SEARCHES: AtomicU64 = AtomicU64::new(0);
-static TOTAL_COMPARISONS: AtomicU64 = AtomicU64::new(0);
+static EXPLICIT_SEARCHES: AtomicU64 = AtomicU64::new(0);
+static EXPLICIT_COMPARISONS: AtomicU64 = AtomicU64::new(0);
+static BACKGROUND_SEARCHES: AtomicU64 = AtomicU64::new(0);
+static BACKGROUND_COMPARISONS: AtomicU64 = AtomicU64::new(0);
 
-/// Get current search statistics (thread-safe)
+/// Explicit-channel stats (default — preserves pre-substrate-refactor semantics).
 pub fn get_search_stats() -> SearchStats {
     SearchStats {
-        total_searches: TOTAL_SEARCHES.load(Ordering::Relaxed),
-        total_comparisons: TOTAL_COMPARISONS.load(Ordering::Relaxed),
+        total_searches: EXPLICIT_SEARCHES.load(Ordering::Relaxed),
+        total_comparisons: EXPLICIT_COMPARISONS.load(Ordering::Relaxed),
     }
 }
 
-/// Reset search statistics
+/// Background-channel stats — substrate-internal calls
+/// (nearest_attractor_with_dist, compute_resonance, etc.).
+pub fn get_search_stats_background() -> SearchStats {
+    SearchStats {
+        total_searches: BACKGROUND_SEARCHES.load(Ordering::Relaxed),
+        total_comparisons: BACKGROUND_COMPARISONS.load(Ordering::Relaxed),
+    }
+}
+
+/// Combined: explicit + background.
+pub fn get_search_stats_all() -> SearchStats {
+    SearchStats {
+        total_searches: EXPLICIT_SEARCHES.load(Ordering::Relaxed)
+            + BACKGROUND_SEARCHES.load(Ordering::Relaxed),
+        total_comparisons: EXPLICIT_COMPARISONS.load(Ordering::Relaxed)
+            + BACKGROUND_COMPARISONS.load(Ordering::Relaxed),
+    }
+}
+
+/// Reset both channels.
 pub fn reset_search_stats() {
-    TOTAL_SEARCHES.store(0, Ordering::Relaxed);
-    TOTAL_COMPARISONS.store(0, Ordering::Relaxed);
+    EXPLICIT_SEARCHES.store(0, Ordering::Relaxed);
+    EXPLICIT_COMPARISONS.store(0, Ordering::Relaxed);
+    BACKGROUND_SEARCHES.store(0, Ordering::Relaxed);
+    BACKGROUND_COMPARISONS.store(0, Ordering::Relaxed);
 }
 
 /// Get Fibonacci number at index (clamped to sequence length)
@@ -101,17 +139,42 @@ pub fn fibonacci_search<T>(
     target: &T,
     cmp: impl Fn(&T, &T) -> i32,
 ) -> Result<usize, usize> {
+    fibonacci_search_categorised(arr, target, cmp, true)
+}
+
+/// Background-channel variant of fibonacci_search. Same algorithm, but
+/// stats are recorded under the BACKGROUND counters instead of EXPLICIT.
+/// Substrate-internal callers (nearest_attractor_with_dist) use this so
+/// HInt::new() construction work doesn't pollute the explicit channel
+/// that experiments measure.
+pub fn fibonacci_search_internal<T>(
+    arr: &[T],
+    target: &T,
+    cmp: impl Fn(&T, &T) -> i32,
+) -> Result<usize, usize> {
+    fibonacci_search_categorised(arr, target, cmp, false)
+}
+
+fn fibonacci_search_categorised<T>(
+    arr: &[T],
+    target: &T,
+    cmp: impl Fn(&T, &T) -> i32,
+    explicit: bool,
+) -> Result<usize, usize> {
     if arr.is_empty() {
         return Err(0);
     }
 
-    TOTAL_SEARCHES.fetch_add(1, Ordering::Relaxed);
+    if explicit {
+        EXPLICIT_SEARCHES.fetch_add(1, Ordering::Relaxed);
+    } else {
+        BACKGROUND_SEARCHES.fetch_add(1, Ordering::Relaxed);
+    }
 
     let mut fib_idx = find_fib_index(arr.len());
     let mut offset = 0usize;
     let mut comparisons = 0u64;
 
-    // Standard Fibonacci search algorithm
     while fib_idx > 0 {
         comparisons += 1;
 
@@ -122,16 +185,18 @@ pub fn fibonacci_search<T>(
 
         match cmp_result {
             0 => {
-                TOTAL_COMPARISONS.fetch_add(comparisons, Ordering::Relaxed);
+                if explicit {
+                    EXPLICIT_COMPARISONS.fetch_add(comparisons, Ordering::Relaxed);
+                } else {
+                    BACKGROUND_COMPARISONS.fetch_add(comparisons, Ordering::Relaxed);
+                }
                 return Ok(mid);
             }
             n if n < 0 => {
-                // arr[mid] < target, search right
                 offset = mid + 1;
                 fib_idx = fib_idx.saturating_sub(2);
             }
             _ => {
-                // arr[mid] > target, search left
                 fib_idx = fib_idx.saturating_sub(1);
             }
         }
@@ -141,7 +206,11 @@ pub fn fibonacci_search<T>(
         }
     }
 
-    TOTAL_COMPARISONS.fetch_add(comparisons, Ordering::Relaxed);
+    if explicit {
+        EXPLICIT_COMPARISONS.fetch_add(comparisons, Ordering::Relaxed);
+    } else {
+        BACKGROUND_COMPARISONS.fetch_add(comparisons, Ordering::Relaxed);
+    }
     Err(offset)
 }
 
@@ -171,7 +240,7 @@ pub fn phi_pi_fib_search_v2<T>(
     if arr.is_empty() {
         return Err(0);
     }
-    TOTAL_SEARCHES.fetch_add(1, Ordering::Relaxed);
+    EXPLICIT_SEARCHES.fetch_add(1, Ordering::Relaxed);
 
     let mut low: usize = 0;
     let mut high: usize = arr.len();
@@ -198,7 +267,7 @@ pub fn phi_pi_fib_search_v2<T>(
         comparisons += 1;
         match cmp(&arr[mid], target) {
             0 => {
-                TOTAL_COMPARISONS.fetch_add(comparisons, Ordering::Relaxed);
+                EXPLICIT_COMPARISONS.fetch_add(comparisons, Ordering::Relaxed);
                 return Ok(mid);
             }
             n if n < 0 => low = mid + 1,
@@ -213,7 +282,7 @@ pub fn phi_pi_fib_search_v2<T>(
         let mid = low + (high - low) / 2;
         match cmp(&arr[mid], target) {
             0 => {
-                TOTAL_COMPARISONS.fetch_add(comparisons, Ordering::Relaxed);
+                EXPLICIT_COMPARISONS.fetch_add(comparisons, Ordering::Relaxed);
                 return Ok(mid);
             }
             n if n < 0 => low = mid + 1,
@@ -221,7 +290,7 @@ pub fn phi_pi_fib_search_v2<T>(
         }
     }
 
-    TOTAL_COMPARISONS.fetch_add(comparisons, Ordering::Relaxed);
+    EXPLICIT_COMPARISONS.fetch_add(comparisons, Ordering::Relaxed);
     Err(low)
 }
 
@@ -239,7 +308,7 @@ pub fn fibonacci_search_with_trace<T>(
     if arr.is_empty() {
         return (Err(0), probes);
     }
-    TOTAL_SEARCHES.fetch_add(1, Ordering::Relaxed);
+    EXPLICIT_SEARCHES.fetch_add(1, Ordering::Relaxed);
 
     let mut fib_idx = find_fib_index(arr.len());
     let mut offset = 0usize;
@@ -254,7 +323,7 @@ pub fn fibonacci_search_with_trace<T>(
         let cmp_result = cmp(&arr[mid], target);
         match cmp_result {
             0 => {
-                TOTAL_COMPARISONS.fetch_add(comparisons, Ordering::Relaxed);
+                EXPLICIT_COMPARISONS.fetch_add(comparisons, Ordering::Relaxed);
                 return (Ok(mid), probes);
             }
             n if n < 0 => {
@@ -271,7 +340,7 @@ pub fn fibonacci_search_with_trace<T>(
         }
     }
 
-    TOTAL_COMPARISONS.fetch_add(comparisons, Ordering::Relaxed);
+    EXPLICIT_COMPARISONS.fetch_add(comparisons, Ordering::Relaxed);
     (Err(offset), probes)
 }
 
@@ -288,7 +357,7 @@ pub fn binary_search<T>(
     let mut high = arr.len();
     let mut comparisons = 0u64;
 
-    TOTAL_SEARCHES.fetch_add(1, Ordering::Relaxed);
+    EXPLICIT_SEARCHES.fetch_add(1, Ordering::Relaxed);
 
     while low < high {
         comparisons += 1;
@@ -298,7 +367,7 @@ pub fn binary_search<T>(
 
         match cmp_result {
             0 => {
-                TOTAL_COMPARISONS.fetch_add(comparisons, Ordering::Relaxed);
+                EXPLICIT_COMPARISONS.fetch_add(comparisons, Ordering::Relaxed);
                 return Ok(mid);
             }
             n if n < 0 => {
@@ -310,7 +379,7 @@ pub fn binary_search<T>(
         }
     }
 
-    TOTAL_COMPARISONS.fetch_add(comparisons, Ordering::Relaxed);
+    EXPLICIT_COMPARISONS.fetch_add(comparisons, Ordering::Relaxed);
     Err(low)
 }
 
@@ -334,7 +403,9 @@ pub fn nearest_attractor_with_dist(value: i64) -> (i64, i64) {
         return (0, 0);
     }
     let target = abs_v as u64;
-    let r = fibonacci_search(FIBONACCI, &target, |a, b| {
+    // Substrate-internal call — book against the BACKGROUND counters
+    // so explicit OMC searches stay separately measurable.
+    let r = fibonacci_search_internal(FIBONACCI, &target, |a, b| {
         if a < b { -1 } else if a > b { 1 } else { 0 }
     });
     let (nearest_abs, min_dist): (i64, i64) = match r {

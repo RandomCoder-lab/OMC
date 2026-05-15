@@ -1536,18 +1536,7 @@ impl Interpreter {
                 let v = self.eval_expr(e)?;
                 match v {
                     Value::HInt(h) => {
-                        let fibs: [i64; 15] = [0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610];
-                        let abs_val = h.value.abs();
-                        let mut nearest = fibs[0];
-                        let mut min_dist = abs_val;
-                        for &fib in &fibs {
-                            let d = (fib - abs_val).abs();
-                            if d < min_dist {
-                                min_dist = d;
-                                nearest = fib;
-                            }
-                        }
-                        let result = if h.value < 0 { -nearest } else { nearest };
+                        let result = crate::phi_pi_fib::fold_to_nearest_attractor(h.value);
                         Ok(Value::HInt(HInt::new(result)))
                     }
                     _ => Ok(Value::HInt(HInt::new(0))),
@@ -1668,6 +1657,8 @@ impl Interpreter {
             | "phi_pi_bin_search" | "log_phi_pi_fibonacci"
             // Traced variants — return [result, probe_indices_array]
             | "phi_pi_fib_search_traced" | "phi_pi_fib_nearest_traced"
+            // Split-channel stats (explicit vs background substrate work)
+            | "phi_pi_fib_stats_bg" | "phi_pi_fib_stats_all"
             // Self-healing
             | "safe_divide" | "safe_arr_get" | "safe_arr_set"
             | "safe_add" | "safe_sub" | "safe_mul" | "resolve_singularity"
@@ -2181,20 +2172,7 @@ impl Interpreter {
                 if danger > 0.5 {
                     // Snap to nearest Fibonacci, preserve sign.
                     let n = v.to_int();
-                    let fibs: [i64; 15] = [
-                        0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610,
-                    ];
-                    let abs_n = n.abs();
-                    let mut nearest = fibs[0];
-                    let mut min_dist = abs_n;
-                    for &fib in &fibs {
-                        let d = (fib - abs_n).abs();
-                        if d < min_dist {
-                            min_dist = d;
-                            nearest = fib;
-                        }
-                    }
-                    let result = if n < 0 { -nearest } else { nearest };
+                    let result = crate::phi_pi_fib::fold_to_nearest_attractor(n);
                     // The point of fold_escape is to escape the zero-trap:
                     // if the nearest Fibonacci is 0 (which happens for x=0),
                     // jump to 1 instead. Otherwise we'd just heal back to
@@ -2233,20 +2211,7 @@ impl Interpreter {
                 let divisor = if danger > 0.5 {
                     // Fold b away from zero.
                     let n = b.to_int();
-                    let fibs: [i64; 15] = [
-                        0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610,
-                    ];
-                    let abs_n = n.abs();
-                    let mut nearest = fibs[0];
-                    let mut min_dist = abs_n;
-                    for &fib in &fibs {
-                        let d = (fib - abs_n).abs();
-                        if d < min_dist {
-                            min_dist = d;
-                            nearest = fib;
-                        }
-                    }
-                    let mut healed = if n < 0 { -nearest } else { nearest };
+                    let mut healed = crate::phi_pi_fib::fold_to_nearest_attractor(n);
                     if healed == 0 {
                         healed = 1;
                     }
@@ -2399,19 +2364,11 @@ impl Interpreter {
                 if let Value::Array(arr) = arr_v {
                     let mut acc = 0i64;
                     for v in arr.items.borrow().iter() {
-                        let n = v.to_int().abs();
-                        let fibs: [i64; 15] = [
-                            0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610,
-                        ];
-                        let mut nearest = fibs[0];
-                        let mut min_dist = n;
-                        for &f in &fibs {
-                            let d = (f - n).abs();
-                            if d < min_dist {
-                                min_dist = d;
-                                nearest = f;
-                            }
-                        }
+                        // .abs() before fold matches the prior behaviour
+                        // (always positive attractor accumulated).
+                        let nearest = crate::phi_pi_fib::fold_to_nearest_attractor(
+                            v.to_int().abs(),
+                        );
                         acc = acc.wrapping_add(nearest);
                     }
                     Ok(Value::HInt(HInt::new(acc)))
@@ -2476,20 +2433,7 @@ impl Interpreter {
                 let resolved = match mode.as_str() {
                     "fold" => {
                         // Snap |numerator| to nearest Fibonacci, preserve sign.
-                        let fibs: [i64; 15] = [
-                            0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610,
-                        ];
-                        let abs_n = numerator.abs();
-                        let mut nearest = fibs[0];
-                        let mut min_dist = abs_n;
-                        for &fib in &fibs {
-                            let d = (fib - abs_n).abs();
-                            if d < min_dist {
-                                min_dist = d;
-                                nearest = fib;
-                            }
-                        }
-                        if numerator < 0 { -nearest } else { nearest }
+                        crate::phi_pi_fib::fold_to_nearest_attractor(numerator)
                     }
                     "invert" => {
                         // 1/n style: return signed inverse magnitude.
@@ -3726,20 +3670,12 @@ impl Interpreter {
                     return Err("harmonic_partition requires (array)".to_string());
                 }
                 if let Value::Array(arr) = self.eval_expr(&args[0])? {
-                    let fibs: [i64; 15] = [
-                        0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610,
-                    ];
                     use std::collections::BTreeMap;
                     let mut buckets: BTreeMap<i64, Vec<Value>> = BTreeMap::new();
                     let items_in = arr.items.borrow().clone();
                     for v in items_in {
                         let n = v.to_int();
-                        let abs_n = n.abs();
-                        let nearest = fibs.iter()
-                            .min_by_key(|f| (**f - abs_n).abs())
-                            .copied()
-                            .unwrap_or(0);
-                        let key = if n < 0 { -nearest } else { nearest };
+                        let key = crate::phi_pi_fib::fold_to_nearest_attractor(n);
                         buckets.entry(key).or_insert_with(Vec::new).push(v);
                     }
                     let outer: Vec<Value> = buckets.into_iter().map(|(_, items)| {
@@ -4027,10 +3963,32 @@ impl Interpreter {
                 ];
                 Ok(Value::Array(HArray::from_vec(items)))
             }
-            // phi_pi_fib_reset() -> null. Zero the phi_pi_fib counters.
+            // phi_pi_fib_reset() -> null. Zero both phi_pi_fib counter
+            // channels (explicit AND background).
             "phi_pi_fib_reset" => {
                 crate::phi_pi_fib::reset_search_stats();
                 Ok(Value::Null)
+            }
+            // phi_pi_fib_stats_bg() -> [searches, comparisons] for the
+            // BACKGROUND channel — substrate-internal calls
+            // (HInt::new -> compute_resonance -> nearest_attractor_with_dist).
+            "phi_pi_fib_stats_bg" => {
+                let s = crate::phi_pi_fib::get_search_stats_background();
+                let items = vec![
+                    Value::HInt(HInt::new(s.total_searches as i64)),
+                    Value::HInt(HInt::new(s.total_comparisons as i64)),
+                ];
+                Ok(Value::Array(HArray::from_vec(items)))
+            }
+            // phi_pi_fib_stats_all() -> [searches, comparisons] summed
+            // across explicit + background channels.
+            "phi_pi_fib_stats_all" => {
+                let s = crate::phi_pi_fib::get_search_stats_all();
+                let items = vec![
+                    Value::HInt(HInt::new(s.total_searches as i64)),
+                    Value::HInt(HInt::new(s.total_comparisons as i64)),
+                ];
+                Ok(Value::Array(HArray::from_vec(items)))
             }
             // phi_pi_fib_search_v2(sorted_arr, target) -> int
             //   F(k)/φ^(π·k) split-point search. Same return convention
@@ -5182,6 +5140,7 @@ pub(crate) const HEAL_BUILTIN_NAMES: &[&str] = &[
     "phi_pi_fib_search_v2", "phi_pi_fib_nearest_v2",
     "phi_pi_bin_search", "log_phi_pi_fibonacci",
     "phi_pi_fib_search_traced", "phi_pi_fib_nearest_traced",
+    "phi_pi_fib_stats_bg", "phi_pi_fib_stats_all",
     // Self-healing
     "safe_divide", "safe_arr_get", "safe_arr_set",
     "safe_add", "safe_sub", "safe_mul", "resolve_singularity",
@@ -5205,21 +5164,8 @@ impl Interpreter {
         match v {
             Value::HInt(h) => {
                 let mut current = h.value;
-                let fibs: [i64; 15] = [
-                    0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610,
-                ];
                 for _ in 0..depth.max(1) {
-                    let abs_val = current.abs();
-                    let mut nearest = fibs[0];
-                    let mut min_dist = abs_val;
-                    for &fib in &fibs {
-                        let d = (fib - abs_val).abs();
-                        if d < min_dist {
-                            min_dist = d;
-                            nearest = fib;
-                        }
-                    }
-                    current = if current < 0 { -nearest } else { nearest };
+                    current = crate::phi_pi_fib::fold_to_nearest_attractor(current);
                 }
                 Value::HInt(HInt::new(current))
             }
