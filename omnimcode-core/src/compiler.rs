@@ -134,11 +134,19 @@ impl Compiler {
                 self.fn_return_types.get(name.as_str()).copied().or_else(|| {
                     // Built-ins whose return type is fixed.
                     match name.as_str() {
+                        // Truly int-returning builtins. Polymorphic ones
+                        // (arr_get, dict_get, arr_min/max/sum — return value
+                        // depends on the element type) are deliberately
+                        // EXCLUDED. Listing them here causes the compiler
+                        // to emit Op::AddInt for `arr_get(...) + x`, which
+                        // calls .to_int() on both operands and silently
+                        // truncates floats. Caught by a real-world float-
+                        // accumulator pattern in examples/recommend.
                         "fibonacci" | "fib" | "is_fibonacci" | "factorial"
                         | "abs" | "floor" | "ceil" | "round" | "is_prime"
                         | "even" | "odd" | "is_even" | "is_odd"
-                        | "len" | "arr_len" | "arr_min" | "arr_max"
-                        | "arr_sum" | "arr_get" | "arr_index_of" | "arr_contains"
+                        | "len" | "arr_len"
+                        | "arr_index_of" | "arr_contains"
                         | "is_singularity" | "resolve_singularity"
                         | "pow_int" | "square" | "cube" | "sign" | "to_int"
                         | "int" | "classify_resonance" | "safe_add" | "safe_sub"
