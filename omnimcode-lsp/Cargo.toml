@@ -1,0 +1,24 @@
+[package]
+name = "omnimcode-lsp"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Language Server Protocol implementation for OMNIcode"
+
+[[bin]]
+name = "omnimcode-lsp"
+path = "src/main.rs"
+
+[dependencies]
+# OMC core WITHOUT python-embed — the LSP doesn't run user code, just
+# parses + analyzes. Smaller dep tree, faster compile, no libpython
+# requirement on developer machines.
+omnimcode-core = { path = "../omnimcode-core", default-features = false }
+
+# LSP server framework. tower-lsp handles JSON-RPC over stdio and
+# dispatches Initialize/DidOpen/DidChange/etc. to a Backend trait.
+tower-lsp = "0.20"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std"] }
+dashmap = "5"
+serde_json = "1"

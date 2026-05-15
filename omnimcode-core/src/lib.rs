@@ -20,4 +20,8 @@ pub mod bytecode_opt;  // Constant folding + peephole optimizer [Phase K]
 pub mod disasm;        // Bytecode disassembler [Phase P]
 pub mod formatter;     // AST -> canonical OMC source (for --fmt)
 
-pub mod python_embed;  // Embedded CPython: py_* builtins (numpy, pandas, ...)
+// Embedded CPython: py_* builtins (numpy, pandas, ...). Default-on
+// for desktop builds; downstream WASM / no_std crates can disable
+// via `omnimcode-core = { default-features = false }`.
+#[cfg(feature = "python-embed")]
+pub mod python_embed;

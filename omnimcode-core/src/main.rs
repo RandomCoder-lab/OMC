@@ -73,19 +73,29 @@ fn main() {
 }
 
 /// Register the `py_*` builtin family on `interp`. Embedded Python
-/// is now always-on (used to be feature-gated + OMC_PYTHON=1) — the
+/// is on by default (python-embed feature, in default features) — the
 /// standalone binary ships with numpy/pandas/sklearn reachable from
 /// any OMC program out of the box.
 ///
 /// Set OMC_NO_PYTHON=1 in the environment to skip registration if
-/// you genuinely don't want CPython initialised in your process
-/// (saves ~5 MB resident from the embedded interpreter).
+/// you genuinely don't want CPython initialised in your process.
+/// Disable the `python-embed` Cargo feature at build time for WASM /
+/// no_std targets where libpython can't link.
+#[cfg(feature = "python-embed")]
 fn maybe_register_python(interp: &mut Interpreter) {
     if std::env::var("OMC_NO_PYTHON").as_deref() == Ok("1") {
         return;
     }
     omnimcode_core::python_embed::register_python_builtins(interp);
 }
+
+/// Stub when `python-embed` is OFF (e.g. WASM target). Lets the rest
+/// of main.rs call this unconditionally; OMC programs that use
+/// `py_*` builtins will get "Undefined function" errors at runtime
+/// which is the desired behavior — fail loudly, don't pretend Python
+/// is there when it isn't.
+#[cfg(not(feature = "python-embed"))]
+fn maybe_register_python(_interp: &mut Interpreter) {}
 
 /// `--install [SPEC]`. SPEC can be:
 ///
@@ -104,6 +114,7 @@ fn maybe_register_python(interp: &mut Interpreter) {
 /// Eats our own dogfood: HTTP fetch via embedded Python `requests`,
 /// TOML parse via `tomllib`, sha256 via `hashlib`. Zero new Rust
 /// dependencies.
+#[cfg(feature = "python-embed")]
 fn install_command(spec: Option<&str>) -> i32 {
     use omnimcode_core::python_embed::{
         install_url_via_python, parse_omc_toml_via_python, registry_lookup,
@@ -204,6 +215,13 @@ fn install_command(spec: Option<&str>) -> i32 {
             if failures > 0 { 1 } else { 0 }
         }
     }
+}
+
+#[cfg(not(feature = "python-embed"))]
+fn install_command(_spec: Option<&str>) -> i32 {
+    eprintln!("--install requires the `python-embed` feature (HTTP / TOML / sha256).");
+    eprintln!("Rebuild with `cargo build --release` (default features include python-embed).");
+    2
 }
 
 /// `--test FILE`: load FILE, find every top-level `fn test_*()`,

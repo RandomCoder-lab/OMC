@@ -19,15 +19,23 @@ path = "src/lib.rs"
 [dependencies]
 regex = "1.10"
 thiserror = "1.0"
-# Embedded CPython is now mandatory: OMC programs gain `py_import` /
-# `py_call` / etc. out of the box. Building requires libpython at link
-# time (pyo3 auto-detects via PYO3_PYTHON / `python3-config --prefix`).
+# Embedded CPython — required for the desktop standalone binary
+# (always-on py_import/py_call/etc.), optional for downstream
+# crates that target WASM or no_std where libpython can't link.
+#
+# Behind the `python-embed` feature which is in `default`, so
+# `cargo build` of the standalone gets it without flags. WASM /
+# embedded users build with `--no-default-features`.
+#
 # Set PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 if your Python is newer
 # than pyo3's max supported version.
-pyo3 = { version = "0.23", features = ["auto-initialize"] }
+pyo3 = { version = "0.23", features = ["auto-initialize"], optional = true }
 
 [features]
-default = []
+# Default-on for desktop. Downstream WASM / no_std crates select
+# `default-features = false` to get a Python-free OMC core.
+default = ["python-embed"]
+python-embed = ["dep:pyo3"]
 ffi = []
 serialization = []
 

@@ -1,0 +1,53 @@
+{
+  "name": "vscode-omc",
+  "displayName": "OMNIcode",
+  "description": "OMNIcode language support: syntax highlighting, diagnostics, hover, completion via LSP",
+  "version": "0.1.0",
+  "publisher": "sovereignlattice",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": ["Programming Languages"],
+  "main": "./out/extension.js",
+  "activationEvents": ["onLanguage:omc"],
+  "contributes": {
+    "languages": [
+      {
+        "id": "omc",
+        "aliases": ["OMNIcode", "omc"],
+        "extensions": [".omc"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "omc",
+        "scopeName": "source.omc",
+        "path": "./syntaxes/omc.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "type": "object",
+      "title": "OMNIcode",
+      "properties": {
+        "omc.serverPath": {
+          "type": "string",
+          "default": "omnimcode-lsp",
+          "description": "Path to the omnimcode-lsp binary. If not on PATH, set to the absolute path (e.g., /home/you/OMC/target/release/omnimcode-lsp)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.80.0",
+    "typescript": "^5.0.0"
+  }
+}

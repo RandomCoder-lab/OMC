@@ -1,0 +1,35 @@
+[package]
+name = "omnimcode-wasm"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "OMNIcode for WebAssembly — browser / Node / edge deployment without CPython"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[dependencies]
+# Pull omnimcode-core WITHOUT the python-embed feature so libpython
+# doesn't need to link. WASM gets the language + harmonic primitives;
+# `py_*` builtins fail at runtime with "Undefined function" which is
+# the intended behavior (fail loudly).
+omnimcode-core = { path = "../omnimcode-core", default-features = false }
+
+# Browser bridge: wasm-bindgen exposes Rust fns to JS, serde-wasm-bindgen
+# converts JSON-like values back and forth.
+wasm-bindgen = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde-wasm-bindgen = "0.6"
+# Tiny panic-to-console hook for browser dev ergonomics.
+console_error_panic_hook = { version = "0.1", optional = true }
+
+[features]
+default = ["console_error_panic_hook"]
+
+[profile.release]
+# size-optimised build for the .wasm payload (~150 KB target)
+opt-level = "z"
+lto = true
+codegen-units = 1
