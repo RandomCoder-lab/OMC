@@ -1,0 +1,204 @@
+# =============================================================================
+# Experiment 10 — Harmonic CRT-style positional encoding (Path E2).
+#
+# Background: experiment 3 found that 4-channel harmonic PE
+# (phi.fold(pos * prime + 1)) saturates at 22 unique vectors by L=64
+# while sinusoidal PE stays distinct to L=64 then saturates at 64.
+# This experiment tries a different harmonic strategy: pure-CRT-style
+# modular encoding with Fibonacci-attractor moduli.
+#
+# Chinese Remainder Theorem: for pairwise-coprime moduli (m1, ..., mk),
+# the residue tuple (pos mod m1, ..., pos mod mk) uniquely identifies
+# pos in [0, m1*m2*...*mk).
+#
+# Pairwise-coprime Fibonacci attractors near our target range:
+#   F_5 = 5
+#   F_6 = 8  (gcd(5,8) = 1)
+#   F_7 = 13 (gcd(5,13)=1, gcd(8,13)=1)
+#   F_8 = 21 (gcd(5,21)=1, gcd(8,21)=1, gcd(13,21)=1)
+# Product = 10920 — encoding capacity well past L=200.
+#
+# Channel design:
+#   harmonic_crt_pe(pos) = [
+#       pos mod 5,
+#       pos mod 8,
+#       pos mod 13,
+#       pos mod 21,
+#   ]
+#
+# This is unambiguously substrate-aligned: the choice of moduli IS
+# the harmonic claim. Whether THESE specific values give
+# better-than-sinusoidal distinctness is what we measure.
+#
+# Comparison: same sinusoidal_pe as experiment 3 (4 channels at 2
+# periods) so the head-to-head is direct.
+#
+# Sweep: L = 8, 16, 32, 48, 64, 100, 200.
+# Metric: distinct-vector count + lookup recovery rate (squared L2).
+#
+# Hypothesis: CRT with Fibonacci moduli should stay distinct to
+# L = product of moduli = 10920, well past sinusoidal's 64-period
+# wrap. If true, this is the first per-component harmonic primitive
+# that beats its transformer baseline on a real task — the missing
+# piece for transformerless LLM positional encoding.
+# =============================================================================
+
+h D = 4;
+
+# ---------------------------------------------------------------------------
+# CRT-style harmonic encoding: residues mod Fibonacci attractors.
+# ---------------------------------------------------------------------------
+fn harmonic_crt_pe(pos) -> array {
+    h v = arr_new(D, 0);
+    arr_set(v, 0, pos % 5);
+    arr_set(v, 1, pos % 8);
+    arr_set(v, 2, pos % 13);
+    arr_set(v, 3, pos % 21);
+    return v;
+}
+
+# ---------------------------------------------------------------------------
+# Same multi-channel sinusoidal as experiment 3 — paper's geometric
+# frequency layout, two periods (8 and 64), four channels total.
+# ---------------------------------------------------------------------------
+fn sin_channel(pos, period) -> int {
+    h two_pi = 2.0 * pi();
+    h theta = to_float(pos) * two_pi / to_float(period);
+    return to_int(1000.0 * sin(theta));
+}
+
+fn cos_channel(pos, period) -> int {
+    h two_pi = 2.0 * pi();
+    h theta = to_float(pos) * two_pi / to_float(period);
+    return to_int(1000.0 * cos(theta));
+}
+
+fn sinusoidal_pe(pos) -> array {
+    h v = arr_new(D, 0);
+    arr_set(v, 0, sin_channel(pos, 8));
+    arr_set(v, 1, cos_channel(pos, 8));
+    arr_set(v, 2, sin_channel(pos, 64));
+    arr_set(v, 3, cos_channel(pos, 64));
+    return v;
+}
+
+# ---------------------------------------------------------------------------
+# Squared L2 distance and exact equality on D-vectors.
+# ---------------------------------------------------------------------------
+fn l2sq(a, b) -> int {
+    h s = 0;
+    h i = 0;
+    while i < D {
+        h d = arr_get(a, i) - arr_get(b, i);
+        s = s + (d * d);
+        i = i + 1;
+    }
+    return s;
+}
+
+fn vec_eq(a, b) -> int {
+    h i = 0;
+    while i < D {
+        if arr_get(a, i) != arr_get(b, i) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# ---------------------------------------------------------------------------
+# Count unique vectors among L positions. O(L^2) — fine for L<=200.
+# which: 0 = harmonic-CRT, 1 = sinusoidal.
+# ---------------------------------------------------------------------------
+fn count_unique(L, which) -> int {
+    h unique = 0;
+    h i = 0;
+    while i < L {
+        h vi = arr_new(D, 0);
+        if which == 0 { vi = harmonic_crt_pe(i); }
+        if which == 1 { vi = sinusoidal_pe(i); }
+        h is_first = 1;
+        h j = 0;
+        while j < i {
+            h vj = arr_new(D, 0);
+            if which == 0 { vj = harmonic_crt_pe(j); }
+            if which == 1 { vj = sinusoidal_pe(j); }
+            if vec_eq(vi, vj) == 1 {
+                is_first = 0;
+                j = i;
+            }
+            j = j + 1;
+        }
+        if is_first == 1 { unique = unique + 1; }
+        i = i + 1;
+    }
+    return unique;
+}
+
+# ---------------------------------------------------------------------------
+# Lookup recovery: build vectors for positions 0..L, then for each
+# position generate a query (perfect, no perturbation), find the
+# argmin-L2 stored position, count exact-match recoveries.
+# ---------------------------------------------------------------------------
+fn lookup_recovery(L, which) -> int {
+    h hits = 0;
+    h q = 0;
+    while q < L {
+        h vq = arr_new(D, 0);
+        if which == 0 { vq = harmonic_crt_pe(q); }
+        if which == 1 { vq = sinusoidal_pe(q); }
+        h best_dist = 0 - 1;   # sentinel "infinity"
+        h best_pos = 0 - 1;
+        h k = 0;
+        while k < L {
+            h vk = arr_new(D, 0);
+            if which == 0 { vk = harmonic_crt_pe(k); }
+            if which == 1 { vk = sinusoidal_pe(k); }
+            h d = l2sq(vq, vk);
+            if best_dist < 0 {
+                best_dist = d;
+                best_pos = k;
+            }
+            if d < best_dist {
+                best_dist = d;
+                best_pos = k;
+            }
+            k = k + 1;
+        }
+        if best_pos == q { hits = hits + 1; }
+        q = q + 1;
+    }
+    return hits;
+}
+
+# ---------------------------------------------------------------------------
+# Sweep + report.
+# ---------------------------------------------------------------------------
+println("Experiment 10: harmonic CRT-style PE vs sinusoidal");
+println("---------------------------------------------------");
+println("Channels: 4. Harmonic moduli: 5, 8, 13, 21 (Fibonacci, pairwise coprime).");
+println("Sinusoidal: sin/cos at periods 8 and 64.");
+println("");
+println("L         harmonic_unique  sin_unique     harmonic_hits  sin_hits");
+
+h ls = [8, 16, 32, 48, 64, 100, 200];
+h li = 0;
+while li < arr_len(ls) {
+    h L = arr_get(ls, li);
+    h hu = count_unique(L, 0);
+    h su = count_unique(L, 1);
+    h hh = lookup_recovery(L, 0);
+    h sh = lookup_recovery(L, 1);
+    println(concat_many("",
+        "L=", L,
+        "  harmonic_unique=", hu, "/", L,
+        "  sin_unique=", su, "/", L,
+        "  harmonic_hits=", hh, "/", L,
+        "  sin_hits=", sh, "/", L));
+    li = li + 1;
+}
+
+println("");
+println("If harmonic_unique stays > sin_unique at large L, the CRT-style");
+println("encoding wins on distinctness. If harmonic_hits stays >= sin_hits,");
+println("it also wins on lookup recovery — the architecturally relevant");
+println("metric for transformerless attention.");
