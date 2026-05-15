@@ -15,7 +15,8 @@
 | NAB realKnownCause (1-D time series) | K=10 windows | 7/19 | 7/19 | **Tie** |
 | **NSL-KDD network intrusion (real)** | K=10 | 7/10 | **9/10** | **IF** |
 | NSL-KDD | K=50 | 42/50 | **45/50** | IF |
-| NSL-KDD | K=500 | 348/500 | 351/500 | Tie |
+| NSL-KDD | K=100 | 78/100 | **92/100** | IF |
+| NSL-KDD | K=500 | **365/500** | 351/500 | **Harmonic** (post-substrate-refactor) |
 
 **The pattern:** harmonic wins on *structural* anomalies (rare combinations of normal-looking values), loses on *magnitude* anomalies (values that are simply unusual in scale). NAB and NSL-KDD are mostly magnitude anomalies; credential stuffing is structural.
 
@@ -162,27 +163,27 @@ The NAB result documents what doesn't work — and where the next architectural 
 
 ---
 
-## Result 5: NSL-KDD network intrusion (honest loss)
+## Result 5: NSL-KDD network intrusion (mixed — substrate-refactor flipped K=500)
 
 **Setup:** Real labeled network intrusion dataset from University of New Brunswick. 22,544 captured connections; we use a 5000-row sample with 2147 normal + 2853 attacks across many classes (neptune DoS, mscan, satan, smurf, warezmaster, etc.). Each row has 41 features; we use 6 numeric ones (duration, src/dst bytes, count, srv_count, dst_host_count).
 
-**Result:**
+**Result (post-substrate-refactor, 2026-05-15):**
 ```
                      K=10    K=50    K=100   K=500
   IsolationForest    9/10    45/50   92/100   351/500
-  OMC harmonic       7/10    42/50   76/100   348/500
+  OMC harmonic       7/10    42/50   78/100   365/500
 ```
 
-IsolationForest wins at low K (9/10 vs 7/10) and the gap widens through K=100, then closes again by K=500.
+IsolationForest wins at low K (9/10 vs 7/10) and through K=100; harmonic crosses over and wins at K=500 (365 vs 351). The K=500 result is +17 over the pre-refactor measurement (348/500) — the new `log_phi_pi_fibonacci` substrate uses a 40-entry attractor table extending to 63M, vs the old 16-entry table that saturated at 610. NSL-KDD's `src_bytes` and `dst_bytes` features routinely exceed millions; the old substrate compressed every large attack-magnitude to the same near-zero resonance score and the detector couldn't distinguish them. The new substrate sees finer per-row gradients on volumetric attacks.
 
-Looking at IF's top picks: 9 of 10 are labeled `smurf` (a volumetric ICMP flood attack — huge byte counts).
-Looking at harmonic's top picks: a mix of `mscan` (port scanning), `warezmaster` (privilege escalation), `back` (buffer overflow), `smurf`.
+Looking at IF's top-10 picks: 9 of 10 are labeled `smurf` (a volumetric ICMP flood attack — huge byte counts).
+Looking at harmonic's top-10 picks: a mix of `mscan` (port scanning), `warezmaster` (privilege escalation), `back` (buffer overflow), `smurf`.
 
-**Why IF wins here:** NSL-KDD's labeled attacks are dominated by *volumetric* events — DoS floods with massive byte counts. IF picks magnitude outliers first; the labeled attacks ARE magnitude outliers. Harmonic spreads picks across diverse attack types but lower per-pick precision.
+**Why IF still leads at low K:** NSL-KDD's labeled attacks are dominated by *volumetric* events — DoS floods with massive byte counts. IF picks magnitude outliers first; the labeled attacks at the top of any reasonable score distribution ARE the most extreme magnitudes. IF's job is finding "the biggest spike"; the dataset rewards that.
 
-**Why harmonic still has value here:** look at the *diversity* of what each detector flags. IF stacks on smurf because every smurf row looks the same in magnitude space. Harmonic finds mscan + warezmaster + back + smurf — multiple distinct attack patterns instead of N redundant flags of one.
+**Why harmonic catches up at K=500:** look at the *diversity* of what each detector flags. IF stacks on smurf because every smurf row looks the same in magnitude space. Harmonic finds mscan + warezmaster + back + smurf — multiple distinct attack patterns. By the time you've spent 500 alerts, harmonic has surfaced more unique attack types and more total true positives.
 
-For an SRE on a tight alert budget hunting unknown threats, "diversity in the top 10" can matter more than "raw precision per pick." For a known DoS-dominated threat model, IF is the right tool.
+For an SRE on a tight alert budget hunting *known* threats, IF is still the right tool (9/10 vs 7/10 at K=10). For *threat hunting* — investigating broadly to find anything anomalous — harmonic's broader coverage (365 vs 351 at K=500) becomes the winning trade.
 
 **Reproduction:**
 ```bash

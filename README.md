@@ -220,10 +220,14 @@ Real comparisons against scikit-learn's IsolationForest. Not synthetic glory —
 | **Multi-dim credential stuffing, K=10** | **10/10** | 7/10 | Account-takeover, exfiltration, structural attacks |
 | Multi-dim K=25 | **25/25** | 17/25 | Subspace anomaly detection |
 | Multi-dim K=50 | **50/50** | 40/50 | Same as above, broader recall |
+| **NSL-KDD real intrusion data, K=500** | **365/500** | 351/500 | Threat hunting — broad recall on real labeled attacks |
+| NSL-KDD K=10 / K=50 / K=100 | 7 / 42 / 78 | **9 / 45 / 92** | Volumetric DoS — IF wins on low-K when biggest spike = real |
 | NAB realKnownCause (1-D time series) | 7/19 | 7/19 | Tie at naive baseline tier (SOTA needs CUSUM/HMM) |
 | Power-law K=30 (broad recall) | 5/30 | 15/30 | IF wins when you can investigate everything |
 
-The pattern: **harmonic decisively wins on multi-dim structural anomalies** (the credential-stuffing regime — values that look normal per-dim but rare in combination). Ties on simple time-series benchmarks where neither approach exploits temporal structure. Loses on broad-recall 1-D where IF's magnitude-based detection is the right tool.
+The pattern: **harmonic decisively wins on multi-dim structural anomalies** (the credential-stuffing regime — values that look normal per-dim but rare in combination), and **crosses over to wins on broad-recall threat hunting** even on volumetric-dominated data like NSL-KDD once K is large enough to reward diversity. Ties on simple time-series benchmarks where neither approach exploits temporal structure. Loses at low K on data where the labeled anomalies are all magnitude outliers (IF's home turf).
+
+NSL-KDD K=500 flipped from a tie (348 vs 351) to a harmonic win (365 vs 351) after the 2026-05-15 substrate refactor — the `log_phi_pi_fibonacci` substrate uses a 40-entry attractor table extending to 63M, vs the old 16-entry table that saturated at 610 and collapsed every large-magnitude attack into the same score. See [`SUBSTRATE_CHANGES.md`](SUBSTRATE_CHANGES.md).
 
 The harmonic_anomaly library at [`examples/lib/harmonic_anomaly.omc`](examples/lib/harmonic_anomaly.omc) packages the multi-dim detector with a clean `new` / `fit` / `top_k` API. Install it:
 
