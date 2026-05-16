@@ -113,9 +113,10 @@ Same workload (`examples/datascience/nsl_kdd_validation.omc`, 5000 rows):
 |---|--:|--:|
 | Tree-walk | 363 ms | n/a |
 | JIT (pre-L1.6) | 363 ms | 1 of 4 user fns |
-| **JIT (post-L1.6)** | **191 ms** | **15 of 53 user fns** (incl. `ha.score`) |
+| JIT (post-L1.6) | 191 ms | 15 of 53 user fns (incl. `ha.score`) |
+| **JIT (+ harmonic-primitive intrinsics)** | **107 ms** | 15 of 53 user fns (same fns, but inner harmonic calls now native) |
 
-**1.9× wall-clock speedup on the real harmonic_anomaly workload.** The hot-loop fn `ha.score` now actually runs through the JIT instead of falling back to tree-walk.
+**3.4× wall-clock speedup on the real harmonic_anomaly workload.** The hot-loop fn `ha.score` now runs through the JIT, and its inner calls to `attractor_distance` / `is_attractor` / `nth_fibonacci` / etc. are also native code instead of bouncing back to the tree-walk builtin dispatch per call.
 
 Synthetic microbench (sum over arr_range(0, 1000), 1000 iterations):
 

@@ -252,6 +252,164 @@ pub extern "C" fn omc_harmonic_unalign(n: i64) -> i64 {
     n - attr
 }
 
+/// harmony_value(n) -> f64 returned as i64 bit pattern.
+/// Returns 1.0 for n on a Fibonacci attractor, decays based on distance.
+/// Computed via HInt::compute_resonance, same as the OMC builtin.
+#[no_mangle]
+pub extern "C" fn omc_harmony_value(n: i64) -> i64 {
+    let r = omnimcode_core::value::HInt::compute_resonance(n);
+    r.to_bits() as i64
+}
+
+/// value_danger(n_bits) -> f64 bit pattern of exp(-|n_as_float|).
+/// Arg comes in as the bit pattern of an f64 (the OMC tree-walk path
+/// uses to_float() which can produce either int-as-int or float-as-bits
+/// depending on the value's type; we treat the lane-0 i64 as a float
+/// bit-pattern, matching the existing log_phi_pi_fibonacci convention).
+#[no_mangle]
+pub extern "C" fn omc_value_danger(n_bits: i64) -> i64 {
+    let f = f64::from_bits(n_bits as u64);
+    (-f.abs()).exp().to_bits() as i64
+}
+
+// ---------------------------------------------------------------------------
+// Binary i64,i64 -> i64 harmonic primitives
+// ---------------------------------------------------------------------------
+
+/// gcd(a, b) -> int. Standard Euclid; identity for (0, n) is n.
+#[no_mangle]
+pub extern "C" fn omc_gcd(a: i64, b: i64) -> i64 {
+    let mut a = a.unsigned_abs();
+    let mut b = b.unsigned_abs();
+    while b != 0 {
+        let t = b;
+        b = a % b;
+        a = t;
+    }
+    a as i64
+}
+
+/// lcm(a, b) -> int. Returns 0 if either arg is 0 (matching OMC builtin).
+#[no_mangle]
+pub extern "C" fn omc_lcm(a: i64, b: i64) -> i64 {
+    if a == 0 || b == 0 { return 0; }
+    let g = omc_gcd(a, b) as u64;
+    let abs_a = a.unsigned_abs();
+    let abs_b = b.unsigned_abs();
+    ((abs_a / g) * abs_b) as i64
+}
+
+/// safe_mod(a, b) -> int. Substrate-fold the divisor if dangerously
+/// close to zero, then standard rem_euclid. Mirrors the OMC builtin
+/// (which extends safe_divide's contract to modulo).
+#[no_mangle]
+pub extern "C" fn omc_safe_mod(a: i64, b: i64) -> i64 {
+    let bf = b as f64;
+    let danger = (-bf.abs()).exp();
+    let divisor = if danger > 0.5 {
+        let mut healed = omnimcode_core::phi_pi_fib::fold_to_nearest_attractor(b);
+        if healed == 0 { healed = 1; }
+        healed
+    } else {
+        b
+    };
+    a.rem_euclid(divisor.max(1))
+}
+
+// ---------------------------------------------------------------------------
+// Ternary i64,i64,i64 -> i64 harmonic primitives
+// ---------------------------------------------------------------------------
+
+/// mod_pow(base, exp, modulus) -> int via fast modular exponentiation.
+/// Matches the OMC builtin; uses i128 internally to avoid overflow in
+/// the squaring step.
+#[no_mangle]
+pub extern "C" fn omc_mod_pow(base: i64, exp: i64, modulus: i64) -> i64 {
+    if modulus == 0 { return 0; }
+    let m128 = modulus.unsigned_abs() as i128;
+    let mut result: i128 = 1 % m128;
+    let mut base_m = (base.rem_euclid(modulus)) as i128 % m128;
+    let mut e = exp.max(0) as u64;
+    while e > 0 {
+        if e & 1 == 1 {
+            result = (result * base_m) % m128;
+        }
+        base_m = (base_m * base_m) % m128;
+        e >>= 1;
+    }
+    result as i64
+}
+
+// ---------------------------------------------------------------------------
+// Array-input intrinsics (use the L1.6 marshalling)
+// ---------------------------------------------------------------------------
+
+/// arr_sum_int(arr_ptr) -> wrapping sum of elements.
+/// `arr_ptr` is the standard L1.6 length-prefixed buffer pointer:
+/// slot 0 = length, slots 1..=N = elements.
+#[no_mangle]
+pub extern "C" fn omc_arr_sum_int(arr_ptr: i64) -> i64 {
+    if arr_ptr == 0 { return 0; }
+    unsafe {
+        let p = arr_ptr as *const i64;
+        let len = *p as usize;
+        let mut s: i64 = 0;
+        for i in 1..=len {
+            s = s.wrapping_add(*p.add(i));
+        }
+        s
+    }
+}
+
+/// arr_product(arr_ptr) -> wrapping product of elements. Empty -> 1.
+#[no_mangle]
+pub extern "C" fn omc_arr_product(arr_ptr: i64) -> i64 {
+    if arr_ptr == 0 { return 1; }
+    unsafe {
+        let p = arr_ptr as *const i64;
+        let len = *p as usize;
+        let mut s: i64 = 1;
+        for i in 1..=len {
+            s = s.wrapping_mul(*p.add(i));
+        }
+        s
+    }
+}
+
+/// arr_min_int(arr_ptr) -> min element. Empty -> i64::MAX (sentinel).
+#[no_mangle]
+pub extern "C" fn omc_arr_min_int(arr_ptr: i64) -> i64 {
+    if arr_ptr == 0 { return i64::MAX; }
+    unsafe {
+        let p = arr_ptr as *const i64;
+        let len = *p as usize;
+        if len == 0 { return i64::MAX; }
+        let mut m = *p.add(1);
+        for i in 2..=len {
+            let v = *p.add(i);
+            if v < m { m = v; }
+        }
+        m
+    }
+}
+
+/// arr_max_int(arr_ptr) -> max element. Empty -> i64::MIN (sentinel).
+#[no_mangle]
+pub extern "C" fn omc_arr_max_int(arr_ptr: i64) -> i64 {
+    if arr_ptr == 0 { return i64::MIN; }
+    unsafe {
+        let p = arr_ptr as *const i64;
+        let len = *p as usize;
+        if len == 0 { return i64::MIN; }
+        let mut m = *p.add(1);
+        for i in 2..=len {
+            let v = *p.add(i);
+            if v > m { m = v; }
+        }
+        m
+    }
+}
+
 use std::collections::HashMap;
 
 use inkwell::basic_block::BasicBlock;
@@ -426,6 +584,14 @@ impl<'ctx> JitContext<'ctx> {
             ("omc_digit_sum",          omc_digit_sum as *const () as usize),
             ("omc_digit_count",        omc_digit_count as *const () as usize),
             ("omc_harmonic_unalign",   omc_harmonic_unalign as *const () as usize),
+            ("omc_harmony_value",      omc_harmony_value as *const () as usize),
+            ("omc_value_danger",       omc_value_danger as *const () as usize),
+            // Array-input intrinsics — same i64 -> i64 signature; the
+            // input i64 is the L1.6 length-prefixed buffer pointer.
+            ("omc_arr_sum_int",        omc_arr_sum_int as *const () as usize),
+            ("omc_arr_product",        omc_arr_product as *const () as usize),
+            ("omc_arr_min_int",        omc_arr_min_int as *const () as usize),
+            ("omc_arr_max_int",        omc_arr_max_int as *const () as usize),
         ] {
             let f = module.add_function(
                 name,
@@ -434,6 +600,25 @@ impl<'ctx> JitContext<'ctx> {
             );
             engine.add_global_mapping(&f, ptr);
         }
+
+        // Binary i64,i64 -> i64 intrinsics.
+        let binary_ty = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
+        for (name, ptr) in [
+            ("omc_gcd",      omc_gcd as *const () as usize),
+            ("omc_lcm",      omc_lcm as *const () as usize),
+            ("omc_safe_mod", omc_safe_mod as *const () as usize),
+        ] {
+            let f = module.add_function(name, binary_ty,
+                Some(inkwell::module::Linkage::External));
+            engine.add_global_mapping(&f, ptr);
+        }
+
+        // Ternary i64,i64,i64 -> i64 intrinsics.
+        let ternary_ty = i64_type.fn_type(
+            &[i64_type.into(), i64_type.into(), i64_type.into()], false);
+        let mod_pow_fn = module.add_function("omc_mod_pow", ternary_ty,
+            Some(inkwell::module::Linkage::External));
+        engine.add_global_mapping(&mod_pow_fn, omc_mod_pow as *const () as usize);
 
         Ok(JitContext {
             context,

@@ -681,59 +681,150 @@ impl<'ctx, 'a> DualBandLowerer<'ctx, 'a> {
                         stack.push(self.splat(ret_iv, "log_ret_v")?);
                         continue;
                     }
-                    // Harmonic-primitive intrinsics: unary i64 -> i64
-                    // OMC builtins routed through extern Rust shims
-                    // declared in JitContext::new. Each entry maps
-                    // (OMC source name, argc, extern fn name).
+                    // Harmonic-primitive intrinsics: OMC builtins routed
+                    // through extern Rust shims declared in JitContext::new.
+                    // Three arity tables — unary, binary, ternary — share
+                    // the same pattern: pop args, extract α lane (i64),
+                    // call extern, splat result back as <2 x i64>.
                     //
-                    // Adding a new entry here is enough to enable the
-                    // JIT for that builtin — the extern + global-mapping
-                    // side is already pluraled in lib.rs.
-                    const HARMONIC_INTRINSICS: &[(&str, usize, &str)] = &[
-                        ("nth_fibonacci",      1, "omc_nth_fibonacci"),
-                        ("is_attractor",       1, "omc_is_attractor"),
-                        ("attractor_distance", 1, "omc_attractor_distance"),
-                        ("hbit_tension",       1, "omc_attractor_distance"),
-                        ("fibonacci_index",    1, "omc_fibonacci_index"),
-                        ("attractor_bucket",   1, "omc_attractor_bucket"),
-                        ("substrate_hash",     1, "omc_substrate_hash"),
-                        ("zeckendorf_weight",  1, "omc_zeckendorf_weight"),
-                        ("bit_count",          1, "omc_bit_count"),
-                        ("bit_length",         1, "omc_bit_length"),
-                        ("digit_sum",          1, "omc_digit_sum"),
-                        ("digit_count",        1, "omc_digit_count"),
-                        ("harmonic_unalign",   1, "omc_harmonic_unalign"),
-                        ("harmonic_align",     1, "omc_fold"),
+                    // Unary table — including ARRAY-INPUT intrinsics where
+                    // the i64 arg is the L1.6 length-prefixed buffer pointer
+                    // (the JIT'd code already has that pointer on the stack
+                    // because arrays live as ptr-in-α from NewArray).
+                    const UNARY_INTRINSICS: &[(&str, &str)] = &[
+                        ("nth_fibonacci",      "omc_nth_fibonacci"),
+                        ("is_attractor",       "omc_is_attractor"),
+                        ("attractor_distance", "omc_attractor_distance"),
+                        ("hbit_tension",       "omc_attractor_distance"),
+                        ("fibonacci_index",    "omc_fibonacci_index"),
+                        ("attractor_bucket",   "omc_attractor_bucket"),
+                        ("substrate_hash",     "omc_substrate_hash"),
+                        ("zeckendorf_weight",  "omc_zeckendorf_weight"),
+                        ("bit_count",          "omc_bit_count"),
+                        ("bit_length",         "omc_bit_length"),
+                        ("digit_sum",          "omc_digit_sum"),
+                        ("digit_count",        "omc_digit_count"),
+                        ("harmonic_unalign",   "omc_harmonic_unalign"),
+                        ("harmonic_align",     "omc_fold"),
+                        // harmony_value / value_danger return floats. They're
+                        // NOT in this table because the dispatch boundary
+                        // wraps every i64 return as Value::HInt, which
+                        // would corrupt the float's bit-pattern interpretation
+                        // at the top level. The shims still exist in lib.rs
+                        // for future use once a returns_float plumbing path
+                        // mirrors returns_array_int.
+                        // Array-input intrinsics (input is buffer pointer).
+                        ("arr_sum_int",        "omc_arr_sum_int"),
+                        ("arr_product",        "omc_arr_product"),
+                        ("arr_min_int",        "omc_arr_min_int"),
+                        ("arr_max_int",        "omc_arr_max_int"),
                     ];
-                    if let Some(&(_, _, extern_name)) = HARMONIC_INTRINSICS
+                    if let Some(&(_, extern_name)) = UNARY_INTRINSICS
                         .iter()
-                        .find(|(n, ac, _)| n == name && *ac == *argc)
-                    {
-                        let v_v = self.pop(&mut stack, i, name)?;
-                        let alpha = self
-                            .builder
-                            .build_extract_element(v_v, i64_type.const_int(0, false), "intr_a")
-                            .map_err(|e| format!("intrinsic {} extract at op{}: {}", name, i, e))?;
-                        let alpha_iv = match alpha {
-                            BasicValueEnum::IntValue(iv) => iv,
-                            _ => return Err(format!("intrinsic {} arg not int at op{}", name, i)),
+                        .find(|(n, _)| n == name) {
+                        if *argc == 1 {
+                            let v_v = self.pop(&mut stack, i, name)?;
+                            let alpha = self
+                                .builder
+                                .build_extract_element(v_v, i64_type.const_int(0, false), "intr_a")
+                                .map_err(|e| format!("intrinsic {} extract at op{}: {}", name, i, e))?;
+                            let alpha_iv = match alpha {
+                                BasicValueEnum::IntValue(iv) => iv,
+                                _ => return Err(format!("intrinsic {} arg not int at op{}", name, i)),
+                            };
+                            let ext_fn = self.module
+                                .get_function(extern_name)
+                                .ok_or_else(|| format!("{} not declared at op{}", extern_name, i))?;
+                            let call = self
+                                .builder
+                                .build_call(ext_fn, &[alpha_iv.into()], "intr_call")
+                                .map_err(|e| format!("intrinsic {} call at op{}: {}", name, i, e))?;
+                            let ret = call
+                                .try_as_basic_value()
+                                .left()
+                                .ok_or_else(|| format!("intrinsic {} no value at op{}", name, i))?;
+                            let ret_iv = match ret {
+                                BasicValueEnum::IntValue(iv) => iv,
+                                _ => return Err(format!("intrinsic {} ret not int at op{}", name, i)),
+                            };
+                            stack.push(self.splat(ret_iv, "intr_ret_v")?);
+                            continue;
+                        }
+                    }
+                    // Binary i64,i64 -> i64 intrinsics.
+                    const BINARY_INTRINSICS: &[(&str, &str)] = &[
+                        ("gcd",      "omc_gcd"),
+                        ("lcm",      "omc_lcm"),
+                        ("safe_mod", "omc_safe_mod"),
+                    ];
+                    if let Some(&(_, extern_name)) = BINARY_INTRINSICS
+                        .iter()
+                        .find(|(n, _)| n == name) {
+                        if *argc == 2 {
+                            // Stack order: pushed left-to-right, so top = b, below = a.
+                            let b_v = self.pop(&mut stack, i, name)?;
+                            let a_v = self.pop(&mut stack, i, name)?;
+                            let zero = i64_type.const_int(0, false);
+                            let a_alpha = self.builder.build_extract_element(a_v, zero, "binintr_a")
+                                .map_err(|e| format!("binintr {} a extract at op{}: {}", name, i, e))?;
+                            let b_alpha = self.builder.build_extract_element(b_v, zero, "binintr_b")
+                                .map_err(|e| format!("binintr {} b extract at op{}: {}", name, i, e))?;
+                            let a_iv = match a_alpha {
+                                BasicValueEnum::IntValue(iv) => iv,
+                                _ => return Err(format!("binintr {} a not int at op{}", name, i)),
+                            };
+                            let b_iv = match b_alpha {
+                                BasicValueEnum::IntValue(iv) => iv,
+                                _ => return Err(format!("binintr {} b not int at op{}", name, i)),
+                            };
+                            let ext_fn = self.module
+                                .get_function(extern_name)
+                                .ok_or_else(|| format!("{} not declared at op{}", extern_name, i))?;
+                            let call = self.builder
+                                .build_call(ext_fn, &[a_iv.into(), b_iv.into()], "binintr_call")
+                                .map_err(|e| format!("binintr {} call at op{}: {}", name, i, e))?;
+                            let ret = call.try_as_basic_value().left()
+                                .ok_or_else(|| format!("binintr {} no value at op{}", name, i))?;
+                            let ret_iv = match ret {
+                                BasicValueEnum::IntValue(iv) => iv,
+                                _ => return Err(format!("binintr {} ret not int at op{}", name, i)),
+                            };
+                            stack.push(self.splat(ret_iv, "binintr_ret_v")?);
+                            continue;
+                        }
+                    }
+                    // Ternary i64,i64,i64 -> i64 intrinsics (currently mod_pow).
+                    if name == "mod_pow" && *argc == 3 {
+                        // Stack: top = c, mid = b, bottom = a.
+                        let c_v = self.pop(&mut stack, i, "mod_pow c")?;
+                        let b_v = self.pop(&mut stack, i, "mod_pow b")?;
+                        let a_v = self.pop(&mut stack, i, "mod_pow a")?;
+                        let zero = i64_type.const_int(0, false);
+                        let mut extract = |v, label: &str| -> Result<IntValue<'ctx>, CodegenError> {
+                            let e = self.builder.build_extract_element(v, zero, label)
+                                .map_err(|err| format!("mod_pow extract {} at op{}: {}", label, i, err))?;
+                            match e {
+                                BasicValueEnum::IntValue(iv) => Ok(iv),
+                                _ => Err(format!("mod_pow {} not int at op{}", label, i)),
+                            }
                         };
-                        let ext_fn = self.module
-                            .get_function(extern_name)
-                            .ok_or_else(|| format!("{} not declared at op{}", extern_name, i))?;
-                        let call = self
-                            .builder
-                            .build_call(ext_fn, &[alpha_iv.into()], "intr_call")
-                            .map_err(|e| format!("intrinsic {} call at op{}: {}", name, i, e))?;
-                        let ret = call
-                            .try_as_basic_value()
-                            .left()
-                            .ok_or_else(|| format!("intrinsic {} no value at op{}", name, i))?;
+                        let a_iv = extract(a_v, "mp_a")?;
+                        let b_iv = extract(b_v, "mp_b")?;
+                        let c_iv = extract(c_v, "mp_c")?;
+                        let ext_fn = self.module.get_function("omc_mod_pow")
+                            .ok_or_else(|| format!("omc_mod_pow not declared at op{}", i))?;
+                        let call = self.builder.build_call(
+                            ext_fn,
+                            &[a_iv.into(), b_iv.into(), c_iv.into()],
+                            "mod_pow_call"
+                        ).map_err(|e| format!("mod_pow call at op{}: {}", i, e))?;
+                        let ret = call.try_as_basic_value().left()
+                            .ok_or_else(|| format!("mod_pow no value at op{}", i))?;
                         let ret_iv = match ret {
                             BasicValueEnum::IntValue(iv) => iv,
-                            _ => return Err(format!("intrinsic {} ret not int at op{}", name, i)),
+                            _ => return Err(format!("mod_pow ret not int at op{}", i)),
                         };
-                        stack.push(self.splat(ret_iv, "intr_ret_v")?);
+                        stack.push(self.splat(ret_iv, "mod_pow_ret_v")?);
                         continue;
                     }
                     if name == "to_int" && *argc == 1 {

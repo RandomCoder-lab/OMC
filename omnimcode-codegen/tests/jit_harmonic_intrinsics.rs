@@ -212,3 +212,99 @@ fn jit_chained_harmonics() {
     // For n=100: unalign(100)=11, distance(100)=11, bit_count(100)=popcount(1100100)=3
     assert_eq!(jf.call(&[100]).unwrap(), 11 + 11 + 3);
 }
+
+// ---------- Binary i64,i64 -> i64 intrinsics ----------
+
+#[test]
+fn jit_gcd() {
+    let (_ctx, jf) = jit_one("fn f(a, b) { return gcd(a, b); }", "f");
+    assert_eq!(jf.call(&[12, 18]).unwrap(), 6);
+    assert_eq!(jf.call(&[7, 11]).unwrap(), 1);
+    assert_eq!(jf.call(&[0, 5]).unwrap(), 5, "gcd(0, n) = n");
+}
+
+#[test]
+fn jit_lcm() {
+    let (_ctx, jf) = jit_one("fn f(a, b) { return lcm(a, b); }", "f");
+    assert_eq!(jf.call(&[4, 6]).unwrap(), 12);
+    assert_eq!(jf.call(&[3, 7]).unwrap(), 21);
+    assert_eq!(jf.call(&[0, 5]).unwrap(), 0, "lcm with 0 = 0");
+}
+
+#[test]
+fn jit_safe_mod() {
+    let (_ctx, jf) = jit_one("fn f(a, b) { return safe_mod(a, b); }", "f");
+    assert_eq!(jf.call(&[10, 3]).unwrap(), 1, "10 mod 3 = 1");
+    assert_eq!(jf.call(&[10, 0]).unwrap(), 0, "10 mod safe(0)=1 → 0");
+}
+
+// ---------- Ternary mod_pow ----------
+
+#[test]
+fn jit_mod_pow() {
+    let (_ctx, jf) = jit_one("fn f(b, e, m) { return mod_pow(b, e, m); }", "f");
+    assert_eq!(jf.call(&[3, 5, 7]).unwrap(), 5, "3^5 mod 7 = 243 mod 7 = 5");
+    assert_eq!(jf.call(&[2, 10, 1000]).unwrap(), 24, "2^10 mod 1000");
+    assert_eq!(jf.call(&[7, 0, 5]).unwrap(), 1, "anything^0 = 1");
+}
+
+// ---------- Array-input intrinsics ----------
+//
+// These use the L1.6 input bridge implicitly: the OMC source builds
+// an array via NewArray (frame alloca, len-prefixed), then calls the
+// intrinsic which receives the pointer in lane 0 and reads from it.
+
+#[test]
+fn jit_arr_sum_int_internal_array() {
+    let (_ctx, jf) = jit_one(
+        "fn f() { h arr = [1, 2, 3, 4, 5]; return arr_sum_int(arr); }",
+        "f",
+    );
+    assert_eq!(jf.call(&[]).unwrap(), 15);
+}
+
+#[test]
+fn jit_arr_product_internal_array() {
+    let (_ctx, jf) = jit_one(
+        "fn f() { h arr = [1, 2, 3, 4, 5]; return arr_product(arr); }",
+        "f",
+    );
+    assert_eq!(jf.call(&[]).unwrap(), 120);
+}
+
+#[test]
+fn jit_arr_min_max_int_internal_array() {
+    let (_ctx, jf1) = jit_one(
+        "fn f() { h arr = [5, 1, 9, 3, 7]; return arr_min_int(arr); }",
+        "f",
+    );
+    assert_eq!(jf1.call(&[]).unwrap(), 1);
+    let (_ctx2, jf2) = jit_one(
+        "fn f() { h arr = [5, 1, 9, 3, 7]; return arr_max_int(arr); }",
+        "f",
+    );
+    assert_eq!(jf2.call(&[]).unwrap(), 9);
+}
+
+#[test]
+fn jit_combined_substrate_workload() {
+    // Hot-path-style: walk a frame array, fold each element, sum the
+    // residuals. Exercises NewArray + ArrayIndex + harmonic_unalign +
+    // ArrayLen inside the JIT, no tree-walk fallback.
+    let (_ctx, jf) = jit_one(r#"
+        fn substrate_load() {
+            h arr = [10, 20, 89, 100, 50, 144, 7];
+            h n = arr_len(arr);
+            h s = 0;
+            h i = 0;
+            while i < n {
+                s = s + harmonic_unalign(arr_get(arr, i));
+                i = i + 1;
+            }
+            return s;
+        }
+    "#, "substrate_load");
+    // unalign values per actual substrate nearest-attractor tiebreaker
+    // (verified empirically via tree-walk): 2 + (-1) + 0 + 11 + 16 + 0 + (-1) = 27
+    assert_eq!(jf.call(&[]).unwrap(), 27);
+}
