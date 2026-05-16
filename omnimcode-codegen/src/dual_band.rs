@@ -681,6 +681,61 @@ impl<'ctx, 'a> DualBandLowerer<'ctx, 'a> {
                         stack.push(self.splat(ret_iv, "log_ret_v")?);
                         continue;
                     }
+                    // Harmonic-primitive intrinsics: unary i64 -> i64
+                    // OMC builtins routed through extern Rust shims
+                    // declared in JitContext::new. Each entry maps
+                    // (OMC source name, argc, extern fn name).
+                    //
+                    // Adding a new entry here is enough to enable the
+                    // JIT for that builtin — the extern + global-mapping
+                    // side is already pluraled in lib.rs.
+                    const HARMONIC_INTRINSICS: &[(&str, usize, &str)] = &[
+                        ("nth_fibonacci",      1, "omc_nth_fibonacci"),
+                        ("is_attractor",       1, "omc_is_attractor"),
+                        ("attractor_distance", 1, "omc_attractor_distance"),
+                        ("hbit_tension",       1, "omc_attractor_distance"),
+                        ("fibonacci_index",    1, "omc_fibonacci_index"),
+                        ("attractor_bucket",   1, "omc_attractor_bucket"),
+                        ("substrate_hash",     1, "omc_substrate_hash"),
+                        ("zeckendorf_weight",  1, "omc_zeckendorf_weight"),
+                        ("bit_count",          1, "omc_bit_count"),
+                        ("bit_length",         1, "omc_bit_length"),
+                        ("digit_sum",          1, "omc_digit_sum"),
+                        ("digit_count",        1, "omc_digit_count"),
+                        ("harmonic_unalign",   1, "omc_harmonic_unalign"),
+                        ("harmonic_align",     1, "omc_fold"),
+                    ];
+                    if let Some(&(_, _, extern_name)) = HARMONIC_INTRINSICS
+                        .iter()
+                        .find(|(n, ac, _)| n == name && *ac == *argc)
+                    {
+                        let v_v = self.pop(&mut stack, i, name)?;
+                        let alpha = self
+                            .builder
+                            .build_extract_element(v_v, i64_type.const_int(0, false), "intr_a")
+                            .map_err(|e| format!("intrinsic {} extract at op{}: {}", name, i, e))?;
+                        let alpha_iv = match alpha {
+                            BasicValueEnum::IntValue(iv) => iv,
+                            _ => return Err(format!("intrinsic {} arg not int at op{}", name, i)),
+                        };
+                        let ext_fn = self.module
+                            .get_function(extern_name)
+                            .ok_or_else(|| format!("{} not declared at op{}", extern_name, i))?;
+                        let call = self
+                            .builder
+                            .build_call(ext_fn, &[alpha_iv.into()], "intr_call")
+                            .map_err(|e| format!("intrinsic {} call at op{}: {}", name, i, e))?;
+                        let ret = call
+                            .try_as_basic_value()
+                            .left()
+                            .ok_or_else(|| format!("intrinsic {} no value at op{}", name, i))?;
+                        let ret_iv = match ret {
+                            BasicValueEnum::IntValue(iv) => iv,
+                            _ => return Err(format!("intrinsic {} ret not int at op{}", name, i)),
+                        };
+                        stack.push(self.splat(ret_iv, "intr_ret_v")?);
+                        continue;
+                    }
                     if name == "to_int" && *argc == 1 {
                         let v_v = self.pop(&mut stack, i, "to_int arg")?;
                         let f64_type = self.ctx.f64_type();

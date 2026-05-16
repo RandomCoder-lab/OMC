@@ -133,6 +133,125 @@ pub extern "C" fn omc_arr_free(heap_ptr: i64) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Harmonic-primitive externs for the JIT
+// ---------------------------------------------------------------------------
+//
+// Each fn here is the "JIT shim" version of an OMC builtin: pure i64
+// signature, no allocations, no extern dependencies, just routes
+// straight to the substrate fn the OMC builtin already wraps. Wired
+// up by `JitContext::new` (global mapping) and intercepted by name
+// in the dual-band lowerer's Op::Call handler.
+
+/// nth_fibonacci(k): k-th term of the Fibonacci sequence (table lookup
+/// up to k≤40, then iterative for safety). Matches the OMC builtin.
+#[no_mangle]
+pub extern "C" fn omc_nth_fibonacci(k: i64) -> i64 {
+    let k = k.max(0) as u64;
+    let mut a: u64 = 0;
+    let mut b: u64 = 1;
+    let mut i: u64 = 0;
+    while i < k.min(93) {
+        let t = a.saturating_add(b);
+        a = b;
+        b = t;
+        i += 1;
+    }
+    a as i64
+}
+
+/// is_attractor(n) -> 0 or 1.
+#[no_mangle]
+pub extern "C" fn omc_is_attractor(n: i64) -> i64 {
+    if omnimcode_core::phi_pi_fib::is_on_fibonacci_attractor(n) { 1 } else { 0 }
+}
+
+/// attractor_distance(n) -> distance to nearest Fibonacci attractor.
+/// Also exposed as `hbit_tension` in the OMC surface.
+#[no_mangle]
+pub extern "C" fn omc_attractor_distance(n: i64) -> i64 {
+    let (_a, d) = omnimcode_core::phi_pi_fib::nearest_attractor_with_dist(n);
+    d
+}
+
+/// fibonacci_index(n) -> index of n in FIBONACCI table, or -1 if not present.
+#[no_mangle]
+pub extern "C" fn omc_fibonacci_index(n: i64) -> i64 {
+    omnimcode_core::phi_pi_fib::fibonacci_index_of(n)
+}
+
+/// attractor_bucket(value) -> 0..40 FIBONACCI-table index of nearest attractor.
+#[no_mangle]
+pub extern "C" fn omc_attractor_bucket(n: i64) -> i64 {
+    omnimcode_core::phi_pi_fib::attractor_bucket(n) as i64
+}
+
+/// substrate_hash(value) -> Zeckendorf-mixed avalanche hash.
+///
+/// Mirrors the OMC builtin: decompose magnitude into Zeckendorf indices,
+/// mix each through phi-shifted contributions, fold into a single i64.
+/// Reimplemented here (not via core builtin) because the core dispatch
+/// path takes Value not i64.
+#[no_mangle]
+pub extern "C" fn omc_substrate_hash(n: i64) -> i64 {
+    const SEED: u64 = 0x9E3779B97F4A7C15;
+    let mag = n.unsigned_abs();
+    let idxs = omnimcode_core::phi_pi_fib::zeckendorf_indices(mag);
+    let mut h: u64 = SEED;
+    for (rank, &i) in idxs.iter().enumerate() {
+        let term = (i as u64).wrapping_mul(SEED).rotate_left((rank * 5) as u32);
+        h = (h ^ term).wrapping_mul(SEED);
+    }
+    if n < 0 { h = h.wrapping_add(0xD1B54A32D192ED03); }
+    h as i64
+}
+
+/// zeckendorf_weight(n) -> number of Fibonacci terms in n's Zeckendorf rep.
+#[no_mangle]
+pub extern "C" fn omc_zeckendorf_weight(n: i64) -> i64 {
+    let mag = n.max(0) as u64;
+    omnimcode_core::phi_pi_fib::zeckendorf_indices(mag).len() as i64
+}
+
+/// bit_count(n) -> popcount of |n|.
+#[no_mangle]
+pub extern "C" fn omc_bit_count(n: i64) -> i64 {
+    n.count_ones() as i64
+}
+
+/// bit_length(n) -> minimum bits to represent |n|. 0 for n==0.
+#[no_mangle]
+pub extern "C" fn omc_bit_length(n: i64) -> i64 {
+    if n == 0 { 0 } else { (64 - n.unsigned_abs().leading_zeros()) as i64 }
+}
+
+/// digit_sum(n) -> sum of decimal digits of |n|.
+#[no_mangle]
+pub extern "C" fn omc_digit_sum(n: i64) -> i64 {
+    let mut x = n.unsigned_abs();
+    let mut s: i64 = 0;
+    if x == 0 { return 0; }
+    while x > 0 { s += (x % 10) as i64; x /= 10; }
+    s
+}
+
+/// digit_count(n) -> number of decimal digits in |n|. 1 for n==0.
+#[no_mangle]
+pub extern "C" fn omc_digit_count(n: i64) -> i64 {
+    let mut x = n.unsigned_abs();
+    if x == 0 { return 1; }
+    let mut c: i64 = 0;
+    while x > 0 { c += 1; x /= 10; }
+    c
+}
+
+/// harmonic_unalign(n) = n - fold(n) — the substrate residual.
+#[no_mangle]
+pub extern "C" fn omc_harmonic_unalign(n: i64) -> i64 {
+    let (attr, _) = omnimcode_core::phi_pi_fib::nearest_attractor_with_dist(n);
+    n - attr
+}
+
 use std::collections::HashMap;
 
 use inkwell::basic_block::BasicBlock;
@@ -287,6 +406,35 @@ impl<'ctx> JitContext<'ctx> {
             Some(inkwell::module::Linkage::External),
         );
         engine.add_global_mapping(&heapify_fn, omc_arr_heapify as *const () as usize);
+
+        // Harmonic-primitive externs. All are i64 -> i64; the dual-band
+        // lowerer intercepts the matching OMC builtin names and emits
+        // a call here instead of the generic user-fn dispatch path.
+        // Each (omc_name, rust_fn_ptr) pair must stay in sync with the
+        // intercept list in dual_band.rs:Op::Call.
+        let unary_ty = i64_type.fn_type(&[i64_type.into()], false);
+        for (name, ptr) in [
+            ("omc_nth_fibonacci",      omc_nth_fibonacci as *const () as usize),
+            ("omc_is_attractor",       omc_is_attractor as *const () as usize),
+            ("omc_attractor_distance", omc_attractor_distance as *const () as usize),
+            ("omc_fibonacci_index",    omc_fibonacci_index as *const () as usize),
+            ("omc_attractor_bucket",   omc_attractor_bucket as *const () as usize),
+            ("omc_substrate_hash",     omc_substrate_hash as *const () as usize),
+            ("omc_zeckendorf_weight",  omc_zeckendorf_weight as *const () as usize),
+            ("omc_bit_count",          omc_bit_count as *const () as usize),
+            ("omc_bit_length",         omc_bit_length as *const () as usize),
+            ("omc_digit_sum",          omc_digit_sum as *const () as usize),
+            ("omc_digit_count",        omc_digit_count as *const () as usize),
+            ("omc_harmonic_unalign",   omc_harmonic_unalign as *const () as usize),
+        ] {
+            let f = module.add_function(
+                name,
+                unary_ty,
+                Some(inkwell::module::Linkage::External),
+            );
+            engine.add_global_mapping(&f, ptr);
+        }
+
         Ok(JitContext {
             context,
             module,
