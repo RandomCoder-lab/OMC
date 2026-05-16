@@ -3,6 +3,16 @@
 use crate::ast::*;
 use std::collections::VecDeque;
 
+/// One segment of an f-string body. `f"x={n+1} done"` lexes as
+/// `[Literal("x="), Expr("n+1"), Literal(" done")]`. The parser
+/// re-parses each Expr segment via a sub-Parser to produce a real
+/// Expression AST and stitches the parts together via `concat_many`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum FStringPart {
+    Literal(String),
+    Expr(String),
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Token {
     // Keywords
@@ -31,6 +41,10 @@ pub enum Token {
     Finally,
     Throw,
     Match,
+    /// f-string template — alternating literal and expression segments.
+    /// Parser turns this into `concat_many(parts...)` at expression
+    /// position.
+    FString(Vec<FStringPart>),
     /// `..` for inclusive ranges in match patterns: `0..9`, `"a".."z"`.
     /// Lexed when not part of `..=` (which we don't use yet) or `...`.
     DotDot,
@@ -220,6 +234,87 @@ impl Lexer {
         result
     }
 
+    /// Read an f-string body — `f"x={n}"` syntax. Splits the body into
+    /// alternating literal and expression segments at `{...}` markers.
+    /// The expression segments are stored as raw source strings; the
+    /// parser later re-parses each via a sub-parser into a real
+    /// Expression AST. `{{` and `}}` are escape sequences for literal
+    /// `{` and `}` (Python-compatible).
+    fn read_fstring(&mut self, quote: char) -> Vec<FStringPart> {
+        let mut parts: Vec<FStringPart> = Vec::new();
+        let mut cur_lit = String::new();
+        self.advance(); // skip opening quote
+        while let Some(c) = self.current() {
+            if c == quote {
+                self.advance();
+                break;
+            }
+            if c == '{' {
+                // `{{` -> literal `{`
+                if self.peek(1) == Some('{') {
+                    cur_lit.push('{');
+                    self.advance(); self.advance();
+                    continue;
+                }
+                // Flush current literal segment.
+                if !cur_lit.is_empty() {
+                    parts.push(FStringPart::Literal(std::mem::take(&mut cur_lit)));
+                }
+                self.advance(); // consume `{`
+                let mut depth: i32 = 1;
+                let mut expr_src = String::new();
+                while let Some(ec) = self.current() {
+                    if ec == '{' { depth += 1; expr_src.push(ec); self.advance(); continue; }
+                    if ec == '}' {
+                        depth -= 1;
+                        if depth == 0 { self.advance(); break; }
+                        expr_src.push(ec);
+                        self.advance();
+                        continue;
+                    }
+                    expr_src.push(ec);
+                    self.advance();
+                }
+                parts.push(FStringPart::Expr(expr_src.trim().to_string()));
+                continue;
+            }
+            if c == '}' {
+                // `}}` -> literal `}`
+                if self.peek(1) == Some('}') {
+                    cur_lit.push('}');
+                    self.advance(); self.advance();
+                    continue;
+                }
+                // Bare `}` is an error in Python f-strings, but we
+                // accept it as a literal for ergonomics.
+                cur_lit.push('}');
+                self.advance();
+                continue;
+            }
+            if c == '\\' {
+                self.advance();
+                match self.current() {
+                    Some('n') => cur_lit.push('\n'),
+                    Some('t') => cur_lit.push('\t'),
+                    Some('r') => cur_lit.push('\r'),
+                    Some('\\') => cur_lit.push('\\'),
+                    Some('"') => cur_lit.push('"'),
+                    Some('\'') => cur_lit.push('\''),
+                    Some(c) => cur_lit.push(c),
+                    None => break,
+                }
+                self.advance();
+            } else {
+                cur_lit.push(c);
+                self.advance();
+            }
+        }
+        if !cur_lit.is_empty() {
+            parts.push(FStringPart::Literal(cur_lit));
+        }
+        parts
+    }
+
     fn read_number(&mut self) -> Token {
         let mut num_str = String::new();
         let mut is_float = false;
@@ -342,6 +437,15 @@ impl Lexer {
                 }
                 Some('\'') => return Token::String(self.read_string('\'')),
                 Some(c) if c.is_ascii_digit() => return self.read_number(),
+                // f-string prefix: `f"..."` or `f'...'` (also `F"..."`).
+                // Triggered ONLY when `f` is directly followed by a
+                // quote — a bare `f` identifier still parses normally.
+                Some(c) if (c == 'f' || c == 'F')
+                    && matches!(self.peek(1), Some('"') | Some('\'')) => {
+                    self.advance(); // consume `f`
+                    let quote = self.current().unwrap();
+                    return Token::FString(self.read_fstring(quote));
+                }
                 Some(c) if c.is_alphabetic() || c == '_' => {
                     let ident = self.read_ident();
                     return match ident.as_str() {
@@ -1535,6 +1639,35 @@ impl Parser {
                 let val = s;
                 self.advance();
                 Ok(Expression::String(val))
+            }
+            Token::FString(parts) => {
+                let parts_copy = parts.clone();
+                self.advance();
+                // Turn the f-string into `concat_many(seg0, seg1, ...)`
+                // where literal segments are Expression::String and
+                // expression segments are re-parsed via a sub-Parser.
+                // concat_many tolerates int/float args by calling
+                // to_string internally — so `f"x={n}"` works for any
+                // value type without an explicit to_string call.
+                let mut args: Vec<Expression> = Vec::new();
+                for part in parts_copy {
+                    match part {
+                        FStringPart::Literal(s) => args.push(Expression::String(s)),
+                        FStringPart::Expr(src) => {
+                            let mut sub = Parser::new(&src);
+                            let expr = sub.parse_expression()
+                                .map_err(|e| format!("f-string expr `{}`: {}", src, e))?;
+                            args.push(expr);
+                        }
+                    }
+                }
+                // Empty f-string `f""` produces "".
+                if args.is_empty() { return Ok(Expression::String(String::new())); }
+                Ok(Expression::Call {
+                    name: "concat_many".to_string(),
+                    args,
+                    pos: crate::ast::Pos::unknown(),
+                })
             }
             Token::LBracket => self.parse_array(),
             Token::LBrace => self.parse_dict(),

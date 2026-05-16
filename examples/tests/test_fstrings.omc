@@ -1,0 +1,59 @@
+# Tests for f-string interpolation. `f"..."` syntax is sugar for
+# `concat_many(literal_segments, to_string_calls...)`.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn test_simple_interp() {
+    h x = 42;
+    assert_eq(f"x={x}", "x=42", "simple int interpolation");
+}
+
+fn test_multiple_segments() {
+    h a = 1;
+    h b = 2;
+    assert_eq(f"{a}+{b}={a+b}", "1+2=3", "expression interpolation");
+}
+
+fn test_no_interp() {
+    # An f-string with NO {expr} segments is equivalent to a regular string.
+    assert_eq(f"hello", "hello", "no-interp f-string == regular string");
+}
+
+fn test_empty_fstring() {
+    assert_eq(f"", "", "empty f-string is empty");
+}
+
+fn test_string_interp() {
+    h name = "world";
+    assert_eq(f"hello {name}", "hello world", "string interpolation");
+}
+
+fn test_float_interp() {
+    h pi = 3.14;
+    assert_eq(f"pi={pi}", "pi=3.14", "float interpolation");
+}
+
+fn test_arithmetic_in_braces() {
+    h n = 5;
+    assert_eq(f"{n*2+1}", "11", "arithmetic inside braces");
+}
+
+fn test_brace_escape() {
+    # `{{` and `}}` are escape sequences for literal `{` and `}`.
+    assert_eq(f"left{{right}}", "left{right}", "{{ and }} escape");
+}
+
+fn test_nested_function_call() {
+    h n = 100;
+    assert_eq(f"abs={abs(0 - n)}", "abs=100", "function call inside braces");
+}
+
+fn test_substrate_primitive_in_braces() {
+    # f-strings compose with the substrate. nth_fibonacci is JIT-eligible;
+    # the f-string just calls to_string on the result.
+    assert_eq(f"fib(11)={nth_fibonacci(11)}", "fib(11)=89", "substrate primitive in f-string");
+}
