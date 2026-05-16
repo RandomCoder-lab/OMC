@@ -1,0 +1,99 @@
+# Build the training corpus for seed-expansion.
+#
+# For each function in our test files, emit a JSONL line:
+#   {canonical, raw_hash, attractor, distance, resonance, him, tokens}
+#
+# `tokens` is the omc_token_encode of the canonical form — variable length.
+# The model will be trained to: substrate-features → token sequence.
+
+fn show(label, v) { print(concat_many(label, " = ", to_string(v))); }
+
+fn process_one(canonical) {
+    h hd = omc_canonical_hash(canonical);
+    h raw = dict_get(hd, "raw");
+    h attractor = dict_get(hd, "attractor");
+    h distance = dict_get(hd, "distance");
+    h resonance = dict_get(hd, "resonance");
+    h him = 0.0;  # not on the dict we get from omc_canonical_hash
+    h tokens = omc_token_encode(canonical);
+    h out = dict_new();
+    dict_set(out, "canonical", canonical);
+    dict_set(out, "raw", raw);
+    dict_set(out, "attractor", attractor);
+    dict_set(out, "distance", distance);
+    dict_set(out, "resonance", resonance);
+    dict_set(out, "him", him);
+    dict_set(out, "tokens", tokens);
+    return out;
+}
+
+fn main() {
+    # Hand-curated small corpus of OMC function bodies to demonstrate
+    # the seed → tokens mapping. Each is small enough that a tiny model
+    # has a chance.
+    h corpus = [
+        "fn id(x) { return x; }",
+        "fn add(x, y) { return x + y; }",
+        "fn sub(x, y) { return x - y; }",
+        "fn mul(x, y) { return x * y; }",
+        "fn double(x) { return x * 2; }",
+        "fn triple(x) { return x * 3; }",
+        "fn square(x) { return x * x; }",
+        "fn cube(x) { return x * x * x; }",
+        "fn neg(x) { return 0 - x; }",
+        "fn inc(x) { return x + 1; }",
+        "fn dec(x) { return x - 1; }",
+        "fn is_zero(x) { if x == 0 { return 1; } return 0; }",
+        "fn is_positive(x) { if x > 0 { return 1; } return 0; }",
+        "fn abs_val(x) { if x < 0 { return 0 - x; } return x; }",
+        "fn max_2(a, b) { if a > b { return a; } return b; }",
+        "fn min_2(a, b) { if a < b { return a; } return b; }",
+        "fn sum_arr(xs) { return arr_sum_int(xs); }",
+        "fn len_arr(xs) { return arr_len(xs); }",
+        "fn first(xs) { return arr_get(xs, 0); }",
+        "fn last(xs) { return arr_get(xs, arr_len(xs) - 1); }",
+        "fn empty() { return []; }",
+        "fn single(x) { return [x]; }",
+        "fn pair(a, b) { return [a, b]; }",
+        "fn triple_arr(a, b, c) { return [a, b, c]; }",
+        "fn fact(n) { if n <= 1 { return 1; } return n * fact(n - 1); }",
+        "fn fib(n) { if n <= 1 { return n; } return fib(n - 1) + fib(n - 2); }",
+        "fn pow_int(b, e) { if e == 0 { return 1; } return b * pow_int(b, e - 1); }",
+        "fn sum_to_n(n) { h s = 0; h i = 1; while i <= n { s = s + i; i = i + 1; } return s; }",
+        "fn count_down(n) { h i = n; while i > 0 { i = i - 1; } return i; }",
+        "fn map_double(xs) { return arr_map(xs, fn(v) { return v * 2; }); }",
+        "fn filter_pos(xs) { return arr_filter(xs, fn(v) { return v > 0; }); }",
+        "fn relu_one(x) { if x > 0 { return x; } return 0; }",
+        "fn sign(x) { if x > 0 { return 1; } if x < 0 { return 0 - 1; } return 0; }",
+        "fn clamp01(x) { if x < 0 { return 0; } if x > 1 { return 1; } return x; }",
+        "fn nth_fib(n) { h a = 0; h b = 1; h i = 0; while i < n { h t = a + b; a = b; b = t; i = i + 1; } return a; }",
+        "fn dot(xs, ys) { return arr_dot(xs, ys); }",
+        "fn norm(xs) { return arr_norm(xs); }",
+        "fn softmax(xs) { return arr_softmax(xs); }",
+        "fn matmul(A, B) { return arr_matmul(A, B); }",
+        "fn transpose(M) { return arr_transpose(M); }",
+        "fn resonance_of(n) { return res(n); }",
+        "fn attractor_of(n) { return attractor_distance(n); }",
+        "fn is_fib(n) { return is_attractor(n); }",
+        "fn fold_to_fib(n) { return arr_fold_all([n]); }",
+        "fn make_dict(k, v) { h d = dict_new(); dict_set(d, k, v); return d; }",
+        "fn get_or(d, k, def) { return dict_get_or(d, k, def); }",
+        "fn keys(d) { return dict_keys(d); }",
+        "fn values(d) { return dict_values(d); }",
+        "fn upper_count(s) { return str_len(s); }",
+        "fn join_csv(xs) { return str_join(xs, \",\"); }",
+    ];
+
+    h jsonl_lines = [];
+    h i = 0;
+    while i < arr_len(corpus) {
+        h sample = process_one(arr_get(corpus, i));
+        arr_push(jsonl_lines, json_stringify(sample));
+        i = i + 1;
+    }
+    h jsonl = str_join(jsonl_lines, "\n");
+    write_file("/home/thearchitect/OMC/experiments/seed_expansion/corpus.jsonl", jsonl);
+    show("wrote corpus.jsonl with samples", arr_len(corpus));
+}
+
+main();
