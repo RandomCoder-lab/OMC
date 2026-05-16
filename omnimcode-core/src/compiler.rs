@@ -275,6 +275,9 @@ impl Compiler {
                         | "arr_substrate_score_rows"
                         // Lazy generator collector: returns array
                         | "gen_take"
+                        // Introspection / discoverability surface
+                        | "omc_list_builtins" | "omc_categories"
+                        | "omc_did_you_mean" | "omc_unique_builtins"
                         // Forward-mode autograd duals (Track 2 — 2026-05-16)
                         | "dual" | "dual_add" | "dual_sub"
                         | "dual_mul" | "dual_div" | "dual_neg"

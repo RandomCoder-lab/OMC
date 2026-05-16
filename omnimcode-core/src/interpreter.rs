@@ -6926,6 +6926,92 @@ impl Interpreter {
                 }
                 Ok(Value::HInt(HInt::new(count)))
             }
+            // ---- Introspection (LLM-discoverability surface) -------
+            //
+            // The docs registry in src/docs.rs is the source of truth.
+            // omc_help / omc_list_builtins / omc_categories give code
+            // (and LLMs driving code) a way to enumerate the builtin
+            // surface area at runtime — no separate cheat-sheet needed.
+            //
+            // omc_did_you_mean is what the unknown-function error path
+            // calls; exposing it as a builtin too means user code can
+            // suggest typo fixes when handling its own errors.
+            "omc_help" => {
+                if args.is_empty() {
+                    return Err("omc_help requires (name)".to_string());
+                }
+                let name = self.eval_expr(&args[0])?.to_display_string();
+                match crate::docs::lookup(&name) {
+                    Some(doc) => {
+                        let mut map = std::collections::BTreeMap::new();
+                        map.insert("name".to_string(), Value::String(doc.name.to_string()));
+                        map.insert("category".to_string(), Value::String(doc.category.to_string()));
+                        map.insert("signature".to_string(), Value::String(doc.signature.to_string()));
+                        map.insert("description".to_string(), Value::String(doc.description.to_string()));
+                        map.insert("example".to_string(), Value::String(doc.example.to_string()));
+                        map.insert("unique_to_omc".to_string(),
+                            Value::HInt(HInt::new(if doc.unique_to_omc { 1 } else { 0 })));
+                        Ok(Value::dict_from(map))
+                    }
+                    None => {
+                        // Surface the suggestion path: if there's no
+                        // doc entry, return a dict with did_you_mean
+                        // hits so an LLM/user immediately sees the typo.
+                        let suggestions = crate::docs::did_you_mean(&name, 5);
+                        let mut map = std::collections::BTreeMap::new();
+                        map.insert("name".to_string(), Value::String(name));
+                        map.insert("found".to_string(), Value::HInt(HInt::new(0)));
+                        let did_you_mean: Vec<Value> = suggestions.iter()
+                            .map(|s| Value::String(s.to_string()))
+                            .collect();
+                        map.insert(
+                            "did_you_mean".to_string(),
+                            Value::Array(HArray::from_vec(did_you_mean)),
+                        );
+                        Ok(Value::dict_from(map))
+                    }
+                }
+            }
+            "omc_list_builtins" => {
+                // Optional 1st arg = category filter.
+                let category_filter = if !args.is_empty() {
+                    Some(self.eval_expr(&args[0])?.to_display_string())
+                } else { None };
+                let cat_ref = category_filter.as_deref();
+                let names = crate::docs::names_in(cat_ref);
+                let out: Vec<Value> = names.iter()
+                    .map(|n| Value::String(n.to_string()))
+                    .collect();
+                Ok(Value::Array(HArray::from_vec(out)))
+            }
+            "omc_categories" => {
+                let cats = crate::docs::categories();
+                let out: Vec<Value> = cats.iter()
+                    .map(|c| Value::String(c.to_string()))
+                    .collect();
+                Ok(Value::Array(HArray::from_vec(out)))
+            }
+            "omc_did_you_mean" => {
+                if args.is_empty() {
+                    return Err("omc_did_you_mean requires (name)".to_string());
+                }
+                let query = self.eval_expr(&args[0])?.to_display_string();
+                let limit = if args.len() >= 2 {
+                    self.eval_expr(&args[1])?.to_int().max(1) as usize
+                } else { 5 };
+                let suggestions = crate::docs::did_you_mean(&query, limit);
+                let out: Vec<Value> = suggestions.iter()
+                    .map(|s| Value::String(s.to_string()))
+                    .collect();
+                Ok(Value::Array(HArray::from_vec(out)))
+            }
+            "omc_unique_builtins" => {
+                let out: Vec<Value> = crate::docs::BUILTINS.iter()
+                    .filter(|b| b.unique_to_omc)
+                    .map(|b| Value::String(b.name.to_string()))
+                    .collect();
+                Ok(Value::Array(HArray::from_vec(out)))
+            }
             // arr_fold_all(arr) -> new array with every element snapped
             // to its nearest Fibonacci attractor. Vectorized fold.
             // Substrate-canonical denoising / quantization primitive.
@@ -8419,7 +8505,21 @@ impl Interpreter {
                         return self.call_first_class_function(&v, arg_vals?);
                     }
                 }
-                Err(format!("Undefined function: {}", name))
+                // Unknown function — return a did_you_mean-augmented
+                // error message. Suggestions come from the documented
+                // builtin set (src/docs.rs); on no hits, we surface a
+                // plain "Undefined function" so LLMs / users don't see
+                // a confusing trailing "did you mean:" with nothing.
+                let suggestions = crate::docs::did_you_mean(name, 3);
+                if suggestions.is_empty() {
+                    Err(format!("Undefined function: {}", name))
+                } else {
+                    Err(format!(
+                        "Undefined function: {} (did you mean: {}?)",
+                        name,
+                        suggestions.join(", ")
+                    ))
+                }
             }
         }
     }

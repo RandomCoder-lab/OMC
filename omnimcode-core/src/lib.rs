@@ -5,6 +5,7 @@ pub mod ast;
 pub mod value;
 pub mod parser;
 pub mod interpreter;
+pub mod docs;
 pub mod runtime;
 pub mod circuits;      // Genetic logic circuits
 pub mod evolution;     // Genetic operators

@@ -1,0 +1,144 @@
+# Built-in introspection — what LLMs need to know what OMC can do.
+#
+# omc_help(name)            → dict of metadata for one builtin
+# omc_list_builtins(cat?)   → array of names (optionally filtered)
+# omc_categories()          → array of all category names
+# omc_did_you_mean(name)    → closest known names by edit distance
+# omc_unique_builtins()     → names of OMC-only primitives (no Python eq.)
+#
+# Plus: unknown-function errors now include did-you-mean suggestions.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) {
+    if !cond { test_record_failure(msg); }
+}
+
+# ---- omc_help on a known builtin returns full metadata ----
+
+fn test_help_known_builtin() {
+    h hh = omc_help("arr_softmax");
+    assert_eq(dict_get(hh, "name"), "arr_softmax", "name field");
+    assert_eq(dict_get(hh, "category"), "ml_kernels", "category field");
+    assert_true(str_len(dict_get(hh, "signature")) > 0, "non-empty signature");
+    assert_true(str_len(dict_get(hh, "description")) > 0, "non-empty description");
+    assert_true(str_len(dict_get(hh, "example")) > 0, "non-empty example");
+}
+
+fn test_help_on_substrate_marks_unique() {
+    h hh = omc_help("is_attractor");
+    assert_eq(dict_get(hh, "unique_to_omc"), 1, "is_attractor is OMC-unique");
+}
+
+fn test_help_on_standard_marks_not_unique() {
+    h hh = omc_help("arr_push");
+    assert_eq(dict_get(hh, "unique_to_omc"), 0, "arr_push is not OMC-unique");
+}
+
+fn test_help_on_unknown_returns_suggestions() {
+    h hh = omc_help("arr_softmx");  # typo
+    assert_eq(dict_get(hh, "found"), 0, "marked not found");
+    h suggestions = dict_get(hh, "did_you_mean");
+    assert_true(arr_len(suggestions) >= 1, "got at least one suggestion");
+    # arr_softmax should be in the suggestions
+    h has_match = 0;
+    h i = 0;
+    while i < arr_len(suggestions) {
+        if arr_get(suggestions, i) == "arr_softmax" { has_match = 1; }
+        i = i + 1;
+    }
+    assert_eq(has_match, 1, "arr_softmax suggested for arr_softmx typo");
+}
+
+# ---- omc_list_builtins ----
+
+fn test_list_all_builtins_nonempty() {
+    h all = omc_list_builtins();
+    assert_true(arr_len(all) > 50, "registry has at least 50 entries");
+}
+
+fn test_list_by_category_filters() {
+    h substrate = omc_list_builtins("substrate");
+    h ml = omc_list_builtins("ml_kernels");
+    # Every name in substrate should NOT also be in ml_kernels
+    assert_true(arr_len(substrate) >= 5, "substrate category populated");
+    assert_true(arr_len(ml) >= 5, "ml_kernels category populated");
+    assert_true(arr_len(substrate) < arr_len(omc_list_builtins()),
+        "filter actually filters");
+}
+
+fn test_list_unknown_category_returns_empty() {
+    h none = omc_list_builtins("nonexistent_category");
+    assert_eq(arr_len(none), 0, "unknown category → empty list");
+}
+
+# ---- omc_categories ----
+
+fn test_categories_includes_core() {
+    h cats = omc_categories();
+    assert_true(arr_len(cats) >= 5, "at least 5 categories");
+    h has_core = 0;
+    h has_substrate = 0;
+    h i = 0;
+    while i < arr_len(cats) {
+        h c = arr_get(cats, i);
+        if c == "core" { has_core = 1; }
+        if c == "substrate" { has_substrate = 1; }
+        i = i + 1;
+    }
+    assert_eq(has_core, 1, "has 'core' category");
+    assert_eq(has_substrate, 1, "has 'substrate' category");
+}
+
+# ---- omc_did_you_mean ----
+
+fn test_did_you_mean_close_match() {
+    h s = omc_did_you_mean("arr_softmx");
+    assert_true(arr_len(s) >= 1, "found a close match");
+    assert_eq(arr_get(s, 0), "arr_softmax", "closest is arr_softmax");
+}
+
+fn test_did_you_mean_no_close_match() {
+    # Garbage input → empty list (rather than wild guesses)
+    h s = omc_did_you_mean("xyzqqqzzz12345");
+    assert_eq(arr_len(s), 0, "no suggestions for unrelated input");
+}
+
+fn test_did_you_mean_with_limit() {
+    h s = omc_did_you_mean("tape_a", 2);
+    # Multiple tape_* names are within edit distance 3 of "tape_a"
+    assert_true(arr_len(s) <= 2, "respects limit");
+}
+
+# ---- omc_unique_builtins ----
+
+fn test_unique_builtins_includes_substrate() {
+    h u = omc_unique_builtins();
+    assert_true(arr_len(u) >= 5, "has at least 5 unique builtins");
+    h has_attr = 0;
+    h i = 0;
+    while i < arr_len(u) {
+        if arr_get(u, i) == "is_attractor" { has_attr = 1; }
+        i = i + 1;
+    }
+    assert_eq(has_attr, 1, "is_attractor is flagged unique");
+}
+
+# ---- Error messages: unknown function suggests known names ----
+
+fn test_unknown_function_error_has_suggestion() {
+    h err = "";
+    try {
+        h _ = arr_softmx([1.0, 2.0]);  # typo: missing 'a'
+    } catch e {
+        err = e;
+    }
+    # Error message should mention "did you mean"
+    assert_true(str_len(err) > 0, "got an error");
+    assert_true(re_match("did you mean", err) == 1, "error includes did-you-mean");
+    assert_true(re_match("arr_softmax", err) == 1, "suggests arr_softmax");
+}
