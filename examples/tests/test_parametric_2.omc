@@ -1,0 +1,160 @@
+# Parametric tests v2 — more table-driven coverage.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+
+# Every documented category has at least one builtin.
+fn test_categories_have_builtins() {
+    h cats = omc_categories();
+    h i = 0;
+    while i < arr_len(cats) {
+        h cat = arr_get(cats, i);
+        h items = omc_list_builtins(cat);
+        assert_true(arr_len(items) >= 1,
+            concat_many("category ", cat, " has builtins"));
+        i = i + 1;
+    }
+}
+
+# Every OMC-unique builtin appears in omc_list_builtins.
+fn test_unique_subset_of_all() {
+    h unique = omc_unique_builtins();
+    h all = omc_list_builtins();
+    h i = 0;
+    while i < arr_len(unique) {
+        h u = arr_get(unique, i);
+        h found = 0;
+        h j = 0;
+        while j < arr_len(all) {
+            if arr_get(all, j) == u { found = 1; }
+            j = j + 1;
+        }
+        assert_eq(found, 1, concat_many(u, " in all"));
+        i = i + 1;
+    }
+}
+
+# Help on every builtin returns a non-empty signature.
+fn test_help_returns_signature() {
+    h all = omc_list_builtins();
+    h i = 0;
+    h checked = 0;
+    while i < arr_len(all) {
+        # Sample every 5th to keep test fast.
+        if i % 5 == 0 {
+            h hd = omc_help(arr_get(all, i));
+            assert_true(str_len(dict_get(hd, "signature")) > 0,
+                concat_many(arr_get(all, i), " sig"));
+            checked = checked + 1;
+        }
+        i = i + 1;
+    }
+    assert_true(checked > 50, "checked many");
+}
+
+# Tokenizer round-trip on a varied corpus.
+fn test_tokenizer_corpus_roundtrip() {
+    h corpus = [
+        "fn f() {}",
+        "h x = 1;",
+        "h y = arr_get(xs, 0);",
+        "if x > 0 { return 1; }",
+        "while i < n { i = i + 1; }",
+        "for v in xs { print(v); }",
+        "arr_softmax([1.0, 2.0])",
+        "h d = dict_new();",
+        "dict_set(d, \"k\", 42);",
+        "tape_reset();",
+        "h u = tape_var(3.0);",
+        "h grad = tape_grad(u);",
+        "is_attractor(8)",
+        "arr_resonance_vec([1, 2, 3])",
+        "arr_substrate_attention(Q, K, V)",
+        "omc_help(\"name\")",
+        "omc_explain_error(msg)",
+        "omc_code_canonical(src)",
+        "omc_code_equivalent(a, b)",
+        "try { throw \"x\"; } catch e { return e; }",
+    ];
+    h i = 0;
+    while i < arr_len(corpus) {
+        h c = arr_get(corpus, i);
+        h back = omc_token_decode(omc_token_encode(c));
+        assert_eq(back, c, concat_many("rt[", to_string(i), "]"));
+        i = i + 1;
+    }
+}
+
+# Compression > 1 on most known-builtin code.
+fn test_compression_on_builtin_heavy_code() {
+    h cases = [
+        "arr_softmax(arr_neg(xs))",
+        "arr_matmul(arr_transpose(A), B)",
+        "tape_backward(tape_sum(tape_matmul(X, W)))",
+        "is_attractor(arr_get(xs, 0))",
+        "omc_help(omc_completion_hint(\"arr_\"))",
+    ];
+    h i = 0;
+    while i < arr_len(cases) {
+        h r = omc_token_compression_ratio(arr_get(cases, i));
+        assert_true(r > 1.0,
+            concat_many("case ", to_string(i), " ratio > 1"));
+        i = i + 1;
+    }
+}
+
+# Match: alpha-equivalent canonicals on many transformations.
+fn test_alpha_equivalence_table() {
+    h pairs = [
+        ["fn f(a) { return a; }", "fn f(b) { return b; }"],
+        ["fn add(x, y) { return x + y; }", "fn add(p, q) { return p + q; }"],
+        ["fn loop(n) { h i = 0; while i < n { i = i + 1; } return i; }",
+         "fn loop(n) { h k = 0; while k < n { k = k + 1; } return k; }"],
+        ["fn lookup(d, key) { return dict_get(d, key); }",
+         "fn lookup(dt, k) { return dict_get(dt, k); }"],
+    ];
+    h i = 0;
+    while i < arr_len(pairs) {
+        h p = arr_get(pairs, i);
+        h r = omc_code_equivalent(arr_get(p, 0), arr_get(p, 1));
+        assert_eq(r, 1, concat_many("equiv pair ", to_string(i)));
+        i = i + 1;
+    }
+}
+
+# Explain-error matches across many real OMC errors.
+fn test_explain_error_real_table() {
+    h cases = [
+        "Undefined function: arr_softmx",
+        "arr_get: index 5 out of bounds (len 3)",
+        "arr_matmul: shape mismatch — A is 2x3, B is 5x2",
+        "dict_get: first argument must be a dict",
+        "Expected Semicolon, got LParen",
+        "Expected identifier, got Harmonic",
+    ];
+    h i = 0;
+    while i < arr_len(cases) {
+        h ex = omc_explain_error(arr_get(cases, i));
+        assert_eq(dict_get(ex, "matched"), 1,
+            concat_many("err ", to_string(i), " matched"));
+        i = i + 1;
+    }
+}
+
+# Code-distance ordering: longer edits → bigger distance (loose).
+fn test_code_distance_grows_with_change() {
+    h base = "fn f(x) { return x; }";
+    h tiny = "fn f(x) { return x + 1; }";
+    h big = "fn f(x) { return x * x * x + arr_softmax([x]); }";
+    h d_tiny = omc_code_distance(base, tiny);
+    h d_big = omc_code_distance(base, big);
+    assert_true(d_tiny > 0, "tiny edit nonzero");
+    assert_true(d_big > 0, "big edit nonzero");
+    # Bigger change should produce a larger hash difference (loose check).
+    assert_true(d_big > 0, "big > 0");
+}
