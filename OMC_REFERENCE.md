@@ -2,7 +2,7 @@
 
 Auto-generated from `omnimcode-core/src/docs.rs`. Run `omc --gen-docs > OMC_REFERENCE.md` to regenerate.
 
-**Total documented builtins**: 406
+**Total documented builtins**: 498
 
 **OMC-unique**: 45 (no direct Python/NumPy equivalent — these are why you reach for OMC over numpy)
 
@@ -11,23 +11,23 @@ Auto-generated from `omnimcode-core/src/docs.rs`. Run `omc --gen-docs > OMC_REFE
 ## Categories
 
 - [core](#core) (124 builtins)
-- [arrays](#arrays) (70 builtins)
+- [arrays](#arrays) (111 builtins)
 - [linalg](#linalg) (4 builtins)
 - [ml_kernels](#ml_kernels) (6 builtins)
 - [substrate](#substrate) (24 builtins)
 - [autograd](#autograd) (16 builtins)
 - [duals](#duals) (12 builtins)
 - [generators](#generators) (5 builtins)
-- [strings](#strings) (25 builtins)
-- [regex](#regex) (5 builtins)
+- [strings](#strings) (33 builtins)
+- [regex](#regex) (7 builtins)
 - [json](#json) (2 builtins)
 - [stdlib](#stdlib) (12 builtins)
 - [exceptions](#exceptions) (2 builtins)
 - [introspection](#introspection) (22 builtins)
 - [tokenizer](#tokenizer) (16 builtins)
 - [code_intel](#code_intel) (14 builtins)
-- [math](#math) (29 builtins)
-- [dicts](#dicts) (14 builtins)
+- [math](#math) (58 builtins)
+- [dicts](#dicts) (26 builtins)
 - [test_runner](#test_runner) (4 builtins)
 
 ---
@@ -1978,6 +1978,416 @@ arr_zeros(...)  // see omc_help
 arr_zip(...)  // see omc_help
 ```
 
+### `arr_all`
+
+**Signature**: `(arr, pred_fn?) -> int`
+
+1 if every element is truthy (or matches predicate).
+
+```omc
+arr_all([1,1,1])  // 1
+```
+
+### `arr_any`
+
+**Signature**: `(arr, pred_fn?) -> int`
+
+1 if any element is truthy (or matches predicate).
+
+```omc
+arr_any([0,0,1])  // 1
+```
+
+### `arr_avg_distance`
+
+**Signature**: `(arr) -> float`
+
+Average pairwise distance between elements.
+
+```omc
+arr_avg_distance([1,2,3,4])  // 1.0
+```
+
+### `arr_chunk`
+
+**Signature**: `(arr, n: int) -> array[]`
+
+Split into chunks of size n.
+
+```omc
+arr_chunk([1,2,3,4,5], 2)  // [[1,2],[3,4],[5]]
+```
+
+### `arr_contains`
+
+**Signature**: `(arr, value) -> int`
+
+1 if value appears in arr.
+
+```omc
+arr_contains([1,2,3], 2)  // 1
+```
+
+### `arr_count`
+
+**Signature**: `(arr, value) -> int`
+
+Number of times value appears.
+
+```omc
+arr_count([1,2,2,3], 2)  // 2
+```
+
+### `arr_cumsum`
+
+**Signature**: `(arr) -> array`
+
+Cumulative sum of elements.
+
+```omc
+arr_cumsum([1,2,3])  // [1,3,6]
+```
+
+### `arr_diff`
+
+**Signature**: `(arr) -> array`
+
+First differences (out[i] = arr[i+1] - arr[i]).
+
+```omc
+arr_diff([1,3,6,10])  // [2,3,4]
+```
+
+### `arr_drop`
+
+**Signature**: `(arr, n: int) -> array`
+
+Skip the first n elements.
+
+```omc
+arr_drop([1,2,3,4], 2)  // [3,4]
+```
+
+### `arr_enumerate`
+
+**Signature**: `(arr) -> array`
+
+Pairs of (index, value).
+
+```omc
+arr_enumerate(["a","b"])  // [[0,"a"],[1,"b"]]
+```
+
+### `arr_find`
+
+**Signature**: `(arr, pred_fn) -> any`
+
+First element matching predicate; null if none.
+
+```omc
+arr_find([1,2,3], fn(x){return x>1;})  // 2
+```
+
+### `arr_first`
+
+**Signature**: `(arr) -> any`
+
+First element, or null if empty.
+
+```omc
+arr_first([1,2,3])  // 1
+```
+
+### `arr_flatten`
+
+**Signature**: `(arr_of_arrays) -> array`
+
+One-level flatten.
+
+```omc
+arr_flatten([[1,2],[3,4]])  // [1,2,3,4]
+```
+
+### `arr_from_range`
+
+**Signature**: `(start, end) -> int[]`
+
+[start, start+1, ..., end-1].
+
+```omc
+arr_from_range(0, 5)  // [0,1,2,3,4]
+```
+
+### `arr_gcd`
+
+**Signature**: `(arr: int[]) -> int`
+
+GCD of all elements.
+
+```omc
+arr_gcd([12, 18, 24])  // 6
+```
+
+### `arr_geometric_mean`
+
+**Signature**: `(arr) -> float`
+
+n-th root of product.
+
+```omc
+arr_geometric_mean([1.0, 4.0])  // 2.0
+```
+
+### `arr_harmonic_mean`
+
+**Signature**: `(arr) -> float`
+
+n / sum(1/xi).
+
+```omc
+arr_harmonic_mean([1.0, 2.0])  // 1.333
+```
+
+### `arr_index_of`
+
+**Signature**: `(arr, value) -> int`
+
+Position of first occurrence; -1 if not found.
+
+```omc
+arr_index_of([1,2,3], 2)  // 1
+```
+
+### `arr_is_sorted`
+
+**Signature**: `(arr) -> int`
+
+1 if non-decreasing.
+
+```omc
+arr_is_sorted([1,2,3])  // 1
+```
+
+### `arr_join`
+
+**Signature**: `(arr, sep: string) -> string`
+
+Stringify and join with separator.
+
+```omc
+arr_join([1,2,3], ",")  // "1,2,3"
+```
+
+### `arr_last`
+
+**Signature**: `(arr) -> any`
+
+Last element, or null if empty.
+
+```omc
+arr_last([1,2,3])  // 3
+```
+
+### `arr_max`
+
+**Signature**: `(arr) -> any`
+
+Maximum element.
+
+```omc
+arr_max([3,1,4])  // 4
+```
+
+### `arr_max_float`
+
+**Signature**: `(arr) -> float`
+
+Maximum element (typed-float).
+
+```omc
+arr_max_float([1.0, 2.5, 0.5])  // 2.5
+```
+
+### `arr_median`
+
+**Signature**: `(arr) -> float`
+
+Median of values.
+
+```omc
+arr_median([1.0, 2.0, 3.0])  // 2.0
+```
+
+### `arr_min`
+
+**Signature**: `(arr) -> any`
+
+Minimum element.
+
+```omc
+arr_min([3,1,4])  // 1
+```
+
+### `arr_norm`
+
+**Signature**: `(arr) -> float`
+
+Euclidean norm (L2).
+
+```omc
+arr_norm([3.0, 4.0])  // 5.0
+```
+
+### `arr_ones`
+
+**Signature**: `(n: int) -> int[]`
+
+n-length array of ones.
+
+```omc
+arr_ones(3)  // [1,1,1]
+```
+
+### `arr_partition_by`
+
+**Signature**: `(arr, pred_fn) -> [matching, rest]`
+
+Two arrays split on predicate.
+
+```omc
+arr_partition_by([1,2,3,4], fn(x){return x>2;})  // [[3,4], [1,2]]
+```
+
+### `arr_product`
+
+**Signature**: `(arr) -> int|float`
+
+Product of elements.
+
+```omc
+arr_product([2,3,4])  // 24
+```
+
+### `arr_range`
+
+**Signature**: `(start, end, step?) -> int[]`
+
+Range with optional step.
+
+```omc
+arr_range(0, 10, 2)  // [0,2,4,6,8]
+```
+
+### `arr_reduce`
+
+**Signature**: `(arr, fn, init) -> any`
+
+Left fold with initial accumulator.
+
+```omc
+arr_reduce([1,2,3], fn(a,b){return a+b;}, 0)  // 6
+```
+
+### `arr_repeat`
+
+**Signature**: `(value, n: int) -> array`
+
+n-length array of value.
+
+```omc
+arr_repeat("x", 3)  // ["x","x","x"]
+```
+
+### `arr_sort_int`
+
+**Signature**: `(arr) -> int[]`
+
+Sort integer array ascending.
+
+```omc
+arr_sort_int([3,1,2])  // [1,2,3]
+```
+
+### `arr_sum`
+
+**Signature**: `(arr) -> int|float`
+
+Sum of elements.
+
+```omc
+arr_sum([1,2,3])  // 6
+```
+
+### `arr_sum_sq`
+
+**Signature**: `(arr) -> float`
+
+Sum of squares.
+
+```omc
+arr_sum_sq([3, 4])  // 25
+```
+
+### `arr_take`
+
+**Signature**: `(arr, n: int) -> array`
+
+Take the first n elements.
+
+```omc
+arr_take([1,2,3,4], 2)  // [1,2]
+```
+
+### `arr_unique`
+
+**Signature**: `(arr) -> array`
+
+Deduplicate preserving order.
+
+```omc
+arr_unique([1,2,2,3,1])  // [1,2,3]
+```
+
+### `arr_unique_count`
+
+**Signature**: `(arr) -> int`
+
+Number of distinct values.
+
+```omc
+arr_unique_count([1,2,2,3])  // 3
+```
+
+### `arr_window`
+
+**Signature**: `(arr, size: int) -> array[]`
+
+Sliding windows of given size.
+
+```omc
+arr_window([1,2,3,4], 2)  // [[1,2],[2,3],[3,4]]
+```
+
+### `arr_zeros`
+
+**Signature**: `(n: int) -> int[]`
+
+n-length array of zeros.
+
+```omc
+arr_zeros(3)  // [0,0,0]
+```
+
+### `arr_zip`
+
+**Signature**: `(a, b) -> [a_i, b_i][]`
+
+Zip two arrays into pairs.
+
+```omc
+arr_zip([1,2], [10,20])  // [[1,10],[2,20]]
+```
+
 ---
 
 ## linalg
@@ -2926,6 +3336,86 @@ str_trim(...)  // see omc_help
 str_uppercase(...)  // see omc_help
 ```
 
+### `str_chars`
+
+**Signature**: `(s) -> string[]`
+
+Split into single-char strings.
+
+```omc
+str_chars("ab")  // ["a","b"]
+```
+
+### `str_count`
+
+**Signature**: `(s, sub) -> int`
+
+Non-overlapping occurrences.
+
+```omc
+str_count("banana", "a")  // 3
+```
+
+### `str_ends_with`
+
+**Signature**: `(s, suffix) -> int`
+
+1 if s ends with suffix.
+
+```omc
+str_ends_with("hello", "lo")  // 1
+```
+
+### `str_index_of`
+
+**Signature**: `(s, sub) -> int`
+
+Byte index of first occurrence; -1 if missing.
+
+```omc
+str_index_of("hello", "ll")  // 2
+```
+
+### `str_repeat`
+
+**Signature**: `(s, n) -> string`
+
+Repeat s n times.
+
+```omc
+str_repeat("ab", 3)  // "ababab"
+```
+
+### `str_replace`
+
+**Signature**: `(s, find, replace) -> string`
+
+Replace ALL occurrences.
+
+```omc
+str_replace("a.b", ".", "_")  // "a_b"
+```
+
+### `str_starts_with`
+
+**Signature**: `(s, prefix) -> int`
+
+1 if s begins with prefix.
+
+```omc
+str_starts_with("hello", "he")  // 1
+```
+
+### `str_trim`
+
+**Signature**: `(s) -> string`
+
+Strip leading/trailing whitespace.
+
+```omc
+str_trim("  x  ")  // "x"
+```
+
 ---
 
 ## regex
@@ -2978,6 +3468,26 @@ re_find(...)  // see omc_help
 
 ```omc
 re_split(...)  // see omc_help
+```
+
+### `re_find`
+
+**Signature**: `(pattern, s) -> string`
+
+First match, or empty string.
+
+```omc
+re_find("\d+", "abc123")  // "123"
+```
+
+### `re_split`
+
+**Signature**: `(pattern, s) -> string[]`
+
+Split by regex.
+
+```omc
+re_split("\s+", "a b  c")  // ["a","b","c"]
 ```
 
 ---
@@ -3978,6 +4488,296 @@ sqrt(...)  // see omc_help
 tan(...)  // see omc_help
 ```
 
+### `abs`
+
+**Signature**: `(n) -> int|float`
+
+Absolute value.
+
+```omc
+abs(-5)  // 5
+```
+
+### `acos`
+
+**Signature**: `(x: float) -> float`
+
+Arc-cosine (radians).
+
+```omc
+acos(0.0)  // π/2
+```
+
+### `asin`
+
+**Signature**: `(x: float) -> float`
+
+Arc-sine (radians).
+
+```omc
+asin(0.0)  // 0
+```
+
+### `atan`
+
+**Signature**: `(x: float) -> float`
+
+Arc-tangent (radians).
+
+```omc
+atan(1.0)  // π/4
+```
+
+### `atan2`
+
+**Signature**: `(y, x) -> float`
+
+Arc-tangent of y/x with quadrant handling.
+
+```omc
+atan2(1, 1)  // π/4
+```
+
+### `bit_count`
+
+**Signature**: `(n: int) -> int`
+
+Popcount: number of set bits.
+
+```omc
+bit_count(7)  // 3
+```
+
+### `bit_length`
+
+**Signature**: `(n: int) -> int`
+
+Highest set bit index + 1.
+
+```omc
+bit_length(8)  // 4
+```
+
+### `ceil`
+
+**Signature**: `(x: float) -> int`
+
+Round up to next integer.
+
+```omc
+ceil(1.2)  // 2
+```
+
+### `clamp`
+
+**Signature**: `(x, lo, hi) -> any`
+
+Clip x into [lo, hi].
+
+```omc
+clamp(15, 0, 10)  // 10
+```
+
+### `cos`
+
+**Signature**: `(x) -> float`
+
+Cosine.
+
+```omc
+cos(0)  // 1.0
+```
+
+### `digit_count`
+
+**Signature**: `(n: int) -> int`
+
+Count of decimal digits.
+
+```omc
+digit_count(1234)  // 4
+```
+
+### `digit_sum`
+
+**Signature**: `(n: int) -> int`
+
+Sum of decimal digits.
+
+```omc
+digit_sum(123)  // 6
+```
+
+### `exp`
+
+**Signature**: `(x) -> float`
+
+e^x.
+
+```omc
+exp(0)  // 1.0
+```
+
+### `floor`
+
+**Signature**: `(x: float) -> int`
+
+Round down to next integer.
+
+```omc
+floor(1.8)  // 1
+```
+
+### `fnv1a_hash`
+
+**Signature**: `(s: string) -> int`
+
+FNV-1a hash of a string. Fast non-cryptographic.
+
+```omc
+fnv1a_hash("foo")  // i64 hash
+```
+
+### `gcd`
+
+**Signature**: `(a, b) -> int`
+
+Greatest common divisor.
+
+```omc
+gcd(12, 18)  // 6
+```
+
+### `lcm`
+
+**Signature**: `(a, b) -> int`
+
+Least common multiple.
+
+```omc
+lcm(4, 6)  // 12
+```
+
+### `log`
+
+**Signature**: `(x) -> float`
+
+Natural log.
+
+```omc
+log(2.718281)  // ~1.0
+```
+
+### `log10`
+
+**Signature**: `(x) -> float`
+
+Base-10 log.
+
+```omc
+log10(1000)  // 3.0
+```
+
+### `log2`
+
+**Signature**: `(x) -> float`
+
+Base-2 log.
+
+```omc
+log2(8)  // 3.0
+```
+
+### `max`
+
+**Signature**: `(a, b) -> any`
+
+Larger of two numeric values.
+
+```omc
+max(3, 7)  // 7
+```
+
+### `min`
+
+**Signature**: `(a, b) -> any`
+
+Smaller of two numeric values.
+
+```omc
+min(3, 7)  // 3
+```
+
+### `mod_pow`
+
+**Signature**: `(base, exp, mod) -> int`
+
+Modular exponentiation.
+
+```omc
+mod_pow(2, 10, 1000)  // 24
+```
+
+### `pow`
+
+**Signature**: `(base, exp) -> float`
+
+base^exp (float).
+
+```omc
+pow(2, 10)  // 1024.0
+```
+
+### `round`
+
+**Signature**: `(x: float) -> int`
+
+Round to nearest integer.
+
+```omc
+round(1.5)  // 2
+```
+
+### `sign`
+
+**Signature**: `(n) -> int`
+
+Returns -1, 0, or 1 by sign.
+
+```omc
+sign(-3)  // -1
+```
+
+### `sin`
+
+**Signature**: `(x) -> float`
+
+Sine.
+
+```omc
+sin(0)  // 0.0
+```
+
+### `sqrt`
+
+**Signature**: `(x) -> float`
+
+Square root.
+
+```omc
+sqrt(16)  // 4.0
+```
+
+### `tan`
+
+**Signature**: `(x) -> float`
+
+Tangent.
+
+```omc
+tan(0)  // 0.0
+```
+
 ---
 
 ## dicts
@@ -4120,6 +4920,126 @@ dict_size(...)  // see omc_help
 
 ```omc
 dict_values(...)  // see omc_help
+```
+
+### `dict_clear`
+
+**Signature**: `(d) -> null`
+
+Remove all entries.
+
+```omc
+dict_clear(d);
+```
+
+### `dict_del`
+
+**Signature**: `(d, key) -> null`
+
+Remove a key.
+
+```omc
+dict_del(d, "k");
+```
+
+### `dict_get_or`
+
+**Signature**: `(d, key, default) -> any`
+
+Get value or default if missing.
+
+```omc
+dict_get_or(d, "k", 0)
+```
+
+### `dict_has`
+
+**Signature**: `(d, key) -> int`
+
+1 if key present.
+
+```omc
+dict_has(d, "k")  // 1
+```
+
+### `dict_items`
+
+**Signature**: `(d) -> [key, value][]`
+
+Array of [key, value] pairs.
+
+```omc
+dict_items(d)
+```
+
+### `dict_keys`
+
+**Signature**: `(d) -> string[]`
+
+All keys.
+
+```omc
+dict_keys(d)
+```
+
+### `dict_len`
+
+**Signature**: `(d) -> int`
+
+Number of entries.
+
+```omc
+dict_len(d)
+```
+
+### `dict_merge`
+
+**Signature**: `(a, b) -> dict`
+
+Merge b into copy of a.
+
+```omc
+dict_merge(d1, d2)
+```
+
+### `dict_new`
+
+**Signature**: `() -> dict`
+
+Empty mutable dict.
+
+```omc
+h d = dict_new();
+```
+
+### `dict_pop`
+
+**Signature**: `(d, key) -> any`
+
+Remove and return value at key.
+
+```omc
+dict_pop(d, "k")
+```
+
+### `dict_size`
+
+**Signature**: `(d) -> int`
+
+Same as dict_len.
+
+```omc
+dict_size(d)
+```
+
+### `dict_values`
+
+**Signature**: `(d) -> any[]`
+
+All values.
+
+```omc
+dict_values(d)
 ```
 
 ---
