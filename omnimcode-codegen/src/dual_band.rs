@@ -557,6 +557,24 @@ impl<'ctx, 'a> DualBandLowerer<'ctx, 'a> {
                         BasicValueEnum::IntValue(iv) => iv,
                         _ => return Err(format!("hbit ret alpha not int at op{}", i)),
                     };
+                    // L1.6 output-side bridge (DISABLED — see below):
+                    // The intent was to call omc_arr_heapify on the
+                    // top-of-stack frame pointer when the fn has
+                    // `@jit_returns_array_int`, so the buffer outlives
+                    // the JIT'd fn frame. The wiring went in cleanly
+                    // (extern helper declared + global-mapped, dispatch
+                    // materializer ready), but in end-to-end testing
+                    // the JIT'd fn segfaults on its `ret` instruction
+                    // AFTER omc_arr_heapify successfully runs and
+                    // returns. heapify completes, the heap ptr is
+                    // valid, but the trip back into Rust through the
+                    // extern "C" boundary corrupts something. Needs
+                    // proper debugging (stack alignment? LLVM CC
+                    // mismatch? alloca lifetime?) so left disabled
+                    // here. The infrastructure (JittedFn.returns_array_int,
+                    // omc_arr_heapify + omc_arr_free, dispatch
+                    // materializer) is in place for the future session
+                    // that fixes the actual segfault.
                     self.builder
                         .build_return(Some(&alpha_iv))
                         .map_err(|e| format!("hbit ret at op{}: {}", i, e))?;

@@ -714,6 +714,7 @@ impl Compiler {
                     params.clone(),
                     vec![None; params.len()],
                     None,
+                    Vec::new(), // lambdas don't carry pragmas
                 );
                 self.pending_lambdas.push(func);
                 for nf in nested {
@@ -1014,6 +1015,7 @@ impl Compiler {
         params: Vec<String>,
         param_types: Vec<Option<String>>,
         return_type: Option<String>,
+        pragmas: Vec<String>,
     ) -> CompiledFunction {
         let n = self.ops.len();
         CompiledFunction {
@@ -1034,6 +1036,7 @@ impl Compiler {
                 v.resize(n, crate::ast::Pos::unknown());
                 v
             },
+            pragmas,
         }
     }
 }
@@ -1086,7 +1089,7 @@ pub fn compile_program(statements: &[Statement]) -> Result<Module, String> {
             param_types,
             body,
             return_type,
-            ..
+            pragmas,
         } = stmt
         {
             let mut fc = Compiler::with_user_fns(user_fns.clone());
@@ -1119,6 +1122,7 @@ pub fn compile_program(statements: &[Statement]) -> Result<Module, String> {
                 params.clone(),
                 param_types.clone(),
                 return_type.clone(),
+                pragmas.clone(),
             );
             module.functions.insert(name.clone(), func);
         }
@@ -1140,7 +1144,7 @@ pub fn compile_program(statements: &[Statement]) -> Result<Module, String> {
     }
     let lambda_asts = std::mem::take(&mut mc.pending_lambda_asts);
     module.lambda_asts.extend(lambda_asts);
-    module.main = mc.finish("__main__".to_string(), Vec::new(), Vec::new(), None);
+    module.main = mc.finish("__main__".to_string(), Vec::new(), Vec::new(), None, Vec::new());
 
     Ok(module)
 }

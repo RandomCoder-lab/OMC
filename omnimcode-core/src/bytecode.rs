@@ -224,6 +224,13 @@ pub struct CompiledFunction {
     /// produces. Cell<()> would suffice but Pos is Copy so a plain
     /// Vec works.
     pub op_positions: Vec<crate::ast::Pos>,
+    /// Function-level pragmas (verbatim from `@pragma_name` decorators
+    /// on the source FunctionDef). Forwarded by the compiler from the
+    /// AST so downstream consumers (codegen, JIT dispatch) can read
+    /// them without re-parsing. Common pragmas: `jit_returns_array_int`
+    /// (L1.6 output-side bridge marker), `no_heal_*` (heal-pass opt-outs
+    /// — these don't actually reach the compiler; kept here for parity).
+    pub pragmas: Vec<String>,
 }
 
 /// A compiled module / program.
@@ -252,6 +259,7 @@ impl Default for Module {
                 constants: Vec::new(),
                 call_cache: Vec::new(),
                 op_positions: Vec::new(),
+                pragmas: Vec::new(),
             },
             functions: std::collections::HashMap::new(),
             lambda_asts: Vec::new(),

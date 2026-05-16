@@ -236,13 +236,43 @@ fn maybe_register_jit(
                     _ => return None, // other non-int args → fall through to tree-walk
                 }
             }
-            let result = jf.call(&int_args)
-                .map(|r| Ok(Value::HInt(HInt::new(r))));
-            // _pinned drops here, freeing the marshalled buffers.
-            // Safe because the JIT'd code didn't retain the pointers
-            // (verified by the lowerer's stack-local array discipline).
+            let result = jf.call(&int_args);
+            // L1.6 output-side bridge: when the fn was marked with
+            // `@jit_returns_array_int`, the returned i64 should be a
+            // heap pointer to a length-prefixed buffer. The codegen
+            // path that calls omc_arr_heapify before Op::Return is
+            // currently DISABLED in dual_band.rs because of a JIT-
+            // return-boundary segfault that hasn't been debugged.
+            // When the codegen path is re-enabled, this materializer
+            // wakes up automatically (no further changes needed here).
+            let final_result = match (result, jf.returns_array_int) {
+                (Some(heap_ptr), true) => {
+                    use omnimcode_core::value::HArray;
+                    // Safety: heap_ptr was produced by omc_arr_heapify
+                    // inside the JIT'd fn we just called. It points at a
+                    // [len, v0, ..., vN] Box<[i64]> the JIT side leaked
+                    // for us to consume.
+                    let arr = unsafe {
+                        let p = heap_ptr as *const i64;
+                        let len = *p as usize;
+                        let mut items = Vec::with_capacity(len);
+                        for k in 0..len {
+                            items.push(Value::HInt(HInt::new(*p.add(k + 1))));
+                        }
+                        items
+                    };
+                    // Free the heap allocation now that we've materialized
+                    // the data. After this point heap_ptr is dangling.
+                    unsafe { omnimcode_codegen::omc_arr_free(heap_ptr); }
+                    Some(Ok(Value::Array(HArray::from_vec(arr))))
+                }
+                (Some(scalar), false) => Some(Ok(Value::HInt(HInt::new(scalar)))),
+                (None, _) => None,
+            };
+            // _pinned drops here, freeing the marshalled input buffers.
+            // Safe because the JIT'd code didn't retain those pointers.
             drop(_pinned);
-            result
+            final_result
         },
     );
     interp.set_jit_dispatch(Some(dispatch));

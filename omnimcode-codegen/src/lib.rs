@@ -72,6 +72,67 @@ pub extern "C" fn omc_fold(value: i64) -> i64 {
     omnimcode_core::phi_pi_fib::fold_to_nearest_attractor(value)
 }
 
+/// L1.6 output-side bridge: copy a length-prefixed frame-array buffer
+/// (alloca'd inside the JIT'd fn) into a heap allocation, return the
+/// heap pointer as i64. The frame buffer dies when the JIT'd fn
+/// returns; the heap copy outlives it so the dispatch can materialize
+/// the array on the host side.
+///
+/// Layout matches the L1.6 input bridge: slot 0 holds the length,
+/// slots 1..=N hold the elements. Caller must pair with `omc_arr_free`
+/// to release the heap allocation after marshalling.
+///
+/// # Safety
+/// `frame_ptr` must point at a valid length-prefixed `[i64]` allocation
+/// (slot 0 = length, slots 1..=len contiguous). Reading past slot[length]
+/// is UB. The JIT lowerer only emits this when it has just constructed
+/// such a buffer via Op::NewArray, so the invariant holds in practice.
+#[no_mangle]
+pub extern "C" fn omc_arr_heapify(frame_ptr: i64) -> i64 {
+    // Safety: see doc comment. The JIT'd fn only passes frame pointers
+    // that were freshly produced by emit_new_array, which always uses
+    // the [len, v0, ..., vN] layout.
+    let p = frame_ptr as *const i64;
+    let len = unsafe { *p } as usize;
+    // Copy `len + 1` i64s (including the leading length) into a fresh
+    // heap-owned boxed slice. Box::leak gives us a pointer the host can
+    // use, then later free via omc_arr_free.
+    let mut buf: Vec<i64> = Vec::with_capacity(len + 1);
+    unsafe {
+        for i in 0..=len {
+            buf.push(*p.add(i));
+        }
+    }
+    let boxed = buf.into_boxed_slice();
+    let raw = Box::into_raw(boxed) as *mut i64;
+    raw as i64
+}
+
+/// L1.6 output-side bridge: free a heap allocation produced by
+/// `omc_arr_heapify`. Called by the dispatch boundary after the
+/// returned array has been materialized into a Value::Array.
+///
+/// # Safety
+/// `heap_ptr` must be the pointer returned by a prior `omc_arr_heapify`
+/// call. Calling with any other pointer (including frame pointers or
+/// already-freed heap pointers) is UB.
+#[no_mangle]
+pub extern "C" fn omc_arr_free(heap_ptr: i64) {
+    if heap_ptr == 0 { return; }
+    unsafe {
+        // Reconstruct the original Box<[i64]> from its raw pointer so
+        // it drops correctly. We need the length, which we read from
+        // slot 0 — same protocol as omc_arr_heapify wrote.
+        let p = heap_ptr as *mut i64;
+        let len = *p as usize;
+        // Box::from_raw needs the original slice fat pointer; the
+        // safest reconstruction is via std::slice::from_raw_parts_mut
+        // + Box::from_raw on the slice pointer.
+        let slice = std::slice::from_raw_parts_mut(p, len + 1);
+        let _ = Box::from_raw(slice as *mut [i64]);
+    }
+}
+
 use std::collections::HashMap;
 
 use inkwell::basic_block::BasicBlock;
@@ -113,6 +174,12 @@ pub struct JittedFn {
     /// Erased fn pointer. Cast to the right `unsafe extern "C" fn`
     /// signature at call time based on `arity`.
     pub fn_ptr: *const (),
+    /// L1.6 output-side bridge: when true, the fn's i64 return is a
+    /// heap pointer (produced by omc_arr_heapify before Op::Return)
+    /// to a length-prefixed Box<[i64]>. The dispatch boundary
+    /// materializes a Value::Array from it and calls omc_arr_free
+    /// to release the heap allocation.
+    pub returns_array_int: bool,
 }
 
 // SAFETY: a raw function pointer is `Send + Sync` — it's plain data.
@@ -210,6 +277,16 @@ impl<'ctx> JitContext<'ctx> {
             Some(inkwell::module::Linkage::External),
         );
         engine.add_global_mapping(&fold_fn, omc_fold as *const () as usize);
+        // L1.6 output-side bridge helpers. heapify copies a frame array
+        // to heap so the JIT'd fn can return it as a stable pointer;
+        // free is called by the dispatch after marshalling.
+        let heapify_ty = i64_type.fn_type(&[i64_type.into()], false);
+        let heapify_fn = module.add_function(
+            "omc_arr_heapify",
+            heapify_ty,
+            Some(inkwell::module::Linkage::External),
+        );
+        engine.add_global_mapping(&heapify_fn, omc_arr_heapify as *const () as usize);
         Ok(JitContext {
             context,
             module,
@@ -458,10 +535,18 @@ impl<'ctx> JitContext<'ctx> {
         let mut out: HashMap<String, JittedFn> = HashMap::new();
         for name in &succeeded {
             let suffixed = format!("{}_hbit", name);
-            let arity = module.functions.get(name).map(|cf| cf.params.len()).unwrap_or(0);
+            let cf_opt = module.functions.get(name);
+            let arity = cf_opt.map(|cf| cf.params.len()).unwrap_or(0);
+            // L1.6: read the user's `@jit_returns_array_int` pragma from
+            // the source FunctionDef (forwarded through CompiledFunction)
+            // so the dispatch knows to materialize the i64 return as a
+            // Value::Array of HInts.
+            let returns_array_int = cf_opt
+                .map(|cf| cf.pragmas.iter().any(|p| p == "jit_returns_array_int"))
+                .unwrap_or(false);
             match unsafe { self.extract_raw_fn_ptr(&suffixed, arity) } {
                 Ok(fn_ptr) => {
-                    out.insert(name.clone(), JittedFn { arity, fn_ptr });
+                    out.insert(name.clone(), JittedFn { arity, fn_ptr, returns_array_int });
                 }
                 Err(_) => {
                     // Extraction failure → skip; tree-walk handles it.
