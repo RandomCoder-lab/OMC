@@ -1,0 +1,90 @@
+# Additional substrate-primitive coverage.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+
+fn approx_eq(a, b, tol) {
+    h d = a - b;
+    if d < 0.0 { d = 0.0 - d; }
+    return d <= tol;
+}
+
+# Attractor cases
+fn test_attractor_0() { assert_eq(is_attractor(0), 1, "0 is attractor"); }
+fn test_attractor_1() { assert_eq(is_attractor(1), 1, "1 is attractor"); }
+fn test_attractor_2() { assert_eq(is_attractor(2), 1, "2 is attractor"); }
+fn test_attractor_3() { assert_eq(is_attractor(3), 1, "3 is attractor"); }
+fn test_attractor_5() { assert_eq(is_attractor(5), 1, "5 is attractor"); }
+fn test_attractor_8() { assert_eq(is_attractor(8), 1, "8 is attractor"); }
+fn test_attractor_13() { assert_eq(is_attractor(13), 1, "13 is attractor"); }
+fn test_attractor_21() { assert_eq(is_attractor(21), 1, "21 is attractor"); }
+fn test_attractor_34() { assert_eq(is_attractor(34), 1, "34 is attractor"); }
+fn test_attractor_55() { assert_eq(is_attractor(55), 1, "55 is attractor"); }
+fn test_attractor_89() { assert_eq(is_attractor(89), 1, "89 is attractor"); }
+fn test_attractor_144() { assert_eq(is_attractor(144), 1, "144 is attractor"); }
+
+fn test_not_attractor_4() { assert_eq(is_attractor(4), 0, "4 not attractor"); }
+fn test_not_attractor_6() { assert_eq(is_attractor(6), 0, "6 not attractor"); }
+fn test_not_attractor_7() { assert_eq(is_attractor(7), 0, "7 not attractor"); }
+fn test_not_attractor_100() { assert_eq(is_attractor(100), 0, "100 not attractor"); }
+
+# Attractor distance
+fn test_dist_at_attractor() {
+    assert_eq(attractor_distance(8), 0, "on attractor → 0");
+    assert_eq(attractor_distance(13), 0, "on attractor → 0");
+}
+
+fn test_dist_one_off() {
+    assert_eq(attractor_distance(7), 1, "7 → 8 is 1");
+    assert_eq(attractor_distance(9), 1, "9 → 8 is 1");
+}
+
+fn test_dist_far() {
+    assert_true(attractor_distance(100) >= 5, "100 is several from nearest");
+}
+
+# Fibonacci_index
+fn test_fib_index_zero() { assert_eq(fibonacci_index(0), 0, "0 is at 0"); }
+fn test_fib_index_8() { assert_eq(fibonacci_index(8), 6, "8 is F6"); }
+
+# arr_resonance_vec
+fn test_resonance_vec_attractors_all_one() {
+    h r = arr_resonance_vec([0, 1, 2, 3, 5, 8, 13]);
+    h i = 0;
+    h all_one = 1;
+    while i < arr_len(r) {
+        if !approx_eq(arr_get(r, i), 1.0, 0.001) { all_one = 0; }
+        i = i + 1;
+    }
+    assert_eq(all_one, 1, "all attractors → resonance 1");
+}
+
+# arr_fold_all
+fn test_fold_all_snaps_to_nearest() {
+    h folded = arr_fold_all([7, 9, 22]);
+    # All should be on attractors after folding.
+    h i = 0;
+    h all_on = 1;
+    while i < arr_len(folded) {
+        if !is_attractor(arr_get(folded, i)) { all_on = 0; }
+        i = i + 1;
+    }
+    assert_eq(all_on, 1, "all folded → on attractors");
+}
+
+# CRT recover — uses fixed moduli [5, 8, 13, 21] (4 substrate moduli).
+fn test_crt_recover_zero() {
+    h x = crt_recover([0, 0, 0, 0]);
+    assert_eq(x, 0, "all zeros → 0");
+}
+
+fn test_crt_recover_one() {
+    h x = crt_recover([1, 1, 1, 1]);
+    # x = 1 satisfies 1 mod each.
+    assert_eq(x, 1, "all ones → 1");
+}

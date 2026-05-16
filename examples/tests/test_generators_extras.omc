@@ -1,0 +1,128 @@
+# Additional generator coverage.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+
+fn count_to_n(n) {
+    h i = 1;
+    while i <= n {
+        yield i;
+        i = i + 1;
+    }
+}
+
+fn empty_gen() { return; }
+
+fn yield_once(v) { yield v; }
+
+# Basic eager.
+fn test_eager_count() {
+    h xs = count_to_n(5);
+    assert_eq(arr_len(xs), 5, "5 yields");
+}
+
+fn test_eager_one() {
+    h xs = yield_once(42);
+    assert_eq(arr_len(xs), 1, "one yield");
+    assert_eq(arr_get(xs, 0), 42, "value preserved");
+}
+
+# Lazy gen_count.
+fn test_gen_count_zero() {
+    h n = gen_count(fn() { return empty_gen(); });
+    assert_eq(n, 0, "empty gen");
+}
+
+fn test_gen_count_100() {
+    h n = gen_count(fn() { return count_to_n(100); });
+    assert_eq(n, 100, "100 yields");
+}
+
+# Lazy gen_sum.
+fn test_gen_sum_5() {
+    h s = gen_sum(fn() { return count_to_n(5); });
+    assert_eq(s, 15, "1+2+3+4+5");
+}
+
+fn test_gen_sum_zero_empty() {
+    h s = gen_sum(fn() { return empty_gen(); });
+    assert_eq(s, 0, "empty sums to 0");
+}
+
+# Lazy gen_take.
+fn test_gen_take_zero() {
+    h xs = gen_take(fn() { return count_to_n(100); }, 0);
+    assert_eq(arr_len(xs), 0, "take 0");
+}
+
+fn test_gen_take_exact() {
+    h xs = gen_take(fn() { return count_to_n(5); }, 5);
+    assert_eq(arr_len(xs), 5, "took all");
+}
+
+fn test_gen_take_more_than_available() {
+    h xs = gen_take(fn() { return count_to_n(3); }, 100);
+    assert_eq(arr_len(xs), 3, "all 3 available");
+}
+
+# gen_stream early stop.
+fn test_gen_stream_stops_early() {
+    h count = [0];
+    h done = gen_stream(
+        fn() { return count_to_n(100); },
+        fn(v) {
+            arr_set(count, 0, arr_get(count, 0) + 1);
+            if arr_get(count, 0) >= 3 { return 0; }
+            return 1;
+        }
+    );
+    assert_eq(arr_get(count, 0), 3, "stopped after 3");
+    assert_eq(done, 0, "shorted = 0");
+}
+
+fn test_gen_stream_completes() {
+    h done = gen_stream(
+        fn() { return count_to_n(5); },
+        fn(v) { return 1; }
+    );
+    assert_eq(done, 1, "completed = 1");
+}
+
+# Substrate fib.
+fn test_substrate_fib_zero() {
+    h collected = [];
+    gen_substrate_fib(
+        fn(v) { arr_push(collected, v); return 1; },
+        0
+    );
+    # 0 is the first Fibonacci, so we get [0].
+    assert_eq(arr_len(collected), 1, "0 included");
+}
+
+fn test_substrate_fib_first_few() {
+    h collected = [];
+    gen_substrate_fib(
+        fn(v) { arr_push(collected, v); return 1; },
+        10
+    );
+    # Fibs <= 10: 0, 1, 1, 2, 3, 5, 8.
+    assert_eq(arr_len(collected), 7, "7 Fibs ≤ 10");
+}
+
+fn test_substrate_fib_huge_limit() {
+    h count = [0];
+    gen_substrate_fib(
+        fn(v) {
+            arr_set(count, 0, arr_get(count, 0) + 1);
+            if arr_get(count, 0) >= 30 { return 0; }
+            return 1;
+        },
+        1000000000
+    );
+    assert_eq(arr_get(count, 0), 30, "stopped at 30");
+}

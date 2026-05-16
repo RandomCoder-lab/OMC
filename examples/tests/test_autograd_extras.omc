@@ -1,0 +1,202 @@
+# Additional autograd / dual coverage.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+
+fn approx_eq(a, b, tol) {
+    h d = a - b;
+    if d < 0.0 { d = 0.0 - d; }
+    return d <= tol;
+}
+
+# ---- tape_sub ----
+fn test_tape_sub_grad() {
+    tape_reset();
+    h x = tape_var(5);
+    h y = tape_var(3);
+    h s = tape_sub(x, y);
+    tape_backward(s);
+    assert_true(approx_eq(tape_grad(x), 1.0, 0.001), "dx for x-y = 1");
+    assert_true(approx_eq(tape_grad(y), 0 - 1.0, 0.001), "dy for x-y = -1");
+}
+
+# ---- tape_div ----
+fn test_tape_div_grad() {
+    tape_reset();
+    h x = tape_var(6);
+    h y = tape_var(2);
+    h q = tape_div(x, y);  # 3.0
+    tape_backward(q);
+    # d(x/y)/dx = 1/y = 0.5
+    assert_true(approx_eq(tape_grad(x), 0.5, 0.001), "d(x/y)/dx");
+}
+
+# ---- tape_neg ----
+fn test_tape_neg_grad() {
+    tape_reset();
+    h x = tape_var(7);
+    h n = tape_neg(x);
+    tape_backward(n);
+    assert_true(approx_eq(tape_grad(x), 0 - 1.0, 0.001), "d(-x)/dx = -1");
+}
+
+# ---- tape_pow_int ----
+fn test_tape_pow_int_cube() {
+    tape_reset();
+    h x = tape_var(2);
+    h y = tape_pow_int(x, 3);  # x^3 = 8
+    tape_backward(y);
+    # dy/dx = 3*x^2 = 12 at x=2
+    assert_true(approx_eq(tape_grad(x), 12.0, 0.001), "d(x^3)/dx at 2");
+}
+
+# ---- tape_exp ----
+fn test_tape_exp_at_zero() {
+    tape_reset();
+    h x = tape_var(0);
+    h y = tape_exp(x);
+    tape_backward(y);
+    assert_true(approx_eq(tape_grad(x), 1.0, 0.001), "d(exp)/dx at 0 = 1");
+}
+
+# ---- tape_sin / tape_cos ----
+fn test_tape_sin_at_zero() {
+    tape_reset();
+    h x = tape_var(0);
+    h y = tape_sin(x);
+    tape_backward(y);
+    assert_true(approx_eq(tape_grad(x), 1.0, 0.001), "d(sin)/dx at 0 = cos(0) = 1");
+}
+
+fn test_tape_cos_at_zero() {
+    tape_reset();
+    h x = tape_var(0);
+    h y = tape_cos(x);
+    tape_backward(y);
+    assert_true(approx_eq(tape_grad(x), 0.0, 0.001), "d(cos)/dx at 0 = -sin(0) = 0");
+}
+
+# ---- tape_mean ----
+fn test_tape_mean_grad() {
+    tape_reset();
+    h X = tape_var([1.0, 2.0, 3.0]);
+    h m = tape_mean(X);
+    tape_backward(m);
+    h gX = tape_grad(X);
+    h diff = arr_get(gX, 0) - 0.3333333;
+    if diff < 0.0 { diff = 0.0 - diff; }
+    assert_true(diff < 0.01, "d(mean)/dx_i = 1/n");
+}
+
+# ---- tape_update SGD-step ----
+fn test_tape_update_decreases_loss() {
+    tape_reset();
+    h w = tape_var(5.0);
+    h target = tape_const(0.0);
+    h diff = tape_sub(w, target);
+    h loss = tape_mul(diff, diff);
+    tape_backward(loss);
+    h before = tape_value(loss);
+    tape_update(w, 0.1);
+    # Verify value moved toward target.
+    h new_w = tape_value(w);
+    assert_true(new_w < 5.0, "w decreased toward target");
+}
+
+# ---- tape_reset clears state ----
+fn test_tape_reset_clears() {
+    tape_reset();
+    h x = tape_var(1);  # ID 0
+    tape_reset();
+    h y = tape_var(2);  # also ID 0 after reset
+    # No assertion needed beyond not crashing.
+    assert_true(1, "no crash");
+}
+
+# ---- Dual forward-mode coverage ----
+fn test_dual_construct_and_read() {
+    h d = dual(3.0, 1.0);
+    assert_true(approx_eq(dual_v(d), 3.0, 0.001), "value");
+    assert_true(approx_eq(dual_d(d), 1.0, 0.001), "derivative");
+}
+
+fn test_dual_mul_chain() {
+    h x = dual(2.0, 1.0);
+    h y = dual_mul(x, x);
+    assert_true(approx_eq(dual_d(y), 4.0, 0.001), "d(x^2)/dx at 2 = 4");
+}
+
+fn test_dual_add_combines() {
+    h a = dual(3.0, 1.0);
+    h b = dual(4.0, 0.0);  # constant
+    h c = dual_add(a, b);
+    assert_true(approx_eq(dual_v(c), 7.0, 0.001), "value");
+    assert_true(approx_eq(dual_d(c), 1.0, 0.001), "deriv passes through");
+}
+
+fn test_dual_sub() {
+    h a = dual(5.0, 1.0);
+    h b = dual(3.0, 0.0);
+    h c = dual_sub(a, b);
+    assert_true(approx_eq(dual_v(c), 2.0, 0.001), "value");
+}
+
+fn test_dual_div() {
+    h a = dual(6.0, 1.0);
+    h b = dual(2.0, 0.0);
+    h c = dual_div(a, b);
+    assert_true(approx_eq(dual_v(c), 3.0, 0.001), "value");
+    assert_true(approx_eq(dual_d(c), 0.5, 0.001), "deriv 1/b");
+}
+
+fn test_dual_neg() {
+    h a = dual(3.0, 1.0);
+    h n = dual_neg(a);
+    assert_true(approx_eq(dual_v(n), 0 - 3.0, 0.001), "value negated");
+    assert_true(approx_eq(dual_d(n), 0 - 1.0, 0.001), "deriv negated");
+}
+
+fn test_dual_pow_int_cube() {
+    h x = dual(2.0, 1.0);
+    h y = dual_pow_int(x, 3);
+    assert_true(approx_eq(dual_v(y), 8.0, 0.001), "2^3 = 8");
+    assert_true(approx_eq(dual_d(y), 12.0, 0.001), "d/dx = 3x^2");
+}
+
+fn test_dual_exp_at_zero() {
+    h x = dual(0.0, 1.0);
+    h y = dual_exp(x);
+    assert_true(approx_eq(dual_v(y), 1.0, 0.001), "exp 0 = 1");
+    assert_true(approx_eq(dual_d(y), 1.0, 0.001), "d/dx exp at 0 = 1");
+}
+
+fn test_dual_sin_at_zero() {
+    h x = dual(0.0, 1.0);
+    h y = dual_sin(x);
+    assert_true(approx_eq(dual_v(y), 0.0, 0.001), "sin 0 = 0");
+}
+
+fn test_dual_cos_at_zero() {
+    h x = dual(0.0, 1.0);
+    h y = dual_cos(x);
+    assert_true(approx_eq(dual_v(y), 1.0, 0.001), "cos 0 = 1");
+}
+
+fn test_dual_relu_positive() {
+    h x = dual(5.0, 1.0);
+    h y = dual_relu(x);
+    assert_true(approx_eq(dual_v(y), 5.0, 0.001), "relu+ keeps value");
+    assert_true(approx_eq(dual_d(y), 1.0, 0.001), "relu+ keeps deriv");
+}
+
+fn test_dual_relu_negative() {
+    h x = dual(0 - 5.0, 1.0);
+    h y = dual_relu(x);
+    assert_true(approx_eq(dual_v(y), 0.0, 0.001), "relu- → 0");
+    assert_true(approx_eq(dual_d(y), 0.0, 0.001), "relu- deriv = 0");
+}
