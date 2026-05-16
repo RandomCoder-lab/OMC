@@ -86,16 +86,25 @@ pub enum Statement {
         /// `alias` — parser enforces this.
         selected: Option<Vec<String>>,
     },
-    /// `try { ... } catch err { ... }`. If the try block raises an
-    /// error (via `error("msg")` or any builtin failure), execution
-    /// jumps to the catch block with `err_var` bound to a Value::String
-    /// holding the error message. Without try/catch, builtin failures
-    /// crash the program.
+    /// `try { ... } catch err { ... }` with optional `finally { ... }`.
+    /// If the try block raises an error (via `throw expr`, `error("msg")`,
+    /// or any builtin failure), execution jumps to the catch block with
+    /// `err_var` bound to a Value::String holding the error message. The
+    /// `finally` block, if present, runs unconditionally after both the
+    /// try body AND any handler — even when the handler itself raises.
+    /// Matches Python's try/except/finally semantics.
     Try {
         body: Vec<Statement>,
         err_var: String,
         handler: Vec<Statement>,
+        finally: Option<Vec<Statement>>,
     },
+    /// `throw expr` — explicit exception raise. The expression is
+    /// evaluated and its display-string becomes the error message
+    /// that the surrounding catch (if any) receives in its err_var.
+    /// Future work: carry the thrown Value through Err(Value) instead
+    /// of stringifying, enabling typed-catch hierarchies.
+    Throw(Expression),
     /// `match expr { pat => stmts, ... }`. First arm whose pattern
     /// accepts the scrutinee runs; remaining arms are skipped.
     /// A wildcard or bare-identifier arm at the end is the default.

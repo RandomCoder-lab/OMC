@@ -990,11 +990,11 @@ impl Compiler {
             Statement::FunctionDef { .. } => {
                 // Function defs hoisted by compile_program(); skip here.
             }
-            Statement::Try { .. } => {
+            Statement::Try { .. } | Statement::Throw(_) => {
                 // Tree-walk fallback. See Op::ExecStmt comments — full
                 // exception unwind would require a side try-stack and
                 // a Result-aware op dispatch loop. Until that pays for
-                // itself, fall back to the AST walker for try/catch.
+                // itself, fall back to the AST walker for try/catch/throw.
                 self.emit(Op::ExecStmt(Box::new(s.clone())));
             }
             Statement::Match { .. } => {

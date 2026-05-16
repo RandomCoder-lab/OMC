@@ -28,6 +28,8 @@ pub enum Token {
     Safe,        // H.5 host-level support: `safe <expr>` prefix
     Try,
     Catch,
+    Finally,
+    Throw,
     Match,
     /// `..` for inclusive ranges in match patterns: `0..9`, `"a".."z"`.
     /// Lexed when not part of `..=` (which we don't use yet) or `...`.
@@ -365,6 +367,8 @@ impl Lexer {
                         "safe" => Token::Safe,
                         "try" => Token::Try,
                         "catch" => Token::Catch,
+                        "finally" => Token::Finally,
+                        "throw" => Token::Throw,
                         "match" => Token::Match,
                         "and" => Token::And,
                         "or" => Token::Or,
@@ -760,6 +764,16 @@ impl Parser {
             Token::For => self.parse_for_stmt(),
             Token::Fn => self.parse_function_def(),
             Token::Try => self.parse_try_stmt(),
+            Token::Throw => {
+                // `throw expr;` — evaluate expr, raise its display string
+                // as the current frame's error. Caught by surrounding
+                // try/catch; uncaught throws propagate to the top-level
+                // error handler (which prints + exits the program).
+                self.advance(); // consume `throw`
+                let expr = self.parse_expression()?;
+                self.expect(Token::Semicolon)?;
+                Ok(Statement::Throw(expr))
+            }
             Token::Match => self.parse_match_stmt(),
             // `import core;` or `import core as c;` or `load "path";`
             Token::Import | Token::Load => {
@@ -963,10 +977,11 @@ impl Parser {
         Ok(Statement::While { condition, body })
     }
 
-    /// `try { ... } catch err { ... }` — the simplest possible
-    /// exception form. No exception classes (yet); the caught value
-    /// is always a string holding the error message. Single catch
-    /// arm only — we may add multi-arm matching later.
+    /// `try { ... } catch err { ... }` with optional trailing
+    /// `finally { ... }`. The caught value is currently a Value::String
+    /// holding the error message; future work will carry the thrown
+    /// Value through unchanged for typed-catch hierarchies. Single
+    /// catch arm only — multi-arm typed matching is later work.
     fn parse_try_stmt(&mut self) -> Result<Statement, String> {
         self.expect(Token::Try)?;
         self.expect(Token::LBrace)?;
@@ -975,7 +990,17 @@ impl Parser {
         let err_var = self.parse_ident()?;
         self.expect(Token::LBrace)?;
         let handler = self.parse_block()?;
-        Ok(Statement::Try { body, err_var, handler })
+        // Optional `finally { ... }`. Runs unconditionally after both
+        // the try body and any handler (including when handler itself
+        // raises). Matches Python's try/except/finally semantics.
+        let finally = if self.current() == Token::Finally {
+            self.expect(Token::Finally)?;
+            self.expect(Token::LBrace)?;
+            Some(self.parse_block()?)
+        } else {
+            None
+        };
+        Ok(Statement::Try { body, err_var, handler, finally })
     }
 
     /// `match expr { pat => stmt, pat => { stmts }, ... }`

@@ -644,7 +644,7 @@ impl Interpreter {
                     pragmas,
                 }
             }
-            Statement::Try { body, err_var, handler } => Statement::Try {
+            Statement::Try { body, err_var, handler, finally } => Statement::Try {
                 body: body
                     .into_iter()
                     .map(|s| Self::rewrite_module_calls(s, module_names, alias))
@@ -654,7 +654,13 @@ impl Interpreter {
                     .into_iter()
                     .map(|s| Self::rewrite_module_calls(s, module_names, alias))
                     .collect(),
+                finally: finally.map(|stmts| stmts.into_iter()
+                    .map(|s| Self::rewrite_module_calls(s, module_names, alias))
+                    .collect()),
             },
+            Statement::Throw(e) => Statement::Throw(
+                Self::rewrite_call_expr(e, module_names, alias),
+            ),
             Statement::Match { scrutinee, arms } => Statement::Match {
                 scrutinee: Self::rewrite_call_expr(scrutinee, module_names, alias),
                 arms: arms
@@ -1493,19 +1499,39 @@ impl Interpreter {
                 // No arm matched — silent no-op.
                 Ok(())
             }
-            Statement::Try { body, err_var, handler } => {
+            Statement::Try { body, err_var, handler, finally } => {
                 // Run the body; if anything inside returns Err, jump to
                 // the handler with err_var bound to the message string.
-                // The body and handler share the surrounding scope —
-                // no extra scope is pushed (matches Python try/except).
-                match self.execute_block(body) {
+                // After the body+handler complete (success OR failure),
+                // run finally unconditionally — including when the
+                // handler itself raises. Matches Python try/except/finally.
+                let body_result = self.execute_block(body);
+                let after_handler = match body_result {
                     Ok(()) => Ok(()),
                     Err(msg) => {
-                        // Install err_var in the current scope, run handler.
                         self.set_var(err_var.clone(), Value::String(msg));
                         self.execute_block(handler)
                     }
+                };
+                if let Some(finally_body) = finally {
+                    // Run finally regardless of after_handler's status.
+                    // If both finally and after_handler fail, finally's
+                    // error wins (Python's behavior — finally is the
+                    // "last word" that the surrounding scope sees).
+                    let finally_result = self.execute_block(finally_body);
+                    if finally_result.is_err() {
+                        return finally_result;
+                    }
                 }
+                after_handler
+            }
+            Statement::Throw(expr) => {
+                // Evaluate the expression, raise its display-string as
+                // the current frame's error. Surrounding catch (if any)
+                // binds the string to err_var; uncaught throws propagate
+                // up to the top-level error handler.
+                let v = self.eval_expr(expr)?;
+                Err(v.to_display_string())
             }
             _ => Ok(()),
         }
@@ -6908,9 +6934,10 @@ impl Interpreter {
                 Statement::While { body, .. } | Statement::For { body, .. } => {
                     for s in body { visit(s, fns); }
                 }
-                Statement::Try { body, handler, .. } => {
+                Statement::Try { body, handler, finally, .. } => {
                     for s in body { visit(s, fns); }
                     for s in handler { visit(s, fns); }
+                    if let Some(f) = finally { for s in f { visit(s, fns); } }
                 }
                 Statement::Match { arms, .. } => {
                     for arm in arms { for s in &arm.body { visit(s, fns); } }

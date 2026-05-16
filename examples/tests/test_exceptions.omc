@@ -1,0 +1,130 @@
+# Tests for OMC's exception handling: throw, try/catch, finally.
+# Currently the caught value is a Value::String (the thrown expression's
+# display-form). Typed-catch hierarchies (Err(Value) rather than
+# Err(String)) is future work — this test suite documents what's
+# supported today.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) {
+    if !cond {
+        test_record_failure(msg);
+    }
+}
+
+# ---- throw + catch basics ----
+
+fn test_throw_string() {
+    h caught = "";
+    try {
+        throw "boom";
+    } catch e {
+        caught = e;
+    }
+    assert_eq(caught, "boom", "string throw caught");
+}
+
+fn test_throw_number_stringified() {
+    h caught = "";
+    try {
+        throw 42;
+    } catch e {
+        caught = e;
+    }
+    assert_eq(caught, "42", "number throw stringified at catch");
+}
+
+fn test_no_throw_no_catch_run() {
+    h ran = 0;
+    try {
+        ran = 1;
+    } catch e {
+        ran = 99;
+    }
+    assert_eq(ran, 1, "catch should not run when try succeeds");
+}
+
+# ---- finally semantics ----
+
+fn test_finally_runs_on_success() {
+    h ran = 0;
+    try {
+        # No throw
+    } catch e {
+        ran = 99;
+    } finally {
+        ran = 1;
+    }
+    assert_eq(ran, 1, "finally runs after successful try");
+}
+
+fn test_finally_runs_on_failure() {
+    h ran_catch = 0;
+    h ran_finally = 0;
+    try {
+        throw "x";
+    } catch e {
+        ran_catch = 1;
+    } finally {
+        ran_finally = 1;
+    }
+    assert_eq(ran_catch, 1, "catch ran on failure");
+    assert_eq(ran_finally, 1, "finally also ran after catch");
+}
+
+# ---- nested try ----
+
+fn test_nested_inner_catch() {
+    h outer = 0;
+    h inner = 0;
+    try {
+        try {
+            throw "inner";
+        } catch e {
+            inner = 1;
+        }
+    } catch e {
+        outer = 99;
+    }
+    assert_eq(inner, 1, "inner catch ran");
+    assert_eq(outer, 0, "outer catch did NOT run (inner consumed)");
+}
+
+fn test_nested_rethrow() {
+    h outer_msg = "";
+    try {
+        try {
+            throw "original";
+        } catch e {
+            throw "rethrown";
+        }
+    } catch e {
+        outer_msg = e;
+    }
+    assert_eq(outer_msg, "rethrown", "outer catch sees rethrown value");
+}
+
+# ---- throw inside a called function ----
+
+fn raises() {
+    throw "from raises";
+}
+
+fn test_throw_through_call() {
+    h caught = "";
+    try {
+        raises();
+    } catch e {
+        caught = e;
+    }
+    assert_eq(caught, "from raises", "throw propagates through call boundary");
+}
+
+# OMC's parser currently REQUIRES `catch` before `finally`, even when
+# the try block is not expected to throw. Try-without-catch (Python's
+# `try: ... finally: ...` without an except clause) is a future
+# parser-side relaxation — the runtime semantics already handle it.

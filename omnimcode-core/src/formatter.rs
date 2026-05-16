@@ -178,7 +178,7 @@ fn format_stmt(stmt: &Statement, level: usize, out: &mut String) {
                 out.push_str(";\n");
             }
         }
-        Statement::Try { body, err_var, handler } => {
+        Statement::Try { body, err_var, handler, finally } => {
             out.push_str("try {\n");
             for s in body { format_stmt(s, level + 1, out); }
             indent_to(level, out);
@@ -187,7 +187,17 @@ fn format_stmt(stmt: &Statement, level: usize, out: &mut String) {
             out.push_str(" {\n");
             for s in handler { format_stmt(s, level + 1, out); }
             indent_to(level, out);
+            if let Some(finally_body) = finally {
+                out.push_str("} finally {\n");
+                for s in finally_body { format_stmt(s, level + 1, out); }
+                indent_to(level, out);
+            }
             out.push_str("}\n");
+        }
+        Statement::Throw(e) => {
+            out.push_str("throw ");
+            format_expr(e, out);
+            out.push_str(";\n");
         }
         Statement::Match { scrutinee, arms } => {
             out.push_str("match ");
