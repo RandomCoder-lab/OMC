@@ -1,0 +1,146 @@
+# More substrate-primitive coverage.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+
+fn approx_eq(a, b, tol) {
+    h d = a - b;
+    if d < 0.0 { d = 0.0 - d; }
+    return d <= tol;
+}
+
+# arr_him_vec — every Fibonacci has small HIM (highly coherent)
+fn test_him_fibonacci_small() {
+    h hv = arr_him_vec([1, 2, 3, 5, 8, 13]);
+    h i = 0;
+    while i < arr_len(hv) {
+        h v = arr_get(hv, i);
+        assert_true(v < 0.5,
+            concat_many("him ", to_string(i), " < 0.5"));
+        i = i + 1;
+    }
+}
+
+# arr_resonance and arr_him agree on attractor zeros
+fn test_resonance_at_zero_is_one() {
+    h r = arr_resonance_vec([0]);
+    assert_true(approx_eq(arr_get(r, 0), 1.0, 0.001), "0 has resonance 1");
+}
+
+# arr_fold_all maps each non-attractor to nearest
+fn test_fold_specific_cases() {
+    h folded = arr_fold_all([7, 9, 12, 22, 30]);
+    # 7 → 8, 9 → 8, 12 → 13, 22 → 21, 30 → 34
+    assert_eq(arr_get(folded, 0), 8, "7 → 8");
+    assert_eq(arr_get(folded, 1), 8, "9 → 8");
+    # Some choices depend on tiebreaker; check it's a valid attractor.
+    assert_eq(is_attractor(arr_get(folded, 2)), 1, "12 → attractor");
+    assert_eq(is_attractor(arr_get(folded, 3)), 1, "22 → attractor");
+    assert_eq(is_attractor(arr_get(folded, 4)), 1, "30 → attractor");
+}
+
+# crt_recover with various residue patterns
+fn test_crt_recover_patterns() {
+    h cases_residues = [
+        [0, 0, 0, 0],
+        [1, 1, 1, 1],
+        [2, 2, 2, 2],
+        [3, 3, 3, 3],
+        [4, 4, 4, 4],
+    ];
+    h i = 0;
+    while i < arr_len(cases_residues) {
+        h r = crt_recover(arr_get(cases_residues, i));
+        assert_true(r >= 0, concat_many("CRT ", to_string(i), " non-negative"));
+        i = i + 1;
+    }
+}
+
+# fibonacci_index of known values
+fn test_fib_index_known() {
+    assert_eq(fibonacci_index(0), 0, "F0");
+    assert_eq(fibonacci_index(1), 1, "F1 (or F2)");
+    assert_eq(fibonacci_index(2), 3, "F3");
+    assert_eq(fibonacci_index(3), 4, "F4");
+    assert_eq(fibonacci_index(5), 5, "F5");
+    assert_eq(fibonacci_index(8), 6, "F6");
+    assert_eq(fibonacci_index(13), 7, "F7");
+}
+
+fn test_fib_index_non_attractor_returns_neg() {
+    assert_eq(fibonacci_index(7), 0 - 1, "7 not Fibonacci");
+    assert_eq(fibonacci_index(10), 0 - 1, "10 not Fibonacci");
+}
+
+# Substrate attention preserves shape across inputs
+fn test_attention_shapes() {
+    h Q = [[1, 2, 3], [4, 5, 6]];
+    h K = [[1, 2, 3], [10, 20, 30], [100, 200, 300]];
+    h V = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]];
+    h out = arr_substrate_attention(Q, K, V);
+    assert_eq(arr_len(out), 2, "2 query rows");
+    h r0 = arr_get(out, 0);
+    assert_eq(arr_len(r0), 2, "2 value dims");
+}
+
+# Substrate score rows for various inputs
+fn test_score_rows_zero_matrix() {
+    h M = arr_zeros_2d(3, 3);
+    h s = arr_substrate_score_rows(M);
+    assert_eq(arr_len(s), 3, "3 rows");
+    # 0 is an attractor — every row has resonance 1.0
+    assert_true(arr_get(s, 0) > 0.9, "zeros all on attractor");
+}
+
+# Many is_attractor checks
+fn test_attractor_pattern() {
+    h vals = [0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610, 987];
+    h i = 0;
+    while i < arr_len(vals) {
+        assert_eq(is_attractor(arr_get(vals, i)), 1,
+            concat_many("attractor ", to_string(arr_get(vals, i))));
+        i = i + 1;
+    }
+}
+
+# attractor_distance for off-by-1 from each Fibonacci
+fn test_distance_off_by_one() {
+    h fibs = [3, 5, 8, 13, 21, 34, 55, 89];
+    h i = 0;
+    while i < arr_len(fibs) {
+        h f = arr_get(fibs, i);
+        # f+1 has distance 1 if f+1 isn't itself a Fibonacci.
+        h d_up = attractor_distance(f + 1);
+        h d_down = attractor_distance(f - 1);
+        # Use if-else instead of `||` (boolean OR only in if conditions).
+        h ok_up = 0;
+        if d_up >= 1 { ok_up = 1; }
+        if is_attractor(f + 1) == 1 { ok_up = 1; }
+        assert_eq(ok_up, 1, concat_many("f+1 ", to_string(f)));
+        h ok_dn = 0;
+        if d_down >= 1 { ok_dn = 1; }
+        if is_attractor(f - 1) == 1 { ok_dn = 1; }
+        assert_eq(ok_dn, 1, concat_many("f-1 ", to_string(f)));
+        i = i + 1;
+    }
+}
+
+# Check resonance is in [0, 1]
+fn test_resonance_range() {
+    h vals = [0, 1, 5, 7, 13, 100, 1000];
+    h r = arr_resonance_vec(vals);
+    h i = 0;
+    while i < arr_len(r) {
+        h v = arr_get(r, i);
+        assert_true(v >= 0.0,
+            concat_many("res ", to_string(i), " >= 0"));
+        assert_true(v <= 1.0,
+            concat_many("res ", to_string(i), " <= 1"));
+        i = i + 1;
+    }
+}

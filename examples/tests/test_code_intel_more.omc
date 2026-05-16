@@ -1,0 +1,122 @@
+# Yet more code_intel coverage.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+
+# code_metrics for various sources
+fn test_metrics_grow_with_size() {
+    h small = omc_code_metrics("fn f() {}");
+    h big = omc_code_metrics("fn a() {} fn b() {} fn c() {} fn d() {}");
+    assert_true(dict_get(big, "ast_size") > dict_get(small, "ast_size"),
+        "size grows with content");
+}
+
+fn test_metrics_compression_with_repetition() {
+    # metrics requires parseable OMC code; use a valid program with repetition.
+    h reps = "fn f() { arr_softmax(arr_softmax(arr_softmax(arr_softmax([1.0])))); }";
+    h m = omc_code_metrics(reps);
+    assert_true(dict_get(m, "compression_ratio") > 1.0, "repetition compresses");
+}
+
+# omc_code_dependencies finds calls deep in nested code
+fn test_dependencies_nested_call() {
+    h deps = omc_code_dependencies("fn f() { return arr_softmax(arr_neg(xs)); }");
+    h has_sm = 0;
+    h has_neg = 0;
+    h i = 0;
+    while i < arr_len(deps) {
+        h c = arr_get(deps, i);
+        if c == "arr_softmax" { has_sm = 1; }
+        if c == "arr_neg" { has_neg = 1; }
+        i = i + 1;
+    }
+    assert_eq(has_sm, 1, "softmax found");
+    assert_eq(has_neg, 1, "neg found");
+}
+
+# omc_code_dependencies on class methods
+fn test_dependencies_class_methods() {
+    h src = "class C { x; fn m(self) { return dict_get(self, \"x\"); } }";
+    h deps = omc_code_dependencies(src);
+    # dict_get should be in deps
+    h has = 0;
+    h i = 0;
+    while i < arr_len(deps) {
+        if arr_get(deps, i) == "dict_get" { has = 1; }
+        i = i + 1;
+    }
+    assert_eq(has, 1, "dict_get in class method deps");
+}
+
+# omc_code_summary on a substantial program
+fn test_summary_multi_function() {
+    h src = "fn a() {} fn b(x) { return x; } fn c(x, y) { return x + y; } class K { f; fn m(self) {} }";
+    h s = omc_code_summary(src);
+    h fns = dict_get(s, "functions");
+    # Includes K.m method.
+    assert_true(arr_len(fns) >= 4, "4+ fns");
+    h classes = dict_get(s, "classes");
+    assert_eq(arr_len(classes), 1, "1 class");
+}
+
+# code_diff variations
+fn test_diff_add_and_remove() {
+    h old = "fn a() {} fn b() {}";
+    h new = "fn a() {} fn c() {}";
+    h d = omc_code_diff(old, new);
+    h removed = dict_get(d, "removed");
+    h added = dict_get(d, "added");
+    h unchanged = dict_get(d, "unchanged");
+    assert_eq(arr_len(removed), 1, "b removed");
+    assert_eq(arr_len(added), 1, "c added");
+    assert_eq(arr_len(unchanged), 1, "a unchanged");
+}
+
+# code_fingerprint stability
+fn test_fingerprint_stability_many() {
+    h cases = [
+        "fn f() { return 1; }",
+        "h x = 42;",
+        "fn add(a, b) { return a + b; }",
+    ];
+    h i = 0;
+    while i < arr_len(cases) {
+        h c = arr_get(cases, i);
+        h fp1 = omc_code_fingerprint(c);
+        h fp2 = omc_code_fingerprint(c);
+        assert_eq(fp1, fp2, concat_many("fp ", to_string(i)));
+        i = i + 1;
+    }
+}
+
+# canonical_hash matches even with extra whitespace
+fn test_canonical_hash_whitespace() {
+    h tight = "fn f(x){return x;}";
+    h loose = "fn   f (  x  ) {  return  x  ;  }";
+    h h1 = omc_canonical_hash(tight);
+    h h2 = omc_canonical_hash(loose);
+    assert_eq(dict_get(h1, "raw"), dict_get(h2, "raw"), "whitespace canonicalizes");
+}
+
+# omc_code_minify produces single line
+fn test_minify_single_line_check() {
+    h src = "fn f(x) {\n    if x > 0 {\n        return 1;\n    }\n    return 0;\n}";
+    h m = omc_code_minify(src);
+    # No literal newlines in output.
+    assert_eq(re_match("\n", m), 0, "no newline");
+}
+
+# code_similarity arity
+fn test_similarity_orderable() {
+    h base = "fn f(x) { return x; }";
+    h close = "fn f(x) { return x + 1; }";
+    h far = "fn f(a, b, c) { return a * b * c + arr_softmax(arr_neg([a, b, c])); }";
+    h s_close = omc_code_similarity(base, close);
+    h s_far = omc_code_similarity(base, far);
+    assert_true(s_close > s_far, "close > far");
+}
