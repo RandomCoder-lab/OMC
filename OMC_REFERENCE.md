@@ -2,7 +2,7 @@
 
 Auto-generated from `omnimcode-core/src/docs.rs`. Run `omc --gen-docs > OMC_REFERENCE.md` to regenerate.
 
-**Total documented builtins**: 540
+**Total documented builtins**: 612
 
 **OMC-unique**: 61 (no direct Python/NumPy equivalent — these are why you reach for OMC over numpy)
 
@@ -10,8 +10,8 @@ Auto-generated from `omnimcode-core/src/docs.rs`. Run `omc --gen-docs > OMC_REFE
 
 ## Categories
 
-- [core](#core) (124 builtins)
-- [arrays](#arrays) (111 builtins)
+- [core](#core) (128 builtins)
+- [arrays](#arrays) (128 builtins)
 - [linalg](#linalg) (4 builtins)
 - [ml_kernels](#ml_kernels) (6 builtins)
 - [substrate](#substrate) (39 builtins)
@@ -19,16 +19,18 @@ Auto-generated from `omnimcode-core/src/docs.rs`. Run `omc --gen-docs > OMC_REFE
 - [duals](#duals) (21 builtins)
 - [generators](#generators) (5 builtins)
 - [strings](#strings) (33 builtins)
-- [regex](#regex) (7 builtins)
+- [regex](#regex) (10 builtins)
 - [json](#json) (2 builtins)
-- [stdlib](#stdlib) (22 builtins)
+- [stdlib](#stdlib) (26 builtins)
 - [exceptions](#exceptions) (2 builtins)
 - [introspection](#introspection) (22 builtins)
 - [tokenizer](#tokenizer) (16 builtins)
 - [code_intel](#code_intel) (16 builtins)
-- [math](#math) (58 builtins)
-- [dicts](#dicts) (26 builtins)
+- [math](#math) (82 builtins)
+- [dicts](#dicts) (31 builtins)
 - [test_runner](#test_runner) (8 builtins)
+- [io](#io) (11 builtins)
+- [logging](#logging) (4 builtins)
 
 ---
 
@@ -1274,6 +1276,46 @@ zeckendorf_bit(...)  // see omc_help
 zeckendorf_weight(...)  // see omc_help
 ```
 
+### `to_int`
+
+**Signature**: `(value) -> int`
+
+Coerce value to int (string → parse, float → trunc, bool → 0/1).
+
+```omc
+to_int("42")  // 42
+```
+
+### `to_float`
+
+**Signature**: `(value) -> float`
+
+Coerce value to float.
+
+```omc
+to_float("3.14")  // 3.14
+```
+
+### `to_bool`
+
+**Signature**: `(value) -> bool`
+
+Truthiness: non-zero/non-empty = true.
+
+```omc
+to_bool(0)  // false
+```
+
+### `to_array`
+
+**Signature**: `(value) -> array`
+
+Coerce to array (string → chars, dict → keys array).
+
+```omc
+to_array("abc")  // ["a","b","c"]
+```
+
 ---
 
 ## arrays
@@ -2386,6 +2428,176 @@ Zip two arrays into pairs.
 
 ```omc
 arr_zip([1,2], [10,20])  // [[1,10],[2,20]]
+```
+
+### `arr_dot`
+
+**Signature**: `(a, b) -> float`
+
+Dot product of two arrays.
+
+```omc
+arr_dot([1.0, 2.0], [3.0, 4.0])  // 11.0
+```
+
+### `arr_argmax_2d`
+
+**Signature**: `(matrix) -> [row, col]`
+
+Position of max in 2D matrix.
+
+```omc
+arr_argmax_2d([[1,2],[3,4]])  // [1,1]
+```
+
+### `arr_split_at`
+
+**Signature**: `(arr, idx: int) -> [left, right]`
+
+Split into two parts at idx.
+
+```omc
+arr_split_at([1,2,3,4], 2)  // [[1,2],[3,4]]
+```
+
+### `arr_rotate_left`
+
+**Signature**: `(arr, n) -> array`
+
+Cyclic left rotation.
+
+```omc
+arr_rotate_left([1,2,3,4], 1)  // [2,3,4,1]
+```
+
+### `arr_rotate_right`
+
+**Signature**: `(arr, n) -> array`
+
+Cyclic right rotation.
+
+```omc
+arr_rotate_right([1,2,3,4], 1)  // [4,1,2,3]
+```
+
+### `arr_intersperse`
+
+**Signature**: `(arr, sep) -> array`
+
+Insert sep between elements.
+
+```omc
+arr_intersperse([1,2,3], 0)  // [1,0,2,0,3]
+```
+
+### `arr_pairs`
+
+**Signature**: `(arr) -> [[a,b],...]`
+
+Consecutive pairs.
+
+```omc
+arr_pairs([1,2,3,4])  // [[1,2],[2,3],[3,4]]
+```
+
+### `arr_triples`
+
+**Signature**: `(arr) -> [[a,b,c],...]`
+
+Consecutive triples.
+
+```omc
+arr_triples([1,2,3,4])  // [[1,2,3],[2,3,4]]
+```
+
+### `arr_step_range`
+
+**Signature**: `(start, end, step) -> array`
+
+Stepped range.
+
+```omc
+arr_step_range(0, 10, 2)  // [0,2,4,6,8]
+```
+
+### `arr_index_min`
+
+**Signature**: `(arr) -> int`
+
+Index of min (alias of arr_argmin).
+
+```omc
+arr_index_min([3,1,2])  // 1
+```
+
+### `arr_index_max`
+
+**Signature**: `(arr) -> int`
+
+Index of max (alias of arr_argmax).
+
+```omc
+arr_index_max([3,1,2])  // 0
+```
+
+### `arr_dedupe_sorted`
+
+**Signature**: `(sorted_arr) -> array`
+
+Faster dedupe when input is already sorted.
+
+```omc
+arr_dedupe_sorted([1,1,2,3,3])  // [1,2,3]
+```
+
+### `arr_quantize`
+
+**Signature**: `(arr, n_bins: int) -> int[]`
+
+Bucket each value into [0, n_bins).
+
+```omc
+arr_quantize([1.0, 2.0, 3.0], 3)
+```
+
+### `arr_normalize`
+
+**Signature**: `(arr) -> float[]`
+
+L1-normalize so sum = 1.
+
+```omc
+arr_normalize([1.0, 2.0, 3.0])  // [0.16, 0.33, 0.5]
+```
+
+### `arr_clip`
+
+**Signature**: `(arr, lo, hi) -> array`
+
+Clip every element into [lo, hi].
+
+```omc
+arr_clip([0,5,10,15], 1, 9)  // [1,5,9,9]
+```
+
+### `arr_abs`
+
+**Signature**: `(arr) -> array`
+
+Absolute value of every element.
+
+```omc
+arr_abs([-1, 2, -3])  // [1,2,3]
+```
+
+### `arr_pow_int`
+
+**Signature**: `(arr, n: int) -> array`
+
+Element raised to integer power.
+
+```omc
+arr_pow_int([1,2,3], 2)  // [1,4,9]
 ```
 
 ---
@@ -3750,6 +3962,36 @@ Split by regex.
 re_split("\s+", "a b  c")  // ["a","b","c"]
 ```
 
+### `re_groups`
+
+**Signature**: `(pattern, s) -> string[]`
+
+Capture groups from first match.
+
+```omc
+re_groups("(\w+) (\w+)", "hi bye")  // ["hi", "bye"]
+```
+
+### `re_all_groups`
+
+**Signature**: `(pattern, s) -> string[][]`
+
+All matches' capture groups.
+
+```omc
+re_all_groups(pat, s)
+```
+
+### `re_test`
+
+**Signature**: `(pattern, s) -> int`
+
+Same as re_match.
+
+```omc
+re_test("^\d+$", "123")
+```
+
 ---
 
 ## json
@@ -3997,6 +4239,46 @@ Write content to file (overwrite).
 
 ```omc
 write_file("out.txt", "hello");
+```
+
+### `now_ms`
+
+**Signature**: `() -> int`
+
+Current Unix timestamp in milliseconds.
+
+```omc
+now_ms()
+```
+
+### `now_ns`
+
+**Signature**: `() -> int`
+
+Current Unix timestamp in nanoseconds.
+
+```omc
+now_ns()
+```
+
+### `elapsed_ms`
+
+**Signature**: `(start_ms: int) -> int`
+
+ms since start_ms.
+
+```omc
+elapsed_ms(start)
+```
+
+### `date_part`
+
+**Signature**: `(unix_ts: int, part: string) -> int`
+
+Extract year/month/day/hour/min/sec.
+
+```omc
+date_part(0, "year")  // 1970
 ```
 
 ---
@@ -5159,6 +5441,246 @@ Tangent.
 tan(0)  // 0.0
 ```
 
+### `fact`
+
+**Signature**: `(n: int) -> int`
+
+Factorial.
+
+```omc
+fact(5)  // 120
+```
+
+### `factorial`
+
+**Signature**: `(n: int) -> int`
+
+Factorial (alias).
+
+```omc
+factorial(5)  // 120
+```
+
+### `perm`
+
+**Signature**: `(n: int, k: int) -> int`
+
+Permutations P(n, k).
+
+```omc
+perm(5, 2)  // 20
+```
+
+### `comb`
+
+**Signature**: `(n: int, k: int) -> int`
+
+Combinations C(n, k).
+
+```omc
+comb(5, 2)  // 10
+```
+
+### `fib`
+
+**Signature**: `(n: int) -> int`
+
+n-th Fibonacci number.
+
+```omc
+fib(10)  // 55
+```
+
+### `is_prime`
+
+**Signature**: `(n: int) -> int`
+
+1 if n is prime.
+
+```omc
+is_prime(17)  // 1
+```
+
+### `next_prime`
+
+**Signature**: `(n: int) -> int`
+
+Smallest prime > n.
+
+```omc
+next_prime(10)  // 11
+```
+
+### `hash`
+
+**Signature**: `(value) -> int`
+
+Generic hash for any value.
+
+```omc
+hash("foo")  // i64
+```
+
+### `hash_combine`
+
+**Signature**: `(a: int, b: int) -> int`
+
+Combine two hashes into one.
+
+```omc
+hash_combine(h1, h2)
+```
+
+### `murmurhash`
+
+**Signature**: `(s: string) -> int`
+
+MurmurHash3 — fast non-crypto hash.
+
+```omc
+murmurhash("foo")
+```
+
+### `sort_by`
+
+**Signature**: `(arr, key_fn) -> array`
+
+Sort by key extracted from each element.
+
+```omc
+sort_by(pairs, fn(p){return arr_get(p, 0);})
+```
+
+### `compare`
+
+**Signature**: `(a, b) -> int`
+
+Generic three-way: -1, 0, 1.
+
+```omc
+compare(3, 5)  // -1
+```
+
+### `compare_arr`
+
+**Signature**: `(a, b) -> int`
+
+Lexicographic compare for arrays.
+
+```omc
+compare_arr([1,2], [1,3])  // -1
+```
+
+### `parse_int`
+
+**Signature**: `(s: string, base?: int) -> int`
+
+Parse int (default base 10).
+
+```omc
+parse_int("ff", 16)  // 255
+```
+
+### `parse_float`
+
+**Signature**: `(s: string) -> float`
+
+Parse float.
+
+```omc
+parse_float("3.14")  // 3.14
+```
+
+### `format_int`
+
+**Signature**: `(n: int, base?: int) -> string`
+
+Stringify int in given base.
+
+```omc
+format_int(255, 16)  // "ff"
+```
+
+### `to_hex`
+
+**Signature**: `(n: int) -> string`
+
+Hex string (no prefix).
+
+```omc
+to_hex(255)  // "ff"
+```
+
+### `from_hex`
+
+**Signature**: `(s: string) -> int`
+
+Parse hex string.
+
+```omc
+from_hex("ff")  // 255
+```
+
+### `frac`
+
+**Signature**: `(x: float) -> float`
+
+Fractional part of x.
+
+```omc
+frac(3.7)  // 0.7
+```
+
+### `deg_to_rad`
+
+**Signature**: `(deg: float) -> float`
+
+Degrees → radians.
+
+```omc
+deg_to_rad(180)  // π
+```
+
+### `rad_to_deg`
+
+**Signature**: `(rad: float) -> float`
+
+Radians → degrees.
+
+```omc
+rad_to_deg(3.14159)  // ~180
+```
+
+### `lerp`
+
+**Signature**: `(a, b, t) -> float`
+
+Linear interpolation: a + t*(b-a).
+
+```omc
+lerp(0, 10, 0.5)  // 5
+```
+
+### `smooth_step`
+
+**Signature**: `(edge0, edge1, x) -> float`
+
+Smoothstep 3t²-2t³ interpolation.
+
+```omc
+smooth_step(0, 1, 0.5)
+```
+
+### `wrap_pi`
+
+**Signature**: `(angle: float) -> float`
+
+Wrap angle into [-π, π].
+
+```omc
+wrap_pi(7.0)  // ~0.717
+```
+
 ---
 
 ## dicts
@@ -5423,6 +5945,56 @@ All values.
 dict_values(d)
 ```
 
+### `dict_from_pairs`
+
+**Signature**: `(pairs: [[k,v]]) -> dict`
+
+Build from (key, value) array.
+
+```omc
+dict_from_pairs([["a", 1], ["b", 2]])
+```
+
+### `dict_filter`
+
+**Signature**: `(dict, pred_fn) -> dict`
+
+Keep entries where pred(key, value) is true.
+
+```omc
+dict_filter(d, fn(k,v){return v>0;})
+```
+
+### `dict_map_values`
+
+**Signature**: `(dict, fn) -> dict`
+
+Apply fn to each value, preserve keys.
+
+```omc
+dict_map_values(d, fn(v){return v*2;})
+```
+
+### `dict_invert`
+
+**Signature**: `(dict) -> dict`
+
+Swap keys and values (values must be string-coercible).
+
+```omc
+dict_invert({a:1,b:2})  // {1:a, 2:b}
+```
+
+### `dict_update`
+
+**Signature**: `(target, other) -> null`
+
+In-place merge of other into target.
+
+```omc
+dict_update(t, o);
+```
+
 ---
 
 ## test_runner
@@ -5505,6 +6077,166 @@ Set the current test name for failure prefixing.
 
 ```omc
 test_set_current("my_test");
+```
+
+---
+
+## io
+
+### `list_files`
+
+**Signature**: `(dir: string) -> string[]`
+
+Filenames in directory.
+
+```omc
+list_files(".")  // ["a.omc", ...]
+```
+
+### `read_lines`
+
+**Signature**: `(path: string) -> string[]`
+
+File split into line strings.
+
+```omc
+read_lines("data.txt")
+```
+
+### `write_lines`
+
+**Signature**: `(path: string, lines: string[]) -> null`
+
+Write each line + 
+.
+
+```omc
+write_lines("o.txt", ["a", "b"])
+```
+
+### `append_file`
+
+**Signature**: `(path: string, content: string) -> null`
+
+Append to existing file.
+
+```omc
+append_file("log.txt", "...
+");
+```
+
+### `delete_file`
+
+**Signature**: `(path: string) -> null`
+
+Remove file at path.
+
+```omc
+delete_file("tmp.txt");
+```
+
+### `mkdir`
+
+**Signature**: `(path: string) -> null`
+
+Create directory.
+
+```omc
+mkdir("out");
+```
+
+### `rmdir`
+
+**Signature**: `(path: string) -> null`
+
+Remove empty directory.
+
+```omc
+rmdir("out");
+```
+
+### `exists`
+
+**Signature**: `(path: string) -> int`
+
+Path-exists test for files and dirs.
+
+```omc
+exists("data")  // 1 or 0
+```
+
+### `stat`
+
+**Signature**: `(path: string) -> dict`
+
+Size + mtime + is_dir info.
+
+```omc
+stat("file.omc")
+```
+
+### `current_dir`
+
+**Signature**: `() -> string`
+
+Process working directory.
+
+```omc
+current_dir()
+```
+
+### `set_dir`
+
+**Signature**: `(path: string) -> null`
+
+Change working directory.
+
+```omc
+set_dir("tmp");
+```
+
+---
+
+## logging
+
+### `log_info`
+
+**Signature**: `(msg: string) -> null`
+
+Print labeled INFO line.
+
+```omc
+log_info("started");
+```
+
+### `log_warn`
+
+**Signature**: `(msg: string) -> null`
+
+Print labeled WARN line.
+
+```omc
+log_warn("low memory");
+```
+
+### `log_error`
+
+**Signature**: `(msg: string) -> null`
+
+Print labeled ERROR line.
+
+```omc
+log_error("failed");
+```
+
+### `log_debug`
+
+**Signature**: `(msg: string) -> null`
+
+Print labeled DEBUG line.
+
+```omc
+log_debug("...");
 ```
 
 ---
