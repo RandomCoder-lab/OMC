@@ -1,0 +1,159 @@
+# Additional tokenizer + canonical + code_intel coverage.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+
+fn approx_eq(a, b, tol) {
+    h d = a - b;
+    if d < 0.0 { d = 0.0 - d; }
+    return d <= tol;
+}
+
+# omc_token_lookup at various IDs.
+fn test_lookup_id_1() {
+    h s = omc_token_lookup(1);
+    assert_eq(s, "h ", "ID 1 is 'h '");
+}
+
+fn test_lookup_id_2() {
+    h s = omc_token_lookup(2);
+    assert_eq(s, " = ", "ID 2 is ' = '");
+}
+
+# Round-trip preservation under common transforms.
+fn test_roundtrip_with_brackets() {
+    h src = "fn f(x) { return [1, 2, x]; }";
+    h ids = omc_token_encode(src);
+    h back = omc_token_decode(ids);
+    assert_eq(back, src, "brackets round-trip");
+}
+
+fn test_roundtrip_with_strings() {
+    h src = "h s = \"hello, world\";";
+    h ids = omc_token_encode(src);
+    h back = omc_token_decode(ids);
+    assert_eq(back, src, "strings round-trip");
+}
+
+fn test_roundtrip_with_floats() {
+    h src = "h x = 3.14159;";
+    h ids = omc_token_encode(src);
+    h back = omc_token_decode(ids);
+    assert_eq(back, src, "floats round-trip");
+}
+
+fn test_roundtrip_with_operators() {
+    h src = "h y = (a + b) * (c - d);";
+    h ids = omc_token_encode(src);
+    h back = omc_token_decode(ids);
+    assert_eq(back, src, "operators round-trip");
+}
+
+# Compression measurements.
+fn test_compression_arr_softmax_heavy() {
+    h src = "arr_softmax(arr_softmax(arr_softmax([1.0])))";
+    h pct = omc_token_compress_pct(src);
+    assert_true(pct > 50, "heavy repetition compresses well");
+}
+
+fn test_compression_unique_identifiers_low() {
+    h src = "h foobarbaz = quuxquux + zorbazor;";
+    h pct = omc_token_compress_pct(src);
+    assert_true(pct < 50, "unique identifiers don't compress as well");
+}
+
+# Token distance properties.
+fn test_distance_symmetric() {
+    h d1 = omc_token_distance(3, 5);
+    h d2 = omc_token_distance(5, 3);
+    assert_eq(d1, d2, "distance symmetric");
+}
+
+fn test_distance_triangle_ish() {
+    h d_ac = omc_token_distance(3, 10);
+    h d_ab = omc_token_distance(3, 5);
+    h d_bc = omc_token_distance(5, 10);
+    assert_true(d_ac <= d_ab + d_bc + 10, "approximate triangle bound");
+}
+
+# Canonical hash equality through formatting.
+fn test_canonical_hash_extra_whitespace() {
+    h h1 = omc_canonical_hash("fn f(x) { return x; }");
+    h h2 = omc_canonical_hash("fn f(x){return x;}");
+    assert_eq(dict_get(h1, "raw"), dict_get(h2, "raw"), "whitespace canonicalizes");
+}
+
+fn test_canonical_hash_comment_invariance() {
+    h h1 = omc_canonical_hash("fn f(x) { return x; }");
+    h h2 = omc_canonical_hash("# a comment\nfn f(x) { return x; }");
+    assert_eq(dict_get(h1, "raw"), dict_get(h2, "raw"), "comments canonicalize");
+}
+
+# Similarity properties.
+fn test_similarity_arity_diff() {
+    h s = omc_code_similarity(
+        "fn f(x) { return x; }",
+        "fn f(x, y) { return x + y; }"
+    );
+    assert_true(s < 1.0, "different arity → not 1.0");
+    assert_true(s > 0.0, "positive overlap");
+}
+
+# Fingerprint properties.
+fn test_fingerprint_in_range() {
+    h fp = omc_code_fingerprint("fn f(x) { return x; }");
+    # fp ∈ [0, product(moduli)) ≈ [0, 9.7e8]
+    assert_true(fp >= 0, ">=0");
+    assert_true(fp < 1000000000, "below product");
+}
+
+# Code memory cross-session shape.
+fn test_remember_with_long_name() {
+    omc_memory_clear();
+    h k = "my_loss_v1_with_a_long_name";
+    omc_remember(k, "fn loss() { return 0; }");
+    assert_true(omc_recall(k) != null, "recalled by long name");
+}
+
+# Code dependencies.
+fn test_deps_includes_arr_get() {
+    h deps = omc_code_dependencies("fn f(xs) { return arr_get(xs, 0); }");
+    h has_get = 0;
+    h i = 0;
+    while i < arr_len(deps) {
+        if arr_get(deps, i) == "arr_get" { has_get = 1; }
+        i = i + 1;
+    }
+    assert_eq(has_get, 1, "arr_get is a dep");
+}
+
+# Complexity ordering.
+fn test_complexity_nested_if() {
+    h flat = omc_code_complexity("fn f(x) { return x; }");
+    h nested = omc_code_complexity("fn f(x) { if x > 0 { if x > 10 { if x > 100 { return 3; } return 2; } return 1; } return 0; }");
+    assert_true(dict_get(nested, "complexity") > dict_get(flat, "complexity"),
+        "nested ifs add complexity");
+    assert_true(dict_get(nested, "ast_depth") > dict_get(flat, "ast_depth"),
+        "depth grows");
+}
+
+# Substrate score.
+fn test_substrate_score_empty() {
+    h s = omc_substrate_score("fn f() {}");
+    assert_true(s >= 0.0, "non-neg");
+    assert_true(s <= 1.0, "<=1");
+}
+
+# Substrate vs python detection.
+fn test_uses_python_on_py_import() {
+    assert_eq(omc_code_uses_python("py_call(\"x\");"), 1, "py_call detected");
+}
+
+fn test_uses_substrate_on_resonance() {
+    assert_eq(omc_code_uses_substrate("h r = arr_resonance_vec([1,2]);"), 1, "resonance detected");
+}

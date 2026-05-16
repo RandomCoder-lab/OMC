@@ -1,0 +1,119 @@
+# Additional introspection / discoverability coverage.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+
+# omc_builtin_count grows monotonically over the session.
+fn test_builtin_count_substantial() {
+    h n = omc_builtin_count();
+    assert_true(n > 300, "more than 300 documented builtins");
+}
+
+fn test_unique_count_nonzero() {
+    h u = omc_unique_count();
+    assert_true(u > 10, "unique count substantial");
+    assert_true(u < omc_builtin_count(), "unique <= total");
+}
+
+fn test_categories_count_substantial() {
+    h c = omc_categories_count();
+    assert_true(c >= 10, "many categories");
+}
+
+# Search builtins.
+fn test_search_arr() {
+    h hits = omc_search_builtins("array");
+    assert_true(arr_len(hits) >= 1, "found array-related");
+}
+
+fn test_search_token() {
+    h hits = omc_search_builtins("token");
+    assert_true(arr_len(hits) >= 3, "multiple token builtins");
+}
+
+fn test_search_substrate() {
+    h hits = omc_search_builtins("substrate");
+    assert_true(arr_len(hits) >= 2, "substrate hits");
+}
+
+fn test_search_empty_query() {
+    h hits = omc_search_builtins("");
+    # Empty string matches everything.
+    assert_true(arr_len(hits) > 100, "empty matches many");
+}
+
+# Completion hints.
+fn test_completion_tape() {
+    h h_tape = omc_completion_hint("tape_");
+    assert_true(arr_len(h_tape) >= 5, "tape_* family found");
+}
+
+fn test_completion_dual() {
+    h h_dual = omc_completion_hint("dual_");
+    assert_true(arr_len(h_dual) >= 3, "dual_* family found");
+}
+
+fn test_completion_gen() {
+    h h_gen = omc_completion_hint("gen_");
+    assert_true(arr_len(h_gen) >= 2, "gen_* family found");
+}
+
+fn test_completion_nonexistent_prefix() {
+    h h_x = omc_completion_hint("zzzz_no_such_prefix");
+    assert_eq(arr_len(h_x), 0, "empty for unknown prefix");
+}
+
+# Help on substrate items.
+fn test_help_substrate_attractor() {
+    h h_attr = omc_help("is_attractor");
+    assert_eq(dict_get(h_attr, "unique_to_omc"), 1, "is_attractor is OMC-only");
+}
+
+fn test_help_substrate_resonance() {
+    h h_r = omc_help("arr_resonance_vec");
+    assert_eq(dict_get(h_r, "category"), "substrate", "arr_resonance_vec → substrate");
+}
+
+# help_all_category
+fn test_help_all_substrate_size() {
+    h items = omc_help_all_category("substrate");
+    assert_true(arr_len(items) >= 5, "substrate has several builtins");
+}
+
+fn test_help_all_unknown_category() {
+    h items = omc_help_all_category("nonexistent_cat");
+    assert_eq(arr_len(items), 0, "empty");
+}
+
+# Did-you-mean — typo distance bounds.
+fn test_did_you_mean_typo_far() {
+    h s = omc_did_you_mean("totally_unrelated_blob_qqqz");
+    assert_eq(arr_len(s), 0, "no close matches");
+}
+
+fn test_did_you_mean_softmx() {
+    h s = omc_did_you_mean("arr_softmx");
+    assert_true(arr_len(s) >= 1, "found at least 1");
+}
+
+fn test_did_you_mean_short_query() {
+    h s = omc_did_you_mean("arr", 3);
+    assert_true(arr_len(s) <= 3, "respects limit");
+}
+
+# Error catalog
+fn test_error_count_grown() {
+    h n = omc_error_count();
+    assert_true(n >= 500, "error catalog substantial");
+}
+
+fn test_explain_arr_get_specific() {
+    h ex = omc_explain_error("arr_get: index 5 out of bounds (len 3)");
+    assert_eq(dict_get(ex, "matched"), 1, "matched");
+    assert_eq(dict_get(ex, "category"), "arrays", "arrays cat");
+}
