@@ -235,6 +235,47 @@ impl Lexer {
             }
         }
 
+        // Scientific-notation suffix: `e` / `E` optionally followed by
+        // `+`/`-` then one or more digits. Only recognized when at
+        // least one digit is already accumulated. Forces float type
+        // even if the mantissa was integer (1e5 -> Float(100000.0)).
+        // Without this, `1e-9` was misparsed as int(1) followed by
+        // call(e, -9) — the "Function approx_eq expects 3 arguments,
+        // got 4" error surfaced during the optimization-campaign
+        // tests for the stats builtins.
+        if !num_str.is_empty() {
+            if let Some(c) = self.current() {
+                if c == 'e' || c == 'E' {
+                    let mut lookahead = 1;
+                    let mut has_sign = false;
+                    if matches!(self.peek(lookahead), Some('+') | Some('-')) {
+                        has_sign = true;
+                        lookahead += 1;
+                    }
+                    // Need at least one digit after e/E (and optional sign)
+                    // to commit to scientific notation. Otherwise leave
+                    // the `e` alone — it's an identifier or keyword.
+                    if self.peek(lookahead).map_or(false, |ch| ch.is_ascii_digit()) {
+                        is_float = true;
+                        num_str.push(c);
+                        self.advance();
+                        if has_sign {
+                            num_str.push(self.current().unwrap());
+                            self.advance();
+                        }
+                        while let Some(c) = self.current() {
+                            if c.is_ascii_digit() {
+                                num_str.push(c);
+                                self.advance();
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         if is_float {
             Token::Float(num_str.parse().unwrap_or(0.0))
         } else {

@@ -35,108 +35,108 @@ fn approx_eq(a, b, tol) {
 
 fn test_log2() {
     h r = log2(8.0);
-    assert_true(approx_eq(r, 3.0, 0.000000001), "log2(8) should be 3.0");
+    assert_true(approx_eq(r, 3.0, 1e-9), "log2(8) should be 3.0");
 }
 
 fn test_log10() {
     h r = log10(1000.0);
-    assert_true(approx_eq(r, 3.0, 0.000000001), "log10(1000) should be 3.0");
+    assert_true(approx_eq(r, 3.0, 1e-9), "log10(1000) should be 3.0");
 }
 
 fn test_asin() {
     h r = asin(1.0);
     h pi_half = pi() / 2.0;
-    assert_true(approx_eq(r, pi_half, 0.000000001), "asin(1) should be pi/2");
+    assert_true(approx_eq(r, pi_half, 1e-9), "asin(1) should be pi/2");
 }
 
 fn test_acos() {
     h r = acos(0.0);
     h pi_half = pi() / 2.0;
-    assert_true(approx_eq(r, pi_half, 0.000000001), "acos(0) should be pi/2");
+    assert_true(approx_eq(r, pi_half, 1e-9), "acos(0) should be pi/2");
 }
 
 fn test_atan() {
     h r = atan(1.0);
     h pi_quarter = pi() / 4.0;
-    assert_true(approx_eq(r, pi_quarter, 0.000000001), "atan(1) should be pi/4");
+    assert_true(approx_eq(r, pi_quarter, 1e-9), "atan(1) should be pi/4");
 }
 
 fn test_atan2() {
     h r = atan2(1.0, 1.0);
     h pi_quarter = pi() / 4.0;
-    assert_true(approx_eq(r, pi_quarter, 0.000000001), "atan2(1, 1) should be pi/4");
+    assert_true(approx_eq(r, pi_quarter, 1e-9), "atan2(1, 1) should be pi/4");
 }
 
 fn test_hypot() {
     h r = hypot(3.0, 4.0);
-    assert_true(approx_eq(r, 5.0, 0.000000001), "hypot(3, 4) should be 5");
+    assert_true(approx_eq(r, 5.0, 1e-9), "hypot(3, 4) should be 5");
 }
 
 fn test_lerp_endpoints() {
     h r0 = lerp(10.0, 20.0, 0.0);
     h r1 = lerp(10.0, 20.0, 1.0);
-    assert_true(approx_eq(r0, 10.0, 0.000000001), "lerp(a, b, 0) = a");
-    assert_true(approx_eq(r1, 20.0, 0.000000001), "lerp(a, b, 1) = b");
+    assert_true(approx_eq(r0, 10.0, 1e-9), "lerp(a, b, 0) = a");
+    assert_true(approx_eq(r1, 20.0, 1e-9), "lerp(a, b, 1) = b");
 }
 
 fn test_lerp_midpoint() {
     h r = lerp(10.0, 20.0, 0.5);
-    assert_true(approx_eq(r, 15.0, 0.000000001), "lerp midpoint should be 15");
+    assert_true(approx_eq(r, 15.0, 1e-9), "lerp midpoint should be 15");
 }
 
 # ---------- Array stats ----------
 
 fn test_arr_mean() {
     h r = arr_mean([1, 2, 3, 4, 5]);
-    assert_true(approx_eq(r, 3.0, 0.000000001), "arr_mean([1..5]) should be 3");
+    assert_true(approx_eq(r, 3.0, 1e-9), "arr_mean([1..5]) should be 3");
 }
 
 fn test_arr_variance() {
     # population variance of [2, 4, 4, 4, 5, 5, 7, 9] is 4
     h r = arr_variance([2, 4, 4, 4, 5, 5, 7, 9]);
-    assert_true(approx_eq(r, 4.0, 0.000000001), "variance of textbook example is 4");
+    assert_true(approx_eq(r, 4.0, 1e-9), "variance of textbook example is 4");
 }
 
 fn test_arr_stddev() {
     h r = arr_stddev([2, 4, 4, 4, 5, 5, 7, 9]);
-    assert_true(approx_eq(r, 2.0, 0.000000001), "stddev should be sqrt(4) = 2");
+    assert_true(approx_eq(r, 2.0, 1e-9), "stddev should be sqrt(4) = 2");
 }
 
 fn test_arr_median_odd() {
     h r = arr_median([7, 1, 5, 3, 9]);
-    assert_true(approx_eq(r, 5.0, 0.000000001), "median of odd-length set");
+    assert_true(approx_eq(r, 5.0, 1e-9), "median of odd-length set");
 }
 
 fn test_arr_median_even() {
     h r = arr_median([1, 2, 3, 4]);
-    assert_true(approx_eq(r, 2.5, 0.000000001), "median of even-length set is mean of middle two");
+    assert_true(approx_eq(r, 2.5, 1e-9), "median of even-length set is mean of middle two");
 }
 
 fn test_arr_harmonic_mean() {
     # H([1, 2, 4]) = 3 / (1/1 + 1/2 + 1/4) = 3 / 1.75 ≈ 1.7142857...
     h r = arr_harmonic_mean([1, 2, 4]);
-    assert_true(approx_eq(r, 1.7142857142857142, 0.000000001), "harmonic mean of [1,2,4]");
+    assert_true(approx_eq(r, 1.7142857142857142, 1e-9), "harmonic mean of [1,2,4]");
 }
 
 fn test_arr_geometric_mean() {
     # G([2, 8]) = sqrt(16) = 4
     h r = arr_geometric_mean([2, 8]);
-    assert_true(approx_eq(r, 4.0, 0.000000001), "geometric mean of [2, 8] is 4");
+    assert_true(approx_eq(r, 4.0, 1e-9), "geometric mean of [2, 8] is 4");
 }
 
 fn test_arr_sum_sq() {
     h r = arr_sum_sq([1, 2, 3]);
-    assert_true(approx_eq(r, 14.0, 0.000000001), "sum of squares 1+4+9 = 14");
+    assert_true(approx_eq(r, 14.0, 1e-9), "sum of squares 1+4+9 = 14");
 }
 
 fn test_arr_norm() {
     h r = arr_norm([3, 4]);
-    assert_true(approx_eq(r, 5.0, 0.000000001), "L2 norm of [3, 4] is 5");
+    assert_true(approx_eq(r, 5.0, 1e-9), "L2 norm of [3, 4] is 5");
 }
 
 fn test_arr_dot() {
     h r = arr_dot([1, 2, 3], [4, 5, 6]);
-    assert_true(approx_eq(r, 32.0, 0.000000001), "dot product 1*4 + 2*5 + 3*6 = 32");
+    assert_true(approx_eq(r, 32.0, 1e-9), "dot product 1*4 + 2*5 + 3*6 = 32");
 }
 
 # ---------- Substrate primitives ----------
