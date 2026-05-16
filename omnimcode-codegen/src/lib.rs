@@ -410,6 +410,61 @@ pub extern "C" fn omc_arr_max_int(arr_ptr: i64) -> i64 {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Binary (array_ptr, target) -> int intrinsics — sorted-array search
+// ---------------------------------------------------------------------------
+
+/// int_binary_search(arr_ptr, target) -> index or -1.
+/// Standard midpoint binary search; the OMC builtin's hot path.
+#[no_mangle]
+pub extern "C" fn omc_int_binary_search(arr_ptr: i64, target: i64) -> i64 {
+    if arr_ptr == 0 { return -1; }
+    unsafe {
+        let p = arr_ptr as *const i64;
+        let len = *p as i64;
+        let mut lo: i64 = 0;
+        let mut hi: i64 = len - 1;
+        while lo <= hi {
+            let mid = lo + (hi - lo) / 2;
+            let v = *p.add((mid + 1) as usize);
+            if v == target { return mid; }
+            if v < target { lo = mid + 1; } else { hi = mid - 1; }
+        }
+        -1
+    }
+}
+
+/// int_lower_bound(arr_ptr, target) -> first index i with arr[i] >= target.
+#[no_mangle]
+pub extern "C" fn omc_int_lower_bound(arr_ptr: i64, target: i64) -> i64 {
+    if arr_ptr == 0 { return 0; }
+    unsafe {
+        let p = arr_ptr as *const i64;
+        let len = *p as usize;
+        let mut lo: usize = 0;
+        let mut hi: usize = len;
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if *p.add(mid + 1) < target { lo = mid + 1; } else { hi = mid; }
+        }
+        lo as i64
+    }
+}
+
+/// substrate_search(arr_ptr, target) -> index or -1, via the F(k)/φ^(π·k)
+/// substrate-routed search algorithm.
+#[no_mangle]
+pub extern "C" fn omc_substrate_search(arr_ptr: i64, target: i64) -> i64 {
+    if arr_ptr == 0 { return -1; }
+    unsafe {
+        let p = arr_ptr as *const i64;
+        let len = *p as usize;
+        let slice = std::slice::from_raw_parts(p.add(1), len);
+        omnimcode_core::phi_pi_fib::substrate_search_i64(slice, target)
+            .map(|i| i as i64).unwrap_or(-1)
+    }
+}
+
 use std::collections::HashMap;
 
 use inkwell::basic_block::BasicBlock;
@@ -604,9 +659,14 @@ impl<'ctx> JitContext<'ctx> {
         // Binary i64,i64 -> i64 intrinsics.
         let binary_ty = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
         for (name, ptr) in [
-            ("omc_gcd",      omc_gcd as *const () as usize),
-            ("omc_lcm",      omc_lcm as *const () as usize),
-            ("omc_safe_mod", omc_safe_mod as *const () as usize),
+            ("omc_gcd",               omc_gcd as *const () as usize),
+            ("omc_lcm",               omc_lcm as *const () as usize),
+            ("omc_safe_mod",          omc_safe_mod as *const () as usize),
+            // (array_ptr, target) -> index searches. Same arity as int,int
+            // intrinsics; the first arg is the L1.6 buffer pointer.
+            ("omc_int_binary_search", omc_int_binary_search as *const () as usize),
+            ("omc_int_lower_bound",   omc_int_lower_bound as *const () as usize),
+            ("omc_substrate_search",  omc_substrate_search as *const () as usize),
         ] {
             let f = module.add_function(name, binary_ty,
                 Some(inkwell::module::Linkage::External));

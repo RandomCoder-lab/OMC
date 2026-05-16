@@ -1,0 +1,139 @@
+# =============================================================================
+# harmonic_anomaly v1 (linear _find_key) vs v2 (sorted + int_binary_search)
+# =============================================================================
+# Same NSL-KDD 5000-row workload, both implementations, byte-for-byte
+# identical input. Reports: fit time, score time, top-K recall.
+#
+# Hypothesis: v2's O(log N) lookup wins on score wall-clock with same
+# recall as v1. If true → C aligns and v2 ships.
+# =============================================================================
+
+import "examples/lib/harmonic_anomaly.omc" as ha;
+import "examples/lib/harmonic_anomaly_v2.omc" as ha2;
+import "examples/lib/np.omc" as np;
+
+h t0 = now_ms();
+h raw = read_file("examples/datascience/nsl_kdd_data/sample_5k.csv");
+h rows_raw = csv_parse(raw, ",", 0);
+h t1 = now_ms();
+println(concat_many("loaded ", arr_len(rows_raw), " rows in ", t1 - t0, " ms"));
+
+fn extract_features(row) {
+    return [
+        to_int(arr_get(row, 0)),
+        to_int(arr_get(row, 4)),
+        to_int(arr_get(row, 5)),
+        to_int(arr_get(row, 22)),
+        to_int(arr_get(row, 23)),
+        to_int(arr_get(row, 31))
+    ];
+}
+
+h features = [];
+h attack_indices = {};
+h i = 0;
+while i < arr_len(rows_raw) {
+    h row = arr_get(rows_raw, i);
+    if arr_len(row) >= 42 {
+        arr_push(features, extract_features(row));
+        h label = arr_get(row, 41);
+        if label != "normal" {
+            dict_set(attack_indices, concat_many("", i), 1);
+        }
+    }
+    i = i + 1;
+}
+h n_total = arr_len(features);
+h n_attacks = dict_len(attack_indices);
+println(concat_many("extracted ", n_total, " feature vectors  (",
+    n_total - n_attacks, " normal, ", n_attacks, " attacks)"));
+println("");
+
+h dim_names = ["duration", "src_bytes", "dst_bytes", "count", "srv_count", "dst_host_count"];
+
+# ---- v1 timings ----------------------------------------------------------
+
+h det1 = ha.new(dim_names);
+h v1_fit_t0 = now_ms();
+ha.fit(det1, features);
+h v1_fit_t1 = now_ms();
+println(concat_many("v1 fit:   ", v1_fit_t1 - v1_fit_t0, " ms"));
+
+h v1_score_t0 = now_ms();
+h v1_scores = ha.score_all(det1, features);
+h v1_score_t1 = now_ms();
+println(concat_many("v1 score: ", v1_score_t1 - v1_score_t0, " ms"));
+
+# ---- v2 timings ----------------------------------------------------------
+
+h det2 = ha2.new(dim_names);
+h v2_fit_t0 = now_ms();
+ha2.fit(det2, features);
+h v2_fit_t1 = now_ms();
+println(concat_many("v2 fit:   ", v2_fit_t1 - v2_fit_t0, " ms"));
+
+h v2_score_t0 = now_ms();
+h v2_scores = ha2.score_all(det2, features);
+h v2_score_t1 = now_ms();
+println(concat_many("v2 score: ", v2_score_t1 - v2_score_t0, " ms"));
+
+println("");
+
+# ---- Speedup ratios -----------------------------------------------------
+
+h v1_total = (v1_fit_t1 - v1_fit_t0) + (v1_score_t1 - v1_score_t0);
+h v2_total = (v2_fit_t1 - v2_fit_t0) + (v2_score_t1 - v2_score_t0);
+println(concat_many("v1 total: ", v1_total, " ms"));
+println(concat_many("v2 total: ", v2_total, " ms"));
+
+# ---- Top-K recall comparison (correctness check) -----------------------
+
+fn topk(scores, k) {
+    h neg = [];
+    h ni = 0;
+    while ni < arr_len(scores) {
+        arr_push(neg, 0 - arr_get(scores, ni));
+        ni = ni + 1;
+    }
+    h sorted = np.argsort(neg);
+    h out = [];
+    h j = 0;
+    while j < k {
+        if j < arr_len(sorted) { arr_push(out, arr_get(sorted, j)); }
+        j = j + 1;
+    }
+    return out;
+}
+
+fn count_hits(top_idx, truth_set) {
+    h hits = 0;
+    h k = 0;
+    while k < arr_len(top_idx) {
+        h key = concat_many("", arr_get(top_idx, k));
+        if dict_has(truth_set, key) == 1 { hits = hits + 1; }
+        k = k + 1;
+    }
+    return hits;
+}
+
+println("");
+println("=== Recall @ K (truth = labeled attacks) ===");
+println("                     K=10    K=50    K=100   K=500");
+print("  v1 (linear)        ");
+print(count_hits(topk(v1_scores, 10), attack_indices));
+print("/10   ");
+print(count_hits(topk(v1_scores, 50), attack_indices));
+print("/50   ");
+print(count_hits(topk(v1_scores, 100), attack_indices));
+print("/100   ");
+print(count_hits(topk(v1_scores, 500), attack_indices));
+println("/500");
+print("  v2 (binary-search) ");
+print(count_hits(topk(v2_scores, 10), attack_indices));
+print("/10   ");
+print(count_hits(topk(v2_scores, 50), attack_indices));
+print("/50   ");
+print(count_hits(topk(v2_scores, 100), attack_indices));
+print("/100   ");
+print(count_hits(topk(v2_scores, 500), attack_indices));
+println("/500");

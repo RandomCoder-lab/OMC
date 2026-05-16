@@ -751,11 +751,19 @@ impl<'ctx, 'a> DualBandLowerer<'ctx, 'a> {
                             continue;
                         }
                     }
-                    // Binary i64,i64 -> i64 intrinsics.
+                    // Binary i64,i64 -> i64 intrinsics. Some of these
+                    // accept an array pointer as the FIRST arg (the L1.6
+                    // length-prefixed buffer); the JIT'd code already
+                    // has the pointer in lane 0 from NewArray or a
+                    // marshalled input. No special handling needed —
+                    // the extern Rust shim just deref's the pointer.
                     const BINARY_INTRINSICS: &[(&str, &str)] = &[
-                        ("gcd",      "omc_gcd"),
-                        ("lcm",      "omc_lcm"),
-                        ("safe_mod", "omc_safe_mod"),
+                        ("gcd",                "omc_gcd"),
+                        ("lcm",                "omc_lcm"),
+                        ("safe_mod",           "omc_safe_mod"),
+                        ("int_binary_search",  "omc_int_binary_search"),
+                        ("int_lower_bound",    "omc_int_lower_bound"),
+                        ("substrate_search",   "omc_substrate_search"),
                     ];
                     if let Some(&(_, extern_name)) = BINARY_INTRINSICS
                         .iter()
