@@ -17,6 +17,7 @@ pub struct HInt {
 }
 
 impl HInt {
+    #[inline]
     pub fn new(value: i64) -> Self {
         let resonance = Self::compute_resonance(value);
         let him_score = Self::compute_him(value);
@@ -39,6 +40,7 @@ impl HInt {
     /// local table covered). For |value| > 610 the new resonance is
     /// MORE accurate — the old table saturated at 610, scoring large
     /// inputs unfairly low; the new one extends to 63,245,986.
+    #[inline]
     pub fn compute_resonance(value: i64) -> f64 {
         let (_nearest, min_dist) = crate::phi_pi_fib::nearest_attractor_with_dist(value);
         let abs_val = value.abs();
@@ -50,12 +52,14 @@ impl HInt {
     }
 
     /// Compute Harmonic Integer Map (0-1)
+    #[inline]
     pub fn compute_him(value: i64) -> f64 {
         let v = value as f64;
         let x = (v * PHI) - (v * PHI).floor();
         x.abs().min(1.0 - x.abs())
     }
 
+    #[inline]
     pub fn singularity() -> Self {
         HInt {
             value: 0,
@@ -200,16 +204,19 @@ impl HArray {
 
     /// Construct an HArray from an owned Vec — the most common
     /// builder shape (used by literals, splits, range expansion).
+    #[inline]
     pub fn from_vec(v: Vec<Value>) -> Self {
         HArray { items: std::rc::Rc::new(std::cell::RefCell::new(v)) }
     }
 
     /// Length without taking a guard for the caller. Borrows internally.
+    #[inline]
     pub fn len(&self) -> usize {
         self.items.borrow().len()
     }
 
     /// True iff the inner vec is empty.
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.items.borrow().is_empty()
     }
@@ -273,15 +280,18 @@ pub enum Value {
 impl Value {
     /// Convenience constructor for a Dict from an owned BTreeMap.
     /// Hides the Rc<RefCell<>> wrap from call sites.
+    #[inline]
     pub fn dict_from(m: std::collections::BTreeMap<String, Value>) -> Self {
         Value::Dict(std::rc::Rc::new(std::cell::RefCell::new(m)))
     }
 
     /// Convenience constructor for an empty Dict.
+    #[inline]
     pub fn dict_empty() -> Self {
         Value::dict_from(std::collections::BTreeMap::new())
     }
 
+    #[inline]
     pub fn to_int(&self) -> i64 {
         match self {
             Value::HInt(h) => h.value,
@@ -294,6 +304,7 @@ impl Value {
         }
     }
 
+    #[inline]
     pub fn to_float(&self) -> f64 {
         match self {
             Value::HInt(h) => h.value as f64,
@@ -306,6 +317,7 @@ impl Value {
         }
     }
 
+    #[inline]
     pub fn to_bool(&self) -> bool {
         match self {
             Value::HInt(h) => h.value != 0,
@@ -395,18 +407,52 @@ impl Value {
         }
     }
 
+    #[inline]
     pub fn is_float(&self) -> bool {
         matches!(self, Value::HFloat(_))
     }
 
+    #[inline]
     pub fn is_numeric(&self) -> bool {
         matches!(self, Value::HInt(_) | Value::HFloat(_))
     }
 
+    #[inline]
     pub fn is_singularity(&self) -> bool {
         matches!(self, Value::Singularity { .. })
             // Backward compat: HInt with the old flag set still counts.
             || matches!(self, Value::HInt(h) if h.is_singularity)
+    }
+
+    /// Quickly distinguish a Value::HInt without binding/destructuring.
+    /// Hot in dispatch paths that pre-check before extracting.
+    #[inline]
+    pub fn is_int(&self) -> bool {
+        matches!(self, Value::HInt(_))
+    }
+
+    /// Quickly distinguish a Value::String without allocating.
+    #[inline]
+    pub fn is_string(&self) -> bool {
+        matches!(self, Value::String(_))
+    }
+
+    /// Quickly distinguish a Value::Array without borrowing.
+    #[inline]
+    pub fn is_array(&self) -> bool {
+        matches!(self, Value::Array(_))
+    }
+
+    /// Quickly distinguish a Value::Dict without borrowing.
+    #[inline]
+    pub fn is_dict(&self) -> bool {
+        matches!(self, Value::Dict(_))
+    }
+
+    /// Quickly distinguish Value::Null without going through to_bool.
+    #[inline]
+    pub fn is_null(&self) -> bool {
+        matches!(self, Value::Null)
     }
 }
 

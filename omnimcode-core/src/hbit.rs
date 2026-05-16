@@ -1,7 +1,7 @@
 // src/hbit.rs - HBit (Harmonic Bit) Processing Engine (FIXED)
 // Dual-band computation with harmonic coherence tracking
 
-use crate::value::{HInt, PHI};
+use crate::value::PHI;
 use std::collections::HashMap;
 
 /// HBit Processor - Manages dual-band variables and harmony tracking

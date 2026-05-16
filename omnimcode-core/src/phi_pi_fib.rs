@@ -397,10 +397,19 @@ pub fn binary_search<T>(
 /// Tie-break: when two attractors are equidistant, the LOWER one wins
 /// (matches the original linear-scan semantics: first match in
 /// ascending order).
+#[inline]
 pub fn nearest_attractor_with_dist(value: i64) -> (i64, i64) {
     let abs_v = value.abs();
     if abs_v == 0 {
         return (0, 0);
+    }
+    // Fast path: very small values (1, 2, 3) — extremely common in OMC
+    // hot loops (loop counters, small indices). Skip the fibonacci_search
+    // entirely and return inline. Catches 0/1/2/3 (which are themselves
+    // attractors) without paying for the binary search.
+    if abs_v <= 3 {
+        let signed = if value < 0 { -abs_v } else { abs_v };
+        return (signed, 0);
     }
     let target = abs_v as u64;
     // Substrate-internal call — book against the BACKGROUND counters
@@ -434,12 +443,14 @@ pub fn nearest_attractor_with_dist(value: i64) -> (i64, i64) {
 /// fold_to_nearest_attractor(value) — sign-preserving fold to the
 /// closest Fibonacci attractor. Wrapper around
 /// `nearest_attractor_with_dist` that discards the distance.
+#[inline]
 pub fn fold_to_nearest_attractor(value: i64) -> i64 {
     nearest_attractor_with_dist(value).0
 }
 
 /// is_on_fibonacci_attractor(value) — true iff |value| is exactly a
 /// Fibonacci number in the canonical attractor table.
+#[inline]
 pub fn is_on_fibonacci_attractor(value: i64) -> bool {
     nearest_attractor_with_dist(value).1 == 0
 }

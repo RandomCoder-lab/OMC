@@ -80,6 +80,13 @@ fn is_handle(id: i64) -> bool {
 
 /// OMC Value → Python object (pyo3 0.21 API: `.to_object(py)` and
 /// `.into_py(py)` are the canonical conversions).
+///
+/// pyo3 0.23 deprecated `.into_py()` in favor of `IntoPyObject::into_pyobject`,
+/// which is a substantive API change (returns Bound<'py, _> + Error type
+/// instead of PyObject). Migration is tracked but suppressed here so the
+/// rename-class deprecations elsewhere can land cleanly. See
+/// https://pyo3.rs/v0.23.0/migration for the full migration story.
+#[allow(deprecated)]
 fn omc_to_py(py: Python<'_>, v: &Value) -> PyResult<PyObject> {
     match v {
         Value::HInt(h) => {
@@ -100,14 +107,14 @@ fn omc_to_py(py: Python<'_>, v: &Value) -> PyResult<PyObject> {
         Value::Null => Ok(py.None()),
         Value::Array(arr) => {
             let items = arr.items.borrow();
-            let list = PyList::empty_bound(py);
+            let list = PyList::empty(py);
             for item in items.iter() {
                 list.append(omc_to_py(py, item)?)?;
             }
             Ok(list.into_py(py))
         }
         Value::Dict(d) => {
-            let dict = PyDict::new_bound(py);
+            let dict = PyDict::new(py);
             for (k, val) in d.borrow().iter() {
                 dict.set_item(k, omc_to_py(py, val)?)?;
             }
@@ -191,10 +198,11 @@ fn arr_to_py_tuple<'py>(py: Python<'py>, arr_arg: &Value) -> PyResult<Bound<'py,
         }
         other => vec![omc_to_py(py, other)?],
     };
-    Ok(PyTuple::new_bound(py, items))
+    PyTuple::new(py, items)
 }
 
 /// Register the py_* builtin family on `interp`. After this:
+#[allow(deprecated)]  // pyo3 0.23 IntoPy migration deferred — see omc_to_py
 ///
 ///   py_import("numpy")            → handle
 ///   py_call(handle, "method", a)  → Value
@@ -216,7 +224,7 @@ pub fn register_python_builtins(interp: &mut Interpreter) {
         let name = args[0].to_display_string();
         Python::with_gil(|py| {
             let module = py
-                .import_bound(name.as_str())
+                .import(name.as_str())
                 .map_err(|e| format!("py_import({}): {}", name, e))?;
             Ok(Value::HInt(HInt::new(store_handle(module.into_py(py)))))
         })
@@ -325,7 +333,7 @@ pub fn register_python_builtins(interp: &mut Interpreter) {
                 .map_err(|e| format!("py_call_kw: pos arg conversion: {}", e))?;
             let kwargs = match &kwargs_v {
                 Value::Dict(d) => {
-                    let py_d = PyDict::new_bound(py);
+                    let py_d = PyDict::new(py);
                     for (k, v) in d.borrow().iter() {
                         py_d.set_item(k, omc_to_py(py, v).map_err(|e|
                             format!("py_call_kw: kwarg {}: {}", k, e))?)
@@ -358,7 +366,7 @@ pub fn register_python_builtins(interp: &mut Interpreter) {
                 .map_err(|e| format!("py_call_fn_kw: pos arg conversion: {}", e))?;
             let kwargs = match &kwargs_v {
                 Value::Dict(d) => {
-                    let py_d = PyDict::new_bound(py);
+                    let py_d = PyDict::new(py);
                     for (k, v) in d.borrow().iter() {
                         py_d.set_item(k, omc_to_py(py, v).map_err(|e|
                             format!("py_call_fn_kw: kwarg {}: {}", k, e))?)
@@ -385,7 +393,7 @@ pub fn register_python_builtins(interp: &mut Interpreter) {
             let cstr = std::ffi::CString::new(code.as_str())
                 .map_err(|e| format!("py_eval: {}", e))?;
             let result = py
-                .eval_bound(cstr.to_str().unwrap(), None, None)
+                .eval(cstr.as_c_str(), None, None)
                 .map_err(|e| format!("py_eval: {}", e))?;
             Ok(py_to_omc(py, &result))
         })
@@ -399,7 +407,7 @@ pub fn register_python_builtins(interp: &mut Interpreter) {
         Python::with_gil(|py| {
             let cstr = std::ffi::CString::new(code.as_str())
                 .map_err(|e| format!("py_exec: {}", e))?;
-            py.run_bound(cstr.to_str().unwrap(), None, None)
+            py.run(cstr.as_c_str(), None, None)
                 .map_err(|e| format!("py_exec: {}", e))?;
             Ok(Value::Null)
         })
@@ -532,7 +540,7 @@ impl OmcCallback {
 pub fn fetch_url(url: &str) -> Result<String, String> {
     Python::with_gil(|py| {
         let requests = py
-            .import_bound("requests")
+            .import("requests")
             .map_err(|e| format!("requests not installed: {}", e))?;
         let response = requests
             .call_method1("get", (url,))
@@ -581,7 +589,7 @@ pub fn install_url_via_python(
 /// path is cold (called once per install), so the overhead is fine.
 pub fn sha256_hex(bytes: &[u8]) -> String {
     Python::with_gil(|py| -> PyResult<String> {
-        let hashlib = py.import_bound("hashlib")?;
+        let hashlib = py.import("hashlib")?;
         let h = hashlib.call_method1("sha256", (bytes,))?;
         let hex = h.call_method0("hexdigest")?;
         hex.extract::<String>()
@@ -604,7 +612,7 @@ pub fn registry_lookup(name: &str) -> Result<(String, String), String> {
     let body = fetch_url(&registry_url)
         .map_err(|e| format!("registry fetch {}: {}", registry_url, e))?;
     Python::with_gil(|py| {
-        let json = py.import_bound("json").map_err(|e| format!("json: {}", e))?;
+        let json = py.import("json").map_err(|e| format!("json: {}", e))?;
         let parsed = json
             .call_method1("loads", (body,))
             .map_err(|e| format!("registry parse: {}", e))?;
@@ -647,7 +655,7 @@ pub fn registry_lookup(name: &str) -> Result<(String, String), String> {
 pub fn parse_omc_toml_via_python(text: &str) -> Result<Vec<(String, String)>, String> {
     Python::with_gil(|py| {
         let tomllib = py
-            .import_bound("tomllib")
+            .import("tomllib")
             .map_err(|e| format!("tomllib not available (need Python 3.11+): {}", e))?;
         // tomllib.loads(text) — needs bytes in some versions, str in others.
         // Use loads with str, fall back to bytes.

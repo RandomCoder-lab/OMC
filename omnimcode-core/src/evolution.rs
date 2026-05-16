@@ -1,7 +1,6 @@
 // src/evolution.rs - Genetic algorithm operators for circuit evolution
 
-use crate::circuits::{Circuit, Gate, GateId};
-use std::collections::HashMap;
+use crate::circuits::{Circuit, Gate};
 
 /// Genetic algorithm parameters
 #[derive(Clone, Debug)]
@@ -44,9 +43,6 @@ pub fn evaluate_fitness(circuit: &Circuit, test_cases: &[TestCase]) -> f64 {
 
 /// Mutate a circuit by randomly modifying gates
 pub fn mutate_circuit(circuit: &Circuit, mutation_rate: f64) -> Circuit {
-    use std::collections::hash_map::RandomState;
-    use std::hash::{BuildHasher, Hasher};
-
     let mut mutated = circuit.clone();
 
     // Simple RNG using time-based seed (would use rand crate in production)

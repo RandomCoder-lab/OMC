@@ -188,7 +188,7 @@ impl CircuitOptimizer {
     fn get_gate_constant_value(
         &self,
         gate_id: GateId,
-        gate_map: &HashMap<GateId, GateId>,
+        _gate_map: &HashMap<GateId, GateId>,
         circuit: &Circuit,
     ) -> Option<bool> {
         if gate_id >= circuit.gates.len() {
@@ -302,7 +302,7 @@ impl CircuitOptimizer {
     fn try_simplify_gate(
         &self,
         gate: &Gate,
-        gate_map: &HashMap<GateId, GateId>,
+        _gate_map: &HashMap<GateId, GateId>,
         circuit: &Circuit,
     ) -> Option<SimplifyResult> {
         match gate {

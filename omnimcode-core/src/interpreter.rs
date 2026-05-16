@@ -5019,12 +5019,6 @@ fn vm_fast_dispatch(name: &str, args: &[Value]) -> Option<Result<Value, String>>
     }
 }
 
-/// Render a function name for display in stack traces. Internal
-/// auto-generated lambda identifiers (`__rt_lambda_N` from the tree-
-/// walk evaluator, `__lambda_N` from the bytecode compiler) collapse
-/// to a single "<lambda>" so traces don't leak the implementation
-/// detail of which engine assigned the counter — and so traces stay
-/// stable across tree-walk vs VM runs.
 // ===========================================================================
 // Active-interpreter pointer for reentrant host calls.
 //
