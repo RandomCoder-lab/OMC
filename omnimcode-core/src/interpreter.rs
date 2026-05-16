@@ -7230,6 +7230,40 @@ impl Interpreter {
                 let (_, rb, _) = crate::tokenizer::code_hash(&b);
                 Ok(Value::HInt(HInt::new((ra - rb).abs())))
             }
+            // ---- AST canonicalization (the LLM-reach-for primitives) ---
+            //
+            // omc_code_canonical(src) — parse, walk the AST renaming
+            // locals to __v0/__v1/..., re-emit via the formatter. The
+            // result is invariant under whitespace, comments, local
+            // variable names, parameter names, for-loop variables,
+            // catch err vars, lambda params, and match-arm binds.
+            // Top-level fn/class names, dict keys, string literals,
+            // and globals are PRESERVED (observable API).
+            //
+            // omc_code_equivalent(a, b) — 1 iff canonical forms match.
+            //
+            // Combined with omc_code_hash(omc_code_canonical(x)), an
+            // LLM gets a semantic-stable id for any program region
+            // that survives every cosmetic edit.
+            "omc_code_canonical" => {
+                if args.is_empty() {
+                    return Err("omc_code_canonical requires (code: string)".to_string());
+                }
+                let code = self.eval_expr(&args[0])?.to_display_string();
+                match crate::canonical::canonicalize(&code) {
+                    Ok(s) => Ok(Value::String(s)),
+                    Err(e) => Err(format!("omc_code_canonical: {}", e)),
+                }
+            }
+            "omc_code_equivalent" => {
+                if args.len() < 2 {
+                    return Err("omc_code_equivalent requires (code_a, code_b)".to_string());
+                }
+                let a = self.eval_expr(&args[0])?.to_display_string();
+                let b = self.eval_expr(&args[1])?.to_display_string();
+                let eq = crate::canonical::equivalent(&a, &b);
+                Ok(Value::HInt(HInt::new(if eq { 1 } else { 0 })))
+            }
             // arr_fold_all(arr) -> new array with every element snapped
             // to its nearest Fibonacci attractor. Vectorized fold.
             // Substrate-canonical denoising / quantization primitive.

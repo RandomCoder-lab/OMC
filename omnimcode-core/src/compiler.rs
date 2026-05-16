@@ -196,6 +196,7 @@ impl Compiler {
                         // Substrate-token adapter: token IDs + distance + pack
                         | "omc_token_distance" | "omc_token_vocab_size"
                         | "omc_token_pack" | "omc_code_distance"
+                        | "omc_code_equivalent"
                         // tape_* op constructors return node IDs (int)
                         | "tape_var" | "tape_const"
                         | "tape_add" | "tape_sub" | "tape_mul" | "tape_div"

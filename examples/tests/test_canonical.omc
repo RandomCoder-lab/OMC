@@ -1,0 +1,151 @@
+# AST canonicalization — the LLM-reach-for semantic-equivalence layer.
+#
+# omc_code_canonical(code)         → AST-canonicalized + reformatted string
+# omc_code_equivalent(a, b)        → 1 if canonicals match, else 0
+#
+# Two programs that differ only in whitespace / comments / local-var
+# names / param names / loop vars / catch vars / lambda params produce
+# byte-identical canonical output. Top-level fn/class names and global
+# variables are preserved (observable API).
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) {
+    if !cond { test_record_failure(msg); }
+}
+
+# ---- Whitespace / formatting invariance ----
+
+fn test_whitespace_invariant() {
+    h c1 = omc_code_canonical("fn add(x, y) { return x + y; }");
+    h c2 = omc_code_canonical("fn   add(x,y){return x+y;}");
+    assert_eq(c1, c2, "whitespace doesn't change canonical");
+}
+
+fn test_blank_lines_invariant() {
+    h c1 = omc_code_canonical("fn f(x) { return x; }");
+    h c2 = omc_code_canonical("fn f(x) {\n\n  return x;\n\n}");
+    assert_eq(c1, c2, "blank lines invariant");
+}
+
+# ---- Comments stripped ----
+
+fn test_comments_stripped() {
+    h c1 = omc_code_canonical("fn f(x) { return x; }");
+    h c2 = omc_code_canonical("# header\nfn f(x) {\n  # body\n  return x;\n}");
+    assert_eq(c1, c2, "comments don't affect canonical");
+}
+
+# ---- Alpha-equivalence: param renames ----
+
+fn test_param_rename_invariant() {
+    h c1 = omc_code_canonical("fn add(x, y) { return x + y; }");
+    h c2 = omc_code_canonical("fn add(a, b) { return a + b; }");
+    assert_eq(c1, c2, "param names normalize");
+}
+
+# ---- Alpha-equivalence: local var rename ----
+
+fn test_local_var_rename_invariant() {
+    h c1 = omc_code_canonical("fn f(x) { h tmp = x * 2; return tmp; }");
+    h c2 = omc_code_canonical("fn f(x) { h other = x * 2; return other; }");
+    assert_eq(c1, c2, "local var names normalize");
+}
+
+# ---- Top-level fn names PRESERVED ----
+
+fn test_top_level_fn_name_preserved() {
+    h c1 = omc_code_canonical("fn add(x, y) { return x + y; }");
+    h c2 = omc_code_canonical("fn sub(x, y) { return x + y; }");
+    assert_true(c1 != c2, "top-level fn names are observable");
+}
+
+# ---- Structurally different programs differ ----
+
+fn test_different_body_differs() {
+    h c1 = omc_code_canonical("fn f(x) { return x; }");
+    h c2 = omc_code_canonical("fn f(x) { return x + 1; }");
+    assert_true(c1 != c2, "different bodies → different canonical");
+}
+
+# ---- omc_code_equivalent shortcut ----
+
+fn test_equivalent_returns_1_for_equivalents() {
+    assert_eq(
+        omc_code_equivalent(
+            "fn f(x) { h tmp = x * 2; return tmp; }",
+            "fn f(a) { h q = a * 2; return q; }"
+        ),
+        1,
+        "alpha-equivalent → 1"
+    );
+}
+
+fn test_equivalent_returns_0_for_different() {
+    assert_eq(
+        omc_code_equivalent(
+            "fn f(x) { return x; }",
+            "fn f(x) { return x + 1; }"
+        ),
+        0,
+        "different bodies → 0"
+    );
+}
+
+fn test_equivalent_returns_0_for_parse_error() {
+    # Malformed code shouldn't crash; should return 0 (can't verify).
+    assert_eq(
+        omc_code_equivalent("fn f(x) { return", "fn f(x) { return x; }"),
+        0,
+        "parse error → 0"
+    );
+}
+
+# ---- Combined with omc_code_hash: semantic memory key ----
+
+fn test_canonical_hash_stable_across_renames() {
+    h c1 = omc_code_canonical("fn relu(x) { if x > 0 { return x; } return 0; }");
+    h c2 = omc_code_canonical("fn relu(input) { if input > 0 { return input; } return 0; }");
+    h h1 = omc_code_hash(c1);
+    h h2 = omc_code_hash(c2);
+    assert_eq(dict_get(h1, "raw"), dict_get(h2, "raw"),
+        "canonical-hash stable under alpha-rename");
+}
+
+# ---- For-loop variable invariance ----
+
+fn test_for_loop_var_invariant() {
+    h c1 = omc_code_canonical("fn f(xs) { for i in xs { print(i); } }");
+    h c2 = omc_code_canonical("fn f(xs) { for k in xs { print(k); } }");
+    assert_eq(c1, c2, "for-loop variable normalized");
+}
+
+# ---- Lambda param invariance ----
+
+fn test_lambda_param_invariant() {
+    h c1 = omc_code_canonical("fn f(xs) { return arr_map(xs, fn(x) { return x * 2; }); }");
+    h c2 = omc_code_canonical("fn f(xs) { return arr_map(xs, fn(z) { return z * 2; }); }");
+    assert_eq(c1, c2, "lambda param normalized");
+}
+
+# ---- Catch err-var invariance ----
+
+fn test_catch_err_var_invariant() {
+    h c1 = omc_code_canonical("fn f() { try { throw 1; } catch e { return e; } }");
+    h c2 = omc_code_canonical("fn f() { try { throw 1; } catch err { return err; } }");
+    assert_eq(c1, c2, "catch err-var normalized");
+}
+
+# ---- Builtin names are NOT renamed ----
+
+fn test_builtin_names_preserved() {
+    h c1 = omc_code_canonical("fn f(xs) { return arr_softmax(xs); }");
+    h c2 = omc_code_canonical("fn f(ys) { return arr_softmax(ys); }");
+    # Params normalize, but arr_softmax stays.
+    assert_eq(c1, c2, "alpha-equivalent");
+    assert_true(re_match("arr_softmax", c1) == 1, "arr_softmax preserved in output");
+}

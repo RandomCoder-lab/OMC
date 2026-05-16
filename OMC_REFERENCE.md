@@ -2,9 +2,9 @@
 
 Auto-generated from `omnimcode-core/src/docs.rs`. Run `omc --gen-docs > OMC_REFERENCE.md` to regenerate.
 
-**Total documented builtins**: 110
+**Total documented builtins**: 112
 
-**OMC-unique**: 22 (no direct Python/NumPy equivalent — these are why you reach for OMC over numpy)
+**OMC-unique**: 24 (no direct Python/NumPy equivalent — these are why you reach for OMC over numpy)
 
 ---
 
@@ -24,7 +24,7 @@ Auto-generated from `omnimcode-core/src/docs.rs`. Run `omc --gen-docs > OMC_REFE
 - [stdlib](#stdlib) (8 builtins)
 - [exceptions](#exceptions) (1 builtins)
 - [introspection](#introspection) (8 builtins)
-- [tokenizer](#tokenizer) (10 builtins)
+- [tokenizer](#tokenizer) (12 builtins)
 
 ---
 
@@ -1184,6 +1184,26 @@ Substrate distance between two programs (|hash_a - hash_b|). Same code → 0; sm
 
 ```omc
 omc_code_distance("return 1;", "return 2;")  // small
+```
+
+### `omc_code_canonical` 🔱 *OMC-unique*
+
+**Signature**: `(code: string) -> string`
+
+Parse + AST-canonicalize + re-emit. Output is invariant under whitespace/comments/local-var-names/param-names/loop-vars/catch-vars/lambda-params. Top-level fn/class names + globals preserved.
+
+```omc
+omc_code_canonical("fn f(x) { return x; }") == omc_code_canonical("fn f(a) { return a; }")
+```
+
+### `omc_code_equivalent` 🔱 *OMC-unique*
+
+**Signature**: `(code_a: string, code_b: string) -> int`
+
+1 iff the two programs canonicalize identically (semantic alpha-equivalence). LLMs use this as a memory-key check: 'is this still the same function I was editing?'
+
+```omc
+omc_code_equivalent("fn f(x) { return x; }", "fn f(a) { return a; }")  // 1
 ```
 
 ---

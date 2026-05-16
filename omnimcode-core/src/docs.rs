@@ -834,6 +834,20 @@ pub const BUILTINS: &[BuiltinDoc] = &[
         example: "omc_code_distance(\"return 1;\", \"return 2;\")  // small",
         unique_to_omc: true,
     },
+    BuiltinDoc {
+        name: "omc_code_canonical", category: "tokenizer",
+        signature: "(code: string) -> string",
+        description: "Parse + AST-canonicalize + re-emit. Output is invariant under whitespace/comments/local-var-names/param-names/loop-vars/catch-vars/lambda-params. Top-level fn/class names + globals preserved.",
+        example: "omc_code_canonical(\"fn f(x) { return x; }\") == omc_code_canonical(\"fn f(a) { return a; }\")",
+        unique_to_omc: true,
+    },
+    BuiltinDoc {
+        name: "omc_code_equivalent", category: "tokenizer",
+        signature: "(code_a: string, code_b: string) -> int",
+        description: "1 iff the two programs canonicalize identically (semantic alpha-equivalence). LLMs use this as a memory-key check: 'is this still the same function I was editing?'",
+        example: "omc_code_equivalent(\"fn f(x) { return x; }\", \"fn f(a) { return a; }\")  // 1",
+        unique_to_omc: true,
+    },
 ];
 
 /// Look up a builtin by name. Returns None when there's no docs entry
