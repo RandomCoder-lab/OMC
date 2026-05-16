@@ -1,0 +1,136 @@
+# Substrate-token adapter — the LLM compression / semantic-distance layer.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) {
+    if !cond { test_record_failure(msg); }
+}
+
+fn approx_eq(a, b, tol) {
+    h d = a - b;
+    if d < 0.0 { d = 0.0 - d; }
+    return d <= tol;
+}
+
+# ---- Encode/decode round-trip ----
+
+fn test_roundtrip_simple() {
+    h src = "h x = arr_softmax([1.0]);";
+    h ids = omc_token_encode(src);
+    h back = omc_token_decode(ids);
+    assert_eq(back, src, "simple roundtrip");
+}
+
+fn test_roundtrip_multiline() {
+    h src = "fn main() {\n    h x = arr_get([1, 2, 3], 0);\n    return x;\n}";
+    h ids = omc_token_encode(src);
+    h back = omc_token_decode(ids);
+    assert_eq(back, src, "multiline roundtrip");
+}
+
+fn test_roundtrip_unicode_via_escape() {
+    # Non-ASCII bytes get escaped as [0, byte] pairs.
+    h src = "h α = 3;";
+    h ids = omc_token_encode(src);
+    h back = omc_token_decode(ids);
+    assert_eq(back, src, "unicode roundtrip");
+}
+
+fn test_empty_string() {
+    h src = "";
+    h ids = omc_token_encode(src);
+    assert_eq(arr_len(ids), 0, "empty source → empty ids");
+    h back = omc_token_decode(ids);
+    assert_eq(back, "", "empty roundtrip");
+}
+
+# ---- Vocab & compression ----
+
+fn test_vocab_nonempty() {
+    h v = omc_token_vocab();
+    assert_true(arr_len(v) > 100, "vocab has >100 entries");
+    h size = omc_token_vocab_size();
+    assert_eq(size, arr_len(v), "vocab_size matches array length");
+}
+
+fn test_vocab_id_0_is_escape() {
+    h v = omc_token_vocab();
+    h first = arr_get(v, 0);
+    # The escape sentinel — should not be a normal substring.
+    assert_true(str_len(first) > 0, "ID 0 is a non-empty sentinel");
+}
+
+fn test_compression_is_real() {
+    h src = "h x = arr_softmax([1.0]); h y = arr_softmax([2.0]); h z = arr_softmax([3.0]);";
+    h ratio = omc_token_compression_ratio(src);
+    # Each `arr_softmax` (11 bytes) collapses to a single ID.
+    assert_true(ratio > 1.0, "compression ratio > 1");
+}
+
+# ---- Substrate distance between token IDs ----
+
+fn test_token_distance_self_is_zero() {
+    assert_eq(omc_token_distance(3, 3), 0, "self-distance is 0");
+    assert_eq(omc_token_distance(8, 8), 0, "self-distance is 0");
+}
+
+fn test_token_distance_close_for_attractors() {
+    # IDs 3 and 5 are both Fibonacci attractors → small distance.
+    h d1 = omc_token_distance(3, 5);
+    # IDs 3 and 100 → large distance.
+    h d2 = omc_token_distance(3, 100);
+    assert_true(d1 < d2, "near IDs have smaller distance than far IDs");
+}
+
+# ---- CRT pack / unpack ----
+
+fn test_crt_roundtrip_default_moduli() {
+    h packed = omc_token_pack([3, 42, 7]);
+    h unpacked = omc_token_unpack(packed);
+    assert_eq(arr_len(unpacked), 3, "unpacked has 3 streams");
+    assert_eq(arr_get(unpacked, 0), 3, "stream 0 preserved");
+    assert_eq(arr_get(unpacked, 1), 42, "stream 1 preserved");
+    assert_eq(arr_get(unpacked, 2), 7, "stream 2 preserved");
+}
+
+fn test_crt_custom_moduli() {
+    h moduli = [3, 5, 7];
+    h packed = omc_token_pack([1, 2, 4], moduli);
+    h unpacked = omc_token_unpack(packed, moduli);
+    assert_eq(arr_get(unpacked, 0), 1, "stream 0");
+    assert_eq(arr_get(unpacked, 1), 2, "stream 1");
+    assert_eq(arr_get(unpacked, 2), 4, "stream 2");
+}
+
+# ---- Code-hash equivalence ----
+
+fn test_code_hash_same_for_same_code() {
+    h a = omc_code_hash("arr_softmax([1, 2, 3])");
+    h b = omc_code_hash("arr_softmax([1, 2, 3])");
+    assert_eq(dict_get(a, "attractor"), dict_get(b, "attractor"),
+        "identical code → same attractor");
+    assert_eq(dict_get(a, "raw"), dict_get(b, "raw"),
+        "identical code → same raw hash");
+}
+
+fn test_code_hash_returns_full_dict() {
+    h h_dict = omc_code_hash("h x = 1;");
+    assert_true(str_len(to_string(dict_get(h_dict, "raw"))) > 0, "has raw");
+    assert_true(str_len(to_string(dict_get(h_dict, "attractor"))) > 0, "has attractor");
+    assert_true(str_len(to_string(dict_get(h_dict, "distance"))) >= 0, "has distance");
+    assert_true(str_len(to_string(dict_get(h_dict, "resonance"))) > 0, "has resonance");
+}
+
+fn test_code_distance_zero_for_identical() {
+    h d = omc_code_distance("h x = 1;", "h x = 1;");
+    assert_eq(d, 0, "identical code → distance 0");
+}
+
+fn test_code_distance_nonzero_for_different() {
+    h d = omc_code_distance("h x = 1;", "h x = 999;");
+    assert_true(d > 0, "different code → positive distance");
+}

@@ -762,6 +762,78 @@ pub const BUILTINS: &[BuiltinDoc] = &[
         example: "omc_error_count()  // 42+",
         unique_to_omc: false,
     },
+
+    // ---- Substrate-token adapter (LLM compression / semantic distance) ----
+    BuiltinDoc {
+        name: "omc_token_encode", category: "tokenizer",
+        signature: "(code: string) -> int[]",
+        description: "Encode OMC source as substrate-typed token IDs. Common builtins land on small Fibonacci attractors; round-trips exactly via omc_token_decode.",
+        example: "omc_token_encode(\"arr_softmax([1.0])\")  // short int array",
+        unique_to_omc: true,
+    },
+    BuiltinDoc {
+        name: "omc_token_decode", category: "tokenizer",
+        signature: "(ids: int[]) -> string",
+        description: "Inverse of omc_token_encode — reconstructs the original source.",
+        example: "omc_token_decode([1, 3, 0, 98])  // recovers source",
+        unique_to_omc: true,
+    },
+    BuiltinDoc {
+        name: "omc_token_distance", category: "tokenizer",
+        signature: "(id_a: int, id_b: int) -> int",
+        description: "Substrate distance between two token IDs (sum of attractor-distances + raw delta). Free 'semantic nearness' signal — Python tokenizers have no analogue.",
+        example: "omc_token_distance(3, 5)  // both on attractors → small",
+        unique_to_omc: true,
+    },
+    BuiltinDoc {
+        name: "omc_token_vocab", category: "tokenizer",
+        signature: "() -> string[]",
+        description: "Full token dictionary (index = ID, value = canonical substring).",
+        example: "omc_token_vocab()  // [\"<escape>\", \"h \", \" = \", \"arr_get\", ...]",
+        unique_to_omc: true,
+    },
+    BuiltinDoc {
+        name: "omc_token_vocab_size", category: "tokenizer",
+        signature: "() -> int",
+        description: "Number of dictionary entries.",
+        example: "omc_token_vocab_size()  // 150+",
+        unique_to_omc: false,
+    },
+    BuiltinDoc {
+        name: "omc_token_compression_ratio", category: "tokenizer",
+        signature: "(code: string) -> float",
+        description: "Raw bytes / encoded ints. >1 means the encoder is shrinking the input.",
+        example: "omc_token_compression_ratio(\"arr_softmax([1.0])\")  // ~3-5×",
+        unique_to_omc: true,
+    },
+    BuiltinDoc {
+        name: "omc_token_pack", category: "tokenizer",
+        signature: "(streams: int[], moduli?: int[]) -> int",
+        description: "CRT-pack a stream of remainders into a single i64. Default moduli pack (kind, vocab_id, position_class) for multi-stream tokens.",
+        example: "omc_token_pack([3, 42, 7])  // single packed int",
+        unique_to_omc: true,
+    },
+    BuiltinDoc {
+        name: "omc_token_unpack", category: "tokenizer",
+        signature: "(packed: int, moduli?: int[]) -> int[]",
+        description: "Inverse of omc_token_pack.",
+        example: "omc_token_unpack(packed)  // [kind, vocab_id, position_class]",
+        unique_to_omc: true,
+    },
+    BuiltinDoc {
+        name: "omc_code_hash", category: "tokenizer",
+        signature: "(code: string) -> dict",
+        description: "Hash a program's token stream and fold to nearest Fibonacci attractor. Equivalent programs land on the same attractor. Returns {raw, attractor, distance, resonance}.",
+        example: "omc_code_hash(\"arr_softmax([1])\")  // {attractor: ..., resonance: ...}",
+        unique_to_omc: true,
+    },
+    BuiltinDoc {
+        name: "omc_code_distance", category: "tokenizer",
+        signature: "(code_a: string, code_b: string) -> int",
+        description: "Substrate distance between two programs (|hash_a - hash_b|). Same code → 0; small edits → small distance.",
+        example: "omc_code_distance(\"return 1;\", \"return 2;\")  // small",
+        unique_to_omc: true,
+    },
 ];
 
 /// Look up a builtin by name. Returns None when there's no docs entry

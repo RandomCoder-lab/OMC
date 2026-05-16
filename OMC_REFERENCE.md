@@ -2,9 +2,9 @@
 
 Auto-generated from `omnimcode-core/src/docs.rs`. Run `omc --gen-docs > OMC_REFERENCE.md` to regenerate.
 
-**Total documented builtins**: 100
+**Total documented builtins**: 110
 
-**OMC-unique**: 13 (no direct Python/NumPy equivalent — these are why you reach for OMC over numpy)
+**OMC-unique**: 22 (no direct Python/NumPy equivalent — these are why you reach for OMC over numpy)
 
 ---
 
@@ -24,6 +24,7 @@ Auto-generated from `omnimcode-core/src/docs.rs`. Run `omc --gen-docs > OMC_REFE
 - [stdlib](#stdlib) (8 builtins)
 - [exceptions](#exceptions) (1 builtins)
 - [introspection](#introspection) (8 builtins)
+- [tokenizer](#tokenizer) (10 builtins)
 
 ---
 
@@ -1079,6 +1080,110 @@ Number of curated error patterns. The knowledge base size.
 
 ```omc
 omc_error_count()  // 42+
+```
+
+---
+
+## tokenizer
+
+### `omc_token_encode` 🔱 *OMC-unique*
+
+**Signature**: `(code: string) -> int[]`
+
+Encode OMC source as substrate-typed token IDs. Common builtins land on small Fibonacci attractors; round-trips exactly via omc_token_decode.
+
+```omc
+omc_token_encode("arr_softmax([1.0])")  // short int array
+```
+
+### `omc_token_decode` 🔱 *OMC-unique*
+
+**Signature**: `(ids: int[]) -> string`
+
+Inverse of omc_token_encode — reconstructs the original source.
+
+```omc
+omc_token_decode([1, 3, 0, 98])  // recovers source
+```
+
+### `omc_token_distance` 🔱 *OMC-unique*
+
+**Signature**: `(id_a: int, id_b: int) -> int`
+
+Substrate distance between two token IDs (sum of attractor-distances + raw delta). Free 'semantic nearness' signal — Python tokenizers have no analogue.
+
+```omc
+omc_token_distance(3, 5)  // both on attractors → small
+```
+
+### `omc_token_vocab` 🔱 *OMC-unique*
+
+**Signature**: `() -> string[]`
+
+Full token dictionary (index = ID, value = canonical substring).
+
+```omc
+omc_token_vocab()  // ["<escape>", "h ", " = ", "arr_get", ...]
+```
+
+### `omc_token_vocab_size`
+
+**Signature**: `() -> int`
+
+Number of dictionary entries.
+
+```omc
+omc_token_vocab_size()  // 150+
+```
+
+### `omc_token_compression_ratio` 🔱 *OMC-unique*
+
+**Signature**: `(code: string) -> float`
+
+Raw bytes / encoded ints. >1 means the encoder is shrinking the input.
+
+```omc
+omc_token_compression_ratio("arr_softmax([1.0])")  // ~3-5×
+```
+
+### `omc_token_pack` 🔱 *OMC-unique*
+
+**Signature**: `(streams: int[], moduli?: int[]) -> int`
+
+CRT-pack a stream of remainders into a single i64. Default moduli pack (kind, vocab_id, position_class) for multi-stream tokens.
+
+```omc
+omc_token_pack([3, 42, 7])  // single packed int
+```
+
+### `omc_token_unpack` 🔱 *OMC-unique*
+
+**Signature**: `(packed: int, moduli?: int[]) -> int[]`
+
+Inverse of omc_token_pack.
+
+```omc
+omc_token_unpack(packed)  // [kind, vocab_id, position_class]
+```
+
+### `omc_code_hash` 🔱 *OMC-unique*
+
+**Signature**: `(code: string) -> dict`
+
+Hash a program's token stream and fold to nearest Fibonacci attractor. Equivalent programs land on the same attractor. Returns {raw, attractor, distance, resonance}.
+
+```omc
+omc_code_hash("arr_softmax([1])")  // {attractor: ..., resonance: ...}
+```
+
+### `omc_code_distance` 🔱 *OMC-unique*
+
+**Signature**: `(code_a: string, code_b: string) -> int`
+
+Substrate distance between two programs (|hash_a - hash_b|). Same code → 0; small edits → small distance.
+
+```omc
+omc_code_distance("return 1;", "return 2;")  // small
 ```
 
 ---

@@ -193,6 +193,9 @@ impl Compiler {
                         | "digit_sum" | "digit_count"
                         | "arr_unique_count" | "arr_gcd" | "fnv1a_hash"
                         | "is_instance" | "omc_error_count"
+                        // Substrate-token adapter: token IDs + distance + pack
+                        | "omc_token_distance" | "omc_token_vocab_size"
+                        | "omc_token_pack" | "omc_code_distance"
                         // tape_* op constructors return node IDs (int)
                         | "tape_var" | "tape_const"
                         | "tape_add" | "tape_sub" | "tape_mul" | "tape_div"
@@ -279,6 +282,9 @@ impl Compiler {
                         | "omc_list_builtins" | "omc_categories"
                         | "omc_did_you_mean" | "omc_unique_builtins"
                         | "omc_error_categories"
+                        // Substrate-token adapter returns int array / string array
+                        | "omc_token_encode" | "omc_token_unpack"
+                        | "omc_token_vocab"
                         // Forward-mode autograd duals (Track 2 — 2026-05-16)
                         | "dual" | "dual_add" | "dual_sub"
                         | "dual_mul" | "dual_div" | "dual_neg"

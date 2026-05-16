@@ -7081,6 +7081,155 @@ impl Interpreter {
             "omc_error_count" => {
                 Ok(Value::HInt(HInt::new(crate::errors::ERROR_PATTERNS.len() as i64)))
             }
+            // ---- Substrate-token adapter (LLM compression layer) ---
+            //
+            // Maps OMC source ↔ substrate-typed token IDs. Common
+            // builtin names get small attractor-aligned IDs so:
+            //   - LLM emits short int arrays instead of full names
+            //   - attractor_distance(id) is a free "semantic distance"
+            //   - code-hash comparisons work in resonance-space
+            //
+            // Round-trip is exact (unmatched bytes escape as [0, byte]).
+            "omc_token_encode" => {
+                if args.is_empty() {
+                    return Err("omc_token_encode requires (code: string)".to_string());
+                }
+                let code = self.eval_expr(&args[0])?.to_display_string();
+                let ids = crate::tokenizer::encode(&code);
+                let out: Vec<Value> = ids.iter()
+                    .map(|&i| Value::HInt(HInt::new(i)))
+                    .collect();
+                Ok(Value::Array(HArray::from_vec(out)))
+            }
+            "omc_token_decode" => {
+                if args.is_empty() {
+                    return Err("omc_token_decode requires (ids: int[])".to_string());
+                }
+                let v = self.eval_expr(&args[0])?;
+                if let Value::Array(arr) = v {
+                    let ids: Vec<i64> = arr.items.borrow().iter()
+                        .map(|x| x.to_int())
+                        .collect();
+                    let s = crate::tokenizer::decode(&ids);
+                    Ok(Value::String(s))
+                } else {
+                    Err("omc_token_decode: first arg must be an int array".to_string())
+                }
+            }
+            "omc_token_distance" => {
+                if args.len() < 2 {
+                    return Err("omc_token_distance requires (id_a, id_b)".to_string());
+                }
+                let a = self.eval_expr(&args[0])?.to_int();
+                let b = self.eval_expr(&args[1])?.to_int();
+                Ok(Value::HInt(HInt::new(crate::tokenizer::token_distance(a, b))))
+            }
+            "omc_token_vocab" => {
+                // Return the full dictionary as a string array.
+                // Position is the token's ID; element is the canonical
+                // substring it expands to. ID 0 is the escape sentinel.
+                let out: Vec<Value> = crate::tokenizer::TOKEN_DICT.iter()
+                    .map(|s| Value::String(s.to_string()))
+                    .collect();
+                Ok(Value::Array(HArray::from_vec(out)))
+            }
+            "omc_token_vocab_size" => {
+                Ok(Value::HInt(HInt::new(crate::tokenizer::TOKEN_DICT.len() as i64)))
+            }
+            "omc_token_compression_ratio" => {
+                // bytes_in / ints_out — > 1 means encoding is denser.
+                // Counts each int as 1 unit (token); raw bytes as 1
+                // unit each. Compression is real when shared substrings
+                // collapse to single IDs.
+                if args.is_empty() {
+                    return Err("omc_token_compression_ratio requires (code)".to_string());
+                }
+                let code = self.eval_expr(&args[0])?.to_display_string();
+                let raw = code.len() as f64;
+                let ids = crate::tokenizer::encode(&code).len() as f64;
+                if ids == 0.0 {
+                    return Ok(Value::HFloat(0.0));
+                }
+                Ok(Value::HFloat(raw / ids))
+            }
+            "omc_token_pack" => {
+                // CRT-pack a stream of remainders into a single i64.
+                // Default moduli = tokenizer::CRT_MODULI (7, 1009, 100003).
+                if args.is_empty() {
+                    return Err("omc_token_pack requires (streams, moduli?)".to_string());
+                }
+                let streams_v = self.eval_expr(&args[0])?;
+                let streams: Vec<i64> = if let Value::Array(arr) = streams_v {
+                    arr.items.borrow().iter().map(|v| v.to_int()).collect()
+                } else {
+                    return Err("omc_token_pack: streams must be an array".to_string());
+                };
+                let moduli: Vec<i64> = if args.len() >= 2 {
+                    let mv = self.eval_expr(&args[1])?;
+                    if let Value::Array(arr) = mv {
+                        arr.items.borrow().iter().map(|v| v.to_int()).collect()
+                    } else {
+                        return Err("omc_token_pack: moduli must be an array".to_string());
+                    }
+                } else {
+                    crate::tokenizer::CRT_MODULI.to_vec()
+                };
+                match crate::tokenizer::crt_pack(&streams, &moduli) {
+                    Ok(packed) => Ok(Value::HInt(HInt::new(packed))),
+                    Err(e) => Err(e),
+                }
+            }
+            "omc_token_unpack" => {
+                if args.is_empty() {
+                    return Err("omc_token_unpack requires (packed, moduli?)".to_string());
+                }
+                let packed = self.eval_expr(&args[0])?.to_int();
+                let moduli: Vec<i64> = if args.len() >= 2 {
+                    let mv = self.eval_expr(&args[1])?;
+                    if let Value::Array(arr) = mv {
+                        arr.items.borrow().iter().map(|v| v.to_int()).collect()
+                    } else {
+                        return Err("omc_token_unpack: moduli must be an array".to_string());
+                    }
+                } else {
+                    crate::tokenizer::CRT_MODULI.to_vec()
+                };
+                let out: Vec<Value> = crate::tokenizer::crt_unpack(packed, &moduli)
+                    .iter()
+                    .map(|&i| Value::HInt(HInt::new(i)))
+                    .collect();
+                Ok(Value::Array(HArray::from_vec(out)))
+            }
+            "omc_code_hash" => {
+                // Hash a program's canonical token stream and return
+                // a dict with {raw, attractor, distance, resonance}.
+                // Equivalent programs hash to the same attractor.
+                if args.is_empty() {
+                    return Err("omc_code_hash requires (code: string)".to_string());
+                }
+                let code = self.eval_expr(&args[0])?.to_display_string();
+                let (attractor, raw, dist) = crate::tokenizer::code_hash(&code);
+                let mut map = std::collections::BTreeMap::new();
+                map.insert("raw".to_string(), Value::HInt(HInt::new(raw)));
+                map.insert("attractor".to_string(), Value::HInt(HInt::new(attractor)));
+                map.insert("distance".to_string(), Value::HInt(HInt::new(dist)));
+                map.insert("resonance".to_string(),
+                    Value::HFloat(crate::value::HInt::compute_resonance(raw)));
+                Ok(Value::dict_from(map))
+            }
+            "omc_code_distance" => {
+                // Substrate distance between two programs in hash-space.
+                // Same code → 0. Small edits → small distance.
+                // Structurally different programs → large distance.
+                if args.len() < 2 {
+                    return Err("omc_code_distance requires (code_a, code_b)".to_string());
+                }
+                let a = self.eval_expr(&args[0])?.to_display_string();
+                let b = self.eval_expr(&args[1])?.to_display_string();
+                let (_, ra, _) = crate::tokenizer::code_hash(&a);
+                let (_, rb, _) = crate::tokenizer::code_hash(&b);
+                Ok(Value::HInt(HInt::new((ra - rb).abs())))
+            }
             // arr_fold_all(arr) -> new array with every element snapped
             // to its nearest Fibonacci attractor. Vectorized fold.
             // Substrate-canonical denoising / quantization primitive.
