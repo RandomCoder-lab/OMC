@@ -1,0 +1,230 @@
+# Parametric tests — each one exercises several inputs / properties.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+
+# Fibonacci attractor table
+fn test_attractor_first_15() {
+    h fibs = [0, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377];
+    h i = 0;
+    while i < arr_len(fibs) {
+        assert_eq(is_attractor(arr_get(fibs, i)), 1,
+            concat_many("fib[", to_string(i), "] is attractor"));
+        i = i + 1;
+    }
+}
+
+fn test_non_attractor_4_through_20() {
+    h non = [4, 6, 7, 9, 10, 11, 12, 14, 15, 16, 17, 18, 19, 20];
+    h i = 0;
+    while i < arr_len(non) {
+        assert_eq(is_attractor(arr_get(non, i)), 0,
+            concat_many(to_string(arr_get(non, i)), " not attractor"));
+        i = i + 1;
+    }
+}
+
+# arr_resonance_vec returns 1.0 for every Fibonacci.
+fn test_resonance_fibonacci_all_one() {
+    h fibs = [1, 2, 3, 5, 8, 13, 21, 34, 55, 89];
+    h r = arr_resonance_vec(fibs);
+    h i = 0;
+    while i < arr_len(r) {
+        h v = arr_get(r, i);
+        h diff = v - 1.0;
+        if diff < 0.0 { diff = 0.0 - diff; }
+        assert_true(diff < 0.001,
+            concat_many("fib resonance[", to_string(i), "] near 1"));
+        i = i + 1;
+    }
+}
+
+# arr_fold_all takes anything to an attractor.
+fn test_fold_all_lands_on_attractor() {
+    h xs = [4, 7, 9, 11, 15, 22, 30, 50, 100, 200];
+    h folded = arr_fold_all(xs);
+    h i = 0;
+    while i < arr_len(folded) {
+        assert_eq(is_attractor(arr_get(folded, i)), 1,
+            concat_many("folded[", to_string(i), "] on attractor"));
+        i = i + 1;
+    }
+}
+
+# omc_help on every documented OMC-unique builtin returns sane fields.
+fn test_unique_builtins_help_well_formed() {
+    h unique = omc_unique_builtins();
+    h i = 0;
+    h n = arr_len(unique);
+    while i < n {
+        h name = arr_get(unique, i);
+        h hd = omc_help(name);
+        assert_true(str_len(dict_get(hd, "signature")) > 0,
+            concat_many(name, " has signature"));
+        assert_true(str_len(dict_get(hd, "description")) > 0,
+            concat_many(name, " has description"));
+        assert_eq(dict_get(hd, "unique_to_omc"), 1,
+            concat_many(name, " marked unique"));
+        i = i + 1;
+    }
+}
+
+# Every documented builtin has a non-empty name.
+fn test_every_builtin_has_name() {
+    h all = omc_list_builtins();
+    h i = 0;
+    while i < arr_len(all) {
+        assert_true(str_len(arr_get(all, i)) > 0,
+            concat_many("name[", to_string(i), "] non-empty"));
+        i = i + 1;
+    }
+}
+
+# Sum-of-first-n test for arr_cumsum.
+fn test_cumsum_matches_formula() {
+    h N = 10;
+    h xs = arr_from_range(1, N + 1);
+    h c = arr_cumsum(xs);
+    h i = 0;
+    while i < arr_len(c) {
+        # Expected: i+1-th triangular = (i+1)(i+2)/2
+        h expected = (i + 1) * (i + 2) / 2;
+        assert_eq(arr_get(c, i), expected,
+            concat_many("cumsum[", to_string(i), "]"));
+        i = i + 1;
+    }
+}
+
+# Encode/decode round-trip on many strings.
+fn test_token_roundtrip_table() {
+    h cases = [
+        "h x = 1;",
+        "fn f(x) { return x; }",
+        "arr_softmax([1.0, 2.0])",
+        "h y = arr_get(arr, 0);",
+        "if cond { return null; }",
+        "while i < n { i = i + 1; }",
+        "tape_reset();",
+        "is_attractor(8)",
+    ];
+    h i = 0;
+    while i < arr_len(cases) {
+        h c = arr_get(cases, i);
+        h ids = omc_token_encode(c);
+        h back = omc_token_decode(ids);
+        assert_eq(back, c, concat_many("roundtrip case ", to_string(i)));
+        i = i + 1;
+    }
+}
+
+# Canonical idempotence on many programs.
+fn test_canonical_idempotent_table() {
+    h cases = [
+        "fn f(x) { return x; }",
+        "fn add(a, b) { return a + b; }",
+        "h x = 1; h y = 2;",
+        "if 1 == 1 { return 0; }",
+        "fn map_sq(xs) { return arr_map(xs, fn(z) { return z * z; }); }",
+    ];
+    h i = 0;
+    while i < arr_len(cases) {
+        h c = arr_get(cases, i);
+        h c1 = omc_code_canonical(c);
+        h c2 = omc_code_canonical(c1);
+        assert_eq(c1, c2, concat_many("canon idempotent ", to_string(i)));
+        i = i + 1;
+    }
+}
+
+# Code-equivalence under common rename patterns.
+fn test_equivalence_renames_table() {
+    h pairs_a = [
+        "fn f(x) { return x; }",
+        "fn f(x, y) { return x + y; }",
+        "fn fact(n) { if n <= 1 { return 1; } return n * fact(n - 1); }",
+    ];
+    h pairs_b = [
+        "fn f(a) { return a; }",
+        "fn f(a, b) { return a + b; }",
+        "fn fact(m) { if m <= 1 { return 1; } return m * fact(m - 1); }",
+    ];
+    h i = 0;
+    while i < arr_len(pairs_a) {
+        assert_eq(
+            omc_code_equivalent(arr_get(pairs_a, i), arr_get(pairs_b, i)),
+            1,
+            concat_many("equiv case ", to_string(i))
+        );
+        i = i + 1;
+    }
+}
+
+# Did-you-mean returns nearest for many typos.
+fn test_did_you_mean_typos_table() {
+    h typos = ["arr_softmx", "arr_lne", "tape_bckward", "omc_hep"];
+    h expected_prefixes = ["arr_softmax", "arr_len", "tape_backward", "omc_help"];
+    h i = 0;
+    while i < arr_len(typos) {
+        h suggestions = omc_did_you_mean(arr_get(typos, i));
+        assert_true(arr_len(suggestions) >= 1,
+            concat_many("typo ", to_string(i), " has suggestion"));
+        # Expected prefix may or may not be FIRST; just verify it's in.
+        h has_expected = 0;
+        h j = 0;
+        while j < arr_len(suggestions) {
+            if arr_get(suggestions, j) == arr_get(expected_prefixes, i) {
+                has_expected = 1;
+            }
+            j = j + 1;
+        }
+        assert_eq(has_expected, 1,
+            concat_many("typo ", to_string(i), " suggests expected"));
+        i = i + 1;
+    }
+}
+
+# Code-distance is 0 for byte-identical and >0 for changes.
+fn test_code_distance_table() {
+    h cases = [
+        ["h x = 1;", "h x = 1;", 0],
+        ["h x = 1;", "h x = 2;", 1],  # 1 means "should be > 0"
+        ["fn f() {}", "fn f() {}", 0],
+        ["return 1;", "return 99;", 1],
+    ];
+    h i = 0;
+    while i < arr_len(cases) {
+        h case = arr_get(cases, i);
+        h a = arr_get(case, 0);
+        h b = arr_get(case, 1);
+        h expect_zero = arr_get(case, 2) == 0;
+        h d = omc_code_distance(a, b);
+        if expect_zero {
+            assert_eq(d, 0, concat_many("case ", to_string(i), " distance 0"));
+        } else {
+            assert_true(d > 0, concat_many("case ", to_string(i), " distance > 0"));
+        }
+        i = i + 1;
+    }
+}
+
+# Substrate score is in [0, 1] for arbitrary inputs.
+fn test_substrate_score_range_table() {
+    h cases = [
+        "fn f(x) { return x; }",
+        "h y = arr_get([1, 2, 3], 0);",
+        "tape_reset();",
+        "for v in [1, 2, 3] { print(v); }",
+    ];
+    h i = 0;
+    while i < arr_len(cases) {
+        h s = omc_substrate_score(arr_get(cases, i));
+        assert_true(s >= 0.0, concat_many("score ", to_string(i), " >= 0"));
+        assert_true(s <= 1.0, concat_many("score ", to_string(i), " <= 1"));
+        i = i + 1;
+    }
+}
