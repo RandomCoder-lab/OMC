@@ -90,3 +90,48 @@ PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 OMC_HBIT_JIT=1 OMC_HBIT_JIT_VERBOSE=1 \
 ```
 
 Numbers taken on 2026-05-15. If you want bigger numbers, choose Option 2 above and rewrite `examples/lib/harmonic_anomaly.omc` with array-based frequency tables.
+
+---
+
+## Update: L1.6 Array↔JIT bridging (2026-05-15)
+
+The harmonic_anomaly L1 rewrite lifted dict-keyed frequency tables onto array-of-hashed-int. That made the library JIT-friendly at the OMC level, but the JIT dispatch boundary in `omnimcode-cli/src/main.rs` still rejected `Value::Array` arguments:
+
+```rust
+_ => return None, // non-int arg → fall through to tree-walk
+```
+
+So even after the library was JIT-friendly, every call from tree-walk land into a JIT'd fn with an array arg silently fell back to tree-walk. The JIT log said "JIT'd 1/4 fns" but only `extract_features` actually ran via JIT in practice; everything in the per-row hot loop took the tree-walk path.
+
+**L1.6 fix**: marshal `Value::Array(int_only)` into a length-prefixed `Box<[i64]>` with layout `[len, v0, v1, ..., vN]` — matching the stack-frame array layout the dual-band lowerer's NewArray ops already use. The JIT'd function's `ArrayLen` / `ArrayIndex` code reads from the marshalled buffer with the same access pattern, so **no codegen changes were needed**. The Box drops after `.call()` returns; the JIT'd fn is guaranteed not to retain the pointer beyond the call.
+
+### Empirical re-measurement after L1.6
+
+Same workload (`examples/datascience/nsl_kdd_validation.omc`, 5000 rows):
+
+| Mode | harmonic_anomaly fit | rows JIT'd |
+|---|--:|--:|
+| Tree-walk | 363 ms | n/a |
+| JIT (pre-L1.6) | 363 ms | 1 of 4 user fns |
+| **JIT (post-L1.6)** | **191 ms** | **15 of 53 user fns** (incl. `ha.score`) |
+
+**1.9× wall-clock speedup on the real harmonic_anomaly workload.** The hot-loop fn `ha.score` now actually runs through the JIT instead of falling back to tree-walk.
+
+Synthetic microbench (sum over arr_range(0, 1000), 1000 iterations):
+
+| Mode | ms |
+|---|--:|
+| Tree-walk | 803 |
+| JIT (post-L1.6) | 7 |
+
+**115× on the pure array-consuming hot path.**
+
+### Tests
+
+`omnimcode-codegen/tests/jit_array_bridge.rs` — 6 tests covering sum, max, mixed-args, empty array, large array (1000 elements), and non-int-array rejection (falls through to tree-walk correctly). All pass; the existing 41 codegen tests still pass (48 total).
+
+### Honest limits remaining
+
+- **Read-only contract**: the bridge doesn't write back to the original `HArray` even if the JIT'd fn mutated the buffer. Common case (sum, score, count) is read-only; mutating-array fns return `i64` today so output-side bridging is a future extension.
+- **Int-only arrays**: `Value::Array` whose elements aren't all `HInt` (or `Bool`) falls through to tree-walk. String / float arrays are next-session work.
+- **Return values still i64**: a JIT'd fn that wants to return an array would need a result-buffer convention. Not needed by any current harmonic library.
