@@ -1,0 +1,90 @@
+# More class / inheritance tests.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+
+class Animal {
+    name;
+    fn speak(self) { return "generic"; }
+    fn name_str(self) { return dict_get(self, "name"); }
+}
+
+class Dog extends Animal {
+    name;
+    fn speak(self) { return "woof"; }
+}
+
+class Puppy extends Dog {
+    name;
+}
+
+# Basic construction
+fn test_class_construction() {
+    h a = Animal("zoe");
+    assert_eq(dict_get(a, "name"), "zoe", "name field set");
+}
+
+fn test_class_method_call() {
+    h a = Animal("zoe");
+    assert_eq(a.speak(), "generic", "Animal speaks generic");
+}
+
+fn test_class_method_self_access() {
+    h a = Animal("zoe");
+    assert_eq(a.name_str(), "zoe", "method reads self.name");
+}
+
+# Inheritance: child overrides parent
+fn test_inheritance_override() {
+    h d = Dog("rex");
+    assert_eq(d.speak(), "woof", "Dog overrides speak");
+}
+
+fn test_inheritance_inherits_method() {
+    h d = Dog("rex");
+    # Inherits name_str from Animal.
+    assert_eq(d.name_str(), "rex", "inherits Animal.name_str");
+}
+
+# Two-level inheritance
+fn test_inheritance_two_levels() {
+    h p = Puppy("tiny");
+    # Puppy inherits Dog.speak (which overrode Animal.speak).
+    assert_eq(p.speak(), "woof", "two-level dispatch");
+    # And Puppy inherits Animal.name_str transitively.
+    assert_eq(p.name_str(), "tiny", "transitive inheritance");
+}
+
+# is_instance walks the chain
+fn test_is_instance_self() {
+    h d = Dog("x");
+    assert_eq(is_instance(d, "Dog"), 1, "is Dog");
+}
+
+fn test_is_instance_parent() {
+    h d = Dog("x");
+    assert_eq(is_instance(d, "Animal"), 1, "is Animal too");
+}
+
+fn test_is_instance_grandparent() {
+    h p = Puppy("x");
+    assert_eq(is_instance(p, "Animal"), 1, "Puppy is Animal");
+    assert_eq(is_instance(p, "Dog"), 1, "Puppy is Dog");
+    assert_eq(is_instance(p, "Puppy"), 1, "Puppy is Puppy");
+}
+
+fn test_is_instance_unrelated() {
+    h p = Puppy("x");
+    assert_eq(is_instance(p, "Cat"), 0, "Puppy is not Cat");
+}
+
+fn test_is_instance_non_instance() {
+    assert_eq(is_instance(42, "Anything"), 0, "int is not class instance");
+    assert_eq(is_instance("hello", "Anything"), 0, "string is not class instance");
+    assert_eq(is_instance([1, 2], "Anything"), 0, "array is not class instance");
+}

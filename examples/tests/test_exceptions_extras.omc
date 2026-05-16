@@ -1,0 +1,114 @@
+# More exception / try-catch / typed-throw tests.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+
+# Basic try/catch flow
+fn test_try_no_throw() {
+    h ran = 0;
+    try { ran = 1; } catch e { ran = 99; }
+    assert_eq(ran, 1, "no throw → no catch");
+}
+
+fn test_try_with_throw() {
+    h caught = "";
+    try { throw "boom"; } catch e { caught = e; }
+    assert_eq(caught, "boom", "caught");
+}
+
+# Finally always runs
+fn test_finally_runs_on_success() {
+    h ran = 0;
+    try { } catch e { ran = 99; } finally { ran = 1; }
+    assert_eq(ran, 1, "finally ran on success");
+}
+
+fn test_finally_runs_on_failure() {
+    h c = 0;
+    h f = 0;
+    try { throw "x"; } catch e { c = 1; } finally { f = 1; }
+    assert_eq(c, 1, "catch ran");
+    assert_eq(f, 1, "finally ran");
+}
+
+# Typed exceptions
+fn test_dict_exception() {
+    h kind = "";
+    try {
+        h err = dict_new();
+        dict_set(err, "kind", "FileNotFound");
+        throw err;
+    } catch e {
+        kind = dict_get(e, "kind");
+    }
+    assert_eq(kind, "FileNotFound", "dict kind preserved");
+}
+
+fn test_array_exception() {
+    h len = 0;
+    try { throw [1, 2, 3, 4]; } catch e { len = arr_len(e); }
+    assert_eq(len, 4, "array preserved");
+}
+
+# Nested try
+fn test_nested_inner_catches() {
+    h inner = 0;
+    h outer = 0;
+    try {
+        try { throw "x"; } catch e { inner = 1; }
+    } catch e { outer = 99; }
+    assert_eq(inner, 1, "inner ran");
+    assert_eq(outer, 0, "outer didn't run");
+}
+
+fn test_nested_rethrow_to_outer() {
+    h outer_v = "";
+    try {
+        try { throw "first"; } catch e { throw "rethrow"; }
+    } catch e { outer_v = e; }
+    assert_eq(outer_v, "rethrow", "outer sees rethrow");
+}
+
+# Throw across function boundary
+fn raises_value(v) { throw v; }
+
+fn test_throw_across_call() {
+    h caught = 0;
+    try { raises_value(42); } catch e { caught = e; }
+    assert_eq(caught, "42", "stringified");
+}
+
+# Catch by class via is_instance
+class AppError {
+    message;
+}
+class HttpError extends AppError {
+    message;
+    status;
+}
+
+fn test_catch_by_class() {
+    h handled = 0;
+    try { throw AppError("oops"); }
+    catch e {
+        if is_instance(e, "AppError") { handled = 1; }
+    }
+    assert_eq(handled, 1, "AppError caught");
+}
+
+fn test_catch_subclass_as_parent() {
+    h handled_as = "";
+    try { throw HttpError("404", 404); }
+    catch e {
+        if is_instance(e, "HttpError") { handled_as = "http"; }
+        if handled_as == "" {
+            if is_instance(e, "AppError") { handled_as = "app"; }
+        }
+    }
+    assert_eq(handled_as, "http", "most specific wins");
+}

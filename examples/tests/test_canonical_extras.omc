@@ -1,0 +1,95 @@
+# More canonical / structural-equivalence tests.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+
+# Operator precedence preserved by canonical (parens are explicit)
+fn test_canonical_parens_explicit() {
+    h c1 = omc_code_canonical("h x = a + b * c;");
+    h c2 = omc_code_canonical("h x = a + (b * c);");
+    # Canonical inserts explicit parens, so both should match.
+    assert_eq(c1, c2, "canonical adds explicit parens");
+}
+
+# Multiple functions preserve order.
+fn test_canonical_multi_fn_order() {
+    h c1 = omc_code_canonical("fn a() { return 1; } fn b() { return 2; }");
+    h c2 = omc_code_canonical("fn a() { return 1; } fn b() { return 2; }");
+    assert_eq(c1, c2, "order preserved");
+}
+
+# Nested function definitions canonicalize independently.
+fn test_canonical_nested_fn() {
+    h c1 = omc_code_canonical("fn outer() { fn inner(x) { return x; } return inner(1); }");
+    h c2 = omc_code_canonical("fn outer() { fn inner(y) { return y; } return inner(1); }");
+    assert_eq(c1, c2, "nested params normalize");
+}
+
+# Recursive calls preserve name.
+fn test_canonical_recursive() {
+    h c1 = omc_code_canonical("fn fact(n) { if n <= 1 { return 1; } return n * fact(n - 1); }");
+    h c2 = omc_code_canonical("fn fact(m) { if m <= 1 { return 1; } return m * fact(m - 1); }");
+    assert_eq(c1, c2, "recursive call name preserved");
+}
+
+# Try/catch/finally invariance.
+fn test_canonical_try_catch() {
+    h c1 = omc_code_canonical("fn f() { try { return 1; } catch e { return 0; } }");
+    h c2 = omc_code_canonical("fn f() { try { return 1; } catch err { return 0; } }");
+    assert_eq(c1, c2, "catch var renamed");
+}
+
+# Class definitions canonicalize methods independently.
+fn test_canonical_class_methods() {
+    h c1 = omc_code_canonical("class P { x; fn get(self) { return dict_get(self, \"x\"); } }");
+    h c2 = omc_code_canonical("class P { x; fn get(this) { return dict_get(this, \"x\"); } }");
+    assert_eq(c1, c2, "method params canonicalize");
+}
+
+# Lambda invariance.
+fn test_canonical_lambda_in_call() {
+    h c1 = omc_code_canonical("h ys = arr_map(xs, fn(v) { return v * 2; });");
+    h c2 = omc_code_canonical("h ys = arr_map(xs, fn(x) { return x * 2; });");
+    assert_eq(c1, c2, "lambda param renamed");
+}
+
+# Match canonical with bind patterns (skipped — parser doesn't accept return
+# directly as arm body in this position; tested elsewhere).
+
+# Arithmetic semantics preserved.
+fn test_canonical_arith() {
+    h c1 = omc_code_canonical("fn f(x) { return x * 2 + 1; }");
+    h c2 = omc_code_canonical("fn f(y) { return y * 2 + 1; }");
+    assert_eq(c1, c2, "rename through arithmetic");
+
+    h c3 = omc_code_canonical("fn f(x) { return x * 3 + 1; }");
+    assert_true(c1 != c3, "literal change matters");
+}
+
+# Multi-line whitespace differences.
+fn test_canonical_indentation() {
+    h c1 = omc_code_canonical("fn f(x) {\n    return x;\n}");
+    h c2 = omc_code_canonical("fn f(x){\nreturn x;\n}");
+    h c3 = omc_code_canonical("fn f(x) {return x;}");
+    assert_eq(c1, c2, "indentation ignored");
+    assert_eq(c1, c3, "newlines ignored");
+}
+
+# Comments stripped consistently.
+fn test_canonical_inline_comments() {
+    h c1 = omc_code_canonical("fn f(x) { return x; }");
+    h c2 = omc_code_canonical("fn f(x) { # comment\n return x; # trailing\n}");
+    assert_eq(c1, c2, "inline comments stripped");
+}
+
+# Empty function body.
+fn test_canonical_empty_fn() {
+    h c1 = omc_code_canonical("fn empty() {}");
+    h c2 = omc_code_canonical("fn empty() {\n\n\n}");
+    assert_eq(c1, c2, "empty body");
+}
