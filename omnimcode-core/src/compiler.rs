@@ -254,6 +254,12 @@ impl Compiler {
                         // 2D array primitives (Track 2 — 2026-05-16)
                         | "arr_matmul" | "arr_transpose"
                         | "arr_eye" | "arr_zeros_2d"
+                        // Forward-mode autograd duals (Track 2 — 2026-05-16)
+                        | "dual" | "dual_add" | "dual_sub"
+                        | "dual_mul" | "dual_div" | "dual_neg"
+                        | "dual_pow_int" | "dual_exp"
+                        | "dual_sin" | "dual_cos"
+                        | "dual_relu" | "dual_sigmoid" | "dual_tanh"
                         // introspection
                         | "defined_functions"
                         // test runner: get_failures returns array of strings

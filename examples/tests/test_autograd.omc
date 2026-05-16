@@ -1,0 +1,187 @@
+# Track 2: substrate-aware forward-mode autograd via dual numbers.
+#
+# Dual: [value, derivative]. Lift x with dual(x, 1.0), forward-propagate
+# through dual_* ops, read df/dx from dual_d. Substrate metadata follows
+# the value through HInt/HFloat as usual.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) {
+    if !cond { test_record_failure(msg); }
+}
+
+fn approx_eq(a, b, tol) {
+    h d = a - b;
+    if d < 0.0 { d = 0.0 - d; }
+    return d <= tol;
+}
+
+# ---- Constructor / accessors ----
+
+fn test_dual_construct() {
+    h x = dual(3.0, 1.0);
+    assert_true(approx_eq(dual_v(x), 3.0, 0.001), "value");
+    assert_true(approx_eq(dual_d(x), 1.0, 0.001), "derivative");
+}
+
+# ---- f(x) = x   ;   f'(x) = 1 ----
+
+fn test_identity_grad() {
+    h x = dual(5.0, 1.0);
+    assert_true(approx_eq(dual_d(x), 1.0, 0.001), "df/dx of x is 1");
+}
+
+# ---- f(x) = x^2   ;   f'(x) = 2x   ;   at x=3, f'=6 ----
+
+fn test_square_grad() {
+    h x = dual(3.0, 1.0);
+    h y = dual_mul(x, x);
+    assert_true(approx_eq(dual_v(y), 9.0, 0.001), "x^2 at 3 = 9");
+    assert_true(approx_eq(dual_d(y), 6.0, 0.001), "d/dx x^2 at 3 = 6");
+}
+
+# ---- f(x) = x^3 via dual_pow_int ;  f'(x) = 3x^2  ;  at x=2, f=8, f'=12 ---
+
+fn test_cube_grad_pow() {
+    h x = dual(2.0, 1.0);
+    h y = dual_pow_int(x, 3);
+    assert_true(approx_eq(dual_v(y), 8.0, 0.001), "x^3 at 2 = 8");
+    assert_true(approx_eq(dual_d(y), 12.0, 0.001), "d/dx x^3 at 2 = 12");
+}
+
+# ---- f(x) = a*x + b   (a=2, b=5)   ; f'(x) = 2 ----
+
+fn test_affine_grad() {
+    h x = dual(7.0, 1.0);
+    # constant scalars are treated as duals with deriv=0
+    h y = dual_add(dual_mul(2.0, x), 5.0);
+    assert_true(approx_eq(dual_v(y), 19.0, 0.001), "2*7+5 = 19");
+    assert_true(approx_eq(dual_d(y), 2.0, 0.001), "slope is 2");
+}
+
+# ---- f(x) = (x+1) * (x-1) = x^2 - 1   ;  f'(x) = 2x  ;  at x=4, f'=8 ----
+
+fn test_product_rule() {
+    h x = dual(4.0, 1.0);
+    h y = dual_mul(dual_add(x, 1.0), dual_sub(x, 1.0));
+    assert_true(approx_eq(dual_v(y), 15.0, 0.001), "(x+1)(x-1) at 4 = 15");
+    assert_true(approx_eq(dual_d(y), 8.0, 0.001), "deriv at 4 = 8");
+}
+
+# ---- f(x) = 1/x   ;  f'(x) = -1/x^2  ;  at x=2, f'=-0.25 ----
+
+fn test_reciprocal() {
+    h x = dual(2.0, 1.0);
+    h y = dual_div(1.0, x);
+    assert_true(approx_eq(dual_v(y), 0.5, 0.001), "1/2 = 0.5");
+    assert_true(approx_eq(dual_d(y), 0 - 0.25, 0.001), "d/dx 1/x at 2 = -0.25");
+}
+
+# ---- f(x) = exp(x)  ;  f'(x) = exp(x)   ;  at x=0, both 1 ----
+
+fn test_exp_grad() {
+    h x = dual(0.0, 1.0);
+    h y = dual_exp(x);
+    assert_true(approx_eq(dual_v(y), 1.0, 0.001), "exp(0) = 1");
+    assert_true(approx_eq(dual_d(y), 1.0, 0.001), "d/dx exp(0) = 1");
+}
+
+# ---- f(x) = sin(x) at x=0   ;   f=0, f'=cos(0)=1 ----
+
+fn test_sin_grad() {
+    h x = dual(0.0, 1.0);
+    h y = dual_sin(x);
+    assert_true(approx_eq(dual_v(y), 0.0, 0.001), "sin(0) = 0");
+    assert_true(approx_eq(dual_d(y), 1.0, 0.001), "d/dx sin(0) = 1");
+}
+
+# ---- ReLU branches ----
+
+fn test_relu_positive() {
+    h x = dual(3.5, 1.0);
+    h y = dual_relu(x);
+    assert_true(approx_eq(dual_v(y), 3.5, 0.001), "relu(3.5) = 3.5");
+    assert_true(approx_eq(dual_d(y), 1.0, 0.001), "relu' on positive = 1");
+}
+
+fn test_relu_negative() {
+    h x = dual(0 - 2.0, 1.0);
+    h y = dual_relu(x);
+    assert_true(approx_eq(dual_v(y), 0.0, 0.001), "relu(-2) = 0");
+    assert_true(approx_eq(dual_d(y), 0.0, 0.001), "relu' on negative = 0");
+}
+
+# ---- Sigmoid at 0: value 0.5, deriv 0.25 ----
+
+fn test_sigmoid_grad() {
+    h x = dual(0.0, 1.0);
+    h y = dual_sigmoid(x);
+    assert_true(approx_eq(dual_v(y), 0.5, 0.001), "sigmoid(0) = 0.5");
+    assert_true(approx_eq(dual_d(y), 0.25, 0.001), "sigmoid'(0) = 0.25");
+}
+
+# ---- Tanh at 0: value 0, deriv 1 ----
+
+fn test_tanh_grad() {
+    h x = dual(0.0, 1.0);
+    h y = dual_tanh(x);
+    assert_true(approx_eq(dual_v(y), 0.0, 0.001), "tanh(0) = 0");
+    assert_true(approx_eq(dual_d(y), 1.0, 0.001), "tanh'(0) = 1");
+}
+
+# ---- Chain rule:  f(x) = sigmoid(2x + 1) ; analytic grad at x=0 ----
+# y = sigmoid(2x + 1).  At x=0: u=1, sigmoid(1) = 0.7310586,
+# sigmoid'(1) = 0.7310586*(1 - 0.7310586) = 0.196612.
+# dy/dx = sigmoid'(u) * du/dx = 0.196612 * 2 = 0.393224.
+
+fn test_chain_rule_sigmoid() {
+    h x = dual(0.0, 1.0);
+    h u = dual_add(dual_mul(2.0, x), 1.0);
+    h y = dual_sigmoid(u);
+    assert_true(approx_eq(dual_v(y), 0.7310586, 0.001), "sigmoid(1) value");
+    assert_true(approx_eq(dual_d(y), 0.393224, 0.001), "chain-rule deriv");
+}
+
+# ---- Composition: a tiny "neuron"  y = sigmoid(w*x + b)  ----
+# At w=0.5, x=2.0, b=0.0:  z = 1.0, y = sigmoid(1) = 0.7310586
+# Want dy/dx with w,b held constant. Lift only x:
+
+fn test_neuron_dydx() {
+    h w = 0.5;
+    h b = 0.0;
+    h x = dual(2.0, 1.0);   # seed for d/dx
+    h z = dual_add(dual_mul(w, x), b);   # w*x + b ; dz/dx = w = 0.5
+    h y = dual_sigmoid(z);
+    # dy/dz = sigmoid(1)*(1-sigmoid(1)) ≈ 0.196612 ; dy/dx = 0.196612*0.5
+    assert_true(approx_eq(dual_d(y), 0.098306, 0.001), "neuron dy/dx");
+}
+
+# ---- Substrate-aware: gradients on Fibonacci-valued inputs ----
+# Take f(x) = x^2, evaluate at the Fibonacci attractor x=5.
+# Value 25 is non-attractor (closest is 21 or 34) so resonance < 1,
+# but the gradient computation itself is exact: f'(5) = 10.
+
+fn test_grad_substrate_input() {
+    h x = dual(5.0, 1.0);
+    h y = dual_mul(x, x);
+    assert_true(approx_eq(dual_v(y), 25.0, 0.001), "5^2 = 25");
+    assert_true(approx_eq(dual_d(y), 10.0, 0.001), "f'(5) = 10");
+}
+
+# ---- Quadratic loss: L = (y_hat - y)^2 ; dL/dy_hat = 2(y_hat - y) ---
+# y_hat = w*x. At w=3, x=2 (y_hat=6, y=5): L=1, dL/dw via chain = 2*1*2 = 4
+
+fn test_loss_grad_w() {
+    h w = dual(3.0, 1.0);   # seed d/dw
+    h x = 2.0;
+    h y_target = 5.0;
+    h y_hat = dual_mul(w, x);            # 6  ; dy_hat/dw = 2
+    h diff = dual_sub(y_hat, y_target);  # 1  ; ddiff/dw = 2
+    h L = dual_mul(diff, diff);           # 1  ; dL/dw = 2*1*2 = 4
+    assert_true(approx_eq(dual_v(L), 1.0, 0.001), "loss = 1");
+    assert_true(approx_eq(dual_d(L), 4.0, 0.001), "dL/dw = 4");
+}

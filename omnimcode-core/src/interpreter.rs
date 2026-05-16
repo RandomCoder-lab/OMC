@@ -5717,6 +5717,182 @@ impl Interpreter {
                 }
                 Ok(Value::Array(HArray::from_vec(rows)))
             }
+            // ---- Forward-mode autograd (Track 2) ---------------------
+            //
+            // A dual number is a 2-element array [value, derivative].
+            // No new Value variant — composes with existing array ops,
+            // matmul, and HInt/HFloat substrate metadata.
+            //
+            //   x' = dual(x, 1.0)         # lift input with seed
+            //   y' = dual_mul(x', x')     # forward-prop through f
+            //   grad = dual_d(y')         # read df/dx at x
+            "dual" => {
+                if args.len() < 2 {
+                    return Err("dual requires (value, derivative)".to_string());
+                }
+                let v = self.eval_expr(&args[0])?.to_float();
+                let d = self.eval_expr(&args[1])?.to_float();
+                Ok(Value::Array(HArray::from_vec(vec![
+                    Value::HFloat(v),
+                    Value::HFloat(d),
+                ])))
+            }
+            "dual_v" => {
+                if args.is_empty() {
+                    return Err("dual_v requires (dual)".to_string());
+                }
+                let x = self.eval_expr(&args[0])?;
+                if let Value::Array(a) = x {
+                    let items = a.items.borrow();
+                    if items.is_empty() {
+                        return Err("dual_v: malformed dual".to_string());
+                    }
+                    Ok(Value::HFloat(items[0].to_float()))
+                } else {
+                    Err("dual_v: not a dual".to_string())
+                }
+            }
+            "dual_d" => {
+                if args.is_empty() {
+                    return Err("dual_d requires (dual)".to_string());
+                }
+                let x = self.eval_expr(&args[0])?;
+                if let Value::Array(a) = x {
+                    let items = a.items.borrow();
+                    if items.len() < 2 {
+                        return Err("dual_d: malformed dual".to_string());
+                    }
+                    Ok(Value::HFloat(items[1].to_float()))
+                } else {
+                    Err("dual_d: not a dual".to_string())
+                }
+            }
+            "dual_add" | "dual_sub" | "dual_mul" | "dual_div" => {
+                if args.len() < 2 {
+                    return Err(format!("{} requires (a, b)", name));
+                }
+                let a = self.eval_expr(&args[0])?;
+                let b = self.eval_expr(&args[1])?;
+                let (av, ad) = unpack_dual(&a);
+                let (bv, bd) = unpack_dual(&b);
+                let (rv, rd) = match name {
+                    "dual_add" => (av + bv, ad + bd),
+                    "dual_sub" => (av - bv, ad - bd),
+                    "dual_mul" => (av * bv, ad * bv + av * bd),
+                    "dual_div" => {
+                        if bv == 0.0 {
+                            return Err("dual_div: division by zero".to_string());
+                        }
+                        (av / bv, (ad * bv - av * bd) / (bv * bv))
+                    }
+                    _ => unreachable!(),
+                };
+                Ok(Value::Array(HArray::from_vec(vec![
+                    Value::HFloat(rv),
+                    Value::HFloat(rd),
+                ])))
+            }
+            "dual_neg" => {
+                if args.is_empty() {
+                    return Err("dual_neg requires (a)".to_string());
+                }
+                let a = self.eval_expr(&args[0])?;
+                let (av, ad) = unpack_dual(&a);
+                Ok(Value::Array(HArray::from_vec(vec![
+                    Value::HFloat(-av),
+                    Value::HFloat(-ad),
+                ])))
+            }
+            "dual_pow_int" => {
+                if args.len() < 2 {
+                    return Err("dual_pow_int requires (a, n)".to_string());
+                }
+                let a = self.eval_expr(&args[0])?;
+                let n = self.eval_expr(&args[1])?.to_int() as i32;
+                let (av, ad) = unpack_dual(&a);
+                if n == 0 {
+                    return Ok(Value::Array(HArray::from_vec(vec![
+                        Value::HFloat(1.0),
+                        Value::HFloat(0.0),
+                    ])));
+                }
+                let rv = av.powi(n);
+                let rd = (n as f64) * av.powi(n - 1) * ad;
+                Ok(Value::Array(HArray::from_vec(vec![
+                    Value::HFloat(rv),
+                    Value::HFloat(rd),
+                ])))
+            }
+            "dual_exp" => {
+                if args.is_empty() {
+                    return Err("dual_exp requires (a)".to_string());
+                }
+                let a = self.eval_expr(&args[0])?;
+                let (av, ad) = unpack_dual(&a);
+                let rv = av.exp();
+                Ok(Value::Array(HArray::from_vec(vec![
+                    Value::HFloat(rv),
+                    Value::HFloat(rv * ad),
+                ])))
+            }
+            "dual_sin" => {
+                if args.is_empty() {
+                    return Err("dual_sin requires (a)".to_string());
+                }
+                let a = self.eval_expr(&args[0])?;
+                let (av, ad) = unpack_dual(&a);
+                Ok(Value::Array(HArray::from_vec(vec![
+                    Value::HFloat(av.sin()),
+                    Value::HFloat(av.cos() * ad),
+                ])))
+            }
+            "dual_cos" => {
+                if args.is_empty() {
+                    return Err("dual_cos requires (a)".to_string());
+                }
+                let a = self.eval_expr(&args[0])?;
+                let (av, ad) = unpack_dual(&a);
+                Ok(Value::Array(HArray::from_vec(vec![
+                    Value::HFloat(av.cos()),
+                    Value::HFloat(-av.sin() * ad),
+                ])))
+            }
+            "dual_relu" => {
+                if args.is_empty() {
+                    return Err("dual_relu requires (a)".to_string());
+                }
+                let a = self.eval_expr(&args[0])?;
+                let (av, ad) = unpack_dual(&a);
+                let (rv, rd) = if av > 0.0 { (av, ad) } else { (0.0, 0.0) };
+                Ok(Value::Array(HArray::from_vec(vec![
+                    Value::HFloat(rv),
+                    Value::HFloat(rd),
+                ])))
+            }
+            "dual_sigmoid" => {
+                if args.is_empty() {
+                    return Err("dual_sigmoid requires (a)".to_string());
+                }
+                let a = self.eval_expr(&args[0])?;
+                let (av, ad) = unpack_dual(&a);
+                let s = 1.0 / (1.0 + (-av).exp());
+                Ok(Value::Array(HArray::from_vec(vec![
+                    Value::HFloat(s),
+                    Value::HFloat(s * (1.0 - s) * ad),
+                ])))
+            }
+            "dual_tanh" => {
+                if args.is_empty() {
+                    return Err("dual_tanh requires (a)".to_string());
+                }
+                let a = self.eval_expr(&args[0])?;
+                let (av, ad) = unpack_dual(&a);
+                let t = av.tanh();
+                Ok(Value::Array(HArray::from_vec(vec![
+                    Value::HFloat(t),
+                    Value::HFloat((1.0 - t * t) * ad),
+                ])))
+            }
             // arr_fold_all(arr) -> new array with every element snapped
             // to its nearest Fibonacci attractor. Vectorized fold.
             // Substrate-canonical denoising / quantization primitive.
@@ -8010,6 +8186,22 @@ pub(crate) fn pattern_matches(
             actual == tag
         }
     }
+}
+
+/// Unpack a dual number into (value, derivative). Plain scalars become
+/// (scalar, 0.0) so dual ops can mix duals with constants naturally.
+fn unpack_dual(v: &Value) -> (f64, f64) {
+    if let Value::Array(a) = v {
+        let items = a.items.borrow();
+        if items.len() >= 2 {
+            return (items[0].to_float(), items[1].to_float());
+        }
+        if items.len() == 1 {
+            return (items[0].to_float(), 0.0);
+        }
+        return (0.0, 0.0);
+    }
+    (v.to_float(), 0.0)
 }
 
 fn values_equal(a: &Value, b: &Value) -> bool {
