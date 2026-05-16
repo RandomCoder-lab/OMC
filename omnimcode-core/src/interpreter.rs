@@ -5594,6 +5594,129 @@ impl Interpreter {
                     Err("arr_him_vec: requires an array".to_string())
                 }
             }
+            // ---- 2D array primitives (Track 2) ----------------------
+            //
+            // A "matrix" in OMC is an array of arrays, all inner arrays
+            // the same length. arr_matmul(A, B) does the standard
+            // multiplication: output[i][j] = sum_k A[i][k] * B[k][j].
+            // All values treated as f64 to keep results sensible for
+            // small floating workloads (autograd-style scalars).
+            "arr_matmul" => {
+                if args.len() < 2 {
+                    return Err("arr_matmul requires (matrix_a, matrix_b)".to_string());
+                }
+                let a = self.eval_expr(&args[0])?;
+                let b = self.eval_expr(&args[1])?;
+                if let (Value::Array(am), Value::Array(bm)) = (a, b) {
+                    let arows = am.items.borrow();
+                    let brows = bm.items.borrow();
+                    if arows.is_empty() || brows.is_empty() {
+                        return Err("arr_matmul: empty matrix".to_string());
+                    }
+                    let a_rows = arows.len();
+                    let a_cols = match &arows[0] {
+                        Value::Array(r) => r.items.borrow().len(),
+                        _ => return Err("arr_matmul: A rows must be arrays".to_string()),
+                    };
+                    let b_rows = brows.len();
+                    let b_cols = match &brows[0] {
+                        Value::Array(r) => r.items.borrow().len(),
+                        _ => return Err("arr_matmul: B rows must be arrays".to_string()),
+                    };
+                    if a_cols != b_rows {
+                        return Err(format!(
+                            "arr_matmul: shape mismatch — A is {}x{}, B is {}x{}",
+                            a_rows, a_cols, b_rows, b_cols
+                        ));
+                    }
+                    // Materialize as Vec<Vec<f64>> for the inner loop.
+                    let a_mat: Vec<Vec<f64>> = arows.iter().map(|r| {
+                        if let Value::Array(row) = r {
+                            row.items.borrow().iter().map(|v| v.to_float()).collect()
+                        } else { Vec::new() }
+                    }).collect();
+                    let b_mat: Vec<Vec<f64>> = brows.iter().map(|r| {
+                        if let Value::Array(row) = r {
+                            row.items.borrow().iter().map(|v| v.to_float()).collect()
+                        } else { Vec::new() }
+                    }).collect();
+                    let mut out: Vec<Value> = Vec::with_capacity(a_rows);
+                    for i in 0..a_rows {
+                        let mut row: Vec<Value> = Vec::with_capacity(b_cols);
+                        for j in 0..b_cols {
+                            let mut s = 0.0f64;
+                            for k in 0..a_cols {
+                                s += a_mat[i][k] * b_mat[k][j];
+                            }
+                            row.push(Value::HFloat(s));
+                        }
+                        out.push(Value::Array(HArray::from_vec(row)));
+                    }
+                    Ok(Value::Array(HArray::from_vec(out)))
+                } else {
+                    Err("arr_matmul: requires two 2D arrays".to_string())
+                }
+            }
+            "arr_transpose" => {
+                // Transpose a 2D array. Output[j][i] = input[i][j].
+                if args.is_empty() {
+                    return Err("arr_transpose requires (matrix)".to_string());
+                }
+                let a = self.eval_expr(&args[0])?;
+                if let Value::Array(am) = a {
+                    let rows = am.items.borrow();
+                    if rows.is_empty() {
+                        return Ok(Value::Array(HArray::from_vec(vec![])));
+                    }
+                    let n_cols = match &rows[0] {
+                        Value::Array(r) => r.items.borrow().len(),
+                        _ => return Err("arr_transpose: rows must be arrays".to_string()),
+                    };
+                    let mut out: Vec<Value> = Vec::with_capacity(n_cols);
+                    for j in 0..n_cols {
+                        let mut col: Vec<Value> = Vec::with_capacity(rows.len());
+                        for row_v in rows.iter() {
+                            if let Value::Array(row) = row_v {
+                                col.push(row.items.borrow()[j].clone());
+                            }
+                        }
+                        out.push(Value::Array(HArray::from_vec(col)));
+                    }
+                    Ok(Value::Array(HArray::from_vec(out)))
+                } else {
+                    Err("arr_transpose: requires a 2D array".to_string())
+                }
+            }
+            "arr_eye" => {
+                // arr_eye(n) -> identity matrix (n x n) of ints.
+                if args.is_empty() {
+                    return Err("arr_eye requires (n)".to_string());
+                }
+                let n = self.eval_expr(&args[0])?.to_int().max(0) as usize;
+                let mut rows: Vec<Value> = Vec::with_capacity(n);
+                for i in 0..n {
+                    let mut row: Vec<Value> = Vec::with_capacity(n);
+                    for j in 0..n {
+                        row.push(Value::HInt(HInt::new(if i == j { 1 } else { 0 })));
+                    }
+                    rows.push(Value::Array(HArray::from_vec(row)));
+                }
+                Ok(Value::Array(HArray::from_vec(rows)))
+            }
+            "arr_zeros_2d" => {
+                // arr_zeros_2d(rows, cols) -> (rows x cols) zero matrix.
+                if args.len() < 2 {
+                    return Err("arr_zeros_2d requires (rows, cols)".to_string());
+                }
+                let r = self.eval_expr(&args[0])?.to_int().max(0) as usize;
+                let c = self.eval_expr(&args[1])?.to_int().max(0) as usize;
+                let mut rows: Vec<Value> = Vec::with_capacity(r);
+                for _ in 0..r {
+                    let row: Vec<Value> = (0..c).map(|_| Value::HInt(HInt::new(0))).collect();
+                    rows.push(Value::Array(HArray::from_vec(row)));
+                }
+                Ok(Value::Array(HArray::from_vec(rows)))
+            }
             // arr_fold_all(arr) -> new array with every element snapped
             // to its nearest Fibonacci attractor. Vectorized fold.
             // Substrate-canonical denoising / quantization primitive.

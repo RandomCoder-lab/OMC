@@ -1,0 +1,139 @@
+# Track 2: 2D arrays + matrix multiplication.
+#
+# Matrices in OMC are arrays of arrays. arr_matmul, arr_transpose,
+# arr_eye, and arr_zeros_2d give us the minimum primitives to assemble
+# small linear-algebra workloads on top of the substrate-typed dtype.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) {
+    if !cond { test_record_failure(msg); }
+}
+
+fn approx_eq(a, b, tol) {
+    h d = a - b;
+    if d < 0.0 { d = 0.0 - d; }
+    return d <= tol;
+}
+
+# ---- arr_eye (identity matrix) ----
+
+fn test_eye_3() {
+    h I = arr_eye(3);
+    assert_eq(arr_len(I), 3, "I has 3 rows");
+    h r0 = arr_get(I, 0);
+    h r1 = arr_get(I, 1);
+    assert_eq(arr_len(r0), 3, "row has 3 cols");
+    assert_eq(arr_get(r0, 0), 1, "I[0][0]=1");
+    assert_eq(arr_get(r0, 1), 0, "I[0][1]=0");
+    assert_eq(arr_get(r1, 1), 1, "I[1][1]=1");
+}
+
+# ---- arr_zeros_2d ----
+
+fn test_zeros_2d() {
+    h Z = arr_zeros_2d(2, 3);
+    assert_eq(arr_len(Z), 2, "Z has 2 rows");
+    h r0 = arr_get(Z, 0);
+    assert_eq(arr_len(r0), 3, "row has 3 cols");
+    assert_eq(arr_get(r0, 0), 0, "all zeros");
+    assert_eq(arr_get(r0, 2), 0, "all zeros");
+}
+
+# ---- arr_transpose ----
+
+fn test_transpose_2x3() {
+    h A = [[1, 2, 3], [4, 5, 6]];
+    h At = arr_transpose(A);
+    assert_eq(arr_len(At), 3, "transpose has 3 rows (was 3 cols)");
+    h r0 = arr_get(At, 0);
+    assert_eq(arr_len(r0), 2, "row has 2 cols (was 2 rows)");
+    assert_eq(arr_get(r0, 0), 1, "At[0][0]=A[0][0]=1");
+    assert_eq(arr_get(r0, 1), 4, "At[0][1]=A[1][0]=4");
+    h r2 = arr_get(At, 2);
+    assert_eq(arr_get(r2, 1), 6, "At[2][1]=A[1][2]=6");
+}
+
+fn test_transpose_twice_identity() {
+    h A = [[1, 2], [3, 4], [5, 6]];
+    h Att = arr_transpose(arr_transpose(A));
+    h r0 = arr_get(Att, 0);
+    h r2 = arr_get(Att, 2);
+    assert_eq(arr_get(r0, 0), 1, "(A^T)^T = A");
+    assert_eq(arr_get(r2, 1), 6, "(A^T)^T = A");
+}
+
+# ---- arr_matmul ----
+
+fn test_matmul_2x2_2x2() {
+    # [[1,2],[3,4]] * [[5,6],[7,8]] = [[19,22],[43,50]]
+    h A = [[1, 2], [3, 4]];
+    h B = [[5, 6], [7, 8]];
+    h C = arr_matmul(A, B);
+    h r0 = arr_get(C, 0);
+    h r1 = arr_get(C, 1);
+    assert_true(approx_eq(arr_get(r0, 0), 19.0, 0.001), "C[0][0]=19");
+    assert_true(approx_eq(arr_get(r0, 1), 22.0, 0.001), "C[0][1]=22");
+    assert_true(approx_eq(arr_get(r1, 0), 43.0, 0.001), "C[1][0]=43");
+    assert_true(approx_eq(arr_get(r1, 1), 50.0, 0.001), "C[1][1]=50");
+}
+
+fn test_matmul_identity() {
+    # A * I = A
+    h A = [[2, 3], [4, 5]];
+    h I = arr_eye(2);
+    h C = arr_matmul(A, I);
+    h r0 = arr_get(C, 0);
+    h r1 = arr_get(C, 1);
+    assert_true(approx_eq(arr_get(r0, 0), 2.0, 0.001), "AI[0][0]=2");
+    assert_true(approx_eq(arr_get(r0, 1), 3.0, 0.001), "AI[0][1]=3");
+    assert_true(approx_eq(arr_get(r1, 0), 4.0, 0.001), "AI[1][0]=4");
+    assert_true(approx_eq(arr_get(r1, 1), 5.0, 0.001), "AI[1][1]=5");
+}
+
+fn test_matmul_nonsquare() {
+    # (2x3) * (3x2) = (2x2)
+    h A = [[1, 2, 3], [4, 5, 6]];
+    h B = [[7, 8], [9, 10], [11, 12]];
+    h C = arr_matmul(A, B);
+    assert_eq(arr_len(C), 2, "result has 2 rows");
+    h r0 = arr_get(C, 0);
+    assert_eq(arr_len(r0), 2, "result row has 2 cols");
+    # row 0: 1*7+2*9+3*11 = 58 ; 1*8+2*10+3*12 = 64
+    # row 1: 4*7+5*9+6*11 = 139; 4*8+5*10+6*12 = 154
+    assert_true(approx_eq(arr_get(r0, 0), 58.0, 0.001), "C[0][0]=58");
+    assert_true(approx_eq(arr_get(r0, 1), 64.0, 0.001), "C[0][1]=64");
+    h r1 = arr_get(C, 1);
+    assert_true(approx_eq(arr_get(r1, 0), 139.0, 0.001), "C[1][0]=139");
+    assert_true(approx_eq(arr_get(r1, 1), 154.0, 0.001), "C[1][1]=154");
+}
+
+fn test_matmul_row_vector() {
+    # (1x3) * (3x1) = (1x1) — dot product
+    h r = [[1, 2, 3]];
+    h c = [[4], [5], [6]];
+    h R = arr_matmul(r, c);
+    h r0 = arr_get(R, 0);
+    # 1*4 + 2*5 + 3*6 = 32
+    assert_true(approx_eq(arr_get(r0, 0), 32.0, 0.001), "dot via 1x3*3x1");
+}
+
+# ---- Pipeline: substrate-aware features into matmul ----
+
+fn test_matmul_substrate_pipeline() {
+    # Build feature vector via substrate-typed primitives,
+    # then project through a Fibonacci-weight matrix.
+    h feat = [[1, 2, 3, 5]];   # Fibonacci-like row
+    # 4x2 weight matrix (Fibonacci entries — substrate-resonant)
+    h W = [[1, 0], [1, 1], [2, 1], [3, 2]];
+    h out = arr_matmul(feat, W);
+    h r0 = arr_get(out, 0);
+    # col 0: 1*1 + 2*1 + 3*2 + 5*3 = 1+2+6+15 = 24
+    # col 1: 1*0 + 2*1 + 3*1 + 5*2 = 0+2+3+10 = 15
+    assert_true(approx_eq(arr_get(r0, 0), 24.0, 0.001), "proj col 0 = 24");
+    assert_true(approx_eq(arr_get(r0, 1), 15.0, 0.001), "proj col 1 = 15");
+}

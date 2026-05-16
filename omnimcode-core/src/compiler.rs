@@ -251,6 +251,9 @@ impl Compiler {
                         | "harmonic_dedupe"
                         // polish round (arrays)
                         | "arr_zip" | "arr_unique"
+                        // 2D array primitives (Track 2 — 2026-05-16)
+                        | "arr_matmul" | "arr_transpose"
+                        | "arr_eye" | "arr_zeros_2d"
                         // introspection
                         | "defined_functions"
                         // test runner: get_failures returns array of strings
