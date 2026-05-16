@@ -214,9 +214,13 @@ fn format_stmt(stmt: &Statement, level: usize, out: &mut String) {
             indent_to(level, out);
             out.push_str("}\n");
         }
-        Statement::ClassDef { name, fields, methods } => {
+        Statement::ClassDef { name, parent, fields, methods } => {
             out.push_str("class ");
             out.push_str(name);
+            if let Some(p) = parent {
+                out.push_str(" extends ");
+                out.push_str(p);
+            }
             out.push_str(" {\n");
             for f in fields {
                 indent_to(level + 1, out);

@@ -42,6 +42,7 @@ pub enum Token {
     Throw,
     Match,
     Class,
+    Extends,
     /// f-string template — alternating literal and expression segments.
     /// Parser turns this into `concat_many(parts...)` at expression
     /// position.
@@ -475,6 +476,7 @@ impl Lexer {
                         "finally" => Token::Finally,
                         "throw" => Token::Throw,
                         "class" => Token::Class,
+                        "extends" => Token::Extends,
                         "match" => Token::Match,
                         "and" => Token::And,
                         "or" => Token::Or,
@@ -1099,6 +1101,13 @@ impl Parser {
     fn parse_class_def(&mut self) -> Result<Statement, String> {
         self.expect(Token::Class)?;
         let name = self.parse_ident()?;
+        // Optional `extends Parent` clause.
+        let parent = if self.current() == Token::Extends {
+            self.advance();
+            Some(self.parse_ident()?)
+        } else {
+            None
+        };
         self.expect(Token::LBrace)?;
         let mut fields: Vec<String> = Vec::new();
         let mut methods: Vec<Statement> = Vec::new();
@@ -1117,7 +1126,7 @@ impl Parser {
             }
         }
         self.expect(Token::RBrace)?;
-        Ok(Statement::ClassDef { name, fields, methods })
+        Ok(Statement::ClassDef { name, parent, fields, methods })
     }
 
     /// `try { ... } catch err { ... }` with optional trailing

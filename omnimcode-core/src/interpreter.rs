@@ -15,6 +15,11 @@ pub type JitDispatch =
 pub struct Interpreter {
     globals: HashMap<String, Value>,
     functions: HashMap<String, (Vec<String>, Vec<Statement>)>,
+    /// Class-parent table for `class Child extends Parent` inheritance.
+    /// Maps child class name → parent class name. The instance-method
+    /// dispatch path walks this chain when `<Child>__<method>` isn't
+    /// found, trying `<Parent>__<method>` and so on.
+    class_parents: HashMap<String, String>,
     /// Optional JIT dispatch hook. When set, `invoke_user_function_at`
     /// consults this BEFORE running the tree-walk body. If the hook
     /// returns `Some(result)`, that result wins; otherwise tree-walk
@@ -99,6 +104,7 @@ impl Interpreter {
             test_current_name: std::cell::RefCell::new(String::new()),
             call_stack: Vec::new(),
             host_builtins: HashMap::new(),
+            class_parents: HashMap::new(),
         }
     }
 
@@ -1452,11 +1458,14 @@ impl Interpreter {
                 self.functions.insert(name.clone(), (params.clone(), body.clone()));
                 Ok(())
             }
-            Statement::ClassDef { name, fields, methods } => {
+            Statement::ClassDef { name, parent, fields, methods } => {
                 // Desugar at execute time so the tree-walker doesn't
                 // need register_user_functions to have been called.
                 // Same logic as register_user_functions::visit:
                 // synthesize a constructor + mangled methods.
+                if let Some(p) = parent {
+                    self.class_parents.insert(name.clone(), p.clone());
+                }
                 let mut ctor_body: Vec<Statement> = Vec::new();
                 ctor_body.push(Statement::VarDecl {
                     name: "__obj".to_string(),
@@ -2146,6 +2155,10 @@ impl Interpreter {
         // the mangled `<ClassName>__<method>` fn registered at class-
         // definition time, with `obj` injected as the first arg.
         //
+        // Inheritance: when the child class doesn't define <method>,
+        // walk up the class_parents chain trying `<Parent>__<method>`,
+        // `<Grandparent>__<method>`, and so on. First hit wins.
+        //
         // This MUST be checked before module-qualified dispatch so
         // that instance dicts aren't accidentally looked up as
         // modules. Identified by: receiver-name is a local variable
@@ -2154,13 +2167,22 @@ impl Interpreter {
             if let Some(Value::Dict(d)) = self.get_var(recv_name) {
                 let class_key = d.borrow().get("__class__").cloned();
                 if let Some(Value::String(class_name)) = class_key {
-                    let mangled = format!("{}__{}", class_name, method_name);
-                    if let Some((params, body)) = self.functions.get(&mangled).cloned() {
-                        // Build the call arg list: receiver first
-                        // (binding to `self` if that's the first param
-                        // name), then the rest. We pass the receiver
-                        // as a variable expression — the existing
-                        // `recv_name` resolves to the same dict.
+                    // Walk class → parent chain, bounded to avoid
+                    // accidental cycles in a malformed class table.
+                    let mut current_class: Option<String> = Some(class_name);
+                    let mut hops = 0usize;
+                    let mut hit: Option<(String, Vec<String>, Vec<Statement>)> = None;
+                    while let Some(c) = current_class {
+                        if hops > 64 { break; } // sanity bound
+                        let mangled = format!("{}__{}", c, method_name);
+                        if let Some((params, body)) = self.functions.get(&mangled).cloned() {
+                            hit = Some((mangled, params, body));
+                            break;
+                        }
+                        current_class = self.class_parents.get(&c).cloned();
+                        hops += 1;
+                    }
+                    if let Some((mangled, params, body)) = hit {
                         let mut full_args: Vec<Expression> =
                             Vec::with_capacity(args.len() + 1);
                         full_args.push(Expression::Variable(recv_name.to_string()));
@@ -7122,7 +7144,14 @@ impl Interpreter {
                     fns.insert(name.clone(), (params.clone(), body.clone()));
                     for s in body { visit(s, fns); }
                 }
-                Statement::ClassDef { name, fields, methods } => {
+                Statement::ClassDef { name, parent: _parent, fields, methods } => {
+                    // NOTE: parent registration happens in execute_stmt
+                    // (which has access to &mut self). visit() only
+                    // sees &mut HashMap<...> so it can't reach the
+                    // class_parents table. For the VM-prep path, the
+                    // class_parents update is made during execute_stmt
+                    // when the statement actually executes.
+                    //
                     // Desugar: build a constructor fn and one method fn
                     // per declared method. The constructor is a body of
                     // dict_set calls that populates a fresh dict with

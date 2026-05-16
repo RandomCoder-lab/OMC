@@ -106,17 +106,27 @@ pub enum Statement {
     /// of stringifying, enabling typed-catch hierarchies.
     Throw(Expression),
     /// `class Name { field1; field2; fn method1(self, ...) { ... } }`
-    /// Minimum-viable class system: each ClassDef desugars at
-    /// register_user_functions time into:
+    /// (optional `extends Parent` clause for inheritance).
+    ///
+    /// Each ClassDef desugars at register_user_functions time into:
     ///   - A constructor fn `Name(field1, field2, ...)` that builds a
     ///     dict with __class__="Name" plus each field as a key.
     ///   - One top-level fn per method, name-mangled as `Name__method`.
+    ///
     /// Method dispatch `obj.method(args)` works because the
     /// call-resolution path checks whether the receiver is a Dict
     /// carrying __class__ and routes to the mangled fn name with
     /// `obj` injected as the first argument (the `self` slot).
+    ///
+    /// Inheritance: when `parent` is `Some("Parent")`, the
+    /// instance's __class__ is still set to the child's name, but
+    /// method dispatch falls back to the parent's mangled namespace
+    /// (and recursively up the chain) if the child doesn't define
+    /// the method. The Interpreter maintains a class_parents table
+    /// for the lookup.
     ClassDef {
         name: String,
+        parent: Option<String>,
         fields: Vec<String>,
         methods: Vec<Statement>, // each is a FunctionDef
     },

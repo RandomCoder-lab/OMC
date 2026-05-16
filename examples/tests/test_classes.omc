@@ -119,3 +119,62 @@ fn test_self_mutation() {
     c.increment();
     assert_eq(dict_get(c, "value"), 3, "increment chain");
 }
+
+# ---- Inheritance ----
+
+class Animal {
+    name;
+    fn greet(self) {
+        return concat_many("hi from ", dict_get(self, "name"));
+    }
+    fn species(self) {
+        return "generic animal";
+    }
+}
+
+class Dog extends Animal {
+    name;
+    breed;
+    fn species(self) {
+        return concat_many("dog (", dict_get(self, "breed"), ")");
+    }
+    fn bark(self) {
+        return concat_many(dict_get(self, "name"), " says woof");
+    }
+}
+
+class Puppy extends Dog {
+    name;
+    breed;
+    fn species(self) {
+        # Override even the Dog's override.
+        return concat_many("puppy (", dict_get(self, "breed"), ")");
+    }
+}
+
+fn test_inherited_method() {
+    h d = Dog("rex", "lab");
+    # greet is defined on Animal; Dog doesn't override it.
+    assert_eq(d.greet(), "hi from rex", "inherited greet");
+}
+
+fn test_override() {
+    h a = Animal("alice");
+    h d = Dog("rex", "lab");
+    assert_eq(a.species(), "generic animal", "Animal.species");
+    assert_eq(d.species(), "dog (lab)", "Dog.species override");
+}
+
+fn test_own_method() {
+    h d = Dog("rex", "lab");
+    assert_eq(d.bark(), "rex says woof", "Dog's own method");
+}
+
+fn test_multi_level_inheritance() {
+    h p = Puppy("buddy", "golden");
+    # bark is from Dog (1 hop up), greet is from Animal (2 hops up),
+    # species is Puppy's own (overrides both).
+    assert_eq(p.bark(), "buddy says woof", "bark from Dog");
+    assert_eq(p.greet(), "hi from buddy", "greet from Animal (2 hops)");
+    assert_eq(p.species(), "puppy (golden)", "Puppy's own species");
+}
