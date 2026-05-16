@@ -1,0 +1,130 @@
+# More workflow / introspection tests.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+
+# Cheatsheets across multiple topics
+fn test_cheatsheet_arrays() {
+    h s = omc_cheatsheet("arrays");
+    assert_true(str_len(s) > 100, "arrays cheatsheet substantive");
+}
+
+fn test_cheatsheet_dicts() {
+    h s = omc_cheatsheet("dicts");
+    assert_true(str_len(s) > 100, "dicts cheatsheet substantive");
+}
+
+fn test_cheatsheet_strings() {
+    h s = omc_cheatsheet("strings");
+    assert_true(str_len(s) > 100, "strings cheatsheet substantive");
+}
+
+fn test_cheatsheet_math() {
+    h s = omc_cheatsheet("math");
+    assert_true(str_len(s) > 100, "math cheatsheet");
+}
+
+fn test_cheatsheet_io() {
+    h s = omc_cheatsheet("io");
+    assert_true(str_len(s) > 50, "io cheatsheet");
+}
+
+fn test_cheatsheet_regex() {
+    h s = omc_cheatsheet("regex");
+    assert_true(str_len(s) > 50, "regex cheatsheet");
+}
+
+fn test_cheatsheet_python() {
+    h s = omc_cheatsheet("python");
+    assert_true(str_len(s) > 50, "python cheatsheet");
+}
+
+fn test_cheatsheet_code_intel() {
+    h s = omc_cheatsheet("code_intel");
+    assert_true(str_len(s) > 100, "code_intel cheatsheet");
+}
+
+fn test_cheatsheet_introspection() {
+    h s = omc_cheatsheet("introspection");
+    assert_true(str_len(s) > 100, "introspection cheatsheet");
+}
+
+# omc_change_report content
+fn test_change_report_unchanged() {
+    h r = omc_change_report("fn f(x) { return x; }", "fn f(x) { return x; }");
+    h unchanged = dict_get(r, "unchanged");
+    assert_true(re_match("f", unchanged) == 1, "f unchanged");
+}
+
+fn test_change_report_added() {
+    h r = omc_change_report("fn f() {}", "fn f() {} fn g() {}");
+    h added = dict_get(r, "added");
+    assert_true(re_match("g", added) == 1, "g added");
+}
+
+fn test_change_report_removed() {
+    h r = omc_change_report("fn f() {} fn g() {}", "fn f() {}");
+    h removed = dict_get(r, "removed");
+    assert_true(re_match("g", removed) == 1, "g removed");
+}
+
+fn test_change_report_action_modified() {
+    h r = omc_change_report("fn f() { return 1; }", "fn f() { return 2; }");
+    h action = dict_get(r, "suggested_action");
+    assert_true(re_match("Modified", action) == 1, "modified suggestion");
+}
+
+# omc_id properties
+fn test_omc_id_different_for_different_code() {
+    h a = omc_id("fn a() {}");
+    h b = omc_id("fn b() {}");
+    assert_true(a != b, "different fn names → different ids");
+}
+
+fn test_omc_id_format_check() {
+    h a = omc_id("h x = 1;");
+    assert_true(re_match("^omcid-[0-9]+-[a-f0-9]+$", a) == 1, "format matches");
+}
+
+# Bootstrap content
+fn test_bootstrap_has_substrate() {
+    h s = omc_bootstrap_pack();
+    assert_true(re_match("substrate", s) == 1, "mentions substrate");
+}
+
+fn test_bootstrap_has_python() {
+    h s = omc_bootstrap_pack();
+    assert_true(re_match("Python", s) == 1, "mentions Python");
+}
+
+fn test_bootstrap_has_attractor() {
+    h s = omc_bootstrap_pack();
+    assert_true(re_match("attractor", s) == 1, "mentions attractor");
+}
+
+# Builtin index format
+fn test_builtin_index_has_arrays() {
+    h s = omc_builtin_index_markdown();
+    assert_true(re_match("## arrays", s) == 1, "arrays section");
+}
+
+fn test_builtin_index_has_substrate() {
+    h s = omc_builtin_index_markdown();
+    assert_true(re_match("## substrate", s) == 1, "substrate section");
+}
+
+# Python translation table
+fn test_translation_has_numpy_dot() {
+    h s = omc_python_translation();
+    assert_true(re_match("numpy.dot", s) == 1, "numpy.dot row");
+}
+
+fn test_translation_has_torch_backward() {
+    h s = omc_python_translation();
+    assert_true(re_match("backward", s) == 1, "torch backward row");
+}
