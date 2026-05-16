@@ -1,0 +1,84 @@
+# End-to-end LLM workflow demo. Exercises every major LLM-facing
+# primitive added in this work session. Run this as a sanity check of
+# the overall surface.
+
+fn show(label, v) { print(concat_many(label, " = ", to_string(v))); }
+fn section(name) { print(""); print(concat_many("=== ", name, " ===")); }
+
+fn main() {
+    print("OMC LLM workflow demo — exercises the full discoverability stack.");
+
+    section("Surface size");
+    show("documented builtins", omc_builtin_count());
+    show("OMC-unique builtins", omc_unique_count());
+    show("categories         ", omc_categories_count());
+    show("error patterns     ", omc_error_count());
+    show("token vocab        ", omc_token_vocab_size());
+
+    section("Look up a specific builtin");
+    show("signature ", omc_help_signature("arr_softmax"));
+    show("category  ", omc_help_category("arr_softmax"));
+    show("unique?   ", omc_is_unique("arr_softmax"));
+    show("example   ", omc_help_example("arr_softmax"));
+
+    section("Find what we don't know the name of");
+    h hits = omc_search_builtins("substrate");
+    show("substrate hits", arr_len(hits));
+
+    section("Typo recovery");
+    h sug = omc_did_you_mean("arr_softmx");
+    show("did you mean", sug);
+
+    section("Code memory across edits");
+    omc_memory_clear();
+    h v1 = "fn loss(p, t) { return (p - t) * (p - t); }";
+    h id_v1 = omc_id(v1);
+    show("v1 omc_id", id_v1);
+    omc_remember("loss", v1);
+    h v2 = "fn loss(pred, target) { return (pred - target) * (pred - target); }";
+    show("v2 matches v1?", omc_recall_matches("loss", v2));   # 1 (alpha-eq)
+    h v3 = "fn loss(p, t) { return (p - t) * (p - t) + 0.01; }";
+    show("v3 matches v1?", omc_recall_matches("loss", v3));   # 0 (changed)
+
+    section("Structural diff");
+    h r = omc_change_report(v1, v3);
+    show("modified  ", dict_get(r, "modified"));
+    show("suggestion", dict_get(r, "suggested_action"));
+
+    section("Code metrics");
+    h m = omc_code_metrics(v3);
+    show("complexity      ", dict_get(m, "complexity"));
+    show("ast_size        ", dict_get(m, "ast_size"));
+    show("ast_depth       ", dict_get(m, "ast_depth"));
+    show("compression_ratio", dict_get(m, "compression_ratio"));
+
+    section("Code summary");
+    h s = omc_code_summary(v3);
+    show("functions", dict_get(s, "functions"));
+
+    section("Substrate properties");
+    show("is_attractor(8) ", is_attractor(8));
+    show("attractor_distance(7)", attractor_distance(7));
+    show("resonance_vec [1..5]", arr_resonance_vec([1, 2, 3, 4, 5]));
+
+    section("Substrate scoring");
+    show("substrate_score(v3)", omc_substrate_score(v3));
+
+    section("Token compression");
+    h saved = omc_token_byte_savings(v3);
+    h pct = omc_token_compress_pct(v3);
+    show("bytes saved", saved);
+    show("pct saved", pct);
+
+    section("Catch + explain an error");
+    h em = "";
+    try { h _ = arr_softmx([1.0]); } catch e { em = e; }
+    h ex = omc_explain_error(em);
+    show("category", dict_get(ex, "category"));
+    show("fix     ", dict_get(ex, "fix"));
+
+    print("");
+    print("End: this is the canonical 'LLM driving OMC via MCP' workflow.");
+}
+
+main();
