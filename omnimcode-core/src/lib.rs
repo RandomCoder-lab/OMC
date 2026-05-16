@@ -6,6 +6,7 @@ pub mod value;
 pub mod parser;
 pub mod interpreter;
 pub mod docs;
+pub mod errors;
 pub mod runtime;
 pub mod circuits;      // Genetic logic circuits
 pub mod evolution;     // Genetic operators

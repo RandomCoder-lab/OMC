@@ -1,0 +1,103 @@
+# Error catalog — omc_explain_error pattern-matches runtime errors
+# against a curated knowledge base and returns structured remediation.
+#
+# LLMs catching OMC errors call this to get back actionable fixes
+# without having to memorize the 200+ error niches.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) {
+    if !cond { test_record_failure(msg); }
+}
+
+# ---- omc_error_count ----
+
+fn test_error_count_substantial() {
+    h n = omc_error_count();
+    assert_true(n >= 40, "catalog has at least 40 patterns");
+}
+
+# ---- Pattern matching against a real runtime error ----
+
+fn test_explain_undefined_function() {
+    h err = "";
+    try {
+        h _ = arr_softmx([1.0]);  # typo
+    } catch e {
+        err = e;
+    }
+    h ex = omc_explain_error(err);
+    assert_eq(dict_get(ex, "matched"), 1, "pattern matched");
+    assert_eq(dict_get(ex, "category"), "dispatch", "category is dispatch");
+    assert_true(str_len(dict_get(ex, "fix")) > 0, "fix is non-empty");
+}
+
+fn test_explain_index_out_of_bounds() {
+    h err = "";
+    try {
+        h xs = [1, 2, 3];
+        h _ = arr_get(xs, 99);
+    } catch e {
+        err = e;
+    }
+    h ex = omc_explain_error(err);
+    assert_eq(dict_get(ex, "matched"), 1, "out-of-bounds matched");
+    assert_eq(dict_get(ex, "category"), "arrays", "category arrays");
+}
+
+fn test_explain_matmul_shape_mismatch() {
+    h err = "";
+    try {
+        h A = [[1, 2, 3]];
+        h B = [[1, 2]];  # wrong shape for matmul
+        h _ = arr_matmul(A, B);
+    } catch e {
+        err = e;
+    }
+    h ex = omc_explain_error(err);
+    assert_eq(dict_get(ex, "matched"), 1, "matmul shape matched");
+    assert_eq(dict_get(ex, "category"), "linalg", "linalg category");
+}
+
+# ---- Pattern matching on unknown error returns matched=0 ----
+
+fn test_explain_unknown_error() {
+    h ex = omc_explain_error("this error has no catalog entry whatsoever 12345 xyz");
+    assert_eq(dict_get(ex, "matched"), 0, "no match");
+    assert_true(str_len(dict_get(ex, "explanation")) > 0, "fallback explanation given");
+}
+
+# ---- omc_error_categories ----
+
+fn test_error_categories() {
+    h cats = omc_error_categories();
+    assert_true(arr_len(cats) >= 5, "at least 5 error categories");
+    h has_arrays = 0;
+    h has_dispatch = 0;
+    h i = 0;
+    while i < arr_len(cats) {
+        h c = arr_get(cats, i);
+        if c == "arrays" { has_arrays = 1; }
+        if c == "dispatch" { has_dispatch = 1; }
+        i = i + 1;
+    }
+    assert_eq(has_arrays, 1, "has 'arrays' category");
+    assert_eq(has_dispatch, 1, "has 'dispatch' category");
+}
+
+# ---- Substrate-aware error catalog ----
+
+fn test_explain_substrate_error() {
+    h err = "";
+    try {
+        h _ = arr_substrate_attention([[1, 2]]);  # missing K, V
+    } catch e {
+        err = e;
+    }
+    h ex = omc_explain_error(err);
+    assert_eq(dict_get(ex, "matched"), 1, "substrate attention error matched");
+}

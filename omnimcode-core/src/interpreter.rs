@@ -7012,6 +7012,50 @@ impl Interpreter {
                     .collect();
                 Ok(Value::Array(HArray::from_vec(out)))
             }
+            // omc_explain_error(msg) — pattern-match an error message
+            // against the catalog in src/errors.rs and return a dict
+            // describing what it means, the typical cause, and the fix.
+            // LLMs catching OMC errors call this to get back actionable
+            // remediation without having to memorize 200+ error niches.
+            "omc_explain_error" => {
+                if args.is_empty() {
+                    return Err("omc_explain_error requires (msg)".to_string());
+                }
+                let msg = self.eval_expr(&args[0])?.to_display_string();
+                match crate::errors::match_error(&msg) {
+                    Some(p) => {
+                        let mut map = std::collections::BTreeMap::new();
+                        map.insert("matched".to_string(), Value::HInt(HInt::new(1)));
+                        map.insert("pattern".to_string(), Value::String(p.pattern.to_string()));
+                        map.insert("category".to_string(), Value::String(p.category.to_string()));
+                        map.insert("explanation".to_string(), Value::String(p.explanation.to_string()));
+                        map.insert("typical_cause".to_string(), Value::String(p.typical_cause.to_string()));
+                        map.insert("fix".to_string(), Value::String(p.fix.to_string()));
+                        Ok(Value::dict_from(map))
+                    }
+                    None => {
+                        let mut map = std::collections::BTreeMap::new();
+                        map.insert("matched".to_string(), Value::HInt(HInt::new(0)));
+                        map.insert("explanation".to_string(),
+                            Value::String("No catalog pattern matched — the error message is unique enough that the runtime doesn't have a curated fix yet. Inspect the message itself, or open an issue to add a pattern.".to_string()));
+                        Ok(Value::dict_from(map))
+                    }
+                }
+            }
+            // omc_error_categories() — every distinct error category
+            // in the catalog. Useful for guided exploration.
+            "omc_error_categories" => {
+                let cats = crate::errors::error_categories();
+                let out: Vec<Value> = cats.iter()
+                    .map(|c| Value::String(c.to_string()))
+                    .collect();
+                Ok(Value::Array(HArray::from_vec(out)))
+            }
+            // omc_error_count() — number of curated patterns. Lets
+            // callers verify "the language ships a knowledge base".
+            "omc_error_count" => {
+                Ok(Value::HInt(HInt::new(crate::errors::ERROR_PATTERNS.len() as i64)))
+            }
             // arr_fold_all(arr) -> new array with every element snapped
             // to its nearest Fibonacci attractor. Vectorized fold.
             // Substrate-canonical denoising / quantization primitive.

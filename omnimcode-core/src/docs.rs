@@ -741,6 +741,27 @@ pub const BUILTINS: &[BuiltinDoc] = &[
         example: "omc_unique_builtins()  // [is_attractor, arr_substrate_attention, ...]",
         unique_to_omc: false,
     },
+    BuiltinDoc {
+        name: "omc_explain_error", category: "introspection",
+        signature: "(msg: string) -> dict",
+        description: "Pattern-match an error message against the curated catalog. Returns {matched, pattern, category, explanation, typical_cause, fix}.",
+        example: "try { arr_softmx([1.0]); } catch e { print(dict_get(omc_explain_error(e), \"fix\")); }",
+        unique_to_omc: false,
+    },
+    BuiltinDoc {
+        name: "omc_error_categories", category: "introspection",
+        signature: "() -> string[]",
+        description: "All distinct error categories in the catalog.",
+        example: "omc_error_categories()  // [dispatch, arrays, linalg, ...]",
+        unique_to_omc: false,
+    },
+    BuiltinDoc {
+        name: "omc_error_count", category: "introspection",
+        signature: "() -> int",
+        description: "Number of curated error patterns. The knowledge base size.",
+        example: "omc_error_count()  // 42+",
+        unique_to_omc: false,
+    },
 ];
 
 /// Look up a builtin by name. Returns None when there's no docs entry
