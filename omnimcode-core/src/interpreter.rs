@@ -34,6 +34,16 @@ pub struct Interpreter {
     /// either no throw is in flight or the error originated from a
     /// Rust-side builtin (then catch falls back to the string form).
     pending_throw: Option<Value>,
+    /// Reverse-mode autograd tape. Each node is one op recorded during
+    /// the forward pass. `tape_backward(id)` walks the tape in reverse,
+    /// accumulating gradients into the `grad` field of every node it
+    /// touches. Operates on scalars (HFloat) or 2D matrices (Vec<Vec<f64>>);
+    /// shape is implicit in each node's value. Substrate metadata is
+    /// preserved in the *forward* values via HInt/HFloat throughout —
+    /// gradients themselves are HFloat for precision, but users can read
+    /// `tape_value(id)` to get the substrate-annotated forward value
+    /// alongside `tape_grad(id)` for the derivative.
+    autograd_tape: Vec<TapeNode>,
     /// Optional JIT dispatch hook. When set, `invoke_user_function_at`
     /// consults this BEFORE running the tree-walk body. If the hook
     /// returns `Some(result)`, that result wins; otherwise tree-walk
@@ -121,6 +131,7 @@ impl Interpreter {
             class_parents: HashMap::new(),
             yield_stacks: Vec::new(),
             pending_throw: None,
+            autograd_tape: Vec::new(),
         }
     }
 
@@ -5646,8 +5657,14 @@ impl Interpreter {
             // A "matrix" in OMC is an array of arrays, all inner arrays
             // the same length. arr_matmul(A, B) does the standard
             // multiplication: output[i][j] = sum_k A[i][k] * B[k][j].
-            // All values treated as f64 to keep results sensible for
-            // small floating workloads (autograd-style scalars).
+            //
+            // Substrate-preserving: when every cell of A and B is HInt
+            // (or coerces cleanly to i64), the inner loop runs in i64
+            // and result cells are HInt — so each output carries the
+            // φ-resonance/HIM score that HInt::new computes from the
+            // integer value. The moment a float shows up anywhere, we
+            // fall back to f64 (resonance is then implicit in the value
+            // but not carried as substrate metadata).
             "arr_matmul" => {
                 if args.len() < 2 {
                     return Err("arr_matmul requires (matrix_a, matrix_b)".to_string());
@@ -5676,7 +5693,53 @@ impl Interpreter {
                             a_rows, a_cols, b_rows, b_cols
                         ));
                     }
-                    // Materialize as Vec<Vec<f64>> for the inner loop.
+                    // Substrate path: try i64 first. If any cell is a
+                    // float (or anything that loses precision when
+                    // coerced via to_int), fall back to f64.
+                    let mut all_int = true;
+                    for r in arows.iter().chain(brows.iter()) {
+                        if let Value::Array(row) = r {
+                            for v in row.items.borrow().iter() {
+                                if !matches!(v, Value::HInt(_) | Value::Bool(_) | Value::Null) {
+                                    all_int = false;
+                                    break;
+                                }
+                            }
+                        }
+                        if !all_int { break; }
+                    }
+                    if all_int {
+                        let a_mat: Vec<Vec<i64>> = arows.iter().map(|r| {
+                            if let Value::Array(row) = r {
+                                row.items.borrow().iter().map(|v| v.to_int()).collect()
+                            } else { Vec::new() }
+                        }).collect();
+                        let b_mat: Vec<Vec<i64>> = brows.iter().map(|r| {
+                            if let Value::Array(row) = r {
+                                row.items.borrow().iter().map(|v| v.to_int()).collect()
+                            } else { Vec::new() }
+                        }).collect();
+                        let mut out: Vec<Value> = Vec::with_capacity(a_rows);
+                        for i in 0..a_rows {
+                            let mut row: Vec<Value> = Vec::with_capacity(b_cols);
+                            for j in 0..b_cols {
+                                let mut s: i64 = 0;
+                                for k in 0..a_cols {
+                                    s = s.wrapping_add(a_mat[i][k].wrapping_mul(b_mat[k][j]));
+                                }
+                                // HInt::new recomputes resonance from the
+                                // output value — so each output cell now
+                                // carries its own substrate metadata.
+                                // This is the win over NumPy: every cell
+                                // of the projection knows how aligned it
+                                // is with the φ/Fibonacci substrate.
+                                row.push(Value::HInt(HInt::new(s)));
+                            }
+                            out.push(Value::Array(HArray::from_vec(row)));
+                        }
+                        return Ok(Value::Array(HArray::from_vec(out)));
+                    }
+                    // Float fallback for mixed/float inputs.
                     let a_mat: Vec<Vec<f64>> = arows.iter().map(|r| {
                         if let Value::Array(row) = r {
                             row.items.borrow().iter().map(|v| v.to_float()).collect()
@@ -5939,6 +6002,421 @@ impl Interpreter {
                     Value::HFloat(t),
                     Value::HFloat((1.0 - t * t) * ad),
                 ])))
+            }
+            // ---- Reverse-mode autograd (the real training engine) ---
+            //
+            // Workflow:
+            //   tape_reset();
+            //   h x = tape_var(3.0);          # id of leaf node
+            //   h y = tape_mul(x, x);          # records op, returns id
+            //   tape_backward(y);              # walks tape, accumulates
+            //   h grad_x = tape_grad(x);       # reads dy/dx (= 6.0 here)
+            //
+            // Reverse-mode is O(forward) per parameter — Python autograd's
+            // entire reason for existing. Substrate metadata stays on the
+            // forward values (tape_value(id) returns substrate-typed
+            // HInt when the cell is integral).
+            "tape_reset" => {
+                self.autograd_tape.clear();
+                Ok(Value::Null)
+            }
+            "tape_var" | "tape_const" => {
+                if args.is_empty() {
+                    return Err(format!("{} requires (value)", name));
+                }
+                let v = self.eval_expr(&args[0])?;
+                let mat = tape_from_value(&v)?;
+                let grad = TapeMat::zeros(mat.rows, mat.cols);
+                let op = if name == "tape_var" { TapeOp::Var } else { TapeOp::Const };
+                let id = self.autograd_tape.len();
+                self.autograd_tape.push(TapeNode { op, value: mat, grad });
+                Ok(Value::HInt(HInt::new(id as i64)))
+            }
+            "tape_value" => {
+                if args.is_empty() {
+                    return Err("tape_value requires (node_id)".to_string());
+                }
+                let id = self.eval_expr(&args[0])?.to_int() as usize;
+                if id >= self.autograd_tape.len() {
+                    return Err(format!("tape_value: id {} out of range", id));
+                }
+                // Substrate-preserving: if every cell is an integer,
+                // round-trip through HInt so resonance metadata comes
+                // back on each cell. This is the bit that's unique:
+                // Python's autograd returns plain numpy floats, OMC
+                // returns substrate-annotated values.
+                let m = &self.autograd_tape[id].value;
+                let all_int = m.data.iter().all(|x| x.fract() == 0.0 && x.abs() < (i64::MAX as f64));
+                Ok(tape_to_value(m, all_int))
+            }
+            "tape_grad" => {
+                if args.is_empty() {
+                    return Err("tape_grad requires (node_id)".to_string());
+                }
+                let id = self.eval_expr(&args[0])?.to_int() as usize;
+                if id >= self.autograd_tape.len() {
+                    return Err(format!("tape_grad: id {} out of range", id));
+                }
+                // Gradients usually aren't integers, so don't try to
+                // re-quantize them to HInt — return HFloat (per-cell
+                // substrate metadata is still inspectable via existing
+                // is_attractor / attractor_distance builtins on the
+                // returned cells).
+                Ok(tape_to_value(&self.autograd_tape[id].grad, false))
+            }
+            "tape_add" | "tape_sub" | "tape_mul" | "tape_div" => {
+                if args.len() < 2 {
+                    return Err(format!("{} requires (a_id, b_id)", name));
+                }
+                let a = self.eval_expr(&args[0])?.to_int() as usize;
+                let b = self.eval_expr(&args[1])?.to_int() as usize;
+                if a >= self.autograd_tape.len() || b >= self.autograd_tape.len() {
+                    return Err(format!("{}: node id out of range", name));
+                }
+                let av = self.autograd_tape[a].value.clone();
+                let bv = self.autograd_tape[b].value.clone();
+                // Elementwise — broadcast scalar↔matrix as needed.
+                let (rows, cols) = if av.rows * av.cols >= bv.rows * bv.cols {
+                    (av.rows, av.cols)
+                } else { (bv.rows, bv.cols) };
+                let mut out = TapeMat::zeros(rows, cols);
+                let scalar_a = av.rows * av.cols == 1;
+                let scalar_b = bv.rows * bv.cols == 1;
+                for i in 0..rows {
+                    for j in 0..cols {
+                        let xa = if scalar_a { av.data[0] } else { av.at(i, j) };
+                        let xb = if scalar_b { bv.data[0] } else { bv.at(i, j) };
+                        let v = match name {
+                            "tape_add" => xa + xb,
+                            "tape_sub" => xa - xb,
+                            "tape_mul" => xa * xb,
+                            "tape_div" => if xb == 0.0 { 0.0 } else { xa / xb },
+                            _ => 0.0,
+                        };
+                        out.set(i, j, v);
+                    }
+                }
+                let op = match name {
+                    "tape_add" => TapeOp::Add(a, b),
+                    "tape_sub" => TapeOp::Sub(a, b),
+                    "tape_mul" => TapeOp::Mul(a, b),
+                    "tape_div" => TapeOp::Div(a, b),
+                    _ => unreachable!(),
+                };
+                let grad = TapeMat::zeros(rows, cols);
+                let id = self.autograd_tape.len();
+                self.autograd_tape.push(TapeNode { op, value: out, grad });
+                Ok(Value::HInt(HInt::new(id as i64)))
+            }
+            "tape_neg" => {
+                if args.is_empty() {
+                    return Err("tape_neg requires (a_id)".to_string());
+                }
+                let a = self.eval_expr(&args[0])?.to_int() as usize;
+                let av = self.autograd_tape[a].value.clone();
+                let mut out = TapeMat::zeros(av.rows, av.cols);
+                for k in 0..av.data.len() { out.data[k] = -av.data[k]; }
+                let grad = TapeMat::zeros(av.rows, av.cols);
+                let id = self.autograd_tape.len();
+                self.autograd_tape.push(TapeNode { op: TapeOp::Neg(a), value: out, grad });
+                Ok(Value::HInt(HInt::new(id as i64)))
+            }
+            "tape_pow_int" => {
+                if args.len() < 2 {
+                    return Err("tape_pow_int requires (a_id, n)".to_string());
+                }
+                let a = self.eval_expr(&args[0])?.to_int() as usize;
+                let n = self.eval_expr(&args[1])?.to_int() as i32;
+                let av = self.autograd_tape[a].value.clone();
+                let mut out = TapeMat::zeros(av.rows, av.cols);
+                for k in 0..av.data.len() { out.data[k] = av.data[k].powi(n); }
+                let grad = TapeMat::zeros(av.rows, av.cols);
+                let id = self.autograd_tape.len();
+                self.autograd_tape.push(TapeNode { op: TapeOp::PowInt(a, n), value: out, grad });
+                Ok(Value::HInt(HInt::new(id as i64)))
+            }
+            "tape_exp" | "tape_sin" | "tape_cos"
+            | "tape_relu" | "tape_sigmoid" | "tape_tanh" => {
+                if args.is_empty() {
+                    return Err(format!("{} requires (a_id)", name));
+                }
+                let a = self.eval_expr(&args[0])?.to_int() as usize;
+                let av = self.autograd_tape[a].value.clone();
+                let mut out = TapeMat::zeros(av.rows, av.cols);
+                for k in 0..av.data.len() {
+                    let x = av.data[k];
+                    out.data[k] = match name {
+                        "tape_exp"     => x.exp(),
+                        "tape_sin"     => x.sin(),
+                        "tape_cos"     => x.cos(),
+                        "tape_relu"    => if x > 0.0 { x } else { 0.0 },
+                        "tape_sigmoid" => 1.0 / (1.0 + (-x).exp()),
+                        "tape_tanh"    => x.tanh(),
+                        _              => 0.0,
+                    };
+                }
+                let op = match name {
+                    "tape_exp"     => TapeOp::Exp(a),
+                    "tape_sin"     => TapeOp::Sin(a),
+                    "tape_cos"     => TapeOp::Cos(a),
+                    "tape_relu"    => TapeOp::Relu(a),
+                    "tape_sigmoid" => TapeOp::Sigmoid(a),
+                    "tape_tanh"    => TapeOp::Tanh(a),
+                    _ => unreachable!(),
+                };
+                let grad = TapeMat::zeros(av.rows, av.cols);
+                let id = self.autograd_tape.len();
+                self.autograd_tape.push(TapeNode { op, value: out, grad });
+                Ok(Value::HInt(HInt::new(id as i64)))
+            }
+            "tape_matmul" => {
+                if args.len() < 2 {
+                    return Err("tape_matmul requires (a_id, b_id)".to_string());
+                }
+                let a = self.eval_expr(&args[0])?.to_int() as usize;
+                let b = self.eval_expr(&args[1])?.to_int() as usize;
+                let av = self.autograd_tape[a].value.clone();
+                let bv = self.autograd_tape[b].value.clone();
+                let out = tape_matmul(&av, &bv)?;
+                let grad = TapeMat::zeros(out.rows, out.cols);
+                let id = self.autograd_tape.len();
+                self.autograd_tape.push(TapeNode { op: TapeOp::MatMul(a, b), value: out, grad });
+                Ok(Value::HInt(HInt::new(id as i64)))
+            }
+            "tape_sum" => {
+                if args.is_empty() {
+                    return Err("tape_sum requires (a_id)".to_string());
+                }
+                let a = self.eval_expr(&args[0])?.to_int() as usize;
+                let av = self.autograd_tape[a].value.clone();
+                let s: f64 = av.data.iter().sum();
+                let out = TapeMat::scalar(s);
+                let grad = TapeMat::scalar(0.0);
+                let id = self.autograd_tape.len();
+                self.autograd_tape.push(TapeNode { op: TapeOp::Sum(a), value: out, grad });
+                Ok(Value::HInt(HInt::new(id as i64)))
+            }
+            "tape_mean" => {
+                if args.is_empty() {
+                    return Err("tape_mean requires (a_id)".to_string());
+                }
+                let a = self.eval_expr(&args[0])?.to_int() as usize;
+                let av = self.autograd_tape[a].value.clone();
+                let n = av.data.len().max(1) as f64;
+                let m: f64 = av.data.iter().sum::<f64>() / n;
+                let out = TapeMat::scalar(m);
+                let grad = TapeMat::scalar(0.0);
+                let id = self.autograd_tape.len();
+                self.autograd_tape.push(TapeNode { op: TapeOp::Mean(a), value: out, grad });
+                Ok(Value::HInt(HInt::new(id as i64)))
+            }
+            "tape_backward" => {
+                // Walk the tape in reverse. Initialize the loss node's
+                // grad to ones-of-shape, then dispatch by op type to
+                // accumulate gradients into dependencies. After this
+                // returns, tape_grad(var_id) reads the accumulated grad.
+                if args.is_empty() {
+                    return Err("tape_backward requires (loss_id)".to_string());
+                }
+                let loss_id = self.eval_expr(&args[0])?.to_int() as usize;
+                if loss_id >= self.autograd_tape.len() {
+                    return Err(format!("tape_backward: id {} out of range", loss_id));
+                }
+                // Zero all grads first so backward is idempotent.
+                for node in self.autograd_tape.iter_mut() {
+                    let (r, c) = (node.grad.rows, node.grad.cols);
+                    node.grad = TapeMat::zeros(r, c);
+                }
+                // Seed the loss with 1s (scalar loss → 1.0).
+                {
+                    let g = &mut self.autograd_tape[loss_id].grad;
+                    for v in g.data.iter_mut() { *v = 1.0; }
+                }
+                // Walk in reverse. Cloning grads to drop the borrow,
+                // then writing back through indexed access.
+                for i in (0..=loss_id).rev() {
+                    let op = self.autograd_tape[i].op.clone();
+                    let dy = self.autograd_tape[i].grad.clone();
+                    match op {
+                        TapeOp::Var | TapeOp::Const => {}
+                        TapeOp::Add(a, b) => {
+                            self.autograd_tape[a].grad.add(&dy);
+                            self.autograd_tape[b].grad.add(&dy);
+                        }
+                        TapeOp::Sub(a, b) => {
+                            self.autograd_tape[a].grad.add(&dy);
+                            let mut neg = TapeMat::zeros(dy.rows, dy.cols);
+                            for k in 0..dy.data.len() { neg.data[k] = -dy.data[k]; }
+                            self.autograd_tape[b].grad.add(&neg);
+                        }
+                        TapeOp::Mul(a, b) => {
+                            let av = self.autograd_tape[a].value.clone();
+                            let bv = self.autograd_tape[b].value.clone();
+                            let scalar_a = av.rows * av.cols == 1;
+                            let scalar_b = bv.rows * bv.cols == 1;
+                            // dL/dA = dy * B (elementwise, broadcast)
+                            let mut da = TapeMat::zeros(av.rows, av.cols);
+                            for i2 in 0..av.rows {
+                                for j2 in 0..av.cols {
+                                    let xb = if scalar_b { bv.data[0] } else { bv.at(i2, j2) };
+                                    let xdy = if dy.rows * dy.cols == 1 { dy.data[0] } else { dy.at(i2, j2) };
+                                    da.set(i2, j2, xdy * xb);
+                                }
+                            }
+                            self.autograd_tape[a].grad.add(&da);
+                            let mut db = TapeMat::zeros(bv.rows, bv.cols);
+                            for i2 in 0..bv.rows {
+                                for j2 in 0..bv.cols {
+                                    let xa = if scalar_a { av.data[0] } else { av.at(i2, j2) };
+                                    let xdy = if dy.rows * dy.cols == 1 { dy.data[0] } else { dy.at(i2, j2) };
+                                    db.set(i2, j2, xdy * xa);
+                                }
+                            }
+                            self.autograd_tape[b].grad.add(&db);
+                        }
+                        TapeOp::Div(a, b) => {
+                            let av = self.autograd_tape[a].value.clone();
+                            let bv = self.autograd_tape[b].value.clone();
+                            let scalar_a = av.rows * av.cols == 1;
+                            let scalar_b = bv.rows * bv.cols == 1;
+                            let mut da = TapeMat::zeros(av.rows, av.cols);
+                            for i2 in 0..av.rows {
+                                for j2 in 0..av.cols {
+                                    let xb = if scalar_b { bv.data[0] } else { bv.at(i2, j2) };
+                                    if xb != 0.0 {
+                                        let xdy = if dy.rows * dy.cols == 1 { dy.data[0] } else { dy.at(i2, j2) };
+                                        da.set(i2, j2, xdy / xb);
+                                    }
+                                }
+                            }
+                            self.autograd_tape[a].grad.add(&da);
+                            let mut db = TapeMat::zeros(bv.rows, bv.cols);
+                            for i2 in 0..bv.rows {
+                                for j2 in 0..bv.cols {
+                                    let xa = if scalar_a { av.data[0] } else { av.at(i2, j2) };
+                                    let xb = bv.at(i2, j2);
+                                    if xb != 0.0 {
+                                        let xdy = if dy.rows * dy.cols == 1 { dy.data[0] } else { dy.at(i2, j2) };
+                                        db.set(i2, j2, -xdy * xa / (xb * xb));
+                                    }
+                                }
+                            }
+                            self.autograd_tape[b].grad.add(&db);
+                        }
+                        TapeOp::Neg(a) => {
+                            let mut neg = TapeMat::zeros(dy.rows, dy.cols);
+                            for k in 0..dy.data.len() { neg.data[k] = -dy.data[k]; }
+                            self.autograd_tape[a].grad.add(&neg);
+                        }
+                        TapeOp::PowInt(a, n) => {
+                            let av = self.autograd_tape[a].value.clone();
+                            let mut da = TapeMat::zeros(av.rows, av.cols);
+                            for k in 0..av.data.len() {
+                                let coeff = (n as f64) * av.data[k].powi(n - 1);
+                                da.data[k] = dy.data[k.min(dy.data.len() - 1)] * coeff;
+                            }
+                            self.autograd_tape[a].grad.add(&da);
+                        }
+                        TapeOp::Exp(a) => {
+                            let yv = self.autograd_tape[i].value.clone();
+                            let mut da = TapeMat::zeros(yv.rows, yv.cols);
+                            for k in 0..yv.data.len() { da.data[k] = dy.data[k] * yv.data[k]; }
+                            self.autograd_tape[a].grad.add(&da);
+                        }
+                        TapeOp::Sin(a) => {
+                            let av = self.autograd_tape[a].value.clone();
+                            let mut da = TapeMat::zeros(av.rows, av.cols);
+                            for k in 0..av.data.len() { da.data[k] = dy.data[k] * av.data[k].cos(); }
+                            self.autograd_tape[a].grad.add(&da);
+                        }
+                        TapeOp::Cos(a) => {
+                            let av = self.autograd_tape[a].value.clone();
+                            let mut da = TapeMat::zeros(av.rows, av.cols);
+                            for k in 0..av.data.len() { da.data[k] = -dy.data[k] * av.data[k].sin(); }
+                            self.autograd_tape[a].grad.add(&da);
+                        }
+                        TapeOp::Relu(a) => {
+                            let av = self.autograd_tape[a].value.clone();
+                            let mut da = TapeMat::zeros(av.rows, av.cols);
+                            for k in 0..av.data.len() {
+                                da.data[k] = if av.data[k] > 0.0 { dy.data[k] } else { 0.0 };
+                            }
+                            self.autograd_tape[a].grad.add(&da);
+                        }
+                        TapeOp::Sigmoid(a) => {
+                            let yv = self.autograd_tape[i].value.clone();
+                            let mut da = TapeMat::zeros(yv.rows, yv.cols);
+                            for k in 0..yv.data.len() {
+                                let s = yv.data[k];
+                                da.data[k] = dy.data[k] * s * (1.0 - s);
+                            }
+                            self.autograd_tape[a].grad.add(&da);
+                        }
+                        TapeOp::Tanh(a) => {
+                            let yv = self.autograd_tape[i].value.clone();
+                            let mut da = TapeMat::zeros(yv.rows, yv.cols);
+                            for k in 0..yv.data.len() {
+                                let t = yv.data[k];
+                                da.data[k] = dy.data[k] * (1.0 - t * t);
+                            }
+                            self.autograd_tape[a].grad.add(&da);
+                        }
+                        TapeOp::MatMul(a, b) => {
+                            // dA = dy @ B^T ; dB = A^T @ dy
+                            let av = self.autograd_tape[a].value.clone();
+                            let bv = self.autograd_tape[b].value.clone();
+                            let bt = tape_transpose(&bv);
+                            let at = tape_transpose(&av);
+                            let da = tape_matmul(&dy, &bt)?;
+                            let db = tape_matmul(&at, &dy)?;
+                            self.autograd_tape[a].grad.add(&da);
+                            self.autograd_tape[b].grad.add(&db);
+                        }
+                        TapeOp::Sum(a) => {
+                            // dL/dA = dy (scalar) broadcast to A's shape
+                            let av_shape = (
+                                self.autograd_tape[a].value.rows,
+                                self.autograd_tape[a].value.cols,
+                            );
+                            let mut da = TapeMat::zeros(av_shape.0, av_shape.1);
+                            let s = dy.data[0];
+                            for v in da.data.iter_mut() { *v = s; }
+                            self.autograd_tape[a].grad.add(&da);
+                        }
+                        TapeOp::Mean(a) => {
+                            let av_shape = (
+                                self.autograd_tape[a].value.rows,
+                                self.autograd_tape[a].value.cols,
+                            );
+                            let n = (av_shape.0 * av_shape.1).max(1) as f64;
+                            let mut da = TapeMat::zeros(av_shape.0, av_shape.1);
+                            let s = dy.data[0] / n;
+                            for v in da.data.iter_mut() { *v = s; }
+                            self.autograd_tape[a].grad.add(&da);
+                        }
+                    }
+                }
+                Ok(Value::Null)
+            }
+            // tape_update(var_id, lr) — in-place SGD step. Convenience
+            // so user code doesn't have to read grad, scale, re-bind.
+            // Mutates the underlying Var value; gradient stays for
+            // inspection until the next tape_reset.
+            "tape_update" => {
+                if args.len() < 2 {
+                    return Err("tape_update requires (var_id, lr)".to_string());
+                }
+                let id = self.eval_expr(&args[0])?.to_int() as usize;
+                let lr = self.eval_expr(&args[1])?.to_float();
+                if id >= self.autograd_tape.len() {
+                    return Err("tape_update: id out of range".to_string());
+                }
+                let grad = self.autograd_tape[id].grad.clone();
+                let val = &mut self.autograd_tape[id].value;
+                for k in 0..val.data.len() {
+                    val.data[k] -= lr * grad.data[k];
+                }
+                Ok(Value::Null)
             }
             // arr_fold_all(arr) -> new array with every element snapped
             // to its nearest Fibonacci attractor. Vectorized fold.
@@ -8233,6 +8711,197 @@ pub(crate) fn pattern_matches(
             actual == tag
         }
     }
+}
+
+/// One value on the reverse-mode tape. Scalar (1×1) or 2D matrix —
+/// the matrix form drives end-to-end training without ever leaving OMC.
+/// All numeric storage is f64 internally to keep gradient accumulation
+/// numerically clean. Substrate metadata lives in the *forward* Value
+/// (rebuilt as HInt when integral) and is exposed via tape_value().
+#[derive(Clone, Debug)]
+pub(crate) struct TapeMat {
+    pub data: Vec<f64>,
+    pub rows: usize,
+    pub cols: usize,
+}
+
+impl TapeMat {
+    pub fn scalar(x: f64) -> Self { Self { data: vec![x], rows: 1, cols: 1 } }
+    pub fn zeros(rows: usize, cols: usize) -> Self {
+        Self { data: vec![0.0; rows * cols], rows, cols }
+    }
+    pub fn from_2d(rows: &[Vec<f64>]) -> Self {
+        let r = rows.len();
+        let c = if r == 0 { 0 } else { rows[0].len() };
+        let mut data = Vec::with_capacity(r * c);
+        for row in rows { data.extend_from_slice(row); }
+        Self { data, rows: r, cols: c }
+    }
+    pub fn at(&self, i: usize, j: usize) -> f64 { self.data[i * self.cols + j] }
+    pub fn set(&mut self, i: usize, j: usize, v: f64) { self.data[i * self.cols + j] = v; }
+    pub fn add(&mut self, other: &TapeMat) {
+        // Broadcasting-aware add: same shape, or other is a 1×cols
+        // row-vector broadcast across our rows. Falls back to flat
+        // copy otherwise (caller already validated shapes).
+        if self.rows == other.rows && self.cols == other.cols {
+            for k in 0..self.data.len() { self.data[k] += other.data[k]; }
+        } else if other.rows == 1 && other.cols == self.cols {
+            for i in 0..self.rows {
+                for j in 0..self.cols {
+                    self.data[i * self.cols + j] += other.data[j];
+                }
+            }
+        } else if self.rows == 1 && self.cols == other.cols {
+            // Grow self to match other's row count — used when a
+            // broadcast bias accumulates gradient from many rows.
+            // Sum down to a single row instead.
+            let mut acc = vec![0.0; self.cols];
+            for i in 0..other.rows {
+                for j in 0..self.cols {
+                    acc[j] += other.data[i * other.cols + j];
+                }
+            }
+            for j in 0..self.cols { self.data[j] += acc[j]; }
+        } else if other.rows * other.cols == 1 {
+            for k in 0..self.data.len() { self.data[k] += other.data[0]; }
+        } else if self.rows * self.cols == 1 {
+            // Scalar self gets sum of all of other.
+            let s: f64 = other.data.iter().sum();
+            self.data[0] += s;
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum TapeOp {
+    /// Leaf — a variable the user wants gradients for.
+    Var,
+    /// Constant — held but not part of grad propagation.
+    Const,
+    Add(usize, usize),
+    Sub(usize, usize),
+    Mul(usize, usize),      // element-wise (or scalar)
+    Div(usize, usize),      // element-wise
+    Neg(usize),
+    PowInt(usize, i32),
+    Exp(usize),
+    Sin(usize),
+    Cos(usize),
+    Relu(usize),
+    Sigmoid(usize),
+    Tanh(usize),
+    /// True matrix multiplication, A@B.
+    MatMul(usize, usize),
+    /// Sum every cell to a scalar — needed because loss must be scalar
+    /// for backward(seed=1.0) to make sense.
+    Sum(usize),
+    /// Mean of every cell — same role as Sum but normalized.
+    Mean(usize),
+}
+
+pub(crate) struct TapeNode {
+    pub op: TapeOp,
+    pub value: TapeMat,
+    pub grad: TapeMat,
+}
+
+/// Construct a TapeMat from an OMC Value. Accepts:
+///   - scalar HInt/HFloat → 1×1 matrix
+///   - 1D array → 1×N row matrix
+///   - 2D array (array-of-arrays) → MxN matrix
+fn tape_from_value(v: &Value) -> Result<TapeMat, String> {
+    match v {
+        Value::HInt(_) | Value::HFloat(_) | Value::Bool(_) | Value::Null => {
+            Ok(TapeMat::scalar(v.to_float()))
+        }
+        Value::Array(arr) => {
+            let rows = arr.items.borrow();
+            if rows.is_empty() {
+                return Ok(TapeMat::zeros(0, 0));
+            }
+            let is_2d = matches!(&rows[0], Value::Array(_));
+            if is_2d {
+                let mut out: Vec<Vec<f64>> = Vec::with_capacity(rows.len());
+                let cols = if let Value::Array(r) = &rows[0] { r.items.borrow().len() } else { 0 };
+                for r in rows.iter() {
+                    if let Value::Array(row) = r {
+                        let row_b = row.items.borrow();
+                        if row_b.len() != cols {
+                            return Err("tape: ragged 2D array".to_string());
+                        }
+                        out.push(row_b.iter().map(|v| v.to_float()).collect());
+                    } else {
+                        return Err("tape: mixed 1D/2D rows".to_string());
+                    }
+                }
+                Ok(TapeMat::from_2d(&out))
+            } else {
+                let row: Vec<f64> = rows.iter().map(|v| v.to_float()).collect();
+                Ok(TapeMat::from_2d(&[row]))
+            }
+        }
+        _ => Err("tape: cannot lift this value type into a tape node".to_string()),
+    }
+}
+
+/// Render a TapeMat back to an OMC Value. Scalars come back as HFloat;
+/// row-vectors come back as 1D arrays; 2D matrices come back as 2D arrays.
+/// When `as_hint` is set and every cell rounds cleanly to an integer,
+/// substrate-typed HInts are emitted so resonance metadata is rebuilt
+/// from the value — this is the path that makes "gradients carry HInt
+/// resonance" hold for cells that landed on integer values.
+fn tape_to_value(m: &TapeMat, as_hint: bool) -> Value {
+    let to_cell = |x: f64| -> Value {
+        if as_hint && (x.fract() == 0.0) && x.abs() < (i64::MAX as f64) {
+            Value::HInt(HInt::new(x as i64))
+        } else {
+            Value::HFloat(x)
+        }
+    };
+    if m.rows == 1 && m.cols == 1 {
+        return to_cell(m.data[0]);
+    }
+    if m.rows == 1 {
+        let row: Vec<Value> = m.data.iter().map(|&x| to_cell(x)).collect();
+        return Value::Array(HArray::from_vec(row));
+    }
+    let mut out: Vec<Value> = Vec::with_capacity(m.rows);
+    for i in 0..m.rows {
+        let mut row: Vec<Value> = Vec::with_capacity(m.cols);
+        for j in 0..m.cols { row.push(to_cell(m.at(i, j))); }
+        out.push(Value::Array(HArray::from_vec(row)));
+    }
+    Value::Array(HArray::from_vec(out))
+}
+
+/// Transpose helper for matmul backward.
+fn tape_transpose(m: &TapeMat) -> TapeMat {
+    let mut out = TapeMat::zeros(m.cols, m.rows);
+    for i in 0..m.rows {
+        for j in 0..m.cols {
+            out.set(j, i, m.at(i, j));
+        }
+    }
+    out
+}
+
+/// Standard matmul on TapeMat. Used both in forward Matmul and in the
+/// backward pass (dA = dC @ B^T, dB = A^T @ dC).
+fn tape_matmul(a: &TapeMat, b: &TapeMat) -> Result<TapeMat, String> {
+    if a.cols != b.rows {
+        return Err(format!(
+            "tape_matmul: shape mismatch {}x{} @ {}x{}", a.rows, a.cols, b.rows, b.cols
+        ));
+    }
+    let mut out = TapeMat::zeros(a.rows, b.cols);
+    for i in 0..a.rows {
+        for j in 0..b.cols {
+            let mut s = 0.0;
+            for k in 0..a.cols { s += a.at(i, k) * b.at(k, j); }
+            out.set(i, j, s);
+        }
+    }
+    Ok(out)
 }
 
 /// Unpack a dual number into (value, derivative). Plain scalars become

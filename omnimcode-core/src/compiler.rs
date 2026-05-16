@@ -192,7 +192,14 @@ impl Compiler {
                         | "mod_pow" | "bit_count" | "bit_length"
                         | "digit_sum" | "digit_count"
                         | "arr_unique_count" | "arr_gcd" | "fnv1a_hash"
-                        | "is_instance" => Some("int"),
+                        | "is_instance"
+                        // tape_* op constructors return node IDs (int)
+                        | "tape_var" | "tape_const"
+                        | "tape_add" | "tape_sub" | "tape_mul" | "tape_div"
+                        | "tape_neg" | "tape_pow_int"
+                        | "tape_exp" | "tape_sin" | "tape_cos"
+                        | "tape_relu" | "tape_sigmoid" | "tape_tanh"
+                        | "tape_matmul" | "tape_sum" | "tape_mean" => Some("int"),
                         "pow" | "sqrt" | "log" | "log2" | "log10"
                         | "exp" | "sin" | "cos" | "tan" | "asin" | "acos"
                         | "atan" | "atan2" | "hypot" | "lerp"

@@ -1,0 +1,231 @@
+# Reverse-mode autograd — the real ML training engine.
+#
+# Reverse-mode is O(forward) per parameter — you can compute the
+# gradient of one scalar loss w.r.t. thousands of weights in a single
+# backward walk. Forward-mode (dual numbers) needs one full forward
+# pass PER parameter, so it can't scale past toy models. Reverse-mode
+# is what PyTorch/TensorFlow/JAX are built on.
+#
+# What's uniquely OMC here: forward values are substrate-preserved
+# (HInt cells carry resonance/HIM through matmul; tape_value(id)
+# returns substrate-annotated cells). Python's autograd returns
+# plain numpy floats — substrate metadata is not a thing it has.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) {
+    if !cond { test_record_failure(msg); }
+}
+
+fn approx_eq(a, b, tol) {
+    h d = a - b;
+    if d < 0.0 { d = 0.0 - d; }
+    return d <= tol;
+}
+
+# ---- Scalar: f(x) = x^2 ; f'(x) = 2x ; at x=3, grad = 6 ----
+
+fn test_scalar_square_grad() {
+    tape_reset();
+    h x = tape_var(3.0);
+    h y = tape_mul(x, x);
+    tape_backward(y);
+    h g = tape_grad(x);
+    assert_true(approx_eq(g, 6.0, 0.001), "d(x^2)/dx at 3 = 6");
+}
+
+# ---- Multi-parameter:  f(a, b) = a*b + a^2  ;  df/da = b + 2a ; df/db = a ----
+# At a=2, b=5:  df/da = 5 + 4 = 9 ;  df/db = 2.
+
+fn test_multi_parameter_grads() {
+    tape_reset();
+    h a = tape_var(2.0);
+    h b = tape_var(5.0);
+    h ab = tape_mul(a, b);
+    h aa = tape_mul(a, a);
+    h y = tape_add(ab, aa);
+    tape_backward(y);
+    h ga = tape_grad(a);
+    h gb = tape_grad(b);
+    assert_true(approx_eq(ga, 9.0, 0.001), "df/da = b+2a = 9");
+    assert_true(approx_eq(gb, 2.0, 0.001), "df/db = a = 2");
+}
+
+# ---- Demonstrate the reverse-mode WIN: many params, one backward ---
+# f(a,b,c,d) = a + b + c + d ;  df/dx = 1 for all x.
+# A single tape_backward(loss) gives gradients for every leaf.
+
+fn test_one_backward_many_grads() {
+    tape_reset();
+    h a = tape_var(1.0);
+    h b = tape_var(2.0);
+    h c = tape_var(3.0);
+    h d = tape_var(4.0);
+    h ab = tape_add(a, b);
+    h cd = tape_add(c, d);
+    h y = tape_add(ab, cd);
+    tape_backward(y);
+    assert_true(approx_eq(tape_grad(a), 1.0, 0.001), "da = 1");
+    assert_true(approx_eq(tape_grad(b), 1.0, 0.001), "db = 1");
+    assert_true(approx_eq(tape_grad(c), 1.0, 0.001), "dc = 1");
+    assert_true(approx_eq(tape_grad(d), 1.0, 0.001), "dd = 1");
+}
+
+# ---- Nonlinearities ----
+
+fn test_sigmoid_grad() {
+    tape_reset();
+    h x = tape_var(0.0);
+    h y = tape_sigmoid(x);
+    tape_backward(y);
+    # sigmoid'(0) = 0.5 * 0.5 = 0.25
+    assert_true(approx_eq(tape_grad(x), 0.25, 0.001), "sigmoid'(0) = 0.25");
+}
+
+fn test_tanh_grad() {
+    tape_reset();
+    h x = tape_var(0.0);
+    h y = tape_tanh(x);
+    tape_backward(y);
+    # tanh'(0) = 1
+    assert_true(approx_eq(tape_grad(x), 1.0, 0.001), "tanh'(0) = 1");
+}
+
+fn test_relu_grad_branches() {
+    tape_reset();
+    h xp = tape_var(2.0);
+    h xn = tape_var(0 - 3.0);
+    h yp = tape_relu(xp);
+    h yn = tape_relu(xn);
+    h y = tape_add(yp, yn);
+    tape_backward(y);
+    assert_true(approx_eq(tape_grad(xp), 1.0, 0.001), "relu' on positive = 1");
+    assert_true(approx_eq(tape_grad(xn), 0.0, 0.001), "relu' on negative = 0");
+}
+
+fn test_exp_grad() {
+    tape_reset();
+    h x = tape_var(0.0);
+    h y = tape_exp(x);
+    tape_backward(y);
+    assert_true(approx_eq(tape_grad(x), 1.0, 0.001), "exp'(0) = 1");
+}
+
+# ---- Composition: chain rule through sigmoid(2x + 1) ----
+# At x=0: u=1, sigmoid(1) ≈ 0.7310586,
+# sigmoid'(1) ≈ 0.196612, dy/dx = 0.196612 * 2 ≈ 0.393224
+
+fn test_chain_rule() {
+    tape_reset();
+    h x = tape_var(0.0);
+    h two = tape_const(2.0);
+    h one = tape_const(1.0);
+    h u = tape_add(tape_mul(two, x), one);
+    h y = tape_sigmoid(u);
+    tape_backward(y);
+    assert_true(approx_eq(tape_grad(x), 0.393224, 0.001), "chain rule");
+}
+
+# ---- Matrix autograd: forward through a 2D matmul ----
+# Y = X @ W ; loss = sum(Y) ; dL/dX = ones(Y) @ W^T ; dL/dW = X^T @ ones(Y)
+
+fn test_matmul_backward_shapes() {
+    tape_reset();
+    # X is 1x3, W is 3x2 → Y is 1x2 → loss is scalar.
+    # 1-row gradients come back as 1D arrays (convention: drop the
+    # outer row when there's only one).
+    h X = tape_var([[1.0, 2.0, 3.0]]);
+    h W = tape_var([[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]]);
+    h Y = tape_matmul(X, W);
+    h L = tape_sum(Y);
+    tape_backward(L);
+    h gX = tape_grad(X);  # 1D: [0.3, 0.7, 1.1]
+    h gW = tape_grad(W);  # 2D: 3x2
+    assert_true(approx_eq(arr_get(gX, 0), 0.3, 0.001), "dL/dX[0] = 0.3");
+    assert_true(approx_eq(arr_get(gX, 1), 0.7, 0.001), "dL/dX[1] = 0.7");
+    assert_true(approx_eq(arr_get(gX, 2), 1.1, 0.001), "dL/dX[2] = 1.1");
+    h gW0 = arr_get(gW, 0);
+    assert_true(approx_eq(arr_get(gW0, 0), 1.0, 0.001), "dL/dW[0,0] = 1.0");
+    assert_true(approx_eq(arr_get(gW0, 1), 1.0, 0.001), "dL/dW[0,1] = 1.0");
+    h gW2 = arr_get(gW, 2);
+    assert_true(approx_eq(arr_get(gW2, 0), 3.0, 0.001), "dL/dW[2,0] = 3.0");
+    assert_true(approx_eq(arr_get(gW2, 1), 3.0, 0.001), "dL/dW[2,1] = 3.0");
+}
+
+# ---- End-to-end gradient descent training ----
+# Train a single scalar w to minimize L(w) = sum_i (w*x_i - y_i)^2
+# where y_i = 2 * x_i. Converges fast.
+
+fn test_sgd_training_converges() {
+    h xs = [1.0, 2.0, 3.0, 4.0];
+    h ys = [2.0, 4.0, 6.0, 8.0];
+    h n = arr_len(xs);
+    h step = 0;
+    h max_steps = 100;
+    h lr = 0.01;
+    # Persistent variable across steps via tape_var rebuilt each step,
+    # but we read the converged value from a normal OMC variable.
+    h w_value = 0.1;
+    h converged = 0;
+
+    while step < max_steps {
+        tape_reset();
+        h w = tape_var(w_value);
+        # Accumulate loss across the dataset.
+        h L = tape_const(0.0);
+        h i = 0;
+        while i < n {
+            h xi = tape_const(arr_get(xs, i));
+            h yi = tape_const(arr_get(ys, i));
+            h pred = tape_mul(w, xi);
+            h err = tape_sub(pred, yi);
+            h sq = tape_mul(err, err);
+            L = tape_add(L, sq);
+            i = i + 1;
+        }
+        tape_backward(L);
+        h gw = tape_grad(w);
+        h Lv = tape_value(L);
+        if Lv < 0.001 {
+            converged = 1;
+            step = max_steps;
+        } else {
+            w_value = w_value - lr * gw;
+            step = step + 1;
+        }
+    }
+    assert_eq(converged, 1, "SGD converged on y=2x");
+    assert_true(approx_eq(w_value, 2.0, 0.05), "w near 2.0");
+}
+
+# ---- Substrate metadata preserved on forward values ----
+# After running a forward pass, tape_value(id) for an integer-valued
+# node should come back as HInt with substrate metadata, NOT a plain
+# float. This is the OMC-only property — Python autograd loses this.
+
+fn test_substrate_preserved_through_tape() {
+    tape_reset();
+    h a = tape_var(3);
+    h b = tape_var(5);
+    h s = tape_add(a, b);  # 8 — a Fibonacci attractor
+    h v = tape_value(s);
+    # v should round-trip as an integer-valued result; the cell's
+    # resonance should be high because 8 IS a Fibonacci attractor.
+    assert_true(is_attractor(v) == 1, "8 is a Fibonacci attractor");
+}
+
+fn test_substrate_preserved_through_matmul() {
+    # Substrate-typed matmul (integer in, integer out, resonance on every cell).
+    tape_reset();
+    h X = tape_var([[1, 2]]);
+    h W = tape_var([[1, 1], [2, 2]]);
+    h Y = tape_matmul(X, W);  # = [[5, 5]] ; 1-row → 1D [5, 5]
+    h v = tape_value(Y);
+    h c0 = arr_get(v, 0);
+    # 5 is a Fibonacci attractor — substrate resonance preserved through matmul.
+    assert_eq(is_attractor(c0), 1, "5 is on-attractor (substrate preserved)");
+}
