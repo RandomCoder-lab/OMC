@@ -1,0 +1,16 @@
+[package]
+name = "omnimcode-mcp"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "MCP server exposing OMC eval / introspection / error explainer to LLM clients."
+
+[[bin]]
+name = "omnimcode-mcp"
+path = "src/main.rs"
+
+[dependencies]
+omnimcode-core = { path = "../omnimcode-core", default-features = false }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"

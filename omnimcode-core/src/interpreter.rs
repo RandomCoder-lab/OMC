@@ -44,6 +44,11 @@ pub struct Interpreter {
     /// `tape_value(id)` to get the substrate-annotated forward value
     /// alongside `tape_grad(id)` for the derivative.
     autograd_tape: Vec<TapeNode>,
+    /// Value of the most recently evaluated top-level
+    /// `Statement::Expression`. The MCP server and any REPL frontend
+    /// read this to surface "what did the last line evaluate to"
+    /// without re-running side effects.
+    last_expression_value: Option<Value>,
     /// Stack of yield callbacks for LAZY generators. When set, the
     /// active generator's yield statements invoke the topmost callback
     /// with the yielded value rather than appending to a Vec. Memory
@@ -144,7 +149,14 @@ impl Interpreter {
             autograd_tape: Vec::new(),
             yield_callbacks: Vec::new(),
             gen_stop_requested: false,
+            last_expression_value: None,
         }
+    }
+
+    /// Read (and clear) the most recent top-level expression value.
+    /// Used by the MCP server to return the result of `omc_eval`.
+    pub fn take_last_expression_value(&mut self) -> Option<Value> {
+        self.last_expression_value.take()
     }
 
     /// Register a host-side builtin that OMC code can call by name.
@@ -877,6 +889,14 @@ impl Interpreter {
         }
     }
 
+    /// Take ownership of the current top-level return value. Used by
+    /// the MCP server (and tooling) to read what the last `return`
+    /// produced after `execute` finished. None when the program didn't
+    /// return — equivalent to "no expression result".
+    pub fn take_return_value(&mut self) -> Option<Value> {
+        self.return_value.take()
+    }
+
     pub fn execute(&mut self, statements: Vec<Statement>) -> Result<(), String> {
         for stmt in statements {
             self.execute_stmt(&stmt)?;
@@ -1356,7 +1376,12 @@ impl Interpreter {
                 Ok(())
             }
             Statement::Expression(expr) => {
-                self.eval_expr(expr)?;
+                // Save the result so the MCP / REPL paths can read
+                // "what did the last top-level expression evaluate to"
+                // without re-running. Empty/silent expressions still
+                // leave the prior value in place.
+                let v = self.eval_expr(expr)?;
+                self.last_expression_value = Some(v);
                 Ok(())
             }
             Statement::VarDecl {

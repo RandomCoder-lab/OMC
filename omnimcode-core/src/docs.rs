@@ -388,10 +388,10 @@ pub const BUILTINS: &[BuiltinDoc] = &[
         unique_to_omc: true,
     },
     BuiltinDoc {
-        name: "resonance", category: "substrate",
+        name: "res", category: "substrate",
         signature: "(n: int) -> float",
-        description: "φ-resonance of a single value.",
-        example: "resonance(8)  // 1.0  ; resonance(7)  // <1.0",
+        description: "φ-resonance of a single value (0..1, 1=on Fibonacci attractor).",
+        example: "res(8)  // 1.0  ; res(7)  // <1.0",
         unique_to_omc: true,
     },
     BuiltinDoc {

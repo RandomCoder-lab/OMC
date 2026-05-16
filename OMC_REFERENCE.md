@@ -2,7 +2,7 @@
 
 Auto-generated from `omnimcode-core/src/docs.rs`. Run `omc --gen-docs > OMC_REFERENCE.md` to regenerate.
 
-**Total documented builtins**: 97
+**Total documented builtins**: 100
 
 **OMC-unique**: 13 (no direct Python/NumPy equivalent — these are why you reach for OMC over numpy)
 
@@ -23,7 +23,7 @@ Auto-generated from `omnimcode-core/src/docs.rs`. Run `omc --gen-docs > OMC_REFE
 - [json](#json) (2 builtins)
 - [stdlib](#stdlib) (8 builtins)
 - [exceptions](#exceptions) (1 builtins)
-- [introspection](#introspection) (5 builtins)
+- [introspection](#introspection) (8 builtins)
 
 ---
 
@@ -535,14 +535,14 @@ Position in Fibonacci sequence (-1 if not an attractor).
 fibonacci_index(13)  // 7  ; fibonacci_index(14)  // -1
 ```
 
-### `resonance` 🔱 *OMC-unique*
+### `res` 🔱 *OMC-unique*
 
 **Signature**: `(n: int) -> float`
 
-φ-resonance of a single value.
+φ-resonance of a single value (0..1, 1=on Fibonacci attractor).
 
 ```omc
-resonance(8)  // 1.0  ; resonance(7)  // <1.0
+res(8)  // 1.0  ; res(7)  // <1.0
 ```
 
 ### `harmony` 🔱 *OMC-unique*
@@ -1049,6 +1049,36 @@ Builtins flagged as unique to OMC (no clean Python equivalent).
 
 ```omc
 omc_unique_builtins()  // [is_attractor, arr_substrate_attention, ...]
+```
+
+### `omc_explain_error`
+
+**Signature**: `(msg: string) -> dict`
+
+Pattern-match an error message against the curated catalog. Returns {matched, pattern, category, explanation, typical_cause, fix}.
+
+```omc
+try { arr_softmx([1.0]); } catch e { print(dict_get(omc_explain_error(e), "fix")); }
+```
+
+### `omc_error_categories`
+
+**Signature**: `() -> string[]`
+
+All distinct error categories in the catalog.
+
+```omc
+omc_error_categories()  // [dispatch, arrays, linalg, ...]
+```
+
+### `omc_error_count`
+
+**Signature**: `() -> int`
+
+Number of curated error patterns. The knowledge base size.
+
+```omc
+omc_error_count()  // 42+
 ```
 
 ---

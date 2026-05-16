@@ -1,0 +1,112 @@
+# The OMC-unique surface: things an LLM would reach for OMC for that
+# Python/NumPy/JAX simply can't do.
+#
+# Each section starts with a one-line "why this is OMC-only" so an LLM
+# reading the output understands the differentiator.
+
+fn show(label, v) {
+    print(concat_many(label, " = ", to_string(v)));
+}
+
+fn main() {
+    print("=== OMC unique-primitive showcase ===");
+    print("Run via: omc examples/demos/llm_showcase.omc");
+    print("");
+
+    # ----------------------------------------------------------------
+    # 1. Substrate metadata on every integer.
+    #    Python's i64 is a raw value. OMC's HInt carries φ-resonance
+    #    and HIM scores reflecting Fibonacci-attractor alignment.
+    # ----------------------------------------------------------------
+    print("[1] Substrate metadata on integers (no NumPy equivalent)");
+    show("  is_attractor(8)            ", is_attractor(8));    # 1 (Fib)
+    show("  is_attractor(7)            ", is_attractor(7));    # 0
+    show("  attractor_distance(7)      ", attractor_distance(7));  # 1
+    show("  res(8)                     ", res(8));       # 1.0
+    show("  res(7)                     ", res(7));       # < 1.0
+    print("");
+
+    # ----------------------------------------------------------------
+    # 2. Substrate-typed array library. Resonance/HIM survive every op.
+    # ----------------------------------------------------------------
+    print("[2] Substrate-typed array ops");
+    h fib = [0, 1, 2, 3, 5, 8, 13, 21];
+    show("  arr_resonance_vec(fib)    ", arr_resonance_vec(fib));
+    show("  arr_fold_all([7,100,9,22])", arr_fold_all([7, 100, 9, 22]));
+    print("");
+
+    # ----------------------------------------------------------------
+    # 3. Matrix multiplication preserves substrate metadata.
+    #    Every output cell of an int matmul carries its own resonance.
+    # ----------------------------------------------------------------
+    print("[3] Substrate-preserving matmul");
+    h A = [[1, 2], [3, 5]];   # Fibonacci-shaped
+    h B = [[2, 3], [5, 8]];
+    h C = arr_matmul(A, B);   # 2x2 result, each cell HInt
+    show("  A @ B[0]                  ", arr_get(C, 0));
+    show("  A @ B[1]                  ", arr_get(C, 1));
+    print("");
+
+    # ----------------------------------------------------------------
+    # 4. Substrate-distance attention. The attention KERNEL itself
+    #    uses Fibonacci-distance scoring instead of dot products.
+    # ----------------------------------------------------------------
+    print("[4] Substrate-distance attention");
+    h Q = [[1, 2]];                       # single query
+    h K = [[1, 2], [100, 200]];           # close key + far key
+    h V = [[5.0, 5.0], [99.0, 99.0]];     # close V + far V
+    h out = arr_substrate_attention(Q, K, V);
+    show("  attention(Q,K,V)[0]       ", arr_get(out, 0));
+    print("  → strongly weighted toward V[0] because Q matches K[0] in substrate-space");
+    print("");
+
+    # ----------------------------------------------------------------
+    # 5. Reverse-mode autograd that preserves substrate metadata on
+    #    forward values. Python autograd hands you plain f64.
+    # ----------------------------------------------------------------
+    print("[5] Autograd that keeps substrate metadata on forward path");
+    tape_reset();
+    h x = tape_var(3);
+    h y = tape_var(5);
+    h s = tape_add(x, y);     # 8 — Fibonacci attractor
+    h sq = tape_mul(s, s);    # 64 — close to 55 attractor
+    tape_backward(sq);
+    show("  forward value at s        ", tape_value(s));   # substrate-annotated 8
+    show("  forward value at sq       ", tape_value(sq));
+    show("  d(sq)/dx                  ", tape_grad(x));    # 2*8 = 16
+    show("  d(sq)/dy                  ", tape_grad(y));    # 2*8 = 16
+    print("");
+
+    # ----------------------------------------------------------------
+    # 6. Lazy substrate Fibonacci generator — streams forever in O(1)
+    #    memory. Each yielded value already carries resonance=1.0.
+    # ----------------------------------------------------------------
+    print("[6] Lazy substrate Fibonacci stream (O(1) memory)");
+    h collected = [];
+    gen_substrate_fib(
+        fn(v) {
+            arr_push(collected, v);
+            return 1;
+        },
+        100
+    );
+    show("  Fibs <= 100               ", collected);
+    print("");
+
+    # ----------------------------------------------------------------
+    # 7. The introspection layer itself. LLMs read this at runtime.
+    # ----------------------------------------------------------------
+    print("[7] Self-describing runtime");
+    show("  builtin count             ", arr_len(omc_list_builtins()));
+    show("  category count            ", arr_len(omc_categories()));
+    show("  OMC-unique builtin count  ", arr_len(omc_unique_builtins()));
+    show("  curated error pattern count", omc_error_count());
+    print("");
+    print("  An LLM can call omc_help(\"<name>\") for any of these.");
+    print("  Errors come with did_you_mean suggestions + omc_explain_error.");
+
+    print("");
+    print("=== These are the primitives Python/NumPy cannot replicate. ===");
+}
+
+main();
