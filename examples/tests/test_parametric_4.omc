@@ -1,0 +1,165 @@
+# Parametric v4 — yet more table-driven assertions.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+
+fn approx_eq(a, b, tol) {
+    h d = a - b;
+    if d < 0.0 { d = 0.0 - d; }
+    return d <= tol;
+}
+
+# abs across many ints
+fn test_abs_many() {
+    h ins = [0 - 100, 0 - 5, 0 - 1, 0, 1, 5, 100];
+    h outs = [100, 5, 1, 0, 1, 5, 100];
+    h i = 0;
+    while i < arr_len(ins) {
+        assert_eq(abs(arr_get(ins, i)), arr_get(outs, i),
+            concat_many("abs ", to_string(arr_get(ins, i))));
+        i = i + 1;
+    }
+}
+
+# sign across many ints
+fn test_sign_many() {
+    h ins = [0 - 100, 0 - 1, 0, 1, 100];
+    h outs = [0 - 1, 0 - 1, 0, 1, 1];
+    h i = 0;
+    while i < arr_len(ins) {
+        assert_eq(sign(arr_get(ins, i)), arr_get(outs, i),
+            concat_many("sign ", to_string(arr_get(ins, i))));
+        i = i + 1;
+    }
+}
+
+# gcd table
+fn test_gcd_table() {
+    h pairs_a = [12, 7, 100, 0, 17];
+    h pairs_b = [18, 13, 75, 5, 23];
+    h expected = [6, 1, 25, 5, 1];
+    h i = 0;
+    while i < arr_len(pairs_a) {
+        assert_eq(gcd(arr_get(pairs_a, i), arr_get(pairs_b, i)),
+            arr_get(expected, i),
+            concat_many("gcd ", to_string(i)));
+        i = i + 1;
+    }
+}
+
+# mod_pow with various exponents
+fn test_mod_pow_table() {
+    # base, exp, mod, expected
+    h bases = [2, 3, 5, 7, 2];
+    h exps  = [10, 5, 3, 2, 16];
+    h mods  = [1000, 100, 7, 50, 1000];
+    h outs  = [24, 43, 6, 49, 536];
+    h i = 0;
+    while i < arr_len(bases) {
+        assert_eq(
+            mod_pow(arr_get(bases, i), arr_get(exps, i), arr_get(mods, i)),
+            arr_get(outs, i),
+            concat_many("mod_pow ", to_string(i))
+        );
+        i = i + 1;
+    }
+}
+
+# clamp table
+fn test_clamp_table() {
+    h vals = [0 - 5, 5, 15];
+    h los = [0, 0, 0];
+    h his = [10, 10, 10];
+    h expected = [0, 5, 10];
+    h i = 0;
+    while i < arr_len(vals) {
+        assert_eq(
+            clamp(arr_get(vals, i), arr_get(los, i), arr_get(his, i)),
+            arr_get(expected, i),
+            concat_many("clamp ", to_string(i))
+        );
+        i = i + 1;
+    }
+}
+
+# arr_concat
+fn test_concat_table() {
+    h r1 = arr_concat([1, 2], [3, 4]);
+    assert_eq(arr_len(r1), 4, "len 4");
+    h r2 = arr_concat([], [1, 2]);
+    assert_eq(arr_len(r2), 2, "empty + 2 = 2");
+    h r3 = arr_concat([1], []);
+    assert_eq(arr_len(r3), 1, "1 + empty = 1");
+    h r4 = arr_concat([], []);
+    assert_eq(arr_len(r4), 0, "empty + empty = empty");
+}
+
+# arr_reverse
+fn test_reverse_table() {
+    h a = arr_reverse([1, 2, 3, 4, 5]);
+    assert_eq(arr_get(a, 0), 5, "5 first");
+    assert_eq(arr_get(a, 4), 1, "1 last");
+    h b = arr_reverse([]);
+    assert_eq(arr_len(b), 0, "empty reversed");
+    h c = arr_reverse([42]);
+    assert_eq(arr_get(c, 0), 42, "singleton");
+}
+
+# arr_sort
+fn test_sort_table() {
+    h a = arr_sort([3, 1, 4, 1, 5, 9, 2, 6]);
+    assert_eq(arr_get(a, 0), 1, "smallest first");
+    assert_eq(arr_get(a, arr_len(a) - 1), 9, "largest last");
+}
+
+# arr_filter with predicate
+fn test_filter_evens() {
+    h ev = arr_filter([1, 2, 3, 4, 5, 6], fn(x) { return x % 2 == 0; });
+    assert_eq(arr_len(ev), 3, "3 evens");
+    assert_eq(arr_get(ev, 0), 2, "2");
+    assert_eq(arr_get(ev, 2), 6, "6");
+}
+
+# arr_map double
+fn test_map_double() {
+    h d = arr_map([1, 2, 3], fn(x) { return x * 2; });
+    assert_eq(arr_get(d, 0), 2, "1*2");
+    assert_eq(arr_get(d, 2), 6, "3*2");
+}
+
+# arr_reduce sum
+fn test_reduce_sum() {
+    h s = arr_reduce([1, 2, 3, 4], fn(a, b) { return a + b; }, 0);
+    assert_eq(s, 10, "1+2+3+4");
+}
+
+# omc_help_signature on multiple builtins
+fn test_help_sig_many() {
+    h names = ["arr_get", "arr_push", "dict_get", "is_attractor", "arr_softmax", "tape_var", "omc_help"];
+    h i = 0;
+    while i < arr_len(names) {
+        h sig = omc_help_signature(arr_get(names, i));
+        assert_true(str_len(sig) > 0,
+            concat_many(arr_get(names, i), " sig non-empty"));
+        i = i + 1;
+    }
+}
+
+# omc_is_unique across known cases
+fn test_is_unique_known() {
+    h pairs_name = ["is_attractor", "attractor_distance", "arr_substrate_attention",
+                     "arr_push", "arr_get", "dict_get"];
+    h pairs_expected = [1, 1, 1, 0, 0, 0];
+    h i = 0;
+    while i < arr_len(pairs_name) {
+        assert_eq(omc_is_unique(arr_get(pairs_name, i)),
+            arr_get(pairs_expected, i),
+            concat_many(arr_get(pairs_name, i), " unique"));
+        i = i + 1;
+    }
+}
