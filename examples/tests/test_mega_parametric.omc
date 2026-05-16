@@ -1,0 +1,288 @@
+# Mega parametric — maximum-coverage table-driven tests.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+
+# Verify omc_help on every documented builtin returns non-null dict.
+fn test_help_on_all_documented() {
+    h names = omc_list_builtins();
+    h i = 0;
+    h failures = 0;
+    while i < arr_len(names) {
+        h n = arr_get(names, i);
+        h hd = omc_help(n);
+        if str_len(dict_get(hd, "signature")) == 0 { failures = failures + 1; }
+        i = i + 1;
+    }
+    assert_eq(failures, 0, "every builtin has help");
+}
+
+# Categories list expected ones
+fn test_known_categories_present() {
+    h must_have = ["arrays", "dicts", "strings", "math", "substrate",
+                    "autograd", "tokenizer", "code_intel", "introspection",
+                    "ml_kernels", "regex", "json", "stdlib", "generators",
+                    "duals", "exceptions"];
+    h cats = omc_categories();
+    h i = 0;
+    while i < arr_len(must_have) {
+        h target = arr_get(must_have, i);
+        h found = 0;
+        h j = 0;
+        while j < arr_len(cats) {
+            if arr_get(cats, j) == target { found = 1; }
+            j = j + 1;
+        }
+        assert_eq(found, 1, concat_many("category ", target, " present"));
+        i = i + 1;
+    }
+}
+
+# is_attractor on first 50 integers (with expected attractors).
+fn test_is_attractor_first_50() {
+    h fibs = [0, 1, 2, 3, 5, 8, 13, 21, 34];
+    h i = 0;
+    while i < 50 {
+        h is_fib = 0;
+        h j = 0;
+        while j < arr_len(fibs) {
+            if arr_get(fibs, j) == i { is_fib = 1; }
+            j = j + 1;
+        }
+        assert_eq(is_attractor(i), is_fib,
+            concat_many("is_attractor(", to_string(i), ")"));
+        i = i + 1;
+    }
+}
+
+# Resonance is 1.0 on every Fibonacci up to 89
+fn test_resonance_on_all_fibs() {
+    h fibs = [0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89];
+    h r = arr_resonance_vec(fibs);
+    h i = 0;
+    while i < arr_len(r) {
+        h v = arr_get(r, i);
+        h diff = v - 1.0;
+        if diff < 0.0 { diff = 0.0 - diff; }
+        assert_true(diff < 0.001,
+            concat_many("res ", to_string(arr_get(fibs, i)), " ≈ 1"));
+        i = i + 1;
+    }
+}
+
+# Token encode/decode for 30 different snippets
+fn test_token_roundtrip_30() {
+    h corpus = [
+        "h x = 1;",
+        "h y = 2;",
+        "h z = 3;",
+        "fn f() {}",
+        "fn g() {}",
+        "fn h() {}",
+        "arr_get(xs, 0)",
+        "arr_set(xs, 0, 1)",
+        "dict_get(d, \"k\")",
+        "dict_set(d, \"k\", 1)",
+        "is_attractor(8)",
+        "attractor_distance(7)",
+        "arr_resonance_vec([1,2,3])",
+        "tape_reset();",
+        "tape_var(0.0)",
+        "tape_backward(loss)",
+        "tape_grad(x)",
+        "omc_help(\"name\")",
+        "omc_explain_error(\"msg\")",
+        "omc_code_canonical(src)",
+        "omc_token_encode(s)",
+        "omc_token_decode(ids)",
+        "if x > 0 { return 1; }",
+        "while i < n { i = i + 1; }",
+        "for v in xs { print(v); }",
+        "h sum = arr_sum_int(xs);",
+        "h len = arr_len(xs);",
+        "arr_softmax([1.0, 2.0])",
+        "try { throw 1; } catch e { return e; }",
+        "class P { x; y; }",
+    ];
+    h i = 0;
+    while i < arr_len(corpus) {
+        h c = arr_get(corpus, i);
+        h back = omc_token_decode(omc_token_encode(c));
+        assert_eq(back, c, concat_many("rt[", to_string(i), "]"));
+        i = i + 1;
+    }
+}
+
+# Explain-error matches for 12 distinct runtime errors
+fn test_explain_12_errors() {
+    h cases = [
+        "Undefined function: foo",
+        "arr_get: index 5 out of bounds (len 3)",
+        "arr_set: index 99 out of bounds (len 3)",
+        "dict_get: first argument must be a dict",
+        "arr_matmul: shape mismatch — A is 2x3, B is 5x2",
+        "Expected Semicolon, got LParen",
+        "Expected identifier, got Harmonic",
+        "division by zero",
+        "stack overflow",
+        "json_parse failed",
+        "ragged 2D array",
+        "row-broadcast length mismatch",
+    ];
+    h i = 0;
+    while i < arr_len(cases) {
+        h ex = omc_explain_error(arr_get(cases, i));
+        assert_eq(dict_get(ex, "matched"), 1,
+            concat_many("err ", to_string(i), " matched"));
+        i = i + 1;
+    }
+}
+
+# Did_you_mean on 8 typos finds the right one
+fn test_did_you_mean_8_typos() {
+    h typos = [
+        ["arr_softmx", "arr_softmax"],
+        ["arr_le", "arr_len"],
+        ["tape_bckward", "tape_backward"],
+        ["omc_hep", "omc_help"],
+        ["dict_st", "dict_set"],
+        ["str_lne", "str_len"],
+        ["is_attractr", "is_attractor"],
+        ["arr_softmaxx", "arr_softmax"],
+    ];
+    h i = 0;
+    while i < arr_len(typos) {
+        h pair = arr_get(typos, i);
+        h suggestions = omc_did_you_mean(arr_get(pair, 0));
+        h has = 0;
+        h j = 0;
+        while j < arr_len(suggestions) {
+            if arr_get(suggestions, j) == arr_get(pair, 1) { has = 1; }
+            j = j + 1;
+        }
+        assert_eq(has, 1,
+            concat_many("typo ", to_string(i), " → ", arr_get(pair, 1)));
+        i = i + 1;
+    }
+}
+
+# Help_brief / signature / category extracted properly for many builtins.
+fn test_quick_help_30() {
+    h names = ["arr_get", "arr_set", "arr_push", "arr_len", "arr_softmax",
+                "arr_matmul", "arr_transpose", "dict_get", "dict_set",
+                "dict_has", "str_len", "str_split", "str_join",
+                "is_attractor", "attractor_distance", "arr_resonance_vec",
+                "tape_var", "tape_const", "tape_add", "tape_mul",
+                "tape_backward", "tape_grad", "omc_help", "omc_explain_error",
+                "omc_code_canonical", "omc_code_equivalent", "omc_token_encode",
+                "omc_token_decode", "sha256", "base64_encode"];
+    h i = 0;
+    while i < arr_len(names) {
+        h n = arr_get(names, i);
+        h sig = omc_help_signature(n);
+        assert_true(str_len(sig) > 0,
+            concat_many(n, " has sig"));
+        i = i + 1;
+    }
+}
+
+# Each unique builtin's category is a known string.
+fn test_unique_categories_known() {
+    h known_cats = ["substrate", "autograd", "tokenizer", "code_intel",
+                     "generators", "llm_workflow", "introspection",
+                     "ml_kernels"];
+    h unique = omc_unique_builtins();
+    h i = 0;
+    while i < arr_len(unique) {
+        h cat = omc_help_category(arr_get(unique, i));
+        h is_known = 0;
+        h j = 0;
+        while j < arr_len(known_cats) {
+            if arr_get(known_cats, j) == cat { is_known = 1; }
+            j = j + 1;
+        }
+        assert_eq(is_known, 1,
+            concat_many("unique cat ", arr_get(unique, i)));
+        i = i + 1;
+    }
+}
+
+# omc_is_unique consistent with unique list
+fn test_is_unique_consistent() {
+    h unique = omc_unique_builtins();
+    h i = 0;
+    while i < arr_len(unique) {
+        assert_eq(omc_is_unique(arr_get(unique, i)), 1,
+            concat_many(arr_get(unique, i), " marked"));
+        i = i + 1;
+    }
+}
+
+# Count in each known category > 0
+fn test_count_in_each_category() {
+    h cats = omc_categories();
+    h i = 0;
+    while i < arr_len(cats) {
+        h c = arr_get(cats, i);
+        h n = omc_count_in_category(c);
+        assert_true(n > 0, concat_many("cat ", c, " populated"));
+        i = i + 1;
+    }
+}
+
+# omc_canonical_hash of equivalent forms matches
+fn test_canonical_hash_equivalents_10() {
+    h pairs_a = [
+        "fn f(x) { return x; }",
+        "fn add(a, b) { return a + b; }",
+        "h x = 1;",
+        "if cond { return 1; }",
+        "while i < n { i = i + 1; }",
+        "fn loss(p, t) { return (p - t) * (p - t); }",
+        "fn map_sq(xs) { return arr_map(xs, fn(x) { return x * x; }); }",
+        "fn count(xs) { h n = arr_len(xs); return n; }",
+        "fn neg(v) { return v * (0 - 1); }",
+        "fn id(v) { return v; }",
+    ];
+    h pairs_b = [
+        "fn f(y) { return y; }",
+        "fn add(p, q) { return p + q; }",
+        "h x = 1;",  # same code
+        "if cond { return 1; }",
+        "while j < n { j = j + 1; }",
+        "fn loss(pred, target) { return (pred - target) * (pred - target); }",
+        "fn map_sq(items) { return arr_map(items, fn(z) { return z * z; }); }",
+        "fn count(arr) { h c = arr_len(arr); return c; }",
+        "fn neg(w) { return w * (0 - 1); }",
+        "fn id(w) { return w; }",
+    ];
+    h i = 0;
+    while i < arr_len(pairs_a) {
+        h h1 = omc_canonical_hash(arr_get(pairs_a, i));
+        h h2 = omc_canonical_hash(arr_get(pairs_b, i));
+        assert_eq(dict_get(h1, "raw"), dict_get(h2, "raw"),
+            concat_many("hash equiv ", to_string(i)));
+        i = i + 1;
+    }
+}
+
+# omc_id stability
+fn test_omc_id_stability() {
+    h cases = [
+        "fn f() {}",
+        "fn add(x, y) { return x + y; }",
+        "h x = 1;",
+    ];
+    h i = 0;
+    while i < arr_len(cases) {
+        h id1 = omc_id(arr_get(cases, i));
+        h id2 = omc_id(arr_get(cases, i));
+        assert_eq(id1, id2, concat_many("id ", to_string(i)));
+        i = i + 1;
+    }
+}
