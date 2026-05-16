@@ -2,7 +2,7 @@
 
 Auto-generated from `omnimcode-core/src/docs.rs`. Run `omc --gen-docs > OMC_REFERENCE.md` to regenerate.
 
-**Total documented builtins**: 619
+**Total documented builtins**: 628
 
 **OMC-unique**: 63 (no direct Python/NumPy equivalent — these are why you reach for OMC over numpy)
 
@@ -23,8 +23,8 @@ Auto-generated from `omnimcode-core/src/docs.rs`. Run `omc --gen-docs > OMC_REFE
 - [json](#json) (2 builtins)
 - [stdlib](#stdlib) (26 builtins)
 - [exceptions](#exceptions) (2 builtins)
-- [introspection](#introspection) (22 builtins)
-- [tokenizer](#tokenizer) (16 builtins)
+- [introspection](#introspection) (30 builtins)
+- [tokenizer](#tokenizer) (17 builtins)
 - [code_intel](#code_intel) (16 builtins)
 - [llm_workflow](#llm_workflow) (7 builtins)
 - [math](#math) (82 builtins)
@@ -4510,6 +4510,86 @@ Substring search across name + description. Find what you don't know the name of
 omc_search_builtins("softmax")  // ["arr_softmax"]
 ```
 
+### `omc_help_brief`
+
+**Signature**: `(name: string) -> string`
+
+Compact help: signature + description only (no example). For dense scan.
+
+```omc
+omc_help_brief("arr_softmax")
+```
+
+### `omc_help_signature`
+
+**Signature**: `(name: string) -> string`
+
+Just the signature string. Compactest possible.
+
+```omc
+omc_help_signature("arr_get")  // "(arr, index) -> any"
+```
+
+### `omc_help_example`
+
+**Signature**: `(name: string) -> string`
+
+Just the example for a builtin.
+
+```omc
+omc_help_example("arr_softmax")
+```
+
+### `omc_help_category`
+
+**Signature**: `(name: string) -> string`
+
+Just the category for a builtin.
+
+```omc
+omc_help_category("arr_softmax")  // "ml_kernels"
+```
+
+### `omc_is_unique`
+
+**Signature**: `(name: string) -> int`
+
+1 if the builtin is flagged unique_to_omc.
+
+```omc
+omc_is_unique("is_attractor")  // 1
+```
+
+### `omc_count_in_category`
+
+**Signature**: `(category: string) -> int`
+
+Builtin count in a given category.
+
+```omc
+omc_count_in_category("substrate")  // ~25
+```
+
+### `omc_random_builtin`
+
+**Signature**: `() -> string`
+
+A random builtin name. Useful for exploring or fuzzing.
+
+```omc
+omc_random_builtin()  // "arr_zip"
+```
+
+### `omc_random_unique_builtin`
+
+**Signature**: `() -> string`
+
+A random OMC-unique builtin name. For learning the differentiators.
+
+```omc
+omc_random_unique_builtin()  // "arr_substrate_attention"
+```
+
 ### `cleanup_array`
 
 **Signature**: `(...) -> any`
@@ -4692,6 +4772,16 @@ omc_token_byte_savings("arr_softmax")  // 10 (11 bytes -> 1 token)
 
 ```omc
 omc_token_compress_pct("arr_softmax")  // ~90.9
+```
+
+### `omc_token_vocab_dump`
+
+**Signature**: `(n?: int) -> string`
+
+First N entries of the token vocabulary as numbered list. Default n=50.
+
+```omc
+omc_token_vocab_dump(10)  // first 10 entries
 ```
 
 ---

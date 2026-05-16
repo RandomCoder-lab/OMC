@@ -203,6 +203,7 @@ impl Compiler {
                         | "omc_unique_count"
                         | "omc_token_byte_savings" | "omc_remember"
                         | "omc_recall_matches" | "omc_hbit_hash"
+                        | "omc_is_unique" | "omc_count_in_category"
                         // tape_* op constructors return node IDs (int)
                         | "tape_var" | "tape_const"
                         | "tape_add" | "tape_sub" | "tape_mul" | "tape_div"

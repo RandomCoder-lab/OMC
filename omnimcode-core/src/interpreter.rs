@@ -7793,6 +7793,98 @@ impl Interpreter {
                 }
                 Ok(Value::dict_from(map))
             }
+            "omc_token_vocab_dump" => {
+                // First N entries of vocab as a numbered list.
+                let n = if !args.is_empty() {
+                    self.eval_expr(&args[0])?.to_int().max(0) as usize
+                } else { 50 };
+                let mut s = String::new();
+                let len = crate::tokenizer::TOKEN_DICT.len().min(n);
+                for (i, entry) in crate::tokenizer::TOKEN_DICT.iter().take(len).enumerate() {
+                    let display = entry.replace('\n', "\\n").replace('\t', "\\t");
+                    s.push_str(&format!("{:4}: {:?}\n", i, display));
+                }
+                Ok(Value::String(s))
+            }
+            "omc_help_brief" => {
+                // Just signature + one-line description (no example). Useful
+                // when the LLM wants a compact view across many builtins.
+                if args.is_empty() {
+                    return Err("omc_help_brief requires (name)".to_string());
+                }
+                let name = self.eval_expr(&args[0])?.to_display_string();
+                match crate::docs::lookup(&name) {
+                    Some(d) => Ok(Value::String(format!(
+                        "{} :: {}\n  {}", d.name, d.signature, d.description
+                    ))),
+                    None => Ok(Value::String(format!("{}: not in registry", name))),
+                }
+            }
+            "omc_help_signature" => {
+                // Just the signature string. Compactest possible.
+                if args.is_empty() {
+                    return Err("omc_help_signature requires (name)".to_string());
+                }
+                let name = self.eval_expr(&args[0])?.to_display_string();
+                match crate::docs::lookup(&name) {
+                    Some(d) => Ok(Value::String(d.signature.to_string())),
+                    None => Ok(Value::String(String::new())),
+                }
+            }
+            "omc_help_example" => {
+                if args.is_empty() {
+                    return Err("omc_help_example requires (name)".to_string());
+                }
+                let name = self.eval_expr(&args[0])?.to_display_string();
+                match crate::docs::lookup(&name) {
+                    Some(d) => Ok(Value::String(d.example.to_string())),
+                    None => Ok(Value::String(String::new())),
+                }
+            }
+            "omc_help_category" => {
+                if args.is_empty() {
+                    return Err("omc_help_category requires (name)".to_string());
+                }
+                let name = self.eval_expr(&args[0])?.to_display_string();
+                match crate::docs::lookup(&name) {
+                    Some(d) => Ok(Value::String(d.category.to_string())),
+                    None => Ok(Value::String(String::new())),
+                }
+            }
+            "omc_is_unique" => {
+                // 1 if name is OMC-unique (no Python equivalent).
+                if args.is_empty() {
+                    return Err("omc_is_unique requires (name)".to_string());
+                }
+                let name = self.eval_expr(&args[0])?.to_display_string();
+                match crate::docs::lookup(&name) {
+                    Some(d) => Ok(Value::HInt(HInt::new(if d.unique_to_omc { 1 } else { 0 }))),
+                    None => Ok(Value::HInt(HInt::new(0))),
+                }
+            }
+            "omc_count_in_category" => {
+                if args.is_empty() {
+                    return Err("omc_count_in_category requires (category)".to_string());
+                }
+                let cat = self.eval_expr(&args[0])?.to_display_string();
+                let count = crate::docs::BUILTINS.iter()
+                    .filter(|b| b.category == cat).count() as i64;
+                Ok(Value::HInt(HInt::new(count)))
+            }
+            "omc_random_builtin" => {
+                // Random builtin name. Useful for fuzzing or exploring.
+                let idx = (self.rng_next() % (crate::docs::BUILTINS.len() as u64)) as usize;
+                Ok(Value::String(crate::docs::BUILTINS[idx].name.to_string()))
+            }
+            "omc_random_unique_builtin" => {
+                let uniq: Vec<&str> = crate::docs::BUILTINS.iter()
+                    .filter(|b| b.unique_to_omc).map(|b| b.name).collect();
+                if uniq.is_empty() {
+                    return Ok(Value::String(String::new()));
+                }
+                let idx = (self.rng_next() % (uniq.len() as u64)) as usize;
+                Ok(Value::String(uniq[idx].to_string()))
+            }
             "omc_search_builtins" => {
                 // Substring search across name + description. Returns
                 // matching names. Useful when you don't know what

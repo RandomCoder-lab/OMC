@@ -1,0 +1,81 @@
+# Tests for the new introspection helper builtins.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+
+fn test_help_brief() {
+    h s = omc_help_brief("arr_softmax");
+    assert_true(str_len(s) > 10, "brief non-empty");
+    assert_true(re_match("arr_softmax", s) == 1, "mentions name");
+}
+
+fn test_help_brief_unknown() {
+    h s = omc_help_brief("zzz_no_such");
+    assert_true(re_match("not in registry", s) == 1, "explains miss");
+}
+
+fn test_help_signature() {
+    h s = omc_help_signature("arr_softmax");
+    assert_true(str_len(s) > 0, "has signature");
+    assert_true(re_match("float", s) == 1, "mentions float");
+}
+
+fn test_help_signature_unknown() {
+    h s = omc_help_signature("doesnotexist");
+    assert_eq(s, "", "empty for unknown");
+}
+
+fn test_help_example() {
+    h s = omc_help_example("arr_softmax");
+    assert_true(str_len(s) > 0, "non-empty");
+}
+
+fn test_help_category() {
+    assert_eq(omc_help_category("arr_softmax"), "ml_kernels", "ml_kernels");
+    assert_eq(omc_help_category("is_attractor"), "substrate", "substrate");
+}
+
+fn test_is_unique_yes() {
+    assert_eq(omc_is_unique("is_attractor"), 1, "is_attractor unique");
+}
+
+fn test_is_unique_no() {
+    assert_eq(omc_is_unique("arr_push"), 0, "arr_push not unique");
+}
+
+fn test_count_in_category_substrate() {
+    h n = omc_count_in_category("substrate");
+    assert_true(n >= 5, "substrate has many");
+}
+
+fn test_count_in_category_unknown() {
+    h n = omc_count_in_category("nonexistent_xyz");
+    assert_eq(n, 0, "unknown → 0");
+}
+
+fn test_random_builtin_returns_name() {
+    h n = omc_random_builtin();
+    assert_true(str_len(n) > 0, "non-empty");
+}
+
+fn test_random_unique_is_unique() {
+    h n = omc_random_unique_builtin();
+    assert_eq(omc_is_unique(n), 1, "is unique");
+}
+
+fn test_vocab_dump_default() {
+    h s = omc_token_vocab_dump();
+    assert_true(str_len(s) > 100, "has many entries");
+}
+
+fn test_vocab_dump_small() {
+    h s = omc_token_vocab_dump(5);
+    # 5 entries means 5 numbered lines
+    h lines = str_split(s, "\n");
+    assert_true(arr_len(lines) >= 5, "at least 5 lines");
+}
