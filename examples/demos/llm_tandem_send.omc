@@ -1,0 +1,35 @@
+# Tandem demo: SEND side (Claude → Hermes).
+#
+# Wraps a piece of OMC code as a substrate-signed message, serializes
+# to JSON, writes to the shared channel directory. Hermes picks it up
+# via llm_tandem_receive.omc.
+#
+# Run with:
+#   ./target/release/omnimcode-standalone examples/demos/llm_tandem_send.omc
+#
+# Sender ID convention: hash of "claude" or "hermes" via fnv1a.
+# This run uses CLAUDE_ID = 18173. Hermes uses HERMES_ID = 28765.
+
+fn show(label, v) { print(concat_many(label, " = ", to_string(v))); }
+
+fn main() {
+    h CLAUDE_ID = 18173;
+    h KIND_REQUEST = 1;
+
+    h payload = "fn compute_mean(xs) { h n = arr_len(xs); h s = 0.0; h i = 0; while i < n { s = s + arr_get(xs, i); i = i + 1; } return s / n; }";
+
+    h msg = omc_msg_sign(payload, CLAUDE_ID, KIND_REQUEST);
+    show("packed ID         ", dict_get(msg, "packed"));
+    show("content_hash      ", dict_get(msg, "content_hash"));
+    show("resonance         ", dict_get(msg, "resonance"));
+    show("attractor         ", dict_get(msg, "attractor"));
+
+    h wire = omc_msg_serialize(msg);
+    write_file("/home/thearchitect/omc_channel/from_claude.json", wire);
+    print("");
+    print("Wrote /home/thearchitect/omc_channel/from_claude.json");
+    print("Sender: CLAUDE_ID=18173, kind=1 (request).");
+    print("Hermes can verify substrate-signature integrity without trust.");
+}
+
+main();

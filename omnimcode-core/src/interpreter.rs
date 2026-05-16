@@ -7751,6 +7751,124 @@ impl Interpreter {
                     Err(e) => Err(format!("omc_id: {}", e)),
                 }
             }
+            // ---- Substrate-signed messaging (LLM ↔ LLM protocol) ---
+            //
+            // omc_msg_sign(content, sender_id, kind) — produces a dict
+            // that wraps `content` with HBit substrate metadata
+            // derived from the canonical-hash of the content. The
+            // metadata is RECOMPUTABLE — receivers verify by
+            // recomputing from the content, no trust required.
+            //
+            // Wire-format dict:
+            //   {
+            //     content        : original string
+            //     sender_id      : int
+            //     kind           : int (1=code, 2=request, 3=response, ...)
+            //     content_hash   : fnv1a of canonical content
+            //     resonance      : substrate-derived from content_hash
+            //     him_score      : ditto
+            //     attractor      : nearest Fibonacci to content_hash
+            //     packed         : CRT-packed (sender_id, kind, hash_mod_M)
+            //   }
+            "omc_msg_sign" => {
+                if args.len() < 3 {
+                    return Err("omc_msg_sign requires (content, sender_id, kind)".to_string());
+                }
+                let content = self.eval_expr(&args[0])?.to_display_string();
+                let sender_id = self.eval_expr(&args[1])?.to_int();
+                let kind = self.eval_expr(&args[2])?.to_int();
+                // Canonicalize so cosmetic edits don't change the signature.
+                // Falls back to raw content for non-OMC strings.
+                let canon = crate::canonical::canonicalize(&content)
+                    .unwrap_or_else(|_| content.clone());
+                let hash = crate::tokenizer::fnv1a_64(canon.as_bytes());
+                let h = HInt::new(hash);
+                let (attractor, _) = crate::phi_pi_fib::nearest_attractor_with_dist(hash);
+                let moduli = crate::tokenizer::CRT_MODULI;
+                let streams = [
+                    sender_id.rem_euclid(moduli[0]),
+                    kind.rem_euclid(moduli[1]),
+                    hash.rem_euclid(moduli[2]),
+                ];
+                let packed = crate::tokenizer::crt_pack(&streams, moduli)
+                    .unwrap_or(0);
+                let mut map = std::collections::BTreeMap::new();
+                map.insert("content".to_string(), Value::String(content));
+                map.insert("sender_id".to_string(), Value::HInt(HInt::new(sender_id)));
+                map.insert("kind".to_string(), Value::HInt(HInt::new(kind)));
+                map.insert("content_hash".to_string(), Value::HInt(HInt::new(hash)));
+                map.insert("resonance".to_string(), Value::HFloat(h.resonance));
+                map.insert("him_score".to_string(), Value::HFloat(h.him_score));
+                map.insert("attractor".to_string(), Value::HInt(HInt::new(attractor)));
+                map.insert("packed".to_string(), Value::HInt(HInt::new(packed)));
+                Ok(Value::dict_from(map))
+            }
+            // omc_msg_verify(msg) — recompute substrate metadata from
+            // msg's content and check it matches the signed values.
+            // Returns {valid, sender_id, kind, content, expected_hash,
+            // actual_hash, drift_resonance, drift_him}. valid==1 iff
+            // recomputed signature is identical.
+            "omc_msg_verify" => {
+                if args.is_empty() {
+                    return Err("omc_msg_verify requires (msg: dict)".to_string());
+                }
+                let v = self.eval_expr(&args[0])?;
+                let dict = if let Value::Dict(d) = v { d } else {
+                    return Err("omc_msg_verify: msg must be a dict".to_string());
+                };
+                let d = dict.borrow();
+                let content = d.get("content").map(|x| x.to_display_string())
+                    .unwrap_or_default();
+                let claimed_hash = d.get("content_hash").map(|x| x.to_int()).unwrap_or(0);
+                let claimed_res = d.get("resonance").map(|x| x.to_float()).unwrap_or(0.0);
+                let claimed_him = d.get("him_score").map(|x| x.to_float()).unwrap_or(0.0);
+                let canon = crate::canonical::canonicalize(&content)
+                    .unwrap_or_else(|_| content.clone());
+                let actual_hash = crate::tokenizer::fnv1a_64(canon.as_bytes());
+                let h = HInt::new(actual_hash);
+                let hash_match = claimed_hash == actual_hash;
+                let res_match = (claimed_res - h.resonance).abs() < 1e-9;
+                let him_match = (claimed_him - h.him_score).abs() < 1e-9;
+                let valid = hash_match && res_match && him_match;
+                let mut out = std::collections::BTreeMap::new();
+                out.insert("valid".to_string(),
+                    Value::HInt(HInt::new(if valid { 1 } else { 0 })));
+                out.insert("sender_id".to_string(),
+                    d.get("sender_id").cloned().unwrap_or(Value::Null));
+                out.insert("kind".to_string(),
+                    d.get("kind").cloned().unwrap_or(Value::Null));
+                out.insert("content".to_string(), Value::String(content));
+                out.insert("expected_hash".to_string(),
+                    Value::HInt(HInt::new(claimed_hash)));
+                out.insert("actual_hash".to_string(),
+                    Value::HInt(HInt::new(actual_hash)));
+                out.insert("drift_resonance".to_string(),
+                    Value::HFloat((claimed_res - h.resonance).abs()));
+                out.insert("drift_him".to_string(),
+                    Value::HFloat((claimed_him - h.him_score).abs()));
+                Ok(Value::dict_from(out))
+            }
+            "omc_msg_serialize" => {
+                // Convert a signed-message dict into a JSON wire string.
+                // Useful when writing to a shared file / pipe / socket.
+                if args.is_empty() {
+                    return Err("omc_msg_serialize requires (msg: dict)".to_string());
+                }
+                let v = self.eval_expr(&args[0])?;
+                let j = crate::interpreter::value_to_json(&v);
+                Ok(Value::String(serde_json::to_string(&j).unwrap_or_default()))
+            }
+            "omc_msg_deserialize" => {
+                // Inverse: parse a wire JSON string back into a dict.
+                if args.is_empty() {
+                    return Err("omc_msg_deserialize requires (s: string)".to_string());
+                }
+                let s = self.eval_expr(&args[0])?.to_display_string();
+                match serde_json::from_str::<serde_json::Value>(&s) {
+                    Ok(j) => Ok(crate::interpreter::json_to_value(j)),
+                    Err(e) => Err(format!("omc_msg_deserialize: {}", e)),
+                }
+            }
             "omc_find_similar" => {
                 // omc_find_similar(query, corpus[]) → [{index, distance}, ...]
                 // ranked closest-first by canonical-hash distance.

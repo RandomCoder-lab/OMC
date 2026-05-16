@@ -1080,6 +1080,35 @@ pub const BUILTINS: &[BuiltinDoc] = &[
         example: "omc_find_similar(q, corpus)  // [{index, distance}] — index of any distance-0 hit is the alpha-equiv match",
         unique_to_omc: true,
     },
+    // ---- Substrate-signed messaging (LLM ↔ LLM protocol) ----
+    BuiltinDoc {
+        name: "omc_msg_sign", category: "messaging",
+        signature: "(content: string, sender_id: int, kind: int) -> dict",
+        description: "Wrap content in a substrate-signed message: HBit metadata derived from the canonical-hash of content. Receiver verifies by recomputing — no shared secret needed.",
+        example: "omc_msg_sign(\"fn f(){}\", 42, 1)  // {content, sender_id, kind, content_hash, resonance, him_score, attractor, packed}",
+        unique_to_omc: true,
+    },
+    BuiltinDoc {
+        name: "omc_msg_verify", category: "messaging",
+        signature: "(msg: dict) -> dict",
+        description: "Recompute substrate metadata from msg's content and check it matches signed values. Returns {valid, sender_id, kind, content, expected_hash, actual_hash, drift_resonance, drift_him}.",
+        example: "omc_msg_verify(msg)  // {valid: 1, ...}",
+        unique_to_omc: true,
+    },
+    BuiltinDoc {
+        name: "omc_msg_serialize", category: "messaging",
+        signature: "(msg: dict) -> string",
+        description: "Convert a signed-message dict to JSON wire form. Use when writing to a shared file / pipe / socket.",
+        example: "omc_msg_serialize(msg)  // JSON string",
+        unique_to_omc: false,
+    },
+    BuiltinDoc {
+        name: "omc_msg_deserialize", category: "messaging",
+        signature: "(wire: string) -> dict",
+        description: "Inverse of omc_msg_serialize. Parse JSON wire form back to a dict for omc_msg_verify.",
+        example: "omc_msg_verify(omc_msg_deserialize(wire))",
+        unique_to_omc: false,
+    },
     // ---- LLM workflow bundles ----
     BuiltinDoc {
         name: "omc_cheatsheet", category: "llm_workflow",

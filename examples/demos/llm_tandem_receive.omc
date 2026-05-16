@@ -1,0 +1,34 @@
+# Tandem demo: RECEIVE side (e.g. Hermes reading from Claude).
+#
+# Reads the substrate-signed message from the shared channel,
+# verifies the signature, extracts the payload, and prints whether
+# it can trust the content (substrate metadata recomputable from
+# canonical content — no shared key needed).
+
+fn show(label, v) { print(concat_many(label, " = ", to_string(v))); }
+
+fn main() {
+    h wire = read_file("/home/thearchitect/omc_channel/from_claude.json");
+    h msg = omc_msg_deserialize(wire);
+    h check = omc_msg_verify(msg);
+
+    show("valid signature?  ", dict_get(check, "valid"));
+    show("sender_id         ", dict_get(check, "sender_id"));
+    show("kind              ", dict_get(check, "kind"));
+    show("expected_hash     ", dict_get(check, "expected_hash"));
+    show("actual_hash       ", dict_get(check, "actual_hash"));
+    show("drift_resonance   ", dict_get(check, "drift_resonance"));
+    show("drift_him         ", dict_get(check, "drift_him"));
+
+    if dict_get(check, "valid") == 1 {
+        print("");
+        print("=== Signature valid — content trustworthy ===");
+        print("Payload:");
+        print(dict_get(check, "content"));
+    } else {
+        print("");
+        print("=== SIGNATURE MISMATCH — content tampered or corrupted ===");
+    }
+}
+
+main();

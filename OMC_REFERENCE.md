@@ -2,9 +2,9 @@
 
 Auto-generated from `omnimcode-core/src/docs.rs`. Run `omc --gen-docs > OMC_REFERENCE.md` to regenerate.
 
-**Total documented builtins**: 629
+**Total documented builtins**: 633
 
-**OMC-unique**: 64 (no direct Python/NumPy equivalent — these are why you reach for OMC over numpy)
+**OMC-unique**: 66 (no direct Python/NumPy equivalent — these are why you reach for OMC over numpy)
 
 ---
 
@@ -52,6 +52,7 @@ Other high-value calls: `omc_unique_builtins()` (the OMC-only surface), `omc_pyt
 - [introspection](#introspection) (30 builtins)
 - [tokenizer](#tokenizer) (17 builtins)
 - [code_intel](#code_intel) (17 builtins)
+- [messaging](#messaging) (4 builtins)
 - [llm_workflow](#llm_workflow) (7 builtins)
 - [math](#math) (82 builtins)
 - [dicts](#dicts) (31 builtins)
@@ -4982,6 +4983,50 @@ Content-addressed code lookup. Distance 0 = alpha-equivalent (exact match modulo
 
 ```omc
 omc_find_similar(q, corpus)  // [{index, distance}] — index of any distance-0 hit is the alpha-equiv match
+```
+
+---
+
+## messaging
+
+### `omc_msg_sign` 🔱 *OMC-unique*
+
+**Signature**: `(content: string, sender_id: int, kind: int) -> dict`
+
+Wrap content in a substrate-signed message: HBit metadata derived from the canonical-hash of content. Receiver verifies by recomputing — no shared secret needed.
+
+```omc
+omc_msg_sign("fn f(){}", 42, 1)  // {content, sender_id, kind, content_hash, resonance, him_score, attractor, packed}
+```
+
+### `omc_msg_verify` 🔱 *OMC-unique*
+
+**Signature**: `(msg: dict) -> dict`
+
+Recompute substrate metadata from msg's content and check it matches signed values. Returns {valid, sender_id, kind, content, expected_hash, actual_hash, drift_resonance, drift_him}.
+
+```omc
+omc_msg_verify(msg)  // {valid: 1, ...}
+```
+
+### `omc_msg_serialize`
+
+**Signature**: `(msg: dict) -> string`
+
+Convert a signed-message dict to JSON wire form. Use when writing to a shared file / pipe / socket.
+
+```omc
+omc_msg_serialize(msg)  // JSON string
+```
+
+### `omc_msg_deserialize`
+
+**Signature**: `(wire: string) -> dict`
+
+Inverse of omc_msg_serialize. Parse JSON wire form back to a dict for omc_msg_verify.
+
+```omc
+omc_msg_verify(omc_msg_deserialize(wire))
 ```
 
 ---

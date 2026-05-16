@@ -1,0 +1,94 @@
+# Substrate-signed LLM ↔ LLM messaging.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+
+# Basic sign + verify round-trip
+fn test_sign_verify_roundtrip() {
+    h msg = omc_msg_sign("fn f(x) { return x; }", 42, 1);
+    h check = omc_msg_verify(msg);
+    assert_eq(dict_get(check, "valid"), 1, "signed message verifies");
+    assert_eq(dict_get(check, "sender_id"), 42, "sender preserved");
+    assert_eq(dict_get(check, "kind"), 1, "kind preserved");
+}
+
+# Tampered content fails verification
+fn test_tampered_content_fails() {
+    h msg = omc_msg_sign("fn original() { return 1; }", 7, 2);
+    # Tamper with content but keep stale signature.
+    dict_set(msg, "content", "fn tampered() { return 99; }");
+    h check = omc_msg_verify(msg);
+    assert_eq(dict_get(check, "valid"), 0, "tampered → invalid");
+}
+
+# Tampered hash fails verification
+fn test_tampered_hash_fails() {
+    h msg = omc_msg_sign("fn f() {}", 7, 1);
+    dict_set(msg, "content_hash", 12345);  # garbage
+    h check = omc_msg_verify(msg);
+    assert_eq(dict_get(check, "valid"), 0, "bad hash → invalid");
+}
+
+# Whitespace + alpha-rename are SIGNATURE-PRESERVING
+# (because content is canonicalized before hashing)
+fn test_whitespace_invariant_signature() {
+    h m1 = omc_msg_sign("fn f(x) { return x; }", 1, 1);
+    h m2 = omc_msg_sign("fn   f ( x ) {  return  x  ;  }", 1, 1);
+    assert_eq(dict_get(m1, "content_hash"), dict_get(m2, "content_hash"),
+        "whitespace doesn't change signature");
+}
+
+fn test_alpha_rename_invariant_signature() {
+    h m1 = omc_msg_sign("fn f(x) { return x; }", 1, 1);
+    h m2 = omc_msg_sign("fn f(y) { return y; }", 1, 1);
+    assert_eq(dict_get(m1, "content_hash"), dict_get(m2, "content_hash"),
+        "alpha-rename doesn't change signature");
+}
+
+# Serialize → wire → deserialize → verify
+fn test_wire_format_roundtrip() {
+    h msg = omc_msg_sign("fn add(x, y) { return x + y; }", 99, 3);
+    h wire = omc_msg_serialize(msg);
+    assert_true(str_len(wire) > 0, "wire is non-empty");
+    h received = omc_msg_deserialize(wire);
+    h check = omc_msg_verify(received);
+    assert_eq(dict_get(check, "valid"), 1, "wire-roundtrip valid");
+    assert_eq(dict_get(check, "sender_id"), 99, "sender preserved");
+}
+
+# Different senders produce different packed IDs
+fn test_packed_id_distinguishes_senders() {
+    h m1 = omc_msg_sign("fn f() {}", 1, 1);
+    h m2 = omc_msg_sign("fn f() {}", 2, 1);
+    assert_true(dict_get(m1, "packed") != dict_get(m2, "packed"),
+        "different senders → different packed");
+}
+
+# Different content produces different hashes
+fn test_different_content_different_hash() {
+    h m1 = omc_msg_sign("fn f() { return 1; }", 1, 1);
+    h m2 = omc_msg_sign("fn f() { return 2; }", 1, 1);
+    assert_true(dict_get(m1, "content_hash") != dict_get(m2, "content_hash"),
+        "different content → different hash");
+}
+
+# Substrate metadata is recomputable (the verification check)
+fn test_substrate_metadata_recomputable() {
+    h msg = omc_msg_sign("hello", 1, 1);
+    h check = omc_msg_verify(msg);
+    # drift_resonance should be near 0 since we just signed it.
+    assert_true(dict_get(check, "drift_resonance") < 0.0001,
+        "no resonance drift on fresh sign");
+}
+
+# Empty content still produces a valid signed message
+fn test_empty_content_signs() {
+    h msg = omc_msg_sign("", 0, 0);
+    h check = omc_msg_verify(msg);
+    assert_eq(dict_get(check, "valid"), 1, "empty signs valid");
+}
