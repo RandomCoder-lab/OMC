@@ -201,6 +201,8 @@ impl Compiler {
                         | "omc_code_fingerprint"
                         | "omc_categories_count" | "omc_builtin_count"
                         | "omc_unique_count"
+                        | "omc_token_byte_savings" | "omc_remember"
+                        | "omc_recall_matches" | "omc_hbit_hash"
                         // tape_* op constructors return node IDs (int)
                         | "tape_var" | "tape_const"
                         | "tape_add" | "tape_sub" | "tape_mul" | "tape_div"
@@ -293,6 +295,8 @@ impl Compiler {
                         // Code intel returns arrays of names
                         | "omc_code_extract_fns" | "omc_code_dependencies"
                         | "omc_completion_hint"
+                        | "omc_memory_keys" | "omc_help_all_category"
+                        | "omc_search_builtins"
                         // Forward-mode autograd duals (Track 2 — 2026-05-16)
                         | "dual" | "dual_add" | "dual_sub"
                         | "dual_mul" | "dual_div" | "dual_neg"

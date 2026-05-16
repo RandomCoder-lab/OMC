@@ -1,0 +1,135 @@
+# Session memory + token introspection + substrate scoring builtins.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) {
+    if !cond { test_record_failure(msg); }
+}
+
+# ---- Token lookup / describe ----
+
+fn test_token_lookup_round() {
+    h s = omc_token_lookup(3);
+    assert_eq(s, "arr_get", "ID 3 expands to arr_get");
+}
+
+fn test_token_lookup_out_of_range() {
+    h s = omc_token_lookup(999999);
+    assert_eq(s, "", "unknown ID → empty string");
+}
+
+fn test_token_describe_has_lines() {
+    h ids = omc_token_encode("h x = 1;");
+    h desc = omc_token_describe(ids);
+    assert_true(str_len(desc) > 10, "non-trivial description");
+    assert_true(re_match("id=", desc) == 1, "contains id= line");
+}
+
+fn test_token_byte_savings_positive_on_builtins() {
+    h saved = omc_token_byte_savings("arr_softmax(arr_neg(xs))");
+    # Multiple long names should compress well.
+    assert_true(saved > 5, "compression on builtin-heavy code");
+}
+
+fn test_token_compress_pct_in_range() {
+    h pct = omc_token_compress_pct("arr_softmax(arr_neg(xs))");
+    assert_true(pct >= 0.0, "non-negative percent");
+    assert_true(pct < 100.0, "below 100%");
+}
+
+# ---- Substrate scoring ----
+
+fn test_substrate_score_in_range() {
+    h s = omc_substrate_score("fn f(x) { return x; }");
+    assert_true(s >= 0.0, "score >= 0");
+    assert_true(s <= 1.0, "score <= 1");
+}
+
+fn test_attractor_density_in_range() {
+    h d = omc_attractor_density("h x = 1;");
+    assert_true(d >= 0.0, "density >= 0");
+    assert_true(d <= 1.0, "density <= 1");
+}
+
+# ---- Code memory ----
+
+fn test_remember_returns_hash() {
+    omc_memory_clear();
+    h hh = omc_remember("v1", "fn f(x) { return x; }");
+    assert_true(hh != 0, "non-zero hash returned");
+}
+
+fn test_recall_returns_stored_hash() {
+    omc_memory_clear();
+    h stored = omc_remember("k", "h x = 1;");
+    h recalled = omc_recall("k");
+    assert_eq(stored, recalled, "recall = stored");
+}
+
+fn test_recall_unknown_returns_null() {
+    omc_memory_clear();
+    h r = omc_recall("nonexistent");
+    assert_true(r == null, "unknown key → null");
+}
+
+fn test_recall_matches_yes() {
+    omc_memory_clear();
+    omc_remember("k", "fn f(x) { return x; }");
+    h m = omc_recall_matches("k", "fn f(y) { return y; }");  # alpha-equivalent
+    assert_eq(m, 1, "alpha-equivalent matches");
+}
+
+fn test_recall_matches_no() {
+    omc_memory_clear();
+    omc_remember("k", "fn f(x) { return x; }");
+    h m = omc_recall_matches("k", "fn f(x) { return x + 1; }");
+    assert_eq(m, 0, "different code → no match");
+}
+
+fn test_memory_keys() {
+    omc_memory_clear();
+    omc_remember("a", "h x = 1;");
+    omc_remember("b", "h x = 2;");
+    h keys = omc_memory_keys();
+    assert_eq(arr_len(keys), 2, "two keys");
+}
+
+fn test_memory_clear_empties() {
+    omc_remember("z", "h x = 1;");
+    omc_memory_clear();
+    h keys = omc_memory_keys();
+    assert_eq(arr_len(keys), 0, "cleared");
+}
+
+# ---- omc_help_markdown ----
+
+fn test_help_markdown_returns_md() {
+    h md = omc_help_markdown("arr_softmax");
+    assert_true(re_match("^###", md) == 1, "starts with ### heading");
+}
+
+# ---- omc_search_builtins ----
+
+fn test_search_finds_softmax() {
+    h hits = omc_search_builtins("softmax");
+    assert_true(arr_len(hits) >= 1, "found something for softmax");
+}
+
+# ---- omc_help_all_category ----
+
+fn test_help_all_category_substrate() {
+    h items = omc_help_all_category("substrate");
+    assert_true(arr_len(items) >= 1, "substrate category has entries");
+}
+
+# ---- omc_hbit_hash ----
+
+fn test_hbit_hash_deterministic() {
+    h hh1 = omc_hbit_hash("fn f(x) { return x; }");
+    h hh2 = omc_hbit_hash("fn f(x) { return x; }");
+    assert_eq(hh1, hh2, "deterministic");
+}

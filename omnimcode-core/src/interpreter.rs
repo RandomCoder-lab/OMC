@@ -49,6 +49,10 @@ pub struct Interpreter {
     /// read this to surface "what did the last line evaluate to"
     /// without re-running side effects.
     last_expression_value: Option<Value>,
+    /// Code memory: name → canonical hash. Lets the MCP/REPL caller
+    /// remember "I saw this code as X" across calls. omc_remember
+    /// and omc_recall expose it.
+    code_memory: std::cell::RefCell<std::collections::BTreeMap<String, i64>>,
     /// Stack of yield callbacks for LAZY generators. When set, the
     /// active generator's yield statements invoke the topmost callback
     /// with the yielded value rather than appending to a Vec. Memory
@@ -150,6 +154,7 @@ impl Interpreter {
             yield_callbacks: Vec::new(),
             gen_stop_requested: false,
             last_expression_value: None,
+            code_memory: std::cell::RefCell::new(std::collections::BTreeMap::new()),
         }
     }
 
@@ -7480,6 +7485,242 @@ impl Interpreter {
                 Ok(Value::HInt(HInt::new(
                     crate::docs::BUILTINS.iter().filter(|b| b.unique_to_omc).count() as i64
                 )))
+            }
+            // ---- Token-level introspection (debugging the encoder) ---
+            "omc_token_lookup" => {
+                // Given a token ID, return the substring it expands to.
+                if args.is_empty() {
+                    return Err("omc_token_lookup requires (id: int)".to_string());
+                }
+                let id = self.eval_expr(&args[0])?.to_int() as usize;
+                if id < crate::tokenizer::TOKEN_DICT.len() {
+                    Ok(Value::String(crate::tokenizer::TOKEN_DICT[id].to_string()))
+                } else {
+                    Ok(Value::String(String::new()))
+                }
+            }
+            "omc_token_describe" => {
+                // Human-readable description of an encoded stream.
+                // For each ID, emit "id=N expand='...'" lines.
+                if args.is_empty() {
+                    return Err("omc_token_describe requires (ids)".to_string());
+                }
+                let v = self.eval_expr(&args[0])?;
+                if let Value::Array(arr) = v {
+                    let ids: Vec<i64> = arr.items.borrow().iter().map(|x| x.to_int()).collect();
+                    let mut out = String::new();
+                    let mut i = 0;
+                    while i < ids.len() {
+                        let id = ids[i];
+                        if id == 0 && i + 1 < ids.len() {
+                            out.push_str(&format!("escape byte={}\n", ids[i+1]));
+                            i += 2;
+                        } else {
+                            let entry = crate::tokenizer::TOKEN_DICT
+                                .get(id as usize).unwrap_or(&"<unknown>");
+                            let display = entry.replace('\n', "\\n").replace('\t', "\\t");
+                            out.push_str(&format!("id={} expand=\"{}\"\n", id, display));
+                            i += 1;
+                        }
+                    }
+                    Ok(Value::String(out))
+                } else {
+                    Err("omc_token_describe: requires int array".to_string())
+                }
+            }
+            "omc_token_byte_savings" => {
+                // bytes_saved = raw_len - encoded_token_count.
+                // Negative means encoding inflated (rare).
+                if args.is_empty() {
+                    return Err("omc_token_byte_savings requires (code)".to_string());
+                }
+                let code = self.eval_expr(&args[0])?.to_display_string();
+                let raw = code.len() as i64;
+                let ids = crate::tokenizer::encode(&code).len() as i64;
+                Ok(Value::HInt(HInt::new(raw - ids)))
+            }
+            // ---- Substrate scoring over code ----
+            "omc_substrate_score" => {
+                // How substrate-aligned is this code? Computed as the
+                // fraction of canonical-tokens whose ID is itself a
+                // Fibonacci attractor. 1.0 = every token sits on an
+                // attractor; 0.0 = every token off-attractor.
+                if args.is_empty() {
+                    return Err("omc_substrate_score requires (code)".to_string());
+                }
+                let code = self.eval_expr(&args[0])?.to_display_string();
+                let canon = crate::canonical::canonicalize(&code)
+                    .map_err(|e| format!("omc_substrate_score: {}", e))?;
+                let ids = crate::tokenizer::encode(&canon);
+                if ids.is_empty() {
+                    return Ok(Value::HFloat(0.0));
+                }
+                let on_attractor: usize = ids.iter()
+                    .filter(|&&id| {
+                        let (_, d) = crate::phi_pi_fib::nearest_attractor_with_dist(id);
+                        d == 0
+                    }).count();
+                Ok(Value::HFloat(on_attractor as f64 / ids.len() as f64))
+            }
+            "omc_attractor_density" => {
+                // Same as substrate_score but over RAW source (no
+                // canonicalization). Useful for comparing how
+                // "Fibonacci-shaped" different formatting styles are.
+                if args.is_empty() {
+                    return Err("omc_attractor_density requires (code)".to_string());
+                }
+                let code = self.eval_expr(&args[0])?.to_display_string();
+                let ids = crate::tokenizer::encode(&code);
+                if ids.is_empty() {
+                    return Ok(Value::HFloat(0.0));
+                }
+                let on: usize = ids.iter()
+                    .filter(|&&id| crate::phi_pi_fib::nearest_attractor_with_dist(id).1 == 0)
+                    .count();
+                Ok(Value::HFloat(on as f64 / ids.len() as f64))
+            }
+            // ---- Code memory (session-state for LLMs) ----
+            "omc_remember" => {
+                // omc_remember(name, code) — store the canonical hash
+                // of `code` under `name`. Lets LLMs say "remember this
+                // function as 'softmax_v1'" and recall later.
+                if args.len() < 2 {
+                    return Err("omc_remember requires (name, code)".to_string());
+                }
+                let name = self.eval_expr(&args[0])?.to_display_string();
+                let code = self.eval_expr(&args[1])?.to_display_string();
+                let canon = crate::canonical::canonicalize(&code)
+                    .map_err(|e| format!("omc_remember: {}", e))?;
+                let (_, raw, _) = crate::tokenizer::code_hash(&canon);
+                self.code_memory.borrow_mut().insert(name, raw);
+                Ok(Value::HInt(HInt::new(raw)))
+            }
+            "omc_recall" => {
+                // omc_recall(name) — get the hash stored under `name`,
+                // or null if unknown.
+                if args.is_empty() {
+                    return Err("omc_recall requires (name)".to_string());
+                }
+                let name = self.eval_expr(&args[0])?.to_display_string();
+                match self.code_memory.borrow().get(&name) {
+                    Some(&h) => Ok(Value::HInt(HInt::new(h))),
+                    None => Ok(Value::Null),
+                }
+            }
+            "omc_recall_matches" => {
+                // omc_recall_matches(name, code) — 1 if the current
+                // `code` has the same canonical hash as what was
+                // remembered under `name`. The "did this change?" check.
+                if args.len() < 2 {
+                    return Err("omc_recall_matches requires (name, code)".to_string());
+                }
+                let name = self.eval_expr(&args[0])?.to_display_string();
+                let code = self.eval_expr(&args[1])?.to_display_string();
+                let stored = match self.code_memory.borrow().get(&name) {
+                    Some(&h) => h,
+                    None => return Ok(Value::HInt(HInt::new(0))),
+                };
+                let canon = crate::canonical::canonicalize(&code)
+                    .map_err(|e| format!("omc_recall_matches: {}", e))?;
+                let (_, current, _) = crate::tokenizer::code_hash(&canon);
+                Ok(Value::HInt(HInt::new(if stored == current { 1 } else { 0 })))
+            }
+            "omc_memory_keys" => {
+                // List all remembered names.
+                let mem = self.code_memory.borrow();
+                let out: Vec<Value> = mem.keys()
+                    .map(|k| Value::String(k.clone()))
+                    .collect();
+                Ok(Value::Array(HArray::from_vec(out)))
+            }
+            "omc_memory_clear" => {
+                self.code_memory.borrow_mut().clear();
+                Ok(Value::Null)
+            }
+            // ---- Composition: omc_help_markdown ----
+            "omc_help_markdown" => {
+                // Markdown-formatted help — easier for LLMs that
+                // serialize into rendered chat windows.
+                if args.is_empty() {
+                    return Err("omc_help_markdown requires (name)".to_string());
+                }
+                let name = self.eval_expr(&args[0])?.to_display_string();
+                match crate::docs::lookup(&name) {
+                    Some(doc) => Ok(Value::String(crate::docs::render_markdown(doc))),
+                    None => Ok(Value::String(format!(
+                        "### `{}`\n\n*Not in registry.* Try `omc_did_you_mean(\"{}\")`.",
+                        name, name
+                    ))),
+                }
+            }
+            // ---- HBit-based substrate hash (uses dual-band metadata) ---
+            "omc_hbit_hash" => {
+                // Hash via HBit dual-band: combine the integer value
+                // and its substrate-resonance into the hash so two
+                // values that differ only in resonance still produce
+                // different IDs. This is the OMC version of "hashing
+                // also weighs how 'substrate-coherent' the input is".
+                if args.is_empty() {
+                    return Err("omc_hbit_hash requires (code)".to_string());
+                }
+                let code = self.eval_expr(&args[0])?.to_display_string();
+                let raw = crate::tokenizer::fnv1a_64(code.as_bytes());
+                // Mix in the substrate-resonance of the hash itself.
+                let h = HInt::new(raw);
+                let blended = (raw as f64 * (1.0 + h.resonance) + h.him_score * 1e6) as i64;
+                Ok(Value::HInt(HInt::new(blended)))
+            }
+            // ---- Convenience composers ----
+            "omc_token_compress_pct" => {
+                // 100 * (1 - ids_len / raw_len). Direct % savings.
+                if args.is_empty() {
+                    return Err("omc_token_compress_pct requires (code)".to_string());
+                }
+                let code = self.eval_expr(&args[0])?.to_display_string();
+                let raw = code.len() as f64;
+                if raw == 0.0 { return Ok(Value::HFloat(0.0)); }
+                let ids = crate::tokenizer::encode(&code).len() as f64;
+                Ok(Value::HFloat(100.0 * (1.0 - ids / raw)))
+            }
+            "omc_help_all_category" => {
+                // Return [omc_help(name) for name in <category>] as
+                // an array of dicts. Useful for "show me everything in
+                // the substrate category" in one call.
+                if args.is_empty() {
+                    return Err("omc_help_all_category requires (category)".to_string());
+                }
+                let cat = self.eval_expr(&args[0])?.to_display_string();
+                let out: Vec<Value> = crate::docs::BUILTINS.iter()
+                    .filter(|b| b.category == cat)
+                    .map(|d| {
+                        let mut map = std::collections::BTreeMap::new();
+                        map.insert("name".to_string(), Value::String(d.name.to_string()));
+                        map.insert("signature".to_string(), Value::String(d.signature.to_string()));
+                        map.insert("description".to_string(), Value::String(d.description.to_string()));
+                        map.insert("example".to_string(), Value::String(d.example.to_string()));
+                        map.insert("unique_to_omc".to_string(),
+                            Value::HInt(HInt::new(if d.unique_to_omc { 1 } else { 0 })));
+                        Value::dict_from(map)
+                    })
+                    .collect();
+                Ok(Value::Array(HArray::from_vec(out)))
+            }
+            "omc_search_builtins" => {
+                // Substring search across name + description. Returns
+                // matching names. Useful when you don't know what
+                // you're looking for but know what it should do.
+                if args.is_empty() {
+                    return Err("omc_search_builtins requires (query)".to_string());
+                }
+                let q = self.eval_expr(&args[0])?.to_display_string().to_lowercase();
+                let out: Vec<Value> = crate::docs::BUILTINS.iter()
+                    .filter(|b| {
+                        b.name.to_lowercase().contains(&q) ||
+                        b.description.to_lowercase().contains(&q)
+                    })
+                    .map(|b| Value::String(b.name.to_string()))
+                    .collect();
+                Ok(Value::Array(HArray::from_vec(out)))
             }
             // arr_fold_all(arr) -> new array with every element snapped
             // to its nearest Fibonacci attractor. Vectorized fold.

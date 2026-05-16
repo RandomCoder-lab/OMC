@@ -2,9 +2,9 @@
 
 Auto-generated from `omnimcode-core/src/docs.rs`. Run `omc --gen-docs > OMC_REFERENCE.md` to regenerate.
 
-**Total documented builtins**: 391
+**Total documented builtins**: 406
 
-**OMC-unique**: 40 (no direct Python/NumPy equivalent — these are why you reach for OMC over numpy)
+**OMC-unique**: 45 (no direct Python/NumPy equivalent — these are why you reach for OMC over numpy)
 
 ---
 
@@ -23,9 +23,9 @@ Auto-generated from `omnimcode-core/src/docs.rs`. Run `omc --gen-docs > OMC_REFE
 - [json](#json) (2 builtins)
 - [stdlib](#stdlib) (12 builtins)
 - [exceptions](#exceptions) (2 builtins)
-- [introspection](#introspection) (14 builtins)
-- [tokenizer](#tokenizer) (12 builtins)
-- [code_intel](#code_intel) (11 builtins)
+- [introspection](#introspection) (22 builtins)
+- [tokenizer](#tokenizer) (16 builtins)
+- [code_intel](#code_intel) (14 builtins)
 - [math](#math) (29 builtins)
 - [dicts](#dicts) (14 builtins)
 - [test_runner](#test_runner) (4 builtins)
@@ -3276,6 +3276,86 @@ Count of OMC-unique builtins.
 omc_unique_count()  // 15+
 ```
 
+### `omc_remember` 🔱 *OMC-unique*
+
+**Signature**: `(name: string, code: string) -> int`
+
+Store the canonical hash of `code` under `name`. Returns the stored hash. Session-level memory for LLMs.
+
+```omc
+omc_remember("loss_v1", "fn loss(p, t){ ... }")
+```
+
+### `omc_recall`
+
+**Signature**: `(name: string) -> int|null`
+
+Get the hash stored under `name`, or null.
+
+```omc
+omc_recall("loss_v1")  // 1234567890 or null
+```
+
+### `omc_recall_matches` 🔱 *OMC-unique*
+
+**Signature**: `(name: string, code: string) -> int`
+
+1 if the current code's canonical hash matches what was remembered. 'Did this change?'
+
+```omc
+omc_recall_matches("loss_v1", current_source)  // 0 if edited
+```
+
+### `omc_memory_keys`
+
+**Signature**: `() -> string[]`
+
+All names currently in code-memory.
+
+```omc
+omc_memory_keys()  // ["loss_v1", "feature_pipeline", ...]
+```
+
+### `omc_memory_clear`
+
+**Signature**: `() -> null`
+
+Drop all stored hashes. Use between independent sessions.
+
+```omc
+omc_memory_clear();
+```
+
+### `omc_help_markdown`
+
+**Signature**: `(name: string) -> string`
+
+Help rendered as Markdown — easier for chat-window consumers.
+
+```omc
+omc_help_markdown("arr_softmax")  // ### `arr_softmax`...
+```
+
+### `omc_help_all_category`
+
+**Signature**: `(category: string) -> dict[]`
+
+All builtins in `category` returned as omc_help dicts. Bulk reference.
+
+```omc
+omc_help_all_category("substrate")  // array of help dicts
+```
+
+### `omc_search_builtins`
+
+**Signature**: `(query: string) -> string[]`
+
+Substring search across name + description. Find what you don't know the name of.
+
+```omc
+omc_search_builtins("softmax")  // ["arr_softmax"]
+```
+
 ### `cleanup_array`
 
 **Signature**: `(...) -> any`
@@ -3420,6 +3500,46 @@ omc_code_canonical("fn f(x) { return x; }") == omc_code_canonical("fn f(a) { ret
 omc_code_equivalent("fn f(x) { return x; }", "fn f(a) { return a; }")  // 1
 ```
 
+### `omc_token_lookup`
+
+**Signature**: `(id: int) -> string`
+
+Inverse of token-id-from-name. Get the substring expanded by a single ID.
+
+```omc
+omc_token_lookup(3)  // "arr_get"
+```
+
+### `omc_token_describe`
+
+**Signature**: `(ids: int[]) -> string`
+
+Pretty-print an encoded stream as id=N expand="..." lines for debugging.
+
+```omc
+omc_token_describe(omc_token_encode("h x = 1;"))  // multi-line
+```
+
+### `omc_token_byte_savings`
+
+**Signature**: `(code: string) -> int`
+
+raw_bytes - encoded_tokens. Positive = compression win.
+
+```omc
+omc_token_byte_savings("arr_softmax")  // 10 (11 bytes -> 1 token)
+```
+
+### `omc_token_compress_pct`
+
+**Signature**: `(code: string) -> float`
+
+% bytes saved by encoding. 100 * (1 - ids_len / raw_len).
+
+```omc
+omc_token_compress_pct("arr_softmax")  // ~90.9
+```
+
 ---
 
 ## code_intel
@@ -3532,6 +3652,36 @@ canonicalize + hash. The semantic memory key. {raw, attractor, distance, resonan
 
 ```omc
 omc_canonical_hash("fn f(a){return a;}")  // matches the b-variant
+```
+
+### `omc_substrate_score` 🔱 *OMC-unique*
+
+**Signature**: `(code: string) -> float`
+
+Fraction of CANONICAL tokens whose ID is a Fibonacci attractor. 1.0 = perfectly substrate-aligned.
+
+```omc
+omc_substrate_score("h x = arr_get(xs, 0);")  // 0..1
+```
+
+### `omc_attractor_density` 🔱 *OMC-unique*
+
+**Signature**: `(code: string) -> float`
+
+Like omc_substrate_score but over RAW source (no canonicalize). Compare formatting styles.
+
+```omc
+omc_attractor_density("h x = 1;")  // 0..1
+```
+
+### `omc_hbit_hash` 🔱 *OMC-unique*
+
+**Signature**: `(code: string) -> int`
+
+Hash blended with substrate-resonance of the hash itself — OMC-only dual-band hashing.
+
+```omc
+omc_hbit_hash("h x = 1;")  // substrate-weighted int
 ```
 
 ---
