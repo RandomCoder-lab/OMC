@@ -1,0 +1,146 @@
+# ONN / self-instantiation / context-compression tests.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+
+# M3 spawn count properties.
+fn test_m3_returns_one_for_tiny() {
+    assert_eq(omc_m3_spawn_count(0), 1, "n=0 → 1");
+    assert_eq(omc_m3_spawn_count(1), 1, "n=1 → 1");
+}
+
+fn test_m3_grows_with_n() {
+    assert_true(omc_m3_spawn_count(100) >= omc_m3_spawn_count(10), "monotone-ish");
+}
+
+fn test_m3_sublog_bound() {
+    # n=1000 should give ~11 (much less than log_phi(1000) ≈ 14)
+    h c = omc_m3_spawn_count(1000);
+    assert_true(c < 25, "well below log_phi");
+    assert_true(c > 0, "positive");
+}
+
+fn test_m3_table_matches() {
+    # Reference table from Hermes docs.
+    assert_true(omc_m3_spawn_count(5) <= 4, "n=5 reasonable");
+    assert_true(omc_m3_spawn_count(20) <= 8, "n=20 reasonable");
+    assert_true(omc_m3_spawn_count(200) <= 15, "n=200 reasonable");
+}
+
+# Self-instantiate produces M3(n) specialists.
+fn test_self_instantiate_count() {
+    h items = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"];
+    h specs = omc_self_instantiate(items, "test");
+    assert_eq(arr_len(specs), omc_m3_spawn_count(arr_len(items)),
+        "count matches M3");
+}
+
+fn test_self_instantiate_specialist_shape() {
+    h items = ["msg1", "msg2", "msg3", "msg4"];
+    h specs = omc_self_instantiate(items, "test");
+    h first = arr_get(specs, 0);
+    assert_true(dict_has(first, "fold_index"), "has fold_index");
+    assert_true(dict_has(first, "summary"), "has summary");
+    assert_true(dict_has(first, "mu"), "has mu");
+    assert_true(dict_has(first, "sigma"), "has sigma");
+    assert_true(dict_has(first, "dominant_attractor"), "has attractor");
+    assert_true(dict_has(first, "resonance"), "has resonance");
+    assert_true(dict_has(first, "item_count"), "has item_count");
+}
+
+fn test_self_instantiate_preserves_item_count() {
+    h items = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j",
+               "k", "l", "m", "n", "o", "p", "q", "r", "s", "t"];
+    h specs = omc_self_instantiate(items, "test");
+    h total = 0;
+    h i = 0;
+    while i < arr_len(specs) {
+        total = total + dict_get(arr_get(specs, i), "item_count");
+        i = i + 1;
+    }
+    assert_eq(total, arr_len(items), "all items accounted for");
+}
+
+# Fold-back updates parent state.
+fn test_fold_back_updates_turn() {
+    h items = ["a", "b", "c", "d", "e"];
+    h specs = omc_self_instantiate(items, "x");
+    h folded = omc_fold_back(0.0, 0.0, 0, specs);
+    h turn = dict_get(folded, "turn_count");
+    assert_true(turn > 0, "turn count increased");
+}
+
+fn test_fold_back_returns_required_fields() {
+    h items = ["a", "b", "c"];
+    h specs = omc_self_instantiate(items, "x");
+    h folded = omc_fold_back(0.5, 0.1, 5, specs);
+    assert_true(dict_has(folded, "mu"), "has mu");
+    assert_true(dict_has(folded, "sigma"), "has sigma");
+    assert_true(dict_has(folded, "turn_count"), "has turn_count");
+    assert_true(dict_has(folded, "dominant_attractor"), "has attractor");
+    assert_true(dict_has(folded, "num_specialists_folded"), "has count");
+    assert_true(dict_has(folded, "resonance"), "has resonance");
+}
+
+# Context compression — the headline.
+fn test_context_compress_reduces() {
+    # 100 messages → very few specialists.
+    h msgs = [];
+    h i = 0;
+    while i < 100 {
+        arr_push(msgs, concat_many("message ", to_string(i)));
+        i = i + 1;
+    }
+    h specs = omc_context_compress(msgs);
+    h before = arr_len(msgs);
+    h after = arr_len(specs);
+    assert_true(after < before, "compressed");
+    assert_true(after < 20, "well below 20");
+}
+
+fn test_context_compress_preserves_total_items() {
+    h msgs = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l"];
+    h specs = omc_context_compress(msgs);
+    h total = 0;
+    h i = 0;
+    while i < arr_len(specs) {
+        total = total + dict_get(arr_get(specs, i), "item_count");
+        i = i + 1;
+    }
+    assert_eq(total, arr_len(msgs), "items conserved");
+}
+
+fn test_context_compress_singleton() {
+    h specs = omc_context_compress(["only"]);
+    assert_eq(arr_len(specs), 1, "single message → 1 specialist");
+}
+
+fn test_context_compress_huge() {
+    # 1000 messages — should still collapse to ~10 specialists.
+    h msgs = [];
+    h i = 0;
+    while i < 1000 {
+        arr_push(msgs, concat_many("m", to_string(i)));
+        i = i + 1;
+    }
+    h specs = omc_context_compress(msgs);
+    assert_true(arr_len(specs) < 25, "still under 25 specialists for 1000 messages");
+}
+
+# omc_prompt_agent writes a signed message
+fn test_prompt_agent_writes_file() {
+    h packed = omc_prompt_agent(99999, "test prompt", 18173, "/tmp");
+    assert_true(packed > 0, "got a packed ID");
+    h wire = read_file("/tmp/prompt_to_99999.json");
+    assert_true(str_len(wire) > 0, "file written");
+    # Verify the message
+    h msg = omc_msg_deserialize(wire);
+    h check = omc_msg_verify(msg);
+    assert_eq(dict_get(check, "valid"), 1, "valid signature");
+    assert_eq(dict_get(check, "sender_id"), 18173, "sender preserved");
+}

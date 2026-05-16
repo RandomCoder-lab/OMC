@@ -2,9 +2,9 @@
 
 Auto-generated from `omnimcode-core/src/docs.rs`. Run `omc --gen-docs > OMC_REFERENCE.md` to regenerate.
 
-**Total documented builtins**: 633
+**Total documented builtins**: 638
 
-**OMC-unique**: 66 (no direct Python/NumPy equivalent — these are why you reach for OMC over numpy)
+**OMC-unique**: 71 (no direct Python/NumPy equivalent — these are why you reach for OMC over numpy)
 
 ---
 
@@ -52,7 +52,8 @@ Other high-value calls: `omc_unique_builtins()` (the OMC-only surface), `omc_pyt
 - [introspection](#introspection) (30 builtins)
 - [tokenizer](#tokenizer) (17 builtins)
 - [code_intel](#code_intel) (17 builtins)
-- [messaging](#messaging) (4 builtins)
+- [messaging](#messaging) (5 builtins)
+- [onn](#onn) (4 builtins)
 - [llm_workflow](#llm_workflow) (7 builtins)
 - [math](#math) (82 builtins)
 - [dicts](#dicts) (31 builtins)
@@ -5027,6 +5028,60 @@ Inverse of omc_msg_serialize. Parse JSON wire form back to a dict for omc_msg_ve
 
 ```omc
 omc_msg_verify(omc_msg_deserialize(wire))
+```
+
+### `omc_prompt_agent` 🔱 *OMC-unique*
+
+**Signature**: `(target_id: int, prompt: string, sender_id: int, channel?: string) -> int`
+
+Write a substrate-signed request (kind=1) to target_id's inbox file at `channel/prompt_to_<target_id>.json`. Returns packed message ID. Caller polls for response via read_file + omc_msg_verify. The 'secondary brain' primitive.
+
+```omc
+omc_prompt_agent(28765, "summarize this code", 18173)  // sends to Hermes
+```
+
+---
+
+## onn
+
+### `omc_m3_spawn_count` 🔱 *OMC-unique*
+
+**Signature**: `(n: int) -> int`
+
+M3 optimal subagent count via Fibonacci-π-Fibonacci wave interference. Sublogarithmic — n=1000 → ~11 specialists. Always ≤ floor(log_phi(n))+1.
+
+```omc
+omc_m3_spawn_count(1000)  // ~11
+```
+
+### `omc_self_instantiate` 🔱 *OMC-unique*
+
+**Signature**: `(items: string[], task_hint: string) -> dict[]`
+
+Geometric self-instantiation: fold N items into M3(N) specialists. Each specialist: {fold_index, summary, mu, sigma, dominant_attractor, resonance, wave_amplitude, item_count}.
+
+```omc
+omc_self_instantiate(messages, "compress")
+```
+
+### `omc_fold_back` 🔱 *OMC-unique*
+
+**Signature**: `(parent_mu, parent_sigma, parent_turn, specialists: dict[]) -> dict`
+
+Merge children's specialist outputs back into running parent statistics. Returns {mu, sigma, turn_count, dominant_attractor, num_specialists_folded, resonance}.
+
+```omc
+omc_fold_back(0.5, 0.1, 0, specs)  // updated parent state
+```
+
+### `omc_context_compress` 🔱 *OMC-unique*
+
+**Signature**: `(messages: string[]) -> dict[]`
+
+Compress N context messages to ~M3(N) specialist summaries. The substrate-native answer to the LLM context-limit problem.
+
+```omc
+omc_context_compress(conversation_history)  // ~log_log(N) specialists
 ```
 
 ---

@@ -11,6 +11,7 @@ pub mod tokenizer;
 pub mod canonical;
 pub mod code_intel;
 pub mod llm_workflow;
+pub mod onn;
 pub mod runtime;
 pub mod circuits;      // Genetic logic circuits
 pub mod evolution;     // Genetic operators

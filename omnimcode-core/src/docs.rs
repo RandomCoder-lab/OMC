@@ -1109,6 +1109,42 @@ pub const BUILTINS: &[BuiltinDoc] = &[
         example: "omc_msg_verify(omc_msg_deserialize(wire))",
         unique_to_omc: false,
     },
+    BuiltinDoc {
+        name: "omc_prompt_agent", category: "messaging",
+        signature: "(target_id: int, prompt: string, sender_id: int, channel?: string) -> int",
+        description: "Write a substrate-signed request (kind=1) to target_id's inbox file at `channel/prompt_to_<target_id>.json`. Returns packed message ID. Caller polls for response via read_file + omc_msg_verify. The 'secondary brain' primitive.",
+        example: "omc_prompt_agent(28765, \"summarize this code\", 18173)  // sends to Hermes",
+        unique_to_omc: true,
+    },
+    // ---- ONN: self-instantiation + context compression ----
+    BuiltinDoc {
+        name: "omc_m3_spawn_count", category: "onn",
+        signature: "(n: int) -> int",
+        description: "M3 optimal subagent count via Fibonacci-π-Fibonacci wave interference. Sublogarithmic — n=1000 → ~11 specialists. Always ≤ floor(log_phi(n))+1.",
+        example: "omc_m3_spawn_count(1000)  // ~11",
+        unique_to_omc: true,
+    },
+    BuiltinDoc {
+        name: "omc_self_instantiate", category: "onn",
+        signature: "(items: string[], task_hint: string) -> dict[]",
+        description: "Geometric self-instantiation: fold N items into M3(N) specialists. Each specialist: {fold_index, summary, mu, sigma, dominant_attractor, resonance, wave_amplitude, item_count}.",
+        example: "omc_self_instantiate(messages, \"compress\")",
+        unique_to_omc: true,
+    },
+    BuiltinDoc {
+        name: "omc_fold_back", category: "onn",
+        signature: "(parent_mu, parent_sigma, parent_turn, specialists: dict[]) -> dict",
+        description: "Merge children's specialist outputs back into running parent statistics. Returns {mu, sigma, turn_count, dominant_attractor, num_specialists_folded, resonance}.",
+        example: "omc_fold_back(0.5, 0.1, 0, specs)  // updated parent state",
+        unique_to_omc: true,
+    },
+    BuiltinDoc {
+        name: "omc_context_compress", category: "onn",
+        signature: "(messages: string[]) -> dict[]",
+        description: "Compress N context messages to ~M3(N) specialist summaries. The substrate-native answer to the LLM context-limit problem.",
+        example: "omc_context_compress(conversation_history)  // ~log_log(N) specialists",
+        unique_to_omc: true,
+    },
     // ---- LLM workflow bundles ----
     BuiltinDoc {
         name: "omc_cheatsheet", category: "llm_workflow",

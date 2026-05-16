@@ -1,0 +1,86 @@
+# Context compression — the substrate-native answer to LLM context limits.
+#
+# Take a long conversation (N messages), compress to M3(N) specialists.
+# Each specialist carries mu / sigma / dominant_attractor for one "wave"
+# of the dialogue. M3(N) grows ~log_log(N), so even N=10,000 messages
+# fold to ~17 specialists.
+
+fn show(label, v) { print(concat_many(label, " = ", to_string(v))); }
+fn section(name) { print(""); print(concat_many("=== ", name, " ===")); }
+
+fn make_msgs(n) {
+    h msgs = [];
+    h i = 0;
+    while i < n {
+        arr_push(msgs, concat_many("msg-", to_string(i),
+            ": some content about topic-", to_string(i % 8)));
+        i = i + 1;
+    }
+    return msgs;
+}
+
+fn study(n) {
+    h msgs = make_msgs(n);
+    h before = arr_len(msgs);
+    h k = omc_m3_spawn_count(n);
+    h specs = omc_context_compress(msgs);
+    h after = arr_len(specs);
+    h ratio = before / after;
+    print(concat_many("  N=", to_string(n),
+        "  M3=", to_string(k),
+        "  → ", to_string(after), " specialists",
+        "  (compression ratio ", to_string(ratio), "×)"));
+}
+
+fn main() {
+    print("=== Context compression via ONN self-instantiation ===");
+    print("");
+    print("Hermes ONN claim: any N items fold to M3(N) ~ O(log_phi-pi-fib N)");
+    print("specialists. Each holds phi-resonance-weighted summary statistics");
+    print("(mu, sigma, dominant Fibonacci attractor) of one wave of the input.");
+    print("");
+    print("Compression curve:");
+
+    study(10);
+    study(50);
+    study(100);
+    study(500);
+    study(1000);
+    study(5000);
+    study(10000);
+
+    print("");
+    print("=== Inspect a single specialist ===");
+    h msgs = make_msgs(50);
+    h specs = omc_context_compress(msgs);
+    print(concat_many("50 messages → ", to_string(arr_len(specs)), " specialists"));
+    h first = arr_get(specs, 0);
+    show("  fold_index        ", dict_get(first, "fold_index"));
+    show("  items in this spec", dict_get(first, "item_count"));
+    show("  mu (mean res)     ", dict_get(first, "mu"));
+    show("  sigma             ", dict_get(first, "sigma"));
+    show("  dominant_attractor", dict_get(first, "dominant_attractor"));
+    show("  resonance         ", dict_get(first, "resonance"));
+    show("  summary (truncated)", dict_get(first, "summary"));
+
+    section("Fold-back into a parent state");
+    h parent_mu = 0.5;
+    h parent_sigma = 0.1;
+    h parent_turn = 0;
+    h folded = omc_fold_back(parent_mu, parent_sigma, parent_turn, specs);
+    show("  new mu              ", dict_get(folded, "mu"));
+    show("  new sigma           ", dict_get(folded, "sigma"));
+    show("  new turn_count      ", dict_get(folded, "turn_count"));
+    show("  dominant_attractor  ", dict_get(folded, "dominant_attractor"));
+    show("  num_specialists     ", dict_get(folded, "num_specialists_folded"));
+
+    print("");
+    print("=== Practical implication ===");
+    print("Instead of dropping old conversation history, fold every");
+    print("100-message window into specialists and pass forward only the");
+    print("specialist dicts. Conversation memory becomes substrate-stable");
+    print("statistics, not raw bytes. The 'context problem' becomes a");
+    print("compression problem.");
+}
+
+main();

@@ -1,0 +1,64 @@
+# Secondary-brain protocol — fire a prompt to another agent via the
+# substrate channel and process the (eventually) signed response.
+#
+# Usage pattern:
+#
+#   1. Send: omc_prompt_agent(HERMES_ID, "question", CLAUDE_ID)
+#      → writes /home/thearchitect/omc_channel/prompt_to_28765.json
+#      and returns the packed message ID.
+#
+#   2. Hermes reads its inbox, processes, writes
+#      /home/thearchitect/omc_channel/response_from_28765.json
+#
+#   3. Receive: read_file + omc_msg_verify
+#
+# This OMC program demonstrates step 1 and the verification on
+# whatever response file exists.
+
+fn show(label, v) { print(concat_many(label, " = ", to_string(v))); }
+fn section(name) { print(""); print(concat_many("=== ", name, " ===")); }
+
+fn main() {
+    h CLAUDE_ID = 18173;
+    h HERMES_ID = 28765;
+
+    section("Step 1 — Claude asks Hermes a question");
+    h prompt = "Summarize the M3 spawn count algorithm in one sentence.";
+    h packed = omc_prompt_agent(HERMES_ID, prompt, CLAUDE_ID);
+    show("  packed message ID", packed);
+    show("  wrote to         ", "/home/thearchitect/omc_channel/prompt_to_28765.json");
+
+    section("Step 2 — Hermes processes, writes response (Hermes-side only)");
+    print("  (Hermes runs its own llm_tandem_reply.omc against the inbox.)");
+
+    section("Step 3 — Claude polls for response");
+    # Check if a response exists. If yes, verify and read.
+    h response_path = "/home/thearchitect/omc_channel/response_from_hermes.json";
+    h exists = file_exists(response_path);
+    if exists == 1 {
+        h wire = read_file(response_path);
+        h msg = omc_msg_deserialize(wire);
+        h check = omc_msg_verify(msg);
+        if dict_get(check, "valid") == 1 {
+            print("");
+            print("=== Hermes responded ===");
+            show("  sender_id", dict_get(check, "sender_id"));
+            show("  kind     ", dict_get(check, "kind"));
+            print("  payload:");
+            print(dict_get(check, "content"));
+        } else {
+            print("  Response received but signature invalid.");
+        }
+    } else {
+        print("  No response yet — Hermes hasn't replied. Poll again later.");
+    }
+
+    section("Pattern for repeated calls (LLM-as-secondary-brain)");
+    print("  for q in queries {");
+    print("      omc_prompt_agent(HERMES_ID, q, CLAUDE_ID);");
+    print("      // Hermes processes in parallel; Claude continues.");
+    print("  }");
+    print("  // Later: drain responses by polling response_from_*.json");
+}
+
+main();

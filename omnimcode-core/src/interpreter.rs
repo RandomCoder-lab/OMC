@@ -7848,6 +7848,166 @@ impl Interpreter {
                     Value::HFloat((claimed_him - h.him_score).abs()));
                 Ok(Value::dict_from(out))
             }
+            // ---- ONN / self-instantiation (the context-problem layer) ---
+            //
+            // omc_m3_spawn_count(n) — sublog optimal subagent count via
+            // Fibonacci-π-Fibonacci wave interference. Solves "how many
+            // specialists do I need to compress N items?"
+            "omc_m3_spawn_count" => {
+                if args.is_empty() {
+                    return Err("omc_m3_spawn_count requires (n: int)".to_string());
+                }
+                let n = self.eval_expr(&args[0])?.to_int();
+                Ok(Value::HInt(HInt::new(crate::onn::m3_spawn_count(n))))
+            }
+            // omc_self_instantiate(items: string[], task_hint: string)
+            //   -> dict[] of specialists. Each specialist:
+            //     {fold_index, summary, mu, sigma, dominant_attractor,
+            //      resonance, wave_amplitude, item_count}
+            // Specialist count is m3_spawn_count(len(items)).
+            "omc_self_instantiate" => {
+                if args.len() < 2 {
+                    return Err("omc_self_instantiate requires (items: string[], task_hint: string)".to_string());
+                }
+                let items_v = self.eval_expr(&args[0])?;
+                let task_hint = self.eval_expr(&args[1])?.to_display_string();
+                let items: Vec<String> = if let Value::Array(arr) = items_v {
+                    arr.items.borrow().iter().map(|v| v.to_display_string()).collect()
+                } else {
+                    return Err("omc_self_instantiate: items must be a string array".to_string());
+                };
+                let specs = crate::onn::self_instantiate(&items, &task_hint);
+                let out: Vec<Value> = specs.iter().map(|s| {
+                    let mut m = std::collections::BTreeMap::new();
+                    m.insert("fold_index".to_string(), Value::HInt(HInt::new(s.fold_index as i64)));
+                    m.insert("summary".to_string(), Value::String(s.summary.clone()));
+                    m.insert("mu".to_string(), Value::HFloat(s.mu));
+                    m.insert("sigma".to_string(), Value::HFloat(s.sigma));
+                    m.insert("dominant_attractor".to_string(),
+                        Value::HInt(HInt::new(s.dominant_attractor)));
+                    m.insert("resonance".to_string(), Value::HFloat(s.resonance));
+                    m.insert("wave_amplitude".to_string(), Value::HFloat(s.wave_amplitude));
+                    m.insert("item_count".to_string(), Value::HInt(HInt::new(s.item_count as i64)));
+                    Value::dict_from(m)
+                }).collect();
+                Ok(Value::Array(HArray::from_vec(out)))
+            }
+            // omc_fold_back(parent_mu, parent_sigma, parent_turn,
+            //               specialists: dict[]) -> dict
+            //   Updated {mu, sigma, turn_count, dominant_attractor,
+            //   num_specialists_folded, resonance}.
+            "omc_fold_back" => {
+                if args.len() < 4 {
+                    return Err("omc_fold_back requires (parent_mu, parent_sigma, parent_turn, specialists)".to_string());
+                }
+                let parent_mu = self.eval_expr(&args[0])?.to_float();
+                let parent_sigma = self.eval_expr(&args[1])?.to_float();
+                let parent_turn = self.eval_expr(&args[2])?.to_int();
+                let specs_v = self.eval_expr(&args[3])?;
+                let arr = if let Value::Array(a) = specs_v { a } else {
+                    return Err("omc_fold_back: specialists must be a dict array".to_string());
+                };
+                // Reconstruct Specialist structs from the dicts.
+                let mut specs: Vec<crate::onn::Specialist> = Vec::new();
+                for item in arr.items.borrow().iter() {
+                    let d = if let Value::Dict(d) = item { d } else { continue; };
+                    let d = d.borrow();
+                    specs.push(crate::onn::Specialist {
+                        fold_index: d.get("fold_index").map(|v| v.to_int()).unwrap_or(0) as usize,
+                        summary: d.get("summary").map(|v| v.to_display_string()).unwrap_or_default(),
+                        mu: d.get("mu").map(|v| v.to_float()).unwrap_or(0.0),
+                        sigma: d.get("sigma").map(|v| v.to_float()).unwrap_or(0.0),
+                        dominant_attractor: d.get("dominant_attractor").map(|v| v.to_int()).unwrap_or(0),
+                        resonance: d.get("resonance").map(|v| v.to_float()).unwrap_or(0.0),
+                        wave_amplitude: d.get("wave_amplitude").map(|v| v.to_float()).unwrap_or(0.0),
+                        item_count: d.get("item_count").map(|v| v.to_int()).unwrap_or(0) as usize,
+                    });
+                }
+                let folded = crate::onn::fold_back(parent_mu, parent_sigma, parent_turn, &specs);
+                let mut out = std::collections::BTreeMap::new();
+                for (k, v) in folded {
+                    out.insert(k, Value::HFloat(v));
+                }
+                Ok(Value::dict_from(out))
+            }
+            // omc_context_compress(messages: string[]) — convenience:
+            // = omc_self_instantiate(messages, "context-compress"). The
+            // headline application: shrink N messages to ~log_log(N)
+            // specialists carrying μ/σ/attractor state of each "wave"
+            // of the conversation.
+            "omc_context_compress" => {
+                if args.is_empty() {
+                    return Err("omc_context_compress requires (messages: string[])".to_string());
+                }
+                let items_v = self.eval_expr(&args[0])?;
+                let items: Vec<String> = if let Value::Array(arr) = items_v {
+                    arr.items.borrow().iter().map(|v| v.to_display_string()).collect()
+                } else {
+                    return Err("omc_context_compress: messages must be a string array".to_string());
+                };
+                let specs = crate::onn::self_instantiate(&items, "context-compress");
+                let out: Vec<Value> = specs.iter().map(|s| {
+                    let mut m = std::collections::BTreeMap::new();
+                    m.insert("fold_index".to_string(), Value::HInt(HInt::new(s.fold_index as i64)));
+                    m.insert("summary".to_string(), Value::String(s.summary.clone()));
+                    m.insert("mu".to_string(), Value::HFloat(s.mu));
+                    m.insert("sigma".to_string(), Value::HFloat(s.sigma));
+                    m.insert("dominant_attractor".to_string(),
+                        Value::HInt(HInt::new(s.dominant_attractor)));
+                    m.insert("resonance".to_string(), Value::HFloat(s.resonance));
+                    m.insert("item_count".to_string(), Value::HInt(HInt::new(s.item_count as i64)));
+                    Value::dict_from(m)
+                }).collect();
+                Ok(Value::Array(HArray::from_vec(out)))
+            }
+            // omc_prompt_agent(target_id, prompt, sender_id, channel_dir?)
+            //   — write a signed message to target_id's inbox file.
+            //     Returns the packed message ID. Caller polls for response
+            //     separately via read_file + omc_msg_verify.
+            //
+            // The "secondary brain" primitive: any OMC program can fire
+            // off a query to another agent through the substrate channel.
+            "omc_prompt_agent" => {
+                if args.len() < 3 {
+                    return Err("omc_prompt_agent requires (target_id, prompt, sender_id, channel_dir?)".to_string());
+                }
+                let target_id = self.eval_expr(&args[0])?.to_int();
+                let prompt = self.eval_expr(&args[1])?.to_display_string();
+                let sender_id = self.eval_expr(&args[2])?.to_int();
+                let channel = if args.len() >= 4 {
+                    self.eval_expr(&args[3])?.to_display_string()
+                } else { "/home/thearchitect/omc_channel".to_string() };
+                // Sign as kind=1 (request).
+                let canon = crate::canonical::canonicalize(&prompt)
+                    .unwrap_or_else(|_| prompt.clone());
+                let hash = crate::tokenizer::fnv1a_64(canon.as_bytes());
+                let h = HInt::new(hash);
+                let (attractor, _) = crate::phi_pi_fib::nearest_attractor_with_dist(hash);
+                let moduli = crate::tokenizer::CRT_MODULI;
+                let streams = [
+                    sender_id.rem_euclid(moduli[0]),
+                    1i64.rem_euclid(moduli[1]),
+                    hash.rem_euclid(moduli[2]),
+                ];
+                let packed = crate::tokenizer::crt_pack(&streams, moduli).unwrap_or(0);
+                let mut map = std::collections::BTreeMap::new();
+                map.insert("content".to_string(), Value::String(prompt));
+                map.insert("sender_id".to_string(), Value::HInt(HInt::new(sender_id)));
+                map.insert("target_id".to_string(), Value::HInt(HInt::new(target_id)));
+                map.insert("kind".to_string(), Value::HInt(HInt::new(1)));
+                map.insert("content_hash".to_string(), Value::HInt(HInt::new(hash)));
+                map.insert("resonance".to_string(), Value::HFloat(h.resonance));
+                map.insert("him_score".to_string(), Value::HFloat(h.him_score));
+                map.insert("attractor".to_string(), Value::HInt(HInt::new(attractor)));
+                map.insert("packed".to_string(), Value::HInt(HInt::new(packed)));
+                let msg = Value::dict_from(map);
+                let wire = serde_json::to_string(&crate::interpreter::value_to_json(&msg))
+                    .unwrap_or_default();
+                let path = format!("{}/prompt_to_{}.json", channel, target_id);
+                std::fs::write(&path, wire).map_err(|e|
+                    format!("omc_prompt_agent: write {}: {}", path, e))?;
+                Ok(Value::HInt(HInt::new(packed)))
+            }
             "omc_msg_serialize" => {
                 // Convert a signed-message dict into a JSON wire string.
                 // Useful when writing to a shared file / pipe / socket.
