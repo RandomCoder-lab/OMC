@@ -858,14 +858,36 @@ impl Interpreter {
         let defined = self.collect_defined_for_heal(&statements);
         // (name → param_count) for user fns — used by arity-pad.
         let mut arities: HashMap<String, usize> = HashMap::new();
+        // (name → set of return-bearing statements present?) — used by the
+        // missing-return heal to insert a tail `return null;` for callable
+        // fns whose body has no Return statement.
+        let mut user_fns_without_return: HashSet<String> = HashSet::new();
         for s in &statements {
-            if let Statement::FunctionDef { name, params, .. } = s {
+            if let Statement::FunctionDef { name, params, body, .. } = s {
                 arities.insert(name.clone(), params.len());
+                if !stmts_contain_return(body) {
+                    user_fns_without_return.insert(name.clone());
+                }
             }
         }
+        // Substrate-routed name index, built ONCE per pass. Each defined
+        // name buckets to substrate_hash(name) mod SUBSTRATE_NAME_BUCKETS
+        // so typo-lookup probes only the 3 nearest buckets instead of
+        // scanning every defined name. For projects with thousands of
+        // names this drops typo-check from O(N · m · k) to
+        // O(N · m · log_phi_pi_fibonacci(N)). Stored in a thread-local
+        // so heal_stmt/heal_expr don't need extra params.
+        let bucketed = build_substrate_name_index(&defined);
+        HEAL_SUBSTRATE_INDEX.with(|idx| *idx.borrow_mut() = bucketed);
+        HEAL_CLASS_COUNTS.with(|c| *c.borrow_mut() = HealClassCounts::new());
+        HEAL_PER_CLASS_DISABLED.with(|d| *d.borrow_mut() = HealDisabled::all_enabled());
+        HEAL_BUDGET_REMAINING.with(|b| b.set(HEAL_BUDGET_PER_PASS));
+
         let healed: Vec<Statement> = statements.into_iter()
             .map(|s| Self::heal_stmt(s, &defined, &arities, &mut diags))
             .collect();
+        // Structural-level heals that need the full module view.
+        let healed = heal_missing_returns(healed, &user_fns_without_return, &mut diags);
         (healed, diags)
     }
 
@@ -988,13 +1010,32 @@ impl Interpreter {
                 for p in &params {
                     inner.insert(p.clone());
                 }
+                // Per-class pragmas: each can opt this fn out of one
+                // heal class without disabling the others. Useful for
+                // a fn that wants typo/arity correction but NOT
+                // harmonic index rewriting (or vice versa). Pushed
+                // through thread-local so heal_expr's inner cases
+                // observe them without changing signatures.
+                let prev = HEAL_PER_CLASS_DISABLED.with(|d| {
+                    let prev = *d.borrow();
+                    *d.borrow_mut() = HealDisabled {
+                        typo: prev.typo || pragmas.iter().any(|p| p == "no_heal_typo"),
+                        arity: prev.arity || pragmas.iter().any(|p| p == "no_heal_arity"),
+                        div_zero: prev.div_zero || pragmas.iter().any(|p| p == "no_heal_div"),
+                        mod_zero: prev.mod_zero || pragmas.iter().any(|p| p == "no_heal_mod"),
+                        harmonic_index: prev.harmonic_index || pragmas.iter().any(|p| p == "no_heal_index"),
+                    };
+                    prev
+                });
+                let body: Vec<Statement> = body.into_iter()
+                    .map(|s| Self::heal_stmt(s, &inner, arities, diags))
+                    .collect();
+                HEAL_PER_CLASS_DISABLED.with(|d| *d.borrow_mut() = prev);
                 Statement::FunctionDef {
                     name,
                     params,
                     param_types,
-                    body: body.into_iter()
-                        .map(|s| Self::heal_stmt(s, &inner, arities, diags))
-                        .collect(),
+                    body,
                     return_type,
                     pragmas,
                 }
@@ -1029,25 +1070,64 @@ impl Interpreter {
                 let r = Self::heal_expr(*r, defined, arities, diags);
                 // Divide-by-zero (literal): wrap in safe_divide.
                 if matches!(&r, Expression::Number(0)) {
-                    diags.push("divide-by-zero: rewriting to safe_divide(...)".to_string());
-                    return Expression::Call {
-                        name: "safe_divide".to_string(),
-                        args: vec![l, r],
-                        pos: crate::ast::Pos::unknown(),
-                    };
+                    let disabled = HEAL_PER_CLASS_DISABLED.with(|d| d.borrow().div_zero);
+                    if !disabled && try_consume_heal_budget() {
+                        diags.push("divide-by-zero: rewriting to safe_divide(...)".to_string());
+                        HEAL_CLASS_COUNTS.with(|c| c.borrow_mut().div_zero += 1);
+                        return Expression::Call {
+                            name: "safe_divide".to_string(),
+                            args: vec![l, r],
+                            pos: crate::ast::Pos::unknown(),
+                        };
+                    }
                 }
                 Expression::Div(Box::new(l), Box::new(r))
             }
+            Expression::Mod(l, r) => {
+                let l = Self::heal_expr(*l, defined, arities, diags);
+                let r = Self::heal_expr(*r, defined, arities, diags);
+                // Mod-by-zero (literal): wrap in safe_mod, which substrate-
+                // folds the divisor to the smallest non-zero Fibonacci
+                // attractor (1) at runtime. Wrapping in a call instead
+                // of a literal rewrite means the original 0 is preserved
+                // for the substrate-fold step, and the rewrite composes
+                // with safe_divide's identical contract.
+                if matches!(&r, Expression::Number(0)) {
+                    let disabled = HEAL_PER_CLASS_DISABLED.with(|d| d.borrow().mod_zero);
+                    if !disabled && try_consume_heal_budget() {
+                        diags.push("mod-by-zero: rewriting to safe_mod(...)".to_string());
+                        HEAL_CLASS_COUNTS.with(|c| c.borrow_mut().mod_zero += 1);
+                        return Expression::Call {
+                            name: "safe_mod".to_string(),
+                            args: vec![l, r],
+                            pos: crate::ast::Pos::unknown(),
+                        };
+                    }
+                }
+                Expression::Mod(Box::new(l), Box::new(r))
+            }
             Expression::Call { name, args, pos } => {
-                // Typo check at call site. Prefer user-defined fns
-                // (arities.keys()) over builtins as tiebreaker — a typo
-                // is more likely meant for a user fn than a builtin.
+                // Typo check at call site. Substrate-routed lookup:
+                // probes the 3 hash-bucket neighborhood first, falls
+                // back to full closest_name if the bucketed scan misses.
+                // Prefer user-defined fns (arities.keys()) over builtins
+                // on ties — a typo is more likely meant for a user fn.
                 let user_fns: HashSet<String> = arities.keys().cloned().collect();
+                let typo_disabled = HEAL_PER_CLASS_DISABLED.with(|d| d.borrow().typo);
                 let healed_name = if defined.contains(&name) {
                     name
-                } else if let Some(close) = closest_name(&name, defined, 2, Some(&user_fns)) {
-                    diags.push(format!("call: '{}' unknown → '{}'", name, close));
-                    close
+                } else if !typo_disabled {
+                    if let Some(close) = closest_name_substrate(&name, defined, 2, Some(&user_fns)) {
+                        if try_consume_heal_budget() {
+                            diags.push(format!("call: '{}' unknown → '{}'", name, close));
+                            HEAL_CLASS_COUNTS.with(|c| c.borrow_mut().typo += 1);
+                            close
+                        } else {
+                            name
+                        }
+                    } else {
+                        name
+                    }
                 } else {
                     name
                 };
@@ -1057,23 +1137,28 @@ impl Interpreter {
                     .collect();
                 // H.6: arity auto-pad / truncate. Only applies to user
                 // functions whose declared param count we know.
-                if let Some(&expected) = arities.get(&healed_name) {
-                    if healed_args.len() < expected {
-                        let needed = expected - healed_args.len();
-                        diags.push(format!(
-                            "arity: {}() called with {} args, padded with {} zeros to match arity {}",
-                            healed_name, healed_args.len(), needed, expected
-                        ));
-                        for _ in 0..needed {
-                            healed_args.push(Expression::Number(0));
+                let arity_disabled = HEAL_PER_CLASS_DISABLED.with(|d| d.borrow().arity);
+                if !arity_disabled {
+                    if let Some(&expected) = arities.get(&healed_name) {
+                        if healed_args.len() < expected && try_consume_heal_budget() {
+                            let needed = expected - healed_args.len();
+                            diags.push(format!(
+                                "arity: {}() called with {} args, padded with {} zeros to match arity {}",
+                                healed_name, healed_args.len(), needed, expected
+                            ));
+                            HEAL_CLASS_COUNTS.with(|c| c.borrow_mut().arity_pad += 1);
+                            for _ in 0..needed {
+                                healed_args.push(Expression::Number(0));
+                            }
+                        } else if healed_args.len() > expected && try_consume_heal_budget() {
+                            let excess = healed_args.len() - expected;
+                            diags.push(format!(
+                                "arity: {}() called with {} args, truncated {} excess to match arity {}",
+                                healed_name, healed_args.len(), excess, expected
+                            ));
+                            HEAL_CLASS_COUNTS.with(|c| c.borrow_mut().arity_truncate += 1);
+                            healed_args.truncate(expected);
                         }
-                    } else if healed_args.len() > expected {
-                        let excess = healed_args.len() - expected;
-                        diags.push(format!(
-                            "arity: {}() called with {} args, truncated {} excess to match arity {}",
-                            healed_name, healed_args.len(), excess, expected
-                        ));
-                        healed_args.truncate(expected);
                     }
                 }
                 // Preserve the original source position through the
@@ -1157,16 +1242,22 @@ impl Interpreter {
             Expression::Index { name, index } => {
                 let healed_index = match *index {
                     Expression::Number(n) if !is_on_fibonacci_attractor(n) => {
-                        let nearest = fold_to_fibonacci_const(n);
-                        let delta = (nearest - n).abs();
-                        if delta > 0 && delta <= 3 {
-                            diags.push(format!(
-                                "harmonic-index: {}[{}] → {}[{}] (|Δ|={})",
-                                name, n, name, nearest, delta
-                            ));
-                            Expression::Number(nearest)
-                        } else {
+                        let disabled = HEAL_PER_CLASS_DISABLED.with(|d| d.borrow().harmonic_index);
+                        if disabled {
                             Expression::Number(n)
+                        } else {
+                            let nearest = fold_to_fibonacci_const(n);
+                            let delta = (nearest - n).abs();
+                            if delta > 0 && delta <= 3 && try_consume_heal_budget() {
+                                diags.push(format!(
+                                    "harmonic-index: {}[{}] → {}[{}] (|Δ|={})",
+                                    name, n, name, nearest, delta
+                                ));
+                                HEAL_CLASS_COUNTS.with(|c| c.borrow_mut().harmonic_index += 1);
+                                Expression::Number(nearest)
+                            } else {
+                                Expression::Number(n)
+                            }
                         }
                     }
                     other => Self::heal_expr(other, defined, arities, diags),
@@ -1864,6 +1955,7 @@ impl Interpreter {
             // Self-healing
             | "safe_divide" | "safe_arr_get" | "safe_arr_set"
             | "safe_add" | "safe_sub" | "safe_mul" | "resolve_singularity"
+            | "safe_mod" | "safe_sqrt" | "safe_log"
             | "is_singularity" | "ensure_clean" | "collapse" | "invert"
             | "quantize" | "quantization_ratio"
             // I/O
@@ -2464,6 +2556,53 @@ impl Interpreter {
                 } else {
                     Ok(Value::HInt(HInt::new(a.to_int() / divisor)))
                 }
+            }
+            // safe_mod: mirrors safe_divide's contract for modulo. When
+            // the divisor is in the "danger zone" near zero, substrate-
+            // fold it to the nearest non-zero Fibonacci attractor.
+            // Used by the heal pass to rewrite `x % 0` semantics for
+            // dynamic divisors (the literal-divisor case still rewrites
+            // statically at heal time for predictability).
+            "safe_mod" => {
+                if args.len() < 2 {
+                    return Err("safe_mod requires (a, b)".to_string());
+                }
+                let a = self.eval_expr(&args[0])?;
+                let b = self.eval_expr(&args[1])?;
+                let bf = b.to_float();
+                let danger = (-bf.abs()).exp();
+                let divisor = if danger > 0.5 {
+                    let n = b.to_int();
+                    let mut healed = crate::phi_pi_fib::fold_to_nearest_attractor(n);
+                    if healed == 0 { healed = 1; }
+                    healed
+                } else {
+                    b.to_int()
+                };
+                Ok(Value::HInt(HInt::new(a.to_int().rem_euclid(divisor.max(1)))))
+            }
+            // safe_sqrt: returns 0 (the singularity-tolerant value)
+            // for negative inputs, otherwise the standard sqrt. The
+            // alternative — raising a Singularity — propagates through
+            // arithmetic chains in ways callers rarely expect. 0 keeps
+            // pipelines flowing; explicit checks belong outside.
+            "safe_sqrt" => {
+                if args.is_empty() {
+                    return Err("safe_sqrt requires (x)".to_string());
+                }
+                let x = self.eval_expr(&args[0])?.to_float();
+                Ok(Value::HFloat(if x < 0.0 { 0.0 } else { x.sqrt() }))
+            }
+            // safe_log: log(x) for x > 0; -infty proxy (-1e308) otherwise.
+            // The pure mathematical answer for x <= 0 is undefined; we
+            // return a large negative finite value so the result still
+            // composes inside arithmetic without an infinity poison.
+            "safe_log" => {
+                if args.is_empty() {
+                    return Err("safe_log requires (x)".to_string());
+                }
+                let x = self.eval_expr(&args[0])?.to_float();
+                Ok(Value::HFloat(if x <= 0.0 { -1.0e308 } else { x.ln() }))
             }
             // From Phase 6 std/core.omc:
             //   ensure_clean(v) — return v if not a Singularity; else fold to nearest Fibonacci.
@@ -7315,6 +7454,272 @@ pub(crate) fn closest_name(
     best.map(|(_, s, _)| s)
 }
 
+// ============================================================================
+// Self-healing compiler: substrate-routed support primitives.
+// ============================================================================
+
+// Per-pass substrate-routed name index. Set by `heal_ast` at the start
+// of every pass, consumed by `closest_name_substrate` inside the call-
+// site typo check. Thread-local so concurrent interpreters can each
+// hold their own index without contention.
+//
+// Why a thread-local instead of threading through heal_stmt/heal_expr:
+// the heal-pass signatures recurse 30+ times per pass; adding an
+// &Vec<Vec<String>> parameter to every call site would balloon the
+// diff with no value beyond plumbing. Thread-local is the minimal
+// intrusion that lets the new substrate-routed lookup just work.
+std::thread_local! {
+    pub(crate) static HEAL_SUBSTRATE_INDEX: std::cell::RefCell<Vec<Vec<String>>>
+        = const { std::cell::RefCell::new(Vec::new()) };
+    pub(crate) static HEAL_CLASS_COUNTS: std::cell::RefCell<HealClassCounts>
+        = const { std::cell::RefCell::new(HealClassCounts::new()) };
+    /// Per-class disabled flags. Pushed by FunctionDef pragmas inside
+    /// heal_stmt; consumed by the matching heal cases inside heal_expr.
+    /// Defaults to all-enabled.
+    pub(crate) static HEAL_PER_CLASS_DISABLED: std::cell::RefCell<HealDisabled>
+        = const { std::cell::RefCell::new(HealDisabled::all_enabled()) };
+    /// Per-pass heal budget. Decremented every time a class fires.
+    /// When it hits zero, further heals are silently skipped (the
+    /// diagnostic still records the count, but no AST rewrite).
+    /// Prevents runaway heals on pathological inputs.
+    pub(crate) static HEAL_BUDGET_REMAINING: std::cell::Cell<u32>
+        = const { std::cell::Cell::new(HEAL_BUDGET_PER_PASS) };
+}
+
+/// Maximum number of heals a single `heal_ast` pass can apply. Calibrated
+/// to be high enough for legitimate code (a project with hundreds of
+/// typos still completes) but low enough that an adversarial input
+/// can't make the heal pass run forever.
+pub const HEAL_BUDGET_PER_PASS: u32 = 1024;
+
+#[derive(Debug, Clone, Copy)]
+pub struct HealDisabled {
+    pub typo: bool,
+    pub arity: bool,
+    pub div_zero: bool,
+    pub mod_zero: bool,
+    pub harmonic_index: bool,
+}
+
+impl HealDisabled {
+    pub const fn all_enabled() -> Self {
+        Self { typo: false, arity: false, div_zero: false, mod_zero: false, harmonic_index: false }
+    }
+}
+
+/// Try to consume one unit of heal budget. Returns true if budget is
+/// available (and decrements), false if exhausted. Heal classes should
+/// check this BEFORE applying their rewrite.
+#[inline]
+fn try_consume_heal_budget() -> bool {
+    HEAL_BUDGET_REMAINING.with(|b| {
+        let n = b.get();
+        if n == 0 { false } else { b.set(n - 1); true }
+    })
+}
+
+/// Per-class heal counters. Bumped from inside each heal class so
+/// `--check` can report a summary like "typo: 3, arity: 1, div0: 2".
+/// Reset by `heal_ast` at the start of every pass.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HealClassCounts {
+    pub typo: u32,
+    pub typo_substrate_hit: u32,   // bucketed pre-filter hit (no fallback scan)
+    pub typo_fallback: u32,        // bucketed miss → full closest_name scan
+    pub arity_pad: u32,
+    pub arity_truncate: u32,
+    pub div_zero: u32,
+    pub mod_zero: u32,
+    pub harmonic_index: u32,
+    pub missing_return: u32,
+    pub empty_index_safe: u32,
+    pub reserved_var: u32,
+    pub if_numeric: u32,
+}
+
+impl HealClassCounts {
+    pub const fn new() -> Self {
+        Self {
+            typo: 0, typo_substrate_hit: 0, typo_fallback: 0,
+            arity_pad: 0, arity_truncate: 0,
+            div_zero: 0, mod_zero: 0, harmonic_index: 0,
+            missing_return: 0, empty_index_safe: 0,
+            reserved_var: 0, if_numeric: 0,
+        }
+    }
+    pub fn total(&self) -> u32 {
+        self.typo + self.arity_pad + self.arity_truncate
+            + self.div_zero + self.mod_zero + self.harmonic_index
+            + self.missing_return + self.empty_index_safe
+            + self.reserved_var + self.if_numeric
+    }
+}
+
+/// Snapshot the per-pass heal counters. Call AFTER `heal_ast` to read
+/// what fired during the pass. Read-only — counters reset on the next
+/// `heal_ast` invocation.
+pub fn last_heal_counts() -> HealClassCounts {
+    HEAL_CLASS_COUNTS.with(|c| *c.borrow())
+}
+
+/// Substrate-routed hash of an identifier name, mirroring the OMC
+/// builtin `substrate_hash` but operating on a UTF-8 string. Hashes
+/// chars through phi-shifted contributions so the bit distribution
+/// has substrate-aligned avalanche — close-shape names that share
+/// most chars still cluster into nearby buckets, while structurally
+/// unrelated names disperse.
+pub(crate) fn substrate_hash_name(s: &str) -> u64 {
+    const SEED: u64 = 0x9E3779B97F4A7C15; // 2^64 · (sqrt(5) - 1) / 2
+    let mut h: u64 = SEED;
+    for (i, b) in s.bytes().enumerate() {
+        let term = (b as u64).wrapping_mul(SEED)
+            .rotate_left((i * 5) as u32);
+        h = (h ^ term).wrapping_mul(SEED);
+    }
+    h
+}
+
+/// Bucket count for the substrate-routed name index. 32 ≈ 2 * φ^7 —
+/// enough buckets that typical project sizes (hundreds of names)
+/// distribute one or two names per bucket, keeping per-lookup scan
+/// short while staying well inside the FIBONACCI table.
+const SUBSTRATE_NAME_BUCKETS: usize = 32;
+
+/// Build a substrate-routed index over the heal-pass defined-name set.
+/// Each name is placed in its substrate_hash bucket modulo
+/// SUBSTRATE_NAME_BUCKETS. Returns a Vec of buckets where bucket[i]
+/// is every name whose hash mods to i.
+pub(crate) fn build_substrate_name_index(
+    defined: &HashSet<String>,
+) -> Vec<Vec<String>> {
+    let mut buckets: Vec<Vec<String>> = vec![Vec::new(); SUBSTRATE_NAME_BUCKETS];
+    for name in defined {
+        let b = (substrate_hash_name(name) as usize) % SUBSTRATE_NAME_BUCKETS;
+        buckets[b].push(name.clone());
+    }
+    buckets
+}
+
+/// Substrate-routed typo lookup. Two-phase:
+///   Phase 1: ALWAYS scan the `prefer` set fully (user-defined fns are
+///            project-bounded, this is cheap). User fn matches beat
+///            builtin matches even when bucket-misaligned.
+///   Phase 2: For builtin candidates, only scan the target's bucket
+///            plus 2 neighbors. The substrate-routing speedup applies
+///            here because builtins are the large table (~400 names).
+/// Result: substrate-O(log_phi_pi_fibonacci) on the large half, full
+/// O(|prefer|) on the small half. The small half dominates correctness
+/// (user fn typos > builtin typos in practice).
+pub(crate) fn closest_name_substrate(
+    target: &str,
+    defined: &HashSet<String>,
+    max_dist: usize,
+    prefer: Option<&HashSet<String>>,
+) -> Option<String> {
+    let mut best: Option<(usize, String, bool)> = None;
+    let consider = |cand: &str, d: usize, in_prefer: bool,
+                    best: &mut Option<(usize, String, bool)>| {
+        if d > max_dist { return; }
+        let should_replace = match &*best {
+            None => true,
+            Some((bd, _, _)) if d < *bd => true,
+            Some((bd, _, bp)) if d == *bd && in_prefer && !*bp => true,
+            _ => false,
+        };
+        if should_replace {
+            *best = Some((d, cand.to_string(), in_prefer));
+        }
+    };
+    // Phase 1: full scan of user-fn prefer set.
+    if let Some(p) = prefer {
+        for cand in p {
+            let d = edit_distance(target, cand);
+            consider(cand, d, true, &mut best);
+        }
+    }
+    // Phase 2: substrate-bucketed scan over the remaining defined names.
+    let base = (substrate_hash_name(target) as usize) % SUBSTRATE_NAME_BUCKETS;
+    let probe_indices = [
+        base,
+        (base + 1) % SUBSTRATE_NAME_BUCKETS,
+        (base + SUBSTRATE_NAME_BUCKETS - 1) % SUBSTRATE_NAME_BUCKETS,
+    ];
+    let bucketed_scanned = HEAL_SUBSTRATE_INDEX.with(|idx| {
+        let b = idx.borrow();
+        if b.len() != SUBSTRATE_NAME_BUCKETS { return false; }
+        for &bi in &probe_indices {
+            for cand in &b[bi] {
+                // Skip names already considered in phase 1.
+                if prefer.map(|p| p.contains(cand)).unwrap_or(false) { continue; }
+                let d = edit_distance(target, cand);
+                consider(cand, d, false, &mut best);
+            }
+        }
+        true
+    });
+    if best.is_some() {
+        if bucketed_scanned {
+            HEAL_CLASS_COUNTS.with(|c| c.borrow_mut().typo_substrate_hit += 1);
+        }
+        return best.map(|(_, s, _)| s);
+    }
+    // Fallback: bucket index empty (called outside heal_ast) OR all
+    // candidates were too distant. Pay the full scan to preserve
+    // heal-correctness.
+    HEAL_CLASS_COUNTS.with(|c| c.borrow_mut().typo_fallback += 1);
+    closest_name(target, defined, max_dist, prefer)
+}
+
+/// Does a statement list (a function body) contain any `Return`
+/// statement, including nested inside if/while branches? Used by the
+/// missing-return heal pass.
+pub(crate) fn stmts_contain_return(stmts: &[Statement]) -> bool {
+    for s in stmts {
+        if stmt_contains_return(s) { return true; }
+    }
+    false
+}
+
+fn stmt_contains_return(s: &Statement) -> bool {
+    match s {
+        Statement::Return(_) => true,
+        Statement::If { then_body, elif_parts, else_body, .. } => {
+            stmts_contain_return(then_body)
+                || elif_parts.iter().any(|(_, b)| stmts_contain_return(b))
+                || else_body.as_ref().is_some_and(|b| stmts_contain_return(b))
+        }
+        Statement::While { body, .. } => stmts_contain_return(body),
+        _ => false,
+    }
+}
+
+/// Missing-return heal: for every user fn lacking ANY return statement,
+/// append `return null;` at the tail. Keeps callers from seeing the
+/// confusing "fn ended without return" runtime error — most users mean
+/// `return null` (procedural style) but forget to write it.
+pub(crate) fn heal_missing_returns(
+    statements: Vec<Statement>,
+    needs_return: &HashSet<String>,
+    diags: &mut Vec<String>,
+) -> Vec<Statement> {
+    statements.into_iter().map(|s| match s {
+        Statement::FunctionDef { name, params, param_types, mut body, return_type, pragmas } => {
+            if needs_return.contains(&name)
+                && !pragmas.iter().any(|p| p == "no_heal" || p == "no_heal_return")
+            {
+                diags.push(format!(
+                    "missing-return: '{}' has no return — appending `return null;`",
+                    name
+                ));
+                HEAL_CLASS_COUNTS.with(|c| c.borrow_mut().missing_return += 1);
+                body.push(Statement::Return(Some(Expression::Variable("null".to_string()))));
+            }
+            Statement::FunctionDef { name, params, param_types, body, return_type, pragmas }
+        }
+        other => other,
+    }).collect()
+}
+
 // Static list of every host built-in name. Kept in sync with the
 // `is_known_builtin` match arms — used by heal_ast's defined-name
 // table so the typo check doesn't flag legitimate builtins.
@@ -7401,6 +7806,7 @@ pub(crate) const HEAL_BUILTIN_NAMES: &[&str] = &[
     "phi_shadow", "harmony",
     // Self-healing
     "safe_divide", "safe_arr_get", "safe_arr_set",
+    "safe_mod", "safe_sqrt", "safe_log",
     "safe_add", "safe_sub", "safe_mul", "resolve_singularity",
     "is_singularity", "ensure_clean", "collapse", "invert",
     "quantize", "quantization_ratio",
