@@ -9,6 +9,7 @@ pub mod docs;
 pub mod errors;
 pub mod tokenizer;
 pub mod canonical;
+pub mod code_intel;
 pub mod runtime;
 pub mod circuits;      // Genetic logic circuits
 pub mod evolution;     // Genetic operators

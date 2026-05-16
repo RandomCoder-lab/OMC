@@ -1,0 +1,182 @@
+# Code intelligence — the LLM-iteration primitives layered on top of
+# canonical + tokenize + hash.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) {
+    if !cond { test_record_failure(msg); }
+}
+
+# ---- omc_code_summary ----
+
+fn test_summary_extracts_functions() {
+    h s = omc_code_summary("fn f(x) { return x; } fn g(a, b) { return a + b; }");
+    h fns = dict_get(s, "functions");
+    assert_eq(arr_len(fns), 2, "two functions found");
+    h f0 = arr_get(fns, 0);
+    assert_eq(dict_get(f0, "name"), "f", "first fn name");
+    h f1 = arr_get(fns, 1);
+    assert_eq(dict_get(f1, "name"), "g", "second fn name");
+}
+
+fn test_summary_collects_calls() {
+    h s = omc_code_summary("fn f(x) { return arr_softmax(arr_neg(x)); }");
+    h calls = dict_get(s, "calls");
+    # calls should include arr_softmax and arr_neg
+    h has_softmax = 0;
+    h has_neg = 0;
+    h i = 0;
+    while i < arr_len(calls) {
+        h c = arr_get(calls, i);
+        if c == "arr_softmax" { has_softmax = 1; }
+        if c == "arr_neg" { has_neg = 1; }
+        i = i + 1;
+    }
+    assert_eq(has_softmax, 1, "arr_softmax detected");
+    assert_eq(has_neg, 1, "arr_neg detected");
+}
+
+# ---- omc_code_extract_fns ----
+
+fn test_extract_fns_returns_names() {
+    h names = omc_code_extract_fns("fn foo() {} fn bar() {} fn baz() {}");
+    assert_eq(arr_len(names), 3, "three names");
+}
+
+# ---- omc_code_dependencies ----
+
+fn test_dependencies_lists_builtins() {
+    h deps = omc_code_dependencies("fn f(xs) { return arr_softmax(xs); }");
+    assert_true(arr_len(deps) >= 1, "at least one dep");
+}
+
+# ---- omc_code_complexity ----
+
+fn test_complexity_straight_line() {
+    h c = omc_code_complexity("fn f(x) { return x; }");
+    assert_true(dict_get(c, "complexity") >= 1, "complexity at least 1");
+    assert_true(dict_get(c, "ast_size") > 0, "non-zero ast_size");
+    assert_true(dict_get(c, "ast_depth") > 0, "non-zero depth");
+}
+
+fn test_complexity_grows_with_branches() {
+    h simple = omc_code_complexity("fn f(x) { return x; }");
+    h branchy = omc_code_complexity("fn f(x) { if x > 0 { return 1; } if x < 0 { return 0 - 1; } return 0; }");
+    assert_true(dict_get(branchy, "complexity") > dict_get(simple, "complexity"),
+        "branchy code has higher complexity");
+}
+
+# ---- omc_code_minify ----
+
+fn test_minify_strips_newlines() {
+    h m = omc_code_minify("fn f(x) {\n    return x;\n}");
+    assert_true(re_match("\n", m) == 0, "no newlines after minify");
+    assert_true(re_match("return", m) == 1, "still has return");
+}
+
+# ---- omc_code_similarity ----
+
+fn test_similarity_self_is_one() {
+    h sim = omc_code_similarity(
+        "fn f(x) { return arr_softmax(x); }",
+        "fn f(x) { return arr_softmax(x); }"
+    );
+    h diff = sim - 1.0;
+    if diff < 0.0 { diff = 0.0 - diff; }
+    assert_true(diff < 0.001, "self-similarity is 1.0");
+}
+
+fn test_similarity_alpha_equiv_is_one() {
+    # Alpha-equivalent → canonicals identical → similarity 1.0
+    h sim = omc_code_similarity(
+        "fn f(x) { return x; }",
+        "fn f(a) { return a; }"
+    );
+    h diff = sim - 1.0;
+    if diff < 0.0 { diff = 0.0 - diff; }
+    assert_true(diff < 0.001, "alpha-equivalence → similarity 1");
+}
+
+fn test_similarity_different_is_less_than_one() {
+    h sim = omc_code_similarity(
+        "fn f(x) { return x; }",
+        "fn f(x) { return arr_softmax(arr_neg(x)); }"
+    );
+    assert_true(sim < 1.0, "different programs → sim < 1");
+}
+
+# ---- omc_code_fingerprint ----
+
+fn test_fingerprint_stable_under_rename() {
+    h fp1 = omc_code_fingerprint("fn f(x) { return arr_softmax(x); }");
+    h fp2 = omc_code_fingerprint("fn f(y) { return arr_softmax(y); }");
+    assert_eq(fp1, fp2, "fingerprint stable under alpha-rename");
+}
+
+fn test_fingerprint_differs_for_different_code() {
+    h fp1 = omc_code_fingerprint("fn f(x) { return x; }");
+    h fp2 = omc_code_fingerprint("fn f(x) { return arr_softmax(x); }");
+    assert_true(fp1 != fp2, "different code → different fp");
+}
+
+# ---- omc_code_signature ----
+
+fn test_signature_shows_fn_names() {
+    h sig = omc_code_signature("fn add(x, y) { return x + y; }");
+    assert_true(re_match("fn add", sig) == 1, "signature has 'fn add'");
+}
+
+# ---- omc_code_uses_python ----
+
+fn test_uses_python_yes() {
+    assert_eq(omc_code_uses_python("py_import(\"numpy\");"), 1, "detects py_import");
+}
+
+fn test_uses_python_no() {
+    assert_eq(omc_code_uses_python("fn f(x) { return x; }"), 0, "no py_*");
+}
+
+# ---- omc_code_uses_substrate ----
+
+fn test_uses_substrate_yes() {
+    assert_eq(omc_code_uses_substrate("fn f(x) { return arr_resonance_vec(x); }"), 1,
+        "arr_resonance_vec is substrate");
+}
+
+fn test_uses_substrate_no_for_plain_code() {
+    assert_eq(omc_code_uses_substrate("fn f(x) { return x + 1; }"), 0,
+        "plain code does not use substrate");
+}
+
+# ---- omc_completion_hint ----
+
+fn test_completion_hint_finds_arr_prefix() {
+    h hints = omc_completion_hint("arr_sub");
+    # Should include at least arr_sub itself.
+    assert_true(arr_len(hints) >= 1, "completion hints present");
+}
+
+# ---- omc_canonical_hash ----
+
+fn test_canonical_hash_matches_under_rename() {
+    h h1 = omc_canonical_hash("fn f(x) { h tmp = x * 2; return tmp; }");
+    h h2 = omc_canonical_hash("fn f(a) { h v = a * 2; return v; }");
+    assert_eq(dict_get(h1, "raw"), dict_get(h2, "raw"),
+        "canonical-hash stable under rename");
+}
+
+# ---- omc_builtin_count + omc_unique_count ----
+
+fn test_introspection_counts() {
+    h total = omc_builtin_count();
+    h unique = omc_unique_count();
+    h cats = omc_categories_count();
+    assert_true(total > 100, "lots of builtins documented");
+    assert_true(unique > 5, "several OMC-unique");
+    assert_true(cats > 5, "multiple categories");
+    assert_true(unique <= total, "unique can't exceed total");
+}

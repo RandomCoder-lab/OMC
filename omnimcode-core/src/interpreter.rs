@@ -7264,6 +7264,223 @@ impl Interpreter {
                 let eq = crate::canonical::equivalent(&a, &b);
                 Ok(Value::HInt(HInt::new(if eq { 1 } else { 0 })))
             }
+            // ---- Code intelligence (LLM-iteration primitives) ------
+            //
+            // These give an LLM structural information about code
+            // without re-reading the source: function inventory, call
+            // dependencies, complexity, similarity, fingerprints.
+            "omc_code_summary" => {
+                if args.is_empty() {
+                    return Err("omc_code_summary requires (code: string)".to_string());
+                }
+                let code = self.eval_expr(&args[0])?.to_display_string();
+                let s = crate::code_intel::summarise(&code)
+                    .map_err(|e| format!("omc_code_summary: {}", e))?;
+                let mut map = std::collections::BTreeMap::new();
+                // Function inventory.
+                let fns: Vec<Value> = s.functions.iter().map(|f| {
+                    let mut fm = std::collections::BTreeMap::new();
+                    fm.insert("name".to_string(), Value::String(f.name.clone()));
+                    fm.insert("params".to_string(), Value::Array(HArray::from_vec(
+                        f.params.iter().map(|p| Value::String(p.clone())).collect()
+                    )));
+                    fm.insert("body_stmts".to_string(), Value::HInt(HInt::new(f.body_stmts as i64)));
+                    fm.insert("canonical_hash".to_string(), Value::HInt(HInt::new(f.canonical_hash)));
+                    if let Some(rt) = &f.return_type {
+                        fm.insert("return_type".to_string(), Value::String(rt.clone()));
+                    }
+                    if !f.pragmas.is_empty() {
+                        fm.insert("pragmas".to_string(), Value::Array(HArray::from_vec(
+                            f.pragmas.iter().map(|p| Value::String(p.clone())).collect()
+                        )));
+                    }
+                    Value::dict_from(fm)
+                }).collect();
+                map.insert("functions".to_string(), Value::Array(HArray::from_vec(fns)));
+                map.insert("classes".to_string(), Value::Array(HArray::from_vec(
+                    s.classes.iter().map(|c| Value::String(c.clone())).collect()
+                )));
+                map.insert("imports".to_string(), Value::Array(HArray::from_vec(
+                    s.imports.iter().map(|i| Value::String(i.clone())).collect()
+                )));
+                map.insert("calls".to_string(), Value::Array(HArray::from_vec(
+                    s.calls.iter().map(|c| Value::String(c.clone())).collect()
+                )));
+                map.insert("stmt_count".to_string(), Value::HInt(HInt::new(s.stmt_count as i64)));
+                Ok(Value::dict_from(map))
+            }
+            "omc_code_extract_fns" => {
+                // Lightweight version: just the function names.
+                if args.is_empty() {
+                    return Err("omc_code_extract_fns requires (code)".to_string());
+                }
+                let code = self.eval_expr(&args[0])?.to_display_string();
+                let s = crate::code_intel::summarise(&code)
+                    .map_err(|e| format!("omc_code_extract_fns: {}", e))?;
+                let out: Vec<Value> = s.functions.iter()
+                    .map(|f| Value::String(f.name.clone()))
+                    .collect();
+                Ok(Value::Array(HArray::from_vec(out)))
+            }
+            "omc_code_dependencies" => {
+                // What does this program call? Useful for "which
+                // builtins does this need?" and "does it use Python?"
+                if args.is_empty() {
+                    return Err("omc_code_dependencies requires (code)".to_string());
+                }
+                let code = self.eval_expr(&args[0])?.to_display_string();
+                let s = crate::code_intel::summarise(&code)
+                    .map_err(|e| format!("omc_code_dependencies: {}", e))?;
+                let out: Vec<Value> = s.calls.iter()
+                    .map(|c| Value::String(c.clone()))
+                    .collect();
+                Ok(Value::Array(HArray::from_vec(out)))
+            }
+            "omc_code_complexity" => {
+                // Cyclomatic complexity. Returns a dict with
+                // {complexity, ast_size, ast_depth} so the LLM can
+                // judge "is this code getting too branchy?"
+                if args.is_empty() {
+                    return Err("omc_code_complexity requires (code)".to_string());
+                }
+                let code = self.eval_expr(&args[0])?.to_display_string();
+                let cpx = crate::code_intel::complexity(&code)
+                    .map_err(|e| format!("omc_code_complexity: {}", e))?;
+                let size = crate::code_intel::ast_size(&code)
+                    .map_err(|e| format!("omc_code_complexity: {}", e))?;
+                let depth = crate::code_intel::ast_depth(&code)
+                    .map_err(|e| format!("omc_code_complexity: {}", e))?;
+                let mut map = std::collections::BTreeMap::new();
+                map.insert("complexity".to_string(), Value::HInt(HInt::new(cpx)));
+                map.insert("ast_size".to_string(), Value::HInt(HInt::new(size)));
+                map.insert("ast_depth".to_string(), Value::HInt(HInt::new(depth)));
+                Ok(Value::dict_from(map))
+            }
+            "omc_code_minify" => {
+                if args.is_empty() {
+                    return Err("omc_code_minify requires (code)".to_string());
+                }
+                let code = self.eval_expr(&args[0])?.to_display_string();
+                match crate::code_intel::minify(&code) {
+                    Ok(m) => Ok(Value::String(m)),
+                    Err(e) => Err(format!("omc_code_minify: {}", e)),
+                }
+            }
+            "omc_code_similarity" => {
+                // Jaccard similarity over canonical token IDs. 1.0 =
+                // alpha-equivalent (so a perfect match implies
+                // semantically the same modulo our canonicalization).
+                // Lower = more different.
+                if args.len() < 2 {
+                    return Err("omc_code_similarity requires (a, b)".to_string());
+                }
+                let a = self.eval_expr(&args[0])?.to_display_string();
+                let b = self.eval_expr(&args[1])?.to_display_string();
+                let s = crate::code_intel::similarity(&a, &b)
+                    .map_err(|e| format!("omc_code_similarity: {}", e))?;
+                Ok(Value::HFloat(s))
+            }
+            "omc_code_fingerprint" => {
+                // Substrate-weighted fingerprint: combines hash + size
+                // + complexity via CRT into one int. Two semantically
+                // equivalent programs get the same fingerprint;
+                // unrelated programs almost never collide.
+                if args.is_empty() {
+                    return Err("omc_code_fingerprint requires (code)".to_string());
+                }
+                let code = self.eval_expr(&args[0])?.to_display_string();
+                match crate::code_intel::substrate_fingerprint(&code) {
+                    Ok(fp) => Ok(Value::HInt(HInt::new(fp))),
+                    Err(e) => Err(format!("omc_code_fingerprint: {}", e)),
+                }
+            }
+            "omc_code_signature" => {
+                // Public API surface: just the top-level fn names +
+                // param counts. The minimum an LLM needs to know to
+                // call a module's exports.
+                if args.is_empty() {
+                    return Err("omc_code_signature requires (code)".to_string());
+                }
+                let code = self.eval_expr(&args[0])?.to_display_string();
+                let s = crate::code_intel::summarise(&code)
+                    .map_err(|e| format!("omc_code_signature: {}", e))?;
+                let lines: Vec<String> = s.functions.iter()
+                    .map(|f| format!("fn {}({})", f.name, f.params.join(", ")))
+                    .collect();
+                Ok(Value::String(lines.join("\n")))
+            }
+            "omc_code_uses_python" => {
+                // 1 if any py_* call appears. Quick safety check —
+                // an embedder might want to refuse Python-embedding
+                // code in sandboxed contexts.
+                if args.is_empty() {
+                    return Err("omc_code_uses_python requires (code)".to_string());
+                }
+                let code = self.eval_expr(&args[0])?.to_display_string();
+                let s = crate::code_intel::summarise(&code)
+                    .map_err(|e| format!("omc_code_uses_python: {}", e))?;
+                let uses = s.calls.iter().any(|c| c.starts_with("py_"));
+                Ok(Value::HInt(HInt::new(if uses { 1 } else { 0 })))
+            }
+            "omc_code_uses_substrate" => {
+                // 1 if any substrate-unique primitive is called.
+                // Lets the LLM identify "this code reaches for OMC,
+                // not just Python-clone-able syntax."
+                if args.is_empty() {
+                    return Err("omc_code_uses_substrate requires (code)".to_string());
+                }
+                let code = self.eval_expr(&args[0])?.to_display_string();
+                let s = crate::code_intel::summarise(&code)
+                    .map_err(|e| format!("omc_code_uses_substrate: {}", e))?;
+                let unique_set: std::collections::HashSet<&str> = crate::docs::BUILTINS.iter()
+                    .filter(|b| b.unique_to_omc).map(|b| b.name).collect();
+                let uses = s.calls.iter().any(|c| unique_set.contains(c.as_str()));
+                Ok(Value::HInt(HInt::new(if uses { 1 } else { 0 })))
+            }
+            "omc_completion_hint" => {
+                // Given a prefix, return all known builtin names that
+                // start with it. The IDE / LLM uses this for
+                // autocomplete suggestions.
+                if args.is_empty() {
+                    return Err("omc_completion_hint requires (prefix)".to_string());
+                }
+                let prefix = self.eval_expr(&args[0])?.to_display_string();
+                let out: Vec<Value> = crate::docs::BUILTINS.iter()
+                    .filter(|b| b.name.starts_with(&prefix))
+                    .map(|b| Value::String(b.name.to_string()))
+                    .collect();
+                Ok(Value::Array(HArray::from_vec(out)))
+            }
+            "omc_canonical_hash" => {
+                // Convenience: canonicalize then hash. The semantic
+                // memory key the LLM actually wants — invariant under
+                // every cosmetic edit.
+                if args.is_empty() {
+                    return Err("omc_canonical_hash requires (code)".to_string());
+                }
+                let code = self.eval_expr(&args[0])?.to_display_string();
+                let canon = crate::canonical::canonicalize(&code)
+                    .map_err(|e| format!("omc_canonical_hash: {}", e))?;
+                let (attractor, raw, dist) = crate::tokenizer::code_hash(&canon);
+                let mut map = std::collections::BTreeMap::new();
+                map.insert("raw".to_string(), Value::HInt(HInt::new(raw)));
+                map.insert("attractor".to_string(), Value::HInt(HInt::new(attractor)));
+                map.insert("distance".to_string(), Value::HInt(HInt::new(dist)));
+                map.insert("resonance".to_string(),
+                    Value::HFloat(crate::value::HInt::compute_resonance(raw)));
+                Ok(Value::dict_from(map))
+            }
+            "omc_categories_count" => {
+                Ok(Value::HInt(HInt::new(crate::docs::categories().len() as i64)))
+            }
+            "omc_builtin_count" => {
+                Ok(Value::HInt(HInt::new(crate::docs::BUILTINS.len() as i64)))
+            }
+            "omc_unique_count" => {
+                Ok(Value::HInt(HInt::new(
+                    crate::docs::BUILTINS.iter().filter(|b| b.unique_to_omc).count() as i64
+                )))
+            }
             // arr_fold_all(arr) -> new array with every element snapped
             // to its nearest Fibonacci attractor. Vectorized fold.
             // Substrate-canonical denoising / quantization primitive.

@@ -2,9 +2,9 @@
 
 Auto-generated from `omnimcode-core/src/docs.rs`. Run `omc --gen-docs > OMC_REFERENCE.md` to regenerate.
 
-**Total documented builtins**: 376
+**Total documented builtins**: 391
 
-**OMC-unique**: 37 (no direct Python/NumPy equivalent — these are why you reach for OMC over numpy)
+**OMC-unique**: 40 (no direct Python/NumPy equivalent — these are why you reach for OMC over numpy)
 
 ---
 
@@ -23,8 +23,9 @@ Auto-generated from `omnimcode-core/src/docs.rs`. Run `omc --gen-docs > OMC_REFE
 - [json](#json) (2 builtins)
 - [stdlib](#stdlib) (12 builtins)
 - [exceptions](#exceptions) (2 builtins)
-- [introspection](#introspection) (10 builtins)
+- [introspection](#introspection) (14 builtins)
 - [tokenizer](#tokenizer) (12 builtins)
+- [code_intel](#code_intel) (11 builtins)
 - [math](#math) (29 builtins)
 - [dicts](#dicts) (14 builtins)
 - [test_runner](#test_runner) (4 builtins)
@@ -3235,6 +3236,46 @@ Number of curated error patterns. The knowledge base size.
 omc_error_count()  // 42+
 ```
 
+### `omc_completion_hint`
+
+**Signature**: `(prefix: string) -> string[]`
+
+Documented builtin names starting with `prefix`. IDE-style autocomplete.
+
+```omc
+omc_completion_hint("arr_sub")  // [arr_sub, arr_substrate_attention, ...]
+```
+
+### `omc_categories_count`
+
+**Signature**: `() -> int`
+
+Number of distinct builtin categories.
+
+```omc
+omc_categories_count()  // 15+
+```
+
+### `omc_builtin_count`
+
+**Signature**: `() -> int`
+
+Total documented builtins.
+
+```omc
+omc_builtin_count()  // 390+
+```
+
+### `omc_unique_count`
+
+**Signature**: `() -> int`
+
+Count of OMC-unique builtins.
+
+```omc
+omc_unique_count()  // 15+
+```
+
 ### `cleanup_array`
 
 **Signature**: `(...) -> any`
@@ -3377,6 +3418,120 @@ omc_code_canonical("fn f(x) { return x; }") == omc_code_canonical("fn f(a) { ret
 
 ```omc
 omc_code_equivalent("fn f(x) { return x; }", "fn f(a) { return a; }")  // 1
+```
+
+---
+
+## code_intel
+
+### `omc_code_summary`
+
+**Signature**: `(code: string) -> dict`
+
+Structured summary: {functions, classes, imports, calls, stmt_count}. Each function: {name, params, body_stmts, canonical_hash}.
+
+```omc
+omc_code_summary("fn f(x){return x;}")  // .functions[0].name == "f"
+```
+
+### `omc_code_extract_fns`
+
+**Signature**: `(code: string) -> string[]`
+
+Just the top-level function names (Class methods come as Class.method).
+
+```omc
+omc_code_extract_fns("fn f(){} fn g(){}")  // ["f", "g"]
+```
+
+### `omc_code_dependencies`
+
+**Signature**: `(code: string) -> string[]`
+
+Every name this program calls — both builtins and user-defined. 'What does this need to run?'
+
+```omc
+omc_code_dependencies("fn f(x){return arr_softmax(x);}")  // includes arr_softmax
+```
+
+### `omc_code_complexity`
+
+**Signature**: `(code: string) -> dict`
+
+{complexity, ast_size, ast_depth}. Cyclomatic complexity = branch points + 1.
+
+```omc
+omc_code_complexity("fn f(x){if x>0{return 1;} return 0;}")  // complexity:2
+```
+
+### `omc_code_minify`
+
+**Signature**: `(code: string) -> string`
+
+Canonicalize + strip newlines. Single-line wire form.
+
+```omc
+omc_code_minify("fn f(x){\n  return x;\n}")  // single line
+```
+
+### `omc_code_similarity`
+
+**Signature**: `(a: string, b: string) -> float`
+
+Jaccard over canonical-token multisets. 1.0 = alpha-equivalent.
+
+```omc
+omc_code_similarity("x+1", "x+2")  // close to 1
+```
+
+### `omc_code_fingerprint` 🔱 *OMC-unique*
+
+**Signature**: `(code: string) -> int`
+
+CRT-packed fingerprint of (hash_attractor, ast_size, complexity). Same on equivalent code.
+
+```omc
+omc_code_fingerprint("fn f(x){return x;}")  // stable int
+```
+
+### `omc_code_signature`
+
+**Signature**: `(code: string) -> string`
+
+Public API: one `fn name(params)` per line.
+
+```omc
+omc_code_signature("fn add(x,y){return x+y;}")  // "fn add(x, y)"
+```
+
+### `omc_code_uses_python`
+
+**Signature**: `(code: string) -> int`
+
+1 if any py_* call appears. Quick sandboxing/safety check.
+
+```omc
+omc_code_uses_python("py_import(\"numpy\");")  // 1
+```
+
+### `omc_code_uses_substrate` 🔱 *OMC-unique*
+
+**Signature**: `(code: string) -> int`
+
+1 if any OMC-unique primitive is called. 'Does this code reach for OMC's differentiators?'
+
+```omc
+omc_code_uses_substrate("return arr_resonance_vec(xs);")  // 1
+```
+
+### `omc_canonical_hash` 🔱 *OMC-unique*
+
+**Signature**: `(code: string) -> dict`
+
+canonicalize + hash. The semantic memory key. {raw, attractor, distance, resonance}.
+
+```omc
+omc_canonical_hash("fn f(a){return a;}")  // matches the b-variant
 ```
 
 ---
