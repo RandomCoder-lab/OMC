@@ -15,6 +15,7 @@ path = "src/lib.rs"
 [dependencies]
 regex = "1.10"
 thiserror = "1.0"
+serde_json = "1.0"
 # Embedded CPython — required for the desktop standalone binary
 # (always-on py_import/py_call/etc.), optional for downstream
 # crates that target WASM or no_std where libpython can't link.

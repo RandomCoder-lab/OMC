@@ -665,6 +665,7 @@ dependencies = [
  "criterion",
  "pyo3",
  "regex",
+ "serde_json",
  "thiserror",
 ]
 

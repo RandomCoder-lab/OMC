@@ -1,0 +1,133 @@
+# Tests for json_parse / json_stringify.
+#
+# Round-trip invariants: parse(stringify(v)) == v for any pure-data
+# Value (HInt, HFloat, String, Bool, Null, Array, Dict). Functions
+# and Singularity values stringify to their display form (lossy).
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) {
+    if !cond { test_record_failure(msg); }
+}
+
+# ---- Primitive parsing ----
+
+fn test_parse_int() {
+    h v = json_parse("42");
+    assert_eq(v, 42, "int parses to HInt");
+}
+
+fn test_parse_float() {
+    h v = json_parse("3.14");
+    assert_true(v > 3.1, "float lower bound");
+    assert_true(v < 3.2, "float upper bound");
+}
+
+fn test_parse_string() {
+    h v = json_parse("\"hello\"");
+    assert_eq(v, "hello", "string parses");
+}
+
+fn test_parse_bool() {
+    assert_eq(json_parse("true"), true, "true parses");
+    assert_eq(json_parse("false"), false, "false parses");
+}
+
+fn test_parse_null() {
+    h v = json_parse("null");
+    assert_eq(v, null, "null parses");
+}
+
+# ---- Arrays ----
+
+fn test_parse_array() {
+    h v = json_parse("[1, 2, 3]");
+    assert_eq(arr_len(v), 3, "3-elem array");
+    assert_eq(arr_get(v, 0), 1, "first");
+    assert_eq(arr_get(v, 2), 3, "last");
+}
+
+fn test_parse_empty_array() {
+    h v = json_parse("[]");
+    assert_eq(arr_len(v), 0, "empty array");
+}
+
+fn test_parse_mixed_array() {
+    h v = json_parse("[1, \"two\", 3.5, true, null]");
+    assert_eq(arr_len(v), 5, "5 mixed types");
+    assert_eq(arr_get(v, 0), 1, "int");
+    assert_eq(arr_get(v, 1), "two", "string");
+    assert_eq(arr_get(v, 3), true, "bool");
+}
+
+# ---- Objects (dicts) ----
+
+fn test_parse_object() {
+    h v = json_parse("{\"name\": \"alice\", \"age\": 30}");
+    assert_eq(dict_get(v, "name"), "alice", "name field");
+    assert_eq(dict_get(v, "age"), 30, "age field");
+}
+
+fn test_parse_nested() {
+    h v = json_parse("{\"a\": [1, 2, {\"b\": 3}]}");
+    h a = dict_get(v, "a");
+    assert_eq(arr_len(a), 3, "outer array");
+    h inner = arr_get(a, 2);
+    assert_eq(dict_get(inner, "b"), 3, "nested b");
+}
+
+# ---- Stringify ----
+
+fn test_stringify_int() {
+    assert_eq(json_stringify(42), "42", "int stringifies");
+}
+
+fn test_stringify_string() {
+    assert_eq(json_stringify("hello"), "\"hello\"", "string with quotes");
+}
+
+fn test_stringify_array() {
+    h s = json_stringify([1, 2, 3]);
+    assert_eq(s, "[1,2,3]", "array stringifies (no spaces)");
+}
+
+fn test_stringify_dict() {
+    h d = dict_new();
+    dict_set(d, "x", 1);
+    dict_set(d, "y", 2);
+    # BTreeMap orders alphabetically — output is deterministic.
+    h s = json_stringify(d);
+    assert_eq(s, "{\"x\":1,\"y\":2}", "dict stringifies sorted");
+}
+
+# ---- Round-trip ----
+
+fn test_roundtrip_array() {
+    h v = [10, 20, 30];
+    h back = json_parse(json_stringify(v));
+    assert_eq(arr_len(back), 3, "len preserved");
+    assert_eq(arr_get(back, 1), 20, "values preserved");
+}
+
+fn test_roundtrip_nested() {
+    h d = dict_new();
+    dict_set(d, "users", ["alice", "bob"]);
+    dict_set(d, "count", 2);
+    h s = json_stringify(d);
+    h back = json_parse(s);
+    assert_eq(dict_get(back, "count"), 2, "count round-tripped");
+    h users = dict_get(back, "users");
+    assert_eq(arr_get(users, 1), "bob", "nested array round-tripped");
+}
+
+# ---- Pretty-printing ----
+
+fn test_pretty_print() {
+    h s = json_stringify([1, 2, 3], 1);
+    # Pretty output contains newlines.
+    assert_true(str_contains(s, "\n"), "pretty output has newlines");
+}

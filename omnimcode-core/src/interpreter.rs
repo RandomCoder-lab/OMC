@@ -1915,6 +1915,7 @@ impl Interpreter {
             | "str_split_lines" | "str_count" | "str_is_empty"
             | "str_to_int" | "str_to_float" | "str_capitalize"
             | "re_match" | "re_find" | "re_find_all" | "re_replace" | "re_split"
+            | "json_parse" | "json_stringify"
             // Arrays
             | "arr_new" | "arr_from_range" | "arr_len" | "arr_get" | "arr_set"
             | "arr_push" | "arr_first" | "arr_last" | "arr_slice" | "arr_concat"
@@ -3031,6 +3032,40 @@ impl Interpreter {
             // Defaults to comma separator, no header skip. Pass an explicit
             // separator to handle TSV (sep="\t"), pipe-delim, etc. Pass
             // skip_header=1 to drop the first line.
+            // ---- JSON (via serde_json) -----------------------------
+            "json_parse" => {
+                // json_parse(text) -> Value (dict, array, string, int,
+                // float, bool, or Null). Throws on parse error.
+                if args.is_empty() {
+                    return Err("json_parse requires (text)".to_string());
+                }
+                let text = self.eval_expr(&args[0])?.to_display_string();
+                match serde_json::from_str::<serde_json::Value>(&text) {
+                    Ok(v) => Ok(json_to_value(v)),
+                    Err(e) => Err(format!("json_parse: {}", e)),
+                }
+            }
+            "json_stringify" => {
+                // json_stringify(value) -> string. Pretty-prints if a
+                // second arg is truthy (matches Python json.dumps(indent=2)).
+                if args.is_empty() {
+                    return Err("json_stringify requires (value, pretty?)".to_string());
+                }
+                let v = self.eval_expr(&args[0])?;
+                let jv = value_to_json(&v);
+                let pretty = if args.len() >= 2 {
+                    self.eval_expr(&args[1])?.to_int() != 0
+                } else { false };
+                let s = if pretty {
+                    serde_json::to_string_pretty(&jv)
+                } else {
+                    serde_json::to_string(&jv)
+                };
+                match s {
+                    Ok(out) => Ok(Value::String(out)),
+                    Err(e) => Err(format!("json_stringify: {}", e)),
+                }
+            }
             "csv_parse" => {
                 if args.is_empty() {
                     return Err("csv_parse requires (text, sep?, skip_header?)".to_string());
@@ -7495,6 +7530,63 @@ fn values_equal(a: &Value, b: &Value) -> bool {
 
 // Free function reused by quantize / quantization_ratio / mean_omni_weight.
 // Snap |n| to the nearest Fibonacci attractor, preserving sign.
+/// Convert a `serde_json::Value` into an OMC `Value`. JSON object →
+/// `Value::Dict`, JSON array → `Value::Array`, numbers split into
+/// `HInt` (when representable as i64) vs `HFloat` (everything else).
+pub(crate) fn json_to_value(j: serde_json::Value) -> Value {
+    match j {
+        serde_json::Value::Null => Value::Null,
+        serde_json::Value::Bool(b) => Value::Bool(b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() { Value::HInt(HInt::new(i)) }
+            else if let Some(f) = n.as_f64() { Value::HFloat(f) }
+            else { Value::HInt(HInt::new(0)) }
+        }
+        serde_json::Value::String(s) => Value::String(s),
+        serde_json::Value::Array(arr) => {
+            let items: Vec<Value> = arr.into_iter().map(json_to_value).collect();
+            Value::Array(HArray::from_vec(items))
+        }
+        serde_json::Value::Object(map) => {
+            let mut out = std::collections::BTreeMap::new();
+            for (k, v) in map {
+                out.insert(k, json_to_value(v));
+            }
+            Value::dict_from(out)
+        }
+    }
+}
+
+/// Convert an OMC `Value` back into a `serde_json::Value` for
+/// stringification. Singularity and Function values stringify to
+/// their display form (no clean JSON representation).
+pub(crate) fn value_to_json(v: &Value) -> serde_json::Value {
+    match v {
+        Value::Null => serde_json::Value::Null,
+        Value::Bool(b) => serde_json::Value::Bool(*b),
+        Value::HInt(h) => serde_json::json!(h.value),
+        Value::HFloat(f) => {
+            // NaN / Inf can't be represented in JSON — coerce to null.
+            if f.is_finite() { serde_json::json!(*f) } else { serde_json::Value::Null }
+        }
+        Value::String(s) => serde_json::Value::String(s.clone()),
+        Value::Array(arr) => {
+            let items: Vec<serde_json::Value> = arr.items.borrow().iter()
+                .map(value_to_json).collect();
+            serde_json::Value::Array(items)
+        }
+        Value::Dict(d) => {
+            let mut map = serde_json::Map::new();
+            for (k, vv) in d.borrow().iter() {
+                map.insert(k.clone(), value_to_json(vv));
+            }
+            serde_json::Value::Object(map)
+        }
+        // Singularity / Function / Circuit: fall back to display string.
+        other => serde_json::Value::String(other.to_display_string()),
+    }
+}
+
 pub(crate) fn fold_to_fibonacci_const(n: i64) -> i64 {
     // Substrate-routed via phi_pi_fib::fold_to_nearest_attractor.
     // Was: a 15-element local Fibonacci array + linear scan.
@@ -7855,6 +7947,7 @@ pub(crate) const HEAL_BUILTIN_NAMES: &[&str] = &[
     "str_split_lines", "str_count", "str_is_empty",
     "str_to_int", "str_to_float", "str_capitalize",
     "re_match", "re_find", "re_find_all", "re_replace", "re_split",
+    "json_parse", "json_stringify",
     // Arrays
     "arr_new", "arr_from_range", "arr_len", "arr_get", "arr_set",
     "arr_push", "arr_first", "arr_last", "arr_slice", "arr_concat",
