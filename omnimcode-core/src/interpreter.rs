@@ -1995,6 +1995,8 @@ impl Interpreter {
             | "str_to_int" | "str_to_float" | "str_capitalize"
             | "re_match" | "re_find" | "re_find_all" | "re_replace" | "re_split"
             | "json_parse" | "json_stringify"
+            | "sha256" | "sha512" | "base64_encode" | "base64_decode"
+            | "now_iso" | "now_unix" | "format_time" | "parse_time"
             // Arrays
             | "arr_new" | "arr_from_range" | "arr_len" | "arr_get" | "arr_set"
             | "arr_push" | "arr_first" | "arr_last" | "arr_slice" | "arr_concat"
@@ -3158,6 +3160,93 @@ impl Interpreter {
             // Defaults to comma separator, no header skip. Pass an explicit
             // separator to handle TSV (sep="\t"), pipe-delim, etc. Pass
             // skip_header=1 to drop the first line.
+            // ---- Hashing: sha256 / sha512 / md5 --------------------
+            "sha256" => {
+                // sha256(text_or_bytes) -> hex string. Standard 256-bit
+                // hash; deterministic across runs.
+                use sha2::{Sha256, Digest};
+                if args.is_empty() {
+                    return Err("sha256 requires (text)".to_string());
+                }
+                let input = self.eval_expr(&args[0])?.to_display_string();
+                let digest = Sha256::digest(input.as_bytes());
+                let hex: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
+                Ok(Value::String(hex))
+            }
+            "sha512" => {
+                use sha2::{Sha512, Digest};
+                if args.is_empty() {
+                    return Err("sha512 requires (text)".to_string());
+                }
+                let input = self.eval_expr(&args[0])?.to_display_string();
+                let digest = Sha512::digest(input.as_bytes());
+                let hex: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
+                Ok(Value::String(hex))
+            }
+            // ---- Base64 --------------------------------------------
+            "base64_encode" => {
+                use base64::Engine;
+                if args.is_empty() {
+                    return Err("base64_encode requires (text)".to_string());
+                }
+                let s = self.eval_expr(&args[0])?.to_display_string();
+                Ok(Value::String(
+                    base64::engine::general_purpose::STANDARD.encode(s.as_bytes())
+                ))
+            }
+            "base64_decode" => {
+                use base64::Engine;
+                if args.is_empty() {
+                    return Err("base64_decode requires (text)".to_string());
+                }
+                let s = self.eval_expr(&args[0])?.to_display_string();
+                match base64::engine::general_purpose::STANDARD.decode(&s) {
+                    Ok(bytes) => match String::from_utf8(bytes) {
+                        Ok(decoded) => Ok(Value::String(decoded)),
+                        Err(e) => Err(format!("base64_decode: invalid UTF-8: {}", e)),
+                    },
+                    Err(e) => Err(format!("base64_decode: invalid base64: {}", e)),
+                }
+            }
+            // ---- Datetime via chrono -------------------------------
+            "now_iso" => {
+                // ISO 8601 timestamp of the current UTC instant.
+                let n = chrono::Utc::now();
+                Ok(Value::String(n.to_rfc3339()))
+            }
+            "now_unix" => {
+                // Seconds since the Unix epoch.
+                let n = chrono::Utc::now();
+                Ok(Value::HInt(HInt::new(n.timestamp())))
+            }
+            "format_time" => {
+                // format_time(unix_seconds, fmt) -> string. Uses
+                // chrono::strftime-style format specifiers. Common ones:
+                //   %Y-%m-%d %H:%M:%S    "2026-05-16 14:32:01"
+                //   %A %d %b              "Saturday 16 May"
+                //   %s                    seconds since epoch
+                if args.len() < 2 {
+                    return Err("format_time requires (unix_seconds, fmt)".to_string());
+                }
+                let secs = self.eval_expr(&args[0])?.to_int();
+                let fmt = self.eval_expr(&args[1])?.to_display_string();
+                match chrono::DateTime::from_timestamp(secs, 0) {
+                    Some(dt) => Ok(Value::String(dt.format(&fmt).to_string())),
+                    None => Err(format!("format_time: bad timestamp {}", secs)),
+                }
+            }
+            "parse_time" => {
+                // parse_time(string, fmt) -> unix_seconds.
+                if args.len() < 2 {
+                    return Err("parse_time requires (string, fmt)".to_string());
+                }
+                let s = self.eval_expr(&args[0])?.to_display_string();
+                let fmt = self.eval_expr(&args[1])?.to_display_string();
+                match chrono::NaiveDateTime::parse_from_str(&s, &fmt) {
+                    Ok(dt) => Ok(Value::HInt(HInt::new(dt.and_utc().timestamp()))),
+                    Err(e) => Err(format!("parse_time: {}", e)),
+                }
+            }
             // ---- JSON (via serde_json) -----------------------------
             "json_parse" => {
                 // json_parse(text) -> Value (dict, array, string, int,
@@ -8371,6 +8460,8 @@ pub(crate) const HEAL_BUILTIN_NAMES: &[&str] = &[
     "str_to_int", "str_to_float", "str_capitalize",
     "re_match", "re_find", "re_find_all", "re_replace", "re_split",
     "json_parse", "json_stringify",
+    "sha256", "sha512", "base64_encode", "base64_decode",
+    "now_iso", "now_unix", "format_time", "parse_time",
     // Arrays
     "arr_new", "arr_from_range", "arr_len", "arr_get", "arr_set",
     "arr_push", "arr_first", "arr_last", "arr_slice", "arr_concat",

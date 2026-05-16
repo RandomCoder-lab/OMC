@@ -1,0 +1,90 @@
+# Tests for the richer stdlib: hashing, base64, datetime.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) {
+    if !cond { test_record_failure(msg); }
+}
+
+# ---- sha256 ----
+
+fn test_sha256_empty() {
+    # Known SHA-256 of empty string
+    assert_eq(sha256(""),
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "sha256 of empty string");
+}
+
+fn test_sha256_hello() {
+    assert_eq(sha256("hello"),
+        "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+        "sha256 of 'hello'");
+}
+
+fn test_sha256_deterministic() {
+    assert_eq(sha256("test"), sha256("test"), "deterministic");
+    assert_true(sha256("a") != sha256("b"), "different inputs differ");
+}
+
+fn test_sha256_length() {
+    # SHA-256 always produces 64 hex chars (256 bits).
+    assert_eq(str_len(sha256("anything")), 64, "sha256 hex is 64 chars");
+}
+
+fn test_sha512_length() {
+    # SHA-512 produces 128 hex chars.
+    assert_eq(str_len(sha512("x")), 128, "sha512 hex is 128 chars");
+}
+
+# ---- base64 ----
+
+fn test_base64_roundtrip() {
+    h s = "hello world";
+    h encoded = base64_encode(s);
+    h decoded = base64_decode(encoded);
+    assert_eq(decoded, s, "base64 round-trip");
+}
+
+fn test_base64_known() {
+    assert_eq(base64_encode("hi"), "aGk=", "encode 'hi'");
+    assert_eq(base64_decode("aGk="), "hi", "decode 'aGk='");
+}
+
+fn test_base64_empty() {
+    assert_eq(base64_encode(""), "", "empty encode");
+    assert_eq(base64_decode(""), "", "empty decode");
+}
+
+# ---- Datetime ----
+
+fn test_now_unix_reasonable() {
+    h now = now_unix();
+    # Should be > 1.7e9 (post-2023) and < 2e10 (sanity upper bound)
+    assert_true(now > 1700000000, "post-2023");
+    assert_true(now < 20000000000, "before year 2603");
+}
+
+fn test_now_iso_format() {
+    h s = now_iso();
+    # ISO 8601 should start with 4-digit year then `-`
+    assert_true(str_len(s) > 18, "ISO string has reasonable length");
+    assert_true(re_match("^[0-9]{4}-[0-9]{2}-[0-9]{2}", s) == 1,
+        "ISO starts with YYYY-MM-DD");
+}
+
+fn test_format_time_known() {
+    # Unix epoch = 1970-01-01 00:00:00 UTC
+    assert_eq(format_time(0, "%Y-%m-%d"), "1970-01-01", "epoch is 1970-01-01");
+    assert_eq(format_time(0, "%H:%M:%S"), "00:00:00", "epoch time is 00:00:00");
+}
+
+fn test_parse_format_roundtrip() {
+    h s = "2023-06-15 10:30:00";
+    h ts = parse_time(s, "%Y-%m-%d %H:%M:%S");
+    h back = format_time(ts, "%Y-%m-%d %H:%M:%S");
+    assert_eq(back, s, "parse → format round-trip");
+}

@@ -184,6 +184,8 @@ impl Compiler {
                         | "dict_size" | "dict_pop"
                         // Regex predicate returns int
                         | "re_match"
+                        // Datetime ints
+                        | "now_unix" | "parse_time"
                         // Array index/aggregate ints
                         | "arr_argmax" | "arr_argmin"
                         // Bit/digit/modular int returns
