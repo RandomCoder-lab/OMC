@@ -8337,12 +8337,146 @@ fn values_equal(a: &Value, b: &Value) -> bool {
 /// `op` takes (i64, i64) and returns i64; the helper wraps the
 /// result in HInt so per-element substrate resonance gets recomputed
 /// from the arithmetic output.
+/// Detect whether `a` is a 2D array (every element is itself an array).
+/// Empty rows count as malformed and return None — callers fall back to
+/// the 1D path. Returns (rows, cols) of the first row when 2D.
+fn array_2d_shape(v: &Value) -> Option<(usize, usize)> {
+    if let Value::Array(outer) = v {
+        let rows = outer.items.borrow();
+        if rows.is_empty() { return None; }
+        let first_cols = match &rows[0] {
+            Value::Array(r) => r.items.borrow().len(),
+            _ => return None,
+        };
+        for r in rows.iter() {
+            match r {
+                Value::Array(row) if row.items.borrow().len() == first_cols => {}
+                _ => return None,
+            }
+        }
+        Some((rows.len(), first_cols))
+    } else {
+        None
+    }
+}
+
+/// 2D-aware broadcast paths for elementwise ops. Returns Some(result)
+/// when both operands fit one of the broadcasting shapes; None lets the
+/// caller fall through to the flat 1D path.
+///
+///   (NxM, NxM)        — element-wise, returns NxM
+///   (NxM, M-vector)   — row broadcast: vector added to every row
+///   (M-vector, NxM)   — same, reversed
+fn try_2d_broadcast<F: Fn(i64, i64) -> i64>(
+    a: &Value,
+    b: &Value,
+    name: &str,
+    op: &F,
+) -> Result<Option<Value>, String> {
+    let a_shape = array_2d_shape(a);
+    let b_shape = array_2d_shape(b);
+
+    // Case 1: both 2D — must match shapes element-wise.
+    if let (Some((ar, ac)), Some((br, bc))) = (a_shape, b_shape) {
+        if ar != br || ac != bc {
+            return Err(format!(
+                "{}: 2D shape mismatch ({}x{} vs {}x{})", name, ar, ac, br, bc
+            ));
+        }
+        if let (Value::Array(a_rows), Value::Array(b_rows)) = (a, b) {
+            let ar_b = a_rows.items.borrow();
+            let br_b = b_rows.items.borrow();
+            let mut out_rows: Vec<Value> = Vec::with_capacity(ar);
+            for (ra, rb) in ar_b.iter().zip(br_b.iter()) {
+                let (Value::Array(ra), Value::Array(rb)) = (ra, rb) else {
+                    return Ok(None);
+                };
+                let raw_a = ra.items.borrow();
+                let raw_b = rb.items.borrow();
+                let row: Vec<Value> = raw_a.iter().zip(raw_b.iter())
+                    .map(|(x, y)| Value::HInt(HInt::new(op(x.to_int(), y.to_int()))))
+                    .collect();
+                out_rows.push(Value::Array(HArray::from_vec(row)));
+            }
+            return Ok(Some(Value::Array(HArray::from_vec(out_rows))));
+        }
+    }
+
+    // Case 2: 2D + 1D row-vector — broadcast vector across every row.
+    if let (Some((ar, ac)), None) = (a_shape, b_shape) {
+        if let (Value::Array(a_rows), Value::Array(b_vec)) = (a, b) {
+            let vec_b = b_vec.items.borrow();
+            // Reject when b is itself a non-1D shape (e.g., array of dicts);
+            // a true 1D vector has length == ac.
+            if vec_b.len() != ac {
+                // Could be a length mismatch — surface a clear error.
+                // But only when b looks like a 1D numeric vector; otherwise
+                // fall through to None and let the caller handle.
+                if vec_b.iter().any(|v| matches!(v, Value::Array(_))) {
+                    return Ok(None);
+                }
+                return Err(format!(
+                    "{}: row-broadcast length mismatch ({} cols vs {} vec)",
+                    name, ac, vec_b.len()
+                ));
+            }
+            let ar_b = a_rows.items.borrow();
+            let mut out_rows: Vec<Value> = Vec::with_capacity(ar);
+            for ra in ar_b.iter() {
+                let Value::Array(ra) = ra else { return Ok(None); };
+                let raw_a = ra.items.borrow();
+                let row: Vec<Value> = raw_a.iter().zip(vec_b.iter())
+                    .map(|(x, y)| Value::HInt(HInt::new(op(x.to_int(), y.to_int()))))
+                    .collect();
+                out_rows.push(Value::Array(HArray::from_vec(row)));
+            }
+            return Ok(Some(Value::Array(HArray::from_vec(out_rows))));
+        }
+    }
+
+    // Case 3: 1D + 2D — symmetric.
+    if let (None, Some((br, bc))) = (a_shape, b_shape) {
+        if let (Value::Array(a_vec), Value::Array(b_rows)) = (a, b) {
+            let vec_a = a_vec.items.borrow();
+            if vec_a.len() != bc {
+                if vec_a.iter().any(|v| matches!(v, Value::Array(_))) {
+                    return Ok(None);
+                }
+                return Err(format!(
+                    "{}: row-broadcast length mismatch ({} vec vs {} cols)",
+                    name, vec_a.len(), bc
+                ));
+            }
+            let br_b = b_rows.items.borrow();
+            let mut out_rows: Vec<Value> = Vec::with_capacity(br);
+            for rb in br_b.iter() {
+                let Value::Array(rb) = rb else { return Ok(None); };
+                let raw_b = rb.items.borrow();
+                let row: Vec<Value> = vec_a.iter().zip(raw_b.iter())
+                    .map(|(x, y)| Value::HInt(HInt::new(op(x.to_int(), y.to_int()))))
+                    .collect();
+                out_rows.push(Value::Array(HArray::from_vec(row)));
+            }
+            return Ok(Some(Value::Array(HArray::from_vec(out_rows))));
+        }
+    }
+
+    Ok(None)
+}
+
 pub(crate) fn elementwise_op<F: Fn(i64, i64) -> i64>(
     a: &Value,
     b: &Value,
     name: &str,
     op: F,
 ) -> Result<Value, String> {
+    // 2D-aware broadcasting shortcut — runs before the standard flat-array
+    // path so callers don't have to switch to a separate builtin. Two
+    // 2D operands element-wise; (2D, 1D) row-broadcast (the 1D vector
+    // gets added to every row); (1D, 2D) same in reverse.
+    if let Some(out) = try_2d_broadcast(a, b, name, &op)? {
+        return Ok(out);
+    }
     match (a, b) {
         (Value::Array(arr_a), Value::Array(arr_b)) => {
             let ai = arr_a.items.borrow();

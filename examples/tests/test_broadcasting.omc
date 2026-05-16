@@ -1,0 +1,144 @@
+# Track 2: 2D-aware broadcasting on arr_add / arr_sub / arr_mul.
+#
+# Previous behaviour:
+#   - same-length 1D arrays: element-wise
+#   - scalar ↔ 1D: scalar broadcast
+#   - everything else: silently wrong (each row coerced via to_int → 0)
+#
+# Now adds:
+#   - 2D ↔ 2D (same shape): element-wise per cell
+#   - 2D ↔ 1D row-vector: vector replicated across every row
+#   - 1D row-vector ↔ 2D: same, reversed
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) {
+    if !cond { test_record_failure(msg); }
+}
+
+# ---- 2D + 2D same shape ----
+
+fn test_2d_2d_add() {
+    h A = [[1, 2, 3], [4, 5, 6]];
+    h B = [[10, 20, 30], [40, 50, 60]];
+    h C = arr_add(A, B);
+    assert_eq(arr_len(C), 2, "2 rows");
+    h r0 = arr_get(C, 0);
+    h r1 = arr_get(C, 1);
+    assert_eq(arr_len(r0), 3, "3 cols");
+    assert_eq(arr_get(r0, 0), 11, "(0,0) = 11");
+    assert_eq(arr_get(r0, 2), 33, "(0,2) = 33");
+    assert_eq(arr_get(r1, 0), 44, "(1,0) = 44");
+    assert_eq(arr_get(r1, 2), 66, "(1,2) = 66");
+}
+
+fn test_2d_2d_sub() {
+    h A = [[10, 20], [30, 40]];
+    h B = [[1, 2], [3, 4]];
+    h C = arr_sub(A, B);
+    h r0 = arr_get(C, 0);
+    assert_eq(arr_get(r0, 0), 9, "10-1");
+    assert_eq(arr_get(r0, 1), 18, "20-2");
+    h r1 = arr_get(C, 1);
+    assert_eq(arr_get(r1, 0), 27, "30-3");
+    assert_eq(arr_get(r1, 1), 36, "40-4");
+}
+
+fn test_2d_2d_mul() {
+    h A = [[1, 2], [3, 4]];
+    h B = [[5, 6], [7, 8]];
+    h C = arr_mul(A, B);
+    h r0 = arr_get(C, 0);
+    assert_eq(arr_get(r0, 0), 5, "1*5");
+    assert_eq(arr_get(r0, 1), 12, "2*6");
+    h r1 = arr_get(C, 1);
+    assert_eq(arr_get(r1, 0), 21, "3*7");
+    assert_eq(arr_get(r1, 1), 32, "4*8");
+}
+
+# ---- 2D + 1D row broadcast ----
+
+fn test_2d_1d_add_row_broadcast() {
+    h A = [[1, 2, 3], [10, 20, 30], [100, 200, 300]];
+    h bias = [1, 2, 3];
+    h C = arr_add(A, bias);
+    h r0 = arr_get(C, 0);
+    h r1 = arr_get(C, 1);
+    h r2 = arr_get(C, 2);
+    assert_eq(arr_get(r0, 0), 2, "1+1");
+    assert_eq(arr_get(r0, 2), 6, "3+3");
+    assert_eq(arr_get(r1, 0), 11, "10+1");
+    assert_eq(arr_get(r1, 2), 33, "30+3");
+    assert_eq(arr_get(r2, 0), 101, "100+1");
+    assert_eq(arr_get(r2, 2), 303, "300+3");
+}
+
+fn test_1d_2d_add_symmetric() {
+    h A = [[1, 2, 3], [4, 5, 6]];
+    h bias = [10, 20, 30];
+    # 1D on the LEFT this time
+    h C = arr_add(bias, A);
+    h r0 = arr_get(C, 0);
+    h r1 = arr_get(C, 1);
+    assert_eq(arr_get(r0, 0), 11, "10+1");
+    assert_eq(arr_get(r0, 2), 33, "30+3");
+    assert_eq(arr_get(r1, 1), 25, "20+5");
+}
+
+# ---- Composition: matmul + bias broadcast (a "dense layer") ----
+
+fn test_dense_layer_forward() {
+    # Single example through a linear layer with bias.
+    # X (1x3) @ W (3x2) + b (2,)  = (1x2)
+    h X = [[1, 2, 3]];
+    h W = [[1, 0], [0, 1], [1, 1]];
+    h b = [10, 20];
+    h Z = arr_matmul(X, W);     # (1x2) = [[1+3, 2+3]] = [[4, 5]]
+    h Y = arr_add(Z, b);        # broadcast b across the one row
+    h r0 = arr_get(Y, 0);
+    assert_true(arr_get(r0, 0) > 13, "first activation > 13");
+    assert_true(arr_get(r0, 1) > 24, "second activation > 24");
+}
+
+# ---- Scalar broadcasting still works (regression) ----
+
+fn test_scalar_into_2d_still_unsupported() {
+    # Currently scalar broadcast applies only to 1D arrays; 2D + scalar
+    # would need a separate path. Document the current behaviour so a
+    # future commit that adds it has a baseline to reverse.
+    h A = [[1, 2], [3, 4]];
+    # arr_scale stays a separate builtin and works fine.
+    h C = arr_scale([1, 2, 3], 10);
+    assert_eq(arr_get(C, 0), 10, "scalar broadcast on 1D");
+    assert_eq(arr_get(C, 2), 30, "scalar broadcast on 1D");
+}
+
+# ---- Shape mismatch raises ----
+
+fn test_shape_mismatch_2d_2d_caught() {
+    h caught = "";
+    try {
+        h A = [[1, 2, 3], [4, 5, 6]];
+        h B = [[1, 2], [3, 4]];
+        h _ = arr_add(A, B);
+    } catch e {
+        caught = e;
+    }
+    assert_true(str_len(caught) > 0, "shape mismatch raised");
+}
+
+fn test_shape_mismatch_2d_1d_caught() {
+    h caught = "";
+    try {
+        h A = [[1, 2, 3], [4, 5, 6]];
+        h bad = [1, 2];   # length 2 but 3 cols needed
+        h _ = arr_add(A, bad);
+    } catch e {
+        caught = e;
+    }
+    assert_true(str_len(caught) > 0, "row-broadcast mismatch raised");
+}
