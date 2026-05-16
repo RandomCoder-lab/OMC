@@ -1783,6 +1783,8 @@ impl Interpreter {
             | "gcd" | "lcm" | "square" | "cube" | "pow" | "pow_int" | "sqrt"
             | "factorial" | "is_even" | "even" | "is_odd" | "odd" | "is_prime"
             | "sin" | "cos" | "tan" | "tanh" | "exp" | "log" | "erf" | "sigmoid"
+            | "log2" | "log10" | "asin" | "acos" | "atan" | "atan2"
+            | "hypot" | "lerp"
             | "clamp" | "pi" | "tau" | "e" | "phi" | "phi_inv" | "phi_sq"
             | "phi_squared" | "sqrt_2" | "sqrt_5" | "ln_2"
             // Strings
@@ -1796,6 +1798,9 @@ impl Interpreter {
             | "arr_push" | "arr_first" | "arr_last" | "arr_slice" | "arr_concat"
             | "arr_contains" | "arr_index_of" | "arr_sort" | "arr_reverse" | "arr_join"
             | "arr_min" | "arr_max" | "arr_sum" | "arr_fold_elements"
+            | "arr_mean" | "arr_variance" | "arr_stddev" | "arr_median"
+            | "arr_harmonic_mean" | "arr_geometric_mean"
+            | "arr_sum_sq" | "arr_norm" | "arr_dot"
             | "arr_resonance" | "filter_by_resonance" | "cleanup_array"
             | "arr_map" | "arr_filter" | "arr_reduce"
             | "arr_any" | "arr_all" | "arr_find"
@@ -1810,6 +1815,8 @@ impl Interpreter {
             // OMNIcode harmonic variants
             | "harmonic_checksum" | "harmonic_write_file" | "harmonic_read_file"
             | "harmonic_sort" | "harmonic_split" | "harmonic_partition"
+            | "attractor_distance" | "nearest_attractor"
+            | "largest_attractor_at_most" | "crt_residues" | "hbit_tension"
             | "harmonic_hash" | "harmonic_diff" | "harmonic_dedupe"
             // Phi-Pi-Fib search (Fibonacci-step binary search variant)
             | "phi_pi_fib_search" | "phi_pi_fib_nearest"
@@ -2020,11 +2027,46 @@ impl Interpreter {
             }
             "sqrt" => Ok(Value::HFloat(self.eval_expr(&args[0])?.to_float().sqrt())),
             "log" => Ok(Value::HFloat(self.eval_expr(&args[0])?.to_float().ln())),
+            "log2" => Ok(Value::HFloat(self.eval_expr(&args[0])?.to_float().log2())),
+            "log10" => Ok(Value::HFloat(self.eval_expr(&args[0])?.to_float().log10())),
             "exp" => Ok(Value::HFloat(self.eval_expr(&args[0])?.to_float().exp())),
             "sin" => Ok(Value::HFloat(self.eval_expr(&args[0])?.to_float().sin())),
             "cos" => Ok(Value::HFloat(self.eval_expr(&args[0])?.to_float().cos())),
             "tan" => Ok(Value::HFloat(self.eval_expr(&args[0])?.to_float().tan())),
             "tanh" => Ok(Value::HFloat(self.eval_expr(&args[0])?.to_float().tanh())),
+            "asin" => Ok(Value::HFloat(self.eval_expr(&args[0])?.to_float().asin())),
+            "acos" => Ok(Value::HFloat(self.eval_expr(&args[0])?.to_float().acos())),
+            "atan" => Ok(Value::HFloat(self.eval_expr(&args[0])?.to_float().atan())),
+            "atan2" => {
+                if args.len() < 2 {
+                    return Err("atan2 requires (y, x)".to_string());
+                }
+                let y = self.eval_expr(&args[0])?.to_float();
+                let x = self.eval_expr(&args[1])?.to_float();
+                Ok(Value::HFloat(y.atan2(x)))
+            }
+            // Euclidean distance helper. Common in geometry, ML, and
+            // the harmonic libraries' multi-dim metrics.
+            "hypot" => {
+                if args.len() < 2 {
+                    return Err("hypot requires (a, b)".to_string());
+                }
+                let a = self.eval_expr(&args[0])?.to_float();
+                let b = self.eval_expr(&args[1])?.to_float();
+                Ok(Value::HFloat(a.hypot(b)))
+            }
+            // Linear interpolation: a + t*(b-a). Standard graphics /
+            // ML helper. Useful in OMC for blending values along an
+            // attractor manifold.
+            "lerp" => {
+                if args.len() < 3 {
+                    return Err("lerp requires (a, b, t)".to_string());
+                }
+                let a = self.eval_expr(&args[0])?.to_float();
+                let b = self.eval_expr(&args[1])?.to_float();
+                let t = self.eval_expr(&args[2])?.to_float();
+                Ok(Value::HFloat(a + t * (b - a)))
+            }
             "erf" => {
                 // Abramowitz & Stegun approximation (max error ~1.5e-7)
                 let x = self.eval_expr(&args[0])?.to_float();
@@ -3854,6 +3896,83 @@ impl Interpreter {
                     Err("harmonic_partition: argument must be an array".to_string())
                 }
             }
+            // attractor_distance(n) — substrate primitive: distance from
+            // |n| to the nearest Fibonacci attractor. Returns 0 when n
+            // is exactly on an attractor (including 0). Useful for HBit
+            // tension calculations and OOD gating in user code.
+            "attractor_distance" => {
+                if args.is_empty() {
+                    return Err("attractor_distance requires (n)".to_string());
+                }
+                let n = self.eval_expr(&args[0])?.to_int();
+                let (_a, dist) = crate::phi_pi_fib::nearest_attractor_with_dist(n);
+                Ok(Value::HInt(HInt::new(dist)))
+            }
+            // nearest_attractor(n) — substrate primitive: returns the
+            // Fibonacci attractor closest to n (sign-preserving).
+            // Companion to attractor_distance — together they expose
+            // the substrate's full nearest-attractor lookup to OMC.
+            "nearest_attractor" => {
+                if args.is_empty() {
+                    return Err("nearest_attractor requires (n)".to_string());
+                }
+                let n = self.eval_expr(&args[0])?.to_int();
+                let (a, _dist) = crate::phi_pi_fib::nearest_attractor_with_dist(n);
+                Ok(Value::HInt(HInt::new(a)))
+            }
+            // largest_attractor_at_most(n) — substrate primitive added
+            // for harmonic_split (Path B4): largest Fibonacci attractor
+            // <= |n|, sign-preserving. Useful for greedy chunking and
+            // bucket-budget calculations.
+            "largest_attractor_at_most" => {
+                if args.is_empty() {
+                    return Err("largest_attractor_at_most requires (n)".to_string());
+                }
+                let n = self.eval_expr(&args[0])?.to_int();
+                Ok(Value::HInt(HInt::new(
+                    crate::phi_pi_fib::largest_attractor_at_most(n)
+                )))
+            }
+            // crt_residues(pos, moduli) — Chinese Remainder Theorem-
+            // style residue tuple. The CRT-PE positional encoding (E2)
+            // expressed directly as an OMC builtin. Returns an array
+            // of (pos % m_i) for each modulus in the moduli array.
+            // For pairwise-coprime moduli this uniquely identifies pos
+            // within [0, prod(moduli)).
+            "crt_residues" => {
+                if args.len() < 2 {
+                    return Err("crt_residues requires (pos, moduli_array)".to_string());
+                }
+                let pos = self.eval_expr(&args[0])?.to_int();
+                if let Value::Array(moduli) = self.eval_expr(&args[1])? {
+                    let items = moduli.items.borrow();
+                    let out: Vec<Value> = items.iter().map(|m| {
+                        let mi = m.to_int();
+                        if mi == 0 {
+                            Value::HInt(HInt::new(0))
+                        } else {
+                            Value::HInt(HInt::new(pos.rem_euclid(mi)))
+                        }
+                    }).collect();
+                    Ok(Value::Array(HArray::from_vec(out)))
+                } else {
+                    Err("crt_residues: second arg must be an array".to_string())
+                }
+            }
+            // hbit_tension(value) — 1-D HBit tension, the cheap
+            // OOD-detection primitive: distance from value to its
+            // nearest Fibonacci attractor. Same as attractor_distance
+            // but with a name that matches the experiments-paper
+            // vocabulary (used by harmonic_anomaly's substrate-routed
+            // log bucketing and the hybrid-attention gate).
+            "hbit_tension" => {
+                if args.is_empty() {
+                    return Err("hbit_tension requires (value)".to_string());
+                }
+                let n = self.eval_expr(&args[0])?.to_int();
+                let (_a, dist) = crate::phi_pi_fib::nearest_attractor_with_dist(n);
+                Ok(Value::HInt(HInt::new(dist)))
+            }
             "harmonic_hash" => {
                 // Position-aware resonance hash — different from
                 // harmonic_checksum which is just a sum (trivially
@@ -3997,6 +4116,163 @@ impl Interpreter {
                     Ok(Value::HInt(HInt::new(max)))
                 } else {
                     Err("arr_max: requires an array".to_string())
+                }
+            }
+            // Arithmetic mean as float. Common stats helper not previously
+            // exposed; users had to compute arr_sum / arr_len manually.
+            "arr_mean" => {
+                if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                    let items = arr.items.borrow();
+                    if items.is_empty() {
+                        return Err("arr_mean: empty array".to_string());
+                    }
+                    let sum: f64 = items.iter().map(|v| v.to_float()).sum();
+                    Ok(Value::HFloat(sum / items.len() as f64))
+                } else {
+                    Err("arr_mean: requires an array".to_string())
+                }
+            }
+            // Variance (population, not sample — divides by N not N-1).
+            // Hot in anomaly-detector workloads (per-dim spread).
+            "arr_variance" => {
+                if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                    let items = arr.items.borrow();
+                    if items.is_empty() {
+                        return Err("arr_variance: empty array".to_string());
+                    }
+                    let n = items.len() as f64;
+                    let mean: f64 = items.iter().map(|v| v.to_float()).sum::<f64>() / n;
+                    let var: f64 = items.iter()
+                        .map(|v| { let d = v.to_float() - mean; d * d })
+                        .sum::<f64>() / n;
+                    Ok(Value::HFloat(var))
+                } else {
+                    Err("arr_variance: requires an array".to_string())
+                }
+            }
+            // Standard deviation = sqrt(variance).
+            "arr_stddev" => {
+                if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                    let items = arr.items.borrow();
+                    if items.is_empty() {
+                        return Err("arr_stddev: empty array".to_string());
+                    }
+                    let n = items.len() as f64;
+                    let mean: f64 = items.iter().map(|v| v.to_float()).sum::<f64>() / n;
+                    let var: f64 = items.iter()
+                        .map(|v| { let d = v.to_float() - mean; d * d })
+                        .sum::<f64>() / n;
+                    Ok(Value::HFloat(var.sqrt()))
+                } else {
+                    Err("arr_stddev: requires an array".to_string())
+                }
+            }
+            // Median value. Float result so even-length arrays return
+            // the average of the two middle elements.
+            "arr_median" => {
+                if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                    let items = arr.items.borrow();
+                    if items.is_empty() {
+                        return Err("arr_median: empty array".to_string());
+                    }
+                    let mut floats: Vec<f64> = items.iter().map(|v| v.to_float()).collect();
+                    floats.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                    let n = floats.len();
+                    let m = if n % 2 == 1 {
+                        floats[n / 2]
+                    } else {
+                        (floats[n / 2 - 1] + floats[n / 2]) / 2.0
+                    };
+                    Ok(Value::HFloat(m))
+                } else {
+                    Err("arr_median: requires an array".to_string())
+                }
+            }
+            // Harmonic mean: n / sum(1/x_i). Useful for averaging
+            // rates and frequencies. Substrate-themed name despite
+            // being standard stats — fits the OMC vocabulary.
+            "arr_harmonic_mean" => {
+                if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                    let items = arr.items.borrow();
+                    if items.is_empty() {
+                        return Err("arr_harmonic_mean: empty array".to_string());
+                    }
+                    let mut sum_recip = 0.0;
+                    for v in items.iter() {
+                        let f = v.to_float();
+                        if f == 0.0 {
+                            return Err("arr_harmonic_mean: zero element".to_string());
+                        }
+                        sum_recip += 1.0 / f;
+                    }
+                    Ok(Value::HFloat(items.len() as f64 / sum_recip))
+                } else {
+                    Err("arr_harmonic_mean: requires an array".to_string())
+                }
+            }
+            // Geometric mean: nth_root(prod(x_i)). Done via log-sum
+            // to avoid overflow for large arrays.
+            "arr_geometric_mean" => {
+                if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                    let items = arr.items.borrow();
+                    if items.is_empty() {
+                        return Err("arr_geometric_mean: empty array".to_string());
+                    }
+                    let mut log_sum = 0.0;
+                    for v in items.iter() {
+                        let f = v.to_float();
+                        if f <= 0.0 {
+                            return Err("arr_geometric_mean: non-positive element".to_string());
+                        }
+                        log_sum += f.ln();
+                    }
+                    Ok(Value::HFloat((log_sum / items.len() as f64).exp()))
+                } else {
+                    Err("arr_geometric_mean: requires an array".to_string())
+                }
+            }
+            // Sum of squares — quick helper for variance / norm calcs.
+            "arr_sum_sq" => {
+                if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                    let items = arr.items.borrow();
+                    let s: f64 = items.iter().map(|v| { let f = v.to_float(); f * f }).sum();
+                    Ok(Value::HFloat(s))
+                } else {
+                    Err("arr_sum_sq: requires an array".to_string())
+                }
+            }
+            // L2 norm of the array as a vector — sqrt(sum of squares).
+            "arr_norm" => {
+                if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                    let items = arr.items.borrow();
+                    let s: f64 = items.iter().map(|v| { let f = v.to_float(); f * f }).sum();
+                    Ok(Value::HFloat(s.sqrt()))
+                } else {
+                    Err("arr_norm: requires an array".to_string())
+                }
+            }
+            // Dot product of two equal-length arrays.
+            "arr_dot" => {
+                if args.len() < 2 {
+                    return Err("arr_dot requires (a, b)".to_string());
+                }
+                let a = self.eval_expr(&args[0])?;
+                let b = self.eval_expr(&args[1])?;
+                if let (Value::Array(a), Value::Array(b)) = (a, b) {
+                    let ai = a.items.borrow();
+                    let bi = b.items.borrow();
+                    if ai.len() != bi.len() {
+                        return Err(format!(
+                            "arr_dot: length mismatch ({} vs {})",
+                            ai.len(), bi.len()
+                        ));
+                    }
+                    let s: f64 = ai.iter().zip(bi.iter())
+                        .map(|(x, y)| x.to_float() * y.to_float())
+                        .sum();
+                    Ok(Value::HFloat(s))
+                } else {
+                    Err("arr_dot: requires two arrays".to_string())
                 }
             }
             "arr_concat" => {
@@ -5323,6 +5599,8 @@ pub(crate) const HEAL_BUILTIN_NAMES: &[&str] = &[
     "gcd", "lcm", "square", "cube", "pow", "pow_int", "sqrt",
     "factorial", "is_even", "even", "is_odd", "odd", "is_prime",
     "sin", "cos", "tan", "tanh", "exp", "log", "erf", "sigmoid",
+    "log2", "log10", "asin", "acos", "atan", "atan2",
+    "hypot", "lerp",
     "clamp", "pi", "tau", "e", "phi", "phi_inv", "phi_sq",
     "phi_squared", "sqrt_2", "sqrt_5", "ln_2",
     // Strings
@@ -5337,6 +5615,9 @@ pub(crate) const HEAL_BUILTIN_NAMES: &[&str] = &[
     "arr_push", "arr_first", "arr_last", "arr_slice", "arr_concat",
     "arr_contains", "arr_index_of", "arr_sort", "arr_reverse", "arr_join",
     "arr_min", "arr_max", "arr_sum", "arr_fold_elements",
+    "arr_mean", "arr_variance", "arr_stddev", "arr_median",
+    "arr_harmonic_mean", "arr_geometric_mean",
+    "arr_sum_sq", "arr_norm", "arr_dot",
     "arr_resonance", "filter_by_resonance", "cleanup_array",
     "arr_map", "arr_filter", "arr_reduce", "arr_any", "arr_all", "arr_find",
     "arr_zip", "arr_unique",
@@ -5350,6 +5631,8 @@ pub(crate) const HEAL_BUILTIN_NAMES: &[&str] = &[
     "mean_omni_weight", "boundary", "res",
     "harmonic_checksum", "harmonic_write_file", "harmonic_read_file",
     "harmonic_sort", "harmonic_split", "harmonic_partition",
+    "attractor_distance", "nearest_attractor",
+    "largest_attractor_at_most", "crt_residues", "hbit_tension",
     "harmonic_hash", "harmonic_diff", "harmonic_dedupe",
     // Phi-Pi-Fib search
     "phi_pi_fib_search", "phi_pi_fib_nearest",

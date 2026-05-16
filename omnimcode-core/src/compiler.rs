@@ -151,6 +151,9 @@ impl Compiler {
                         | "pow_int" | "square" | "cube" | "sign" | "to_int"
                         | "int" | "classify_resonance" | "safe_add" | "safe_sub"
                         | "safe_mul"
+                        // Substrate primitives — int returns
+                        | "attractor_distance" | "nearest_attractor"
+                        | "largest_attractor_at_most" | "hbit_tension"
                         // 2026-05-14 stdlib expansion (ints)
                         | "str_index_of" | "str_starts_with" | "str_ends_with"
                         | "file_exists" | "write_file" | "gcd" | "lcm"
@@ -159,8 +162,14 @@ impl Compiler {
                         | "random_int" | "random_seed"
                         // test runner ints
                         | "test_failure_count" | "test_record_failure" => Some("int"),
-                        "pow" | "sqrt" | "log" | "exp" | "sin" | "cos" | "tan"
+                        "pow" | "sqrt" | "log" | "log2" | "log10"
+                        | "exp" | "sin" | "cos" | "tan" | "asin" | "acos"
+                        | "atan" | "atan2" | "hypot" | "lerp"
                         | "tanh" | "erf" | "sigmoid" | "frac" | "clamp"
+                        | "arr_mean" | "arr_variance" | "arr_stddev"
+                        | "arr_median" | "arr_harmonic_mean"
+                        | "arr_geometric_mean" | "arr_sum_sq"
+                        | "arr_norm" | "arr_dot"
                         | "pi" | "e" | "phi" | "tau" | "phi_inv" | "phi_sq"
                         | "phi_squared" | "sqrt_2" | "sqrt_5" | "ln_2"
                         | "to_float" | "float" | "interfere"
