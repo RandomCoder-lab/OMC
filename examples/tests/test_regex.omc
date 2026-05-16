@@ -1,0 +1,65 @@
+# Tests for regex builtins: re_match, re_find, re_find_all, re_replace, re_split.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn test_re_match_basic() {
+    assert_eq(re_match("foo", "barfoobaz"), 1, "foo matches in barfoobaz");
+    assert_eq(re_match("xyz", "abc"), 0, "xyz does not match abc");
+}
+
+fn test_re_match_anchored() {
+    assert_eq(re_match("^abc", "abcdef"), 1, "^abc matches abcdef");
+    assert_eq(re_match("^abc", "xabcdef"), 0, "^abc does NOT match xabcdef");
+}
+
+fn test_re_match_classes() {
+    assert_eq(re_match("[0-9]+", "abc 42 xyz"), 1, "digit class matches");
+    assert_eq(re_match("^[a-z]+$", "hello"), 1, "lowercase-only matches");
+    assert_eq(re_match("^[a-z]+$", "Hello"), 0, "uppercase rejected");
+}
+
+fn test_re_find() {
+    assert_eq(re_find("[0-9]+", "abc 42 xyz"), "42", "first digit match");
+    assert_eq(re_find("[0-9]+", "abc"), "", "no match -> empty string");
+}
+
+fn test_re_find_all() {
+    h matches = re_find_all("[0-9]+", "1 2 3 hello 42");
+    assert_eq(arr_len(matches), 4, "4 numeric tokens");
+    assert_eq(arr_get(matches, 0), "1", "first match");
+    assert_eq(arr_get(matches, 3), "42", "last match");
+}
+
+fn test_re_replace_basic() {
+    assert_eq(re_replace("[0-9]+", "abc 42 xyz", "N"), "abc N xyz", "replace digits with N");
+    assert_eq(re_replace("o", "foo", "0"), "f00", "replace all o with 0");
+}
+
+fn test_re_replace_backref() {
+    # Rust regex syntax uses ${n} or $n for capture groups in replacement.
+    assert_eq(re_replace("(\\w+) (\\w+)", "hello world", "$2 $1"),
+              "world hello", "swap with backrefs");
+}
+
+fn test_re_split() {
+    h parts = re_split("\\s+", "hello   world  foo");
+    assert_eq(arr_len(parts), 3, "3 whitespace-split parts");
+    assert_eq(arr_get(parts, 0), "hello", "first part");
+    assert_eq(arr_get(parts, 1), "world", "second part");
+    assert_eq(arr_get(parts, 2), "foo", "third part");
+}
+
+fn test_re_split_csv() {
+    h parts = re_split(",\\s*", "a, b,c,  d");
+    assert_eq(arr_len(parts), 4, "4 comma-split parts");
+    assert_eq(arr_get(parts, 2), "c", "trim works");
+}
+
+fn test_re_match_empty_string() {
+    assert_eq(re_match("", "anything"), 1, "empty pattern matches everything");
+    assert_eq(re_match("anything", ""), 0, "non-empty pattern on empty text");
+}

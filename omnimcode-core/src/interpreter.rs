@@ -1914,6 +1914,7 @@ impl Interpreter {
             | "str_repeat" | "str_reverse" | "str_uppercase" | "str_lowercase"
             | "str_split_lines" | "str_count" | "str_is_empty"
             | "str_to_int" | "str_to_float" | "str_capitalize"
+            | "re_match" | "re_find" | "re_find_all" | "re_replace" | "re_split"
             // Arrays
             | "arr_new" | "arr_from_range" | "arr_len" | "arr_get" | "arr_set"
             | "arr_push" | "arr_first" | "arr_last" | "arr_slice" | "arr_concat"
@@ -3098,6 +3099,88 @@ impl Interpreter {
                     return Ok(Value::String(s));
                 }
                 Ok(Value::String(s.replace(&old, &new_s)))
+            }
+            // ---- Regex (PCRE-style via the `regex` crate) -----------
+            // Compiles the pattern on every call; for inner loops that
+            // want a compiled regex reused, wrap the call in a fn and
+            // memoize at the OMC level. Cheap-enough for one-shot use.
+            "re_match" => {
+                // re_match(pattern, text) -> 1 if pattern matches anywhere
+                // in text, 0 otherwise. Anchor with ^/$ if you need
+                // full-string matching.
+                if args.len() < 2 {
+                    return Err("re_match requires (pattern, text)".to_string());
+                }
+                let pat = self.eval_expr(&args[0])?.to_display_string();
+                let text = self.eval_expr(&args[1])?.to_display_string();
+                match regex::Regex::new(&pat) {
+                    Ok(re) => Ok(Value::HInt(HInt::new(if re.is_match(&text) { 1 } else { 0 }))),
+                    Err(e) => Err(format!("re_match: invalid pattern {:?}: {}", pat, e)),
+                }
+            }
+            "re_find" => {
+                // re_find(pattern, text) -> first match as string, or "" if no match.
+                if args.len() < 2 {
+                    return Err("re_find requires (pattern, text)".to_string());
+                }
+                let pat = self.eval_expr(&args[0])?.to_display_string();
+                let text = self.eval_expr(&args[1])?.to_display_string();
+                match regex::Regex::new(&pat) {
+                    Ok(re) => {
+                        let m = re.find(&text).map(|m| m.as_str().to_string()).unwrap_or_default();
+                        Ok(Value::String(m))
+                    }
+                    Err(e) => Err(format!("re_find: invalid pattern {:?}: {}", pat, e)),
+                }
+            }
+            "re_find_all" => {
+                // re_find_all(pattern, text) -> array of all matches (in order).
+                if args.len() < 2 {
+                    return Err("re_find_all requires (pattern, text)".to_string());
+                }
+                let pat = self.eval_expr(&args[0])?.to_display_string();
+                let text = self.eval_expr(&args[1])?.to_display_string();
+                match regex::Regex::new(&pat) {
+                    Ok(re) => {
+                        let matches: Vec<Value> = re.find_iter(&text)
+                            .map(|m| Value::String(m.as_str().to_string()))
+                            .collect();
+                        Ok(Value::Array(HArray::from_vec(matches)))
+                    }
+                    Err(e) => Err(format!("re_find_all: invalid pattern {:?}: {}", pat, e)),
+                }
+            }
+            "re_replace" => {
+                // re_replace(pattern, text, replacement) -> text with all
+                // pattern matches replaced. Supports $1, $2 backrefs in
+                // replacement string (Rust regex syntax).
+                if args.len() < 3 {
+                    return Err("re_replace requires (pattern, text, replacement)".to_string());
+                }
+                let pat = self.eval_expr(&args[0])?.to_display_string();
+                let text = self.eval_expr(&args[1])?.to_display_string();
+                let repl = self.eval_expr(&args[2])?.to_display_string();
+                match regex::Regex::new(&pat) {
+                    Ok(re) => Ok(Value::String(re.replace_all(&text, repl.as_str()).into_owned())),
+                    Err(e) => Err(format!("re_replace: invalid pattern {:?}: {}", pat, e)),
+                }
+            }
+            "re_split" => {
+                // re_split(pattern, text) -> array of substrings split at pattern.
+                if args.len() < 2 {
+                    return Err("re_split requires (pattern, text)".to_string());
+                }
+                let pat = self.eval_expr(&args[0])?.to_display_string();
+                let text = self.eval_expr(&args[1])?.to_display_string();
+                match regex::Regex::new(&pat) {
+                    Ok(re) => {
+                        let parts: Vec<Value> = re.split(&text)
+                            .map(|s| Value::String(s.to_string()))
+                            .collect();
+                        Ok(Value::Array(HArray::from_vec(parts)))
+                    }
+                    Err(e) => Err(format!("re_split: invalid pattern {:?}: {}", pat, e)),
+                }
             }
             "str_index_of" => {
                 if args.len() < 2 {
@@ -7771,6 +7854,7 @@ pub(crate) const HEAL_BUILTIN_NAMES: &[&str] = &[
     "str_pad_left", "str_pad_right",
     "str_split_lines", "str_count", "str_is_empty",
     "str_to_int", "str_to_float", "str_capitalize",
+    "re_match", "re_find", "re_find_all", "re_replace", "re_split",
     // Arrays
     "arr_new", "arr_from_range", "arr_len", "arr_get", "arr_set",
     "arr_push", "arr_first", "arr_last", "arr_slice", "arr_concat",

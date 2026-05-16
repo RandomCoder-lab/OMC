@@ -182,6 +182,8 @@ impl Compiler {
                         // String → int parsers + counters + size queries
                         | "str_to_int" | "str_count" | "str_is_empty"
                         | "dict_size" | "dict_pop"
+                        // Regex predicate returns int
+                        | "re_match"
                         // Array index/aggregate ints
                         | "arr_argmax" | "arr_argmin"
                         // Bit/digit/modular int returns
