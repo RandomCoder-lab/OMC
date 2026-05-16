@@ -230,12 +230,20 @@ class TinyLM(nn.Module):
         return self.head(h)  # [B, T, vocab]
 
 
-def make_model(arch: str, vocab_size: int, seq_len: int) -> TinyLM:
-    """Convenience: build one of the three benchmarked architectures."""
+def make_model(
+    arch: str,
+    vocab_size: int,
+    seq_len: int,
+    d_model: int = 64,
+    n_blocks: int = 2,
+) -> TinyLM:
+    """Convenience: build one of the three benchmarked architectures.
+    Defaults match the original tiny-bench (d_model=64, n_blocks=2).
+    The scale experiment uses d_model=128, n_blocks=4."""
     common = dict(
         vocab_size=vocab_size,
-        d_model=64,
-        n_blocks=2,
+        d_model=d_model,
+        n_blocks=n_blocks,
         seq_len=seq_len,
     )
     if arch == "standard":

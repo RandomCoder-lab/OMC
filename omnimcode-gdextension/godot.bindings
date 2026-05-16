@@ -1,0 +1,6 @@
+{
+    "configure": {
+        "methods_to_bind": [],
+        "generate_layout_file": true
+    }
+}

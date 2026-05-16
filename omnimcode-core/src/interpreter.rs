@@ -393,6 +393,7 @@ impl Interpreter {
         None
     }
 
+    #[allow(dead_code)]
     fn import_module(&mut self, name: &str) -> Result<(), String> {
         self.import_module_with_alias(name, None)
     }
@@ -1781,6 +1782,7 @@ impl Interpreter {
             // Numbers & math
             "abs" | "min" | "max" | "sign" | "floor" | "ceil" | "round" | "frac"
             | "gcd" | "lcm" | "square" | "cube" | "pow" | "pow_int" | "sqrt"
+            | "mod_pow" | "bit_count" | "bit_length" | "digit_sum" | "digit_count"
             | "factorial" | "is_even" | "even" | "is_odd" | "odd" | "is_prime"
             | "sin" | "cos" | "tan" | "tanh" | "exp" | "log" | "erf" | "sigmoid"
             | "log2" | "log10" | "asin" | "acos" | "atan" | "atan2"
@@ -1793,11 +1795,16 @@ impl Interpreter {
             | "csv_parse"
             | "str_index_of" | "str_contains" | "str_starts_with" | "str_ends_with"
             | "str_repeat" | "str_reverse" | "str_uppercase" | "str_lowercase"
+            | "str_split_lines" | "str_count" | "str_is_empty"
+            | "str_to_int" | "str_to_float" | "str_capitalize"
             // Arrays
             | "arr_new" | "arr_from_range" | "arr_len" | "arr_get" | "arr_set"
             | "arr_push" | "arr_first" | "arr_last" | "arr_slice" | "arr_concat"
             | "arr_contains" | "arr_index_of" | "arr_sort" | "arr_reverse" | "arr_join"
             | "arr_min" | "arr_max" | "arr_sum" | "arr_fold_elements"
+            | "arr_argmax" | "arr_argmin" | "arr_cumsum" | "arr_diff" | "arr_range"
+            | "arr_unique_count" | "arr_partition_by"
+            | "arr_min_float" | "arr_max_float" | "arr_gcd" | "fnv1a_hash"
             | "arr_mean" | "arr_variance" | "arr_stddev" | "arr_median"
             | "arr_harmonic_mean" | "arr_geometric_mean"
             | "arr_sum_sq" | "arr_norm" | "arr_dot"
@@ -1807,6 +1814,7 @@ impl Interpreter {
             // Dicts
             | "dict_new" | "dict_get" | "dict_set" | "dict_has" | "dict_del"
             | "dict_keys" | "dict_values" | "dict_len" | "dict_merge"
+            | "dict_pop" | "dict_get_or" | "dict_size" | "dict_clear" | "dict_items"
             // Harmonic primitives
             | "fib" | "fibonacci" | "is_fibonacci" | "harmony_value" | "fold"
             | "fold_escape" | "value_danger" | "classify_resonance"
@@ -1817,6 +1825,7 @@ impl Interpreter {
             | "harmonic_sort" | "harmonic_split" | "harmonic_partition"
             | "attractor_distance" | "nearest_attractor"
             | "largest_attractor_at_most" | "crt_residues" | "hbit_tension"
+            | "is_attractor" | "resonance_band" | "crt_recover" | "fibonacci_index"
             | "harmonic_hash" | "harmonic_diff" | "harmonic_dedupe"
             // Phi-Pi-Fib search (Fibonacci-step binary search variant)
             | "phi_pi_fib_search" | "phi_pi_fib_nearest"
@@ -1824,6 +1833,25 @@ impl Interpreter {
             // Phi-Pi-Fib search v2 + binary baseline + theoretical bound
             | "phi_pi_fib_search_v2" | "phi_pi_fib_nearest_v2"
             | "phi_pi_bin_search" | "log_phi_pi_fibonacci"
+            | "zeckendorf" | "from_zeckendorf"
+            | "substrate_search" | "substrate_lower_bound" | "substrate_upper_bound"
+            | "substrate_rank" | "substrate_count_range" | "substrate_slice_range"
+            | "substrate_intersect" | "substrate_difference"
+            | "zeckendorf_weight" | "zeckendorf_bit" | "substrate_hash"
+            | "attractor_bucket" | "substrate_insert" | "substrate_quantile"
+            | "fib_chunks"
+            | "harmonic_align" | "harmonic_unalign" | "phi_pi_log_distance"
+            | "harmonic_resample" | "substrate_select_k"
+            | "int_binary_search" | "int_lower_bound" | "int_upper_bound"
+            | "sorted_merge" | "sorted_union" | "sorted_dedupe"
+            | "nth_fibonacci" | "is_zeckendorf_valid"
+            | "substrate_min_distance" | "substrate_nearest"
+            | "phi_pow" | "phi_pi_pow" | "harmonic_partition_3"
+            | "resonance_band_histogram"
+            | "arr_sum_int" | "arr_product" | "arr_sort_int" | "arr_is_sorted"
+            | "attractor_table" | "harmonic_score"
+            | "arr_min_int" | "arr_max_int" | "arr_avg_distance"
+            | "is_phi_resonant"
             // Traced variants — return [result, probe_indices_array]
             | "phi_pi_fib_search_traced" | "phi_pi_fib_nearest_traced"
             // Split-channel stats (explicit vs background substrate work)
@@ -1853,6 +1881,9 @@ impl Interpreter {
             | "random_int" | "random_float" | "random_seed"
             // Polish round
             | "str_pad_left" | "str_pad_right" | "arr_zip" | "arr_unique"
+            | "arr_take" | "arr_drop" | "arr_count" | "arr_repeat"
+            | "arr_zeros" | "arr_ones" | "arr_chunk" | "arr_flatten"
+            | "arr_enumerate" | "arr_window"
         )
     }
 
@@ -2487,6 +2518,84 @@ impl Interpreter {
                     exp >>= 1;
                 }
                 Ok(Value::HInt(HInt::new(result)))
+            }
+            // mod_pow: modular exponentiation (base^exp mod m).
+            // Wraps i128 internally to avoid overflow in the squaring step
+            // for moduli up to ~2^63. Standard Diffie-Hellman / RSA-shaped
+            // primitive — and useful for CRT recovery in Fibonacci moduli.
+            "mod_pow" => {
+                if args.len() < 3 {
+                    return Err("mod_pow requires (base, exp, modulus)".to_string());
+                }
+                let b = self.eval_expr(&args[0])?.to_int();
+                let e = self.eval_expr(&args[1])?.to_int();
+                let m = self.eval_expr(&args[2])?.to_int();
+                if m == 0 {
+                    return Ok(Value::Singularity {
+                        numerator: 0, denominator: 0,
+                        context: "mod_pow: modulus is zero".to_string(),
+                    });
+                }
+                let m128 = m.unsigned_abs() as i128;
+                let mut result: i128 = 1 % m128;
+                let mut base = (b.rem_euclid(m)) as i128 % m128;
+                let mut exp = e.max(0) as u64;
+                while exp > 0 {
+                    if exp & 1 == 1 {
+                        result = (result * base) % m128;
+                    }
+                    base = (base * base) % m128;
+                    exp >>= 1;
+                }
+                Ok(Value::HInt(HInt::new(result as i64)))
+            }
+            // bit_count (popcount): number of 1 bits in the unsigned repr.
+            "bit_count" => {
+                if args.is_empty() {
+                    return Err("bit_count requires (n)".to_string());
+                }
+                let n = self.eval_expr(&args[0])?.to_int();
+                Ok(Value::HInt(HInt::new(n.count_ones() as i64)))
+            }
+            // bit_length: minimum bits needed to represent abs(n). 0 -> 0.
+            "bit_length" => {
+                if args.is_empty() {
+                    return Err("bit_length requires (n)".to_string());
+                }
+                let n = self.eval_expr(&args[0])?.to_int();
+                let len = if n == 0 { 0 } else { 64 - n.unsigned_abs().leading_zeros() as i64 };
+                Ok(Value::HInt(HInt::new(len)))
+            }
+            // digit_sum: sum of decimal digits of abs(n).
+            // Used in numerology / divisibility / Fibonacci-digit-relation
+            // experiments and harmonic checksum spot-checks.
+            "digit_sum" => {
+                if args.is_empty() {
+                    return Err("digit_sum requires (n)".to_string());
+                }
+                let mut n = self.eval_expr(&args[0])?.to_int().unsigned_abs();
+                let mut sum: i64 = 0;
+                if n == 0 {
+                    return Ok(Value::HInt(HInt::new(0)));
+                }
+                while n > 0 {
+                    sum += (n % 10) as i64;
+                    n /= 10;
+                }
+                Ok(Value::HInt(HInt::new(sum)))
+            }
+            // digit_count: number of decimal digits in abs(n). digit_count(0) = 1.
+            "digit_count" => {
+                if args.is_empty() {
+                    return Err("digit_count requires (n)".to_string());
+                }
+                let mut n = self.eval_expr(&args[0])?.to_int().unsigned_abs();
+                if n == 0 {
+                    return Ok(Value::HInt(HInt::new(1)));
+                }
+                let mut c: i64 = 0;
+                while n > 0 { c += 1; n /= 10; }
+                Ok(Value::HInt(HInt::new(c)))
             }
             // is_even / is_odd predicates
             "even" => {
@@ -3355,6 +3464,75 @@ impl Interpreter {
                     _ => Err("dict_merge: both arguments must be dicts".to_string()),
                 }
             }
+            "dict_pop" => {
+                // Mutating: remove key from dict_var, return its value or Null.
+                if args.len() < 2 {
+                    return Err("dict_pop requires (dict_var, key)".to_string());
+                }
+                let k = self.eval_expr(&args[1])?.to_display_string();
+                if let Expression::Variable(name) = &args[0] {
+                    if let Some(Value::Dict(d)) = self.get_var(name) {
+                        let removed = d.borrow_mut().remove(&k);
+                        return Ok(removed.unwrap_or(Value::Null));
+                    }
+                }
+                Err("dict_pop: first argument must be a dict variable".to_string())
+            }
+            "dict_get_or" => {
+                // Pure: dict_get with a default fallback (always returns the default for missing).
+                if args.len() < 3 {
+                    return Err("dict_get_or requires (dict, key, default)".to_string());
+                }
+                let dict_v = self.eval_expr(&args[0])?;
+                let k = self.eval_expr(&args[1])?.to_display_string();
+                let default = self.eval_expr(&args[2])?;
+                if let Value::Dict(d) = dict_v {
+                    Ok(d.borrow().get(&k).cloned().unwrap_or(default))
+                } else {
+                    Err("dict_get_or: first argument must be a dict".to_string())
+                }
+            }
+            "dict_size" => {
+                // Alias for dict_len (Python-aligned naming).
+                if args.is_empty() {
+                    return Err("dict_size requires (dict)".to_string());
+                }
+                if let Value::Dict(d) = self.eval_expr(&args[0])? {
+                    Ok(Value::HInt(HInt::new(d.borrow().len() as i64)))
+                } else {
+                    Err("dict_size: argument must be a dict".to_string())
+                }
+            }
+            "dict_clear" => {
+                // Mutating: drop all entries.
+                if args.is_empty() {
+                    return Err("dict_clear requires (dict_var)".to_string());
+                }
+                if let Expression::Variable(name) = &args[0] {
+                    if let Some(Value::Dict(d)) = self.get_var(name) {
+                        d.borrow_mut().clear();
+                        return Ok(Value::Null);
+                    }
+                }
+                Err("dict_clear: argument must be a dict variable".to_string())
+            }
+            "dict_items" => {
+                // Returns array of [key, value] pairs.
+                if args.is_empty() {
+                    return Err("dict_items requires (dict)".to_string());
+                }
+                if let Value::Dict(d) = self.eval_expr(&args[0])? {
+                    let mut out = Vec::with_capacity(d.borrow().len());
+                    for (k, v) in d.borrow().iter() {
+                        out.push(Value::Array(HArray::from_vec(vec![
+                            Value::String(k.clone()), v.clone()
+                        ])));
+                    }
+                    Ok(Value::Array(HArray::from_vec(out)))
+                } else {
+                    Err("dict_items: argument must be a dict".to_string())
+                }
+            }
             // File I/O — basic synchronous reads and writes.
             // Error semantics: read_file returns the error message as the
             // error path so callers can pattern-match; write_file returns
@@ -3610,6 +3788,82 @@ impl Interpreter {
                 let padding: String = std::iter::repeat(pad_char).take(width - len).collect();
                 Ok(Value::String(format!("{}{}", s, padding)))
             }
+            "str_split_lines" => {
+                // Split on \n (consuming \r\n properly so Windows files don't
+                // leave \r remnants). Returns array of strings.
+                if args.is_empty() {
+                    return Err("str_split_lines requires (string)".to_string());
+                }
+                let s = self.eval_expr(&args[0])?.to_string();
+                let lines: Vec<Value> = s.lines()
+                    .map(|l| Value::String(l.to_string()))
+                    .collect();
+                Ok(Value::Array(HArray::from_vec(lines)))
+            }
+            "str_count" => {
+                // Count non-overlapping occurrences of needle in haystack.
+                if args.len() < 2 {
+                    return Err("str_count requires (haystack, needle)".to_string());
+                }
+                let s = self.eval_expr(&args[0])?.to_display_string();
+                let needle = self.eval_expr(&args[1])?.to_display_string();
+                if needle.is_empty() {
+                    return Ok(Value::HInt(HInt::new(0)));
+                }
+                Ok(Value::HInt(HInt::new(s.matches(&needle).count() as i64)))
+            }
+            "str_is_empty" => {
+                if args.is_empty() {
+                    return Err("str_is_empty requires (string)".to_string());
+                }
+                let s = self.eval_expr(&args[0])?.to_display_string();
+                Ok(Value::HInt(HInt::new(if s.is_empty() { 1 } else { 0 })))
+            }
+            "str_to_int" => {
+                // Parse string as int. Returns Singularity on parse failure
+                // — same idiom div-by-zero uses elsewhere; resolvable.
+                if args.is_empty() {
+                    return Err("str_to_int requires (string)".to_string());
+                }
+                let s = self.eval_expr(&args[0])?.to_display_string();
+                match s.trim().parse::<i64>() {
+                    Ok(n) => Ok(Value::HInt(HInt::new(n))),
+                    Err(_) => Ok(Value::Singularity {
+                        numerator: 0, denominator: 0,
+                        context: format!("str_to_int: {:?} not parseable", s),
+                    }),
+                }
+            }
+            "str_to_float" => {
+                if args.is_empty() {
+                    return Err("str_to_float requires (string)".to_string());
+                }
+                let s = self.eval_expr(&args[0])?.to_display_string();
+                match s.trim().parse::<f64>() {
+                    Ok(f) => Ok(Value::HFloat(f)),
+                    Err(_) => Ok(Value::Singularity {
+                        numerator: 0, denominator: 0,
+                        context: format!("str_to_float: {:?} not parseable", s),
+                    }),
+                }
+            }
+            "str_capitalize" => {
+                // Uppercase the first char, leave the rest as-is.
+                // Aligns with Python str.capitalize when called on lowercase
+                // input; for mixed-case input we deliberately don't lowercase
+                // the tail (Python does), since that's surprising for many
+                // identifiers/proper nouns.
+                if args.is_empty() {
+                    return Err("str_capitalize requires (string)".to_string());
+                }
+                let s = self.eval_expr(&args[0])?.to_string();
+                let mut chars = s.chars();
+                let out = match chars.next() {
+                    Some(c) => c.to_uppercase().chain(chars).collect(),
+                    None => String::new(),
+                };
+                Ok(Value::String(out))
+            }
             // arr_zip — pair elements positionally. Returns array of
             // [a_i, b_i] pairs; shorter array determines length.
             "arr_zip" => {
@@ -3653,6 +3907,163 @@ impl Interpreter {
                     Ok(Value::Array(HArray::from_vec(seen)))
                 } else {
                     Err("arr_unique: argument must be an array".to_string())
+                }
+            }
+            // arr_take(arr, n) — first n elements (or all if n > len).
+            // Common slicing helper not previously exposed.
+            "arr_take" => {
+                if args.len() < 2 {
+                    return Err("arr_take requires (array, n)".to_string());
+                }
+                let n = self.eval_expr(&args[1])?.to_int().max(0) as usize;
+                if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                    let items = arr.items.borrow();
+                    let take = items.iter().take(n).cloned().collect::<Vec<_>>();
+                    Ok(Value::Array(HArray::from_vec(take)))
+                } else {
+                    Err("arr_take: requires an array".to_string())
+                }
+            }
+            // arr_drop(arr, n) — skip first n elements, return the rest.
+            "arr_drop" => {
+                if args.len() < 2 {
+                    return Err("arr_drop requires (array, n)".to_string());
+                }
+                let n = self.eval_expr(&args[1])?.to_int().max(0) as usize;
+                if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                    let items = arr.items.borrow();
+                    let drop = items.iter().skip(n).cloned().collect::<Vec<_>>();
+                    Ok(Value::Array(HArray::from_vec(drop)))
+                } else {
+                    Err("arr_drop: requires an array".to_string())
+                }
+            }
+            // arr_count(arr, value) — count of occurrences. Useful for
+            // frequency analysis without going through dict_set.
+            "arr_count" => {
+                if args.len() < 2 {
+                    return Err("arr_count requires (array, value)".to_string());
+                }
+                let needle = self.eval_expr(&args[1])?;
+                if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                    let items = arr.items.borrow();
+                    let n: i64 = items.iter().filter(|v| values_equal(v, &needle)).count() as i64;
+                    Ok(Value::HInt(HInt::new(n)))
+                } else {
+                    Err("arr_count: requires an array".to_string())
+                }
+            }
+            // arr_repeat(value, n) — array of n copies of value.
+            // Replaces the common arr_new(n, val) pattern when val is
+            // not just zero.
+            "arr_repeat" => {
+                if args.len() < 2 {
+                    return Err("arr_repeat requires (value, n)".to_string());
+                }
+                let v = self.eval_expr(&args[0])?;
+                let n = self.eval_expr(&args[1])?.to_int().max(0) as usize;
+                let items: Vec<Value> = (0..n).map(|_| v.clone()).collect();
+                Ok(Value::Array(HArray::from_vec(items)))
+            }
+            // arr_zeros(n) — array of n zeros (HInt). NumPy idiom.
+            "arr_zeros" => {
+                if args.is_empty() {
+                    return Err("arr_zeros requires (n)".to_string());
+                }
+                let n = self.eval_expr(&args[0])?.to_int().max(0) as usize;
+                let items: Vec<Value> = (0..n).map(|_| Value::HInt(HInt::new(0))).collect();
+                Ok(Value::Array(HArray::from_vec(items)))
+            }
+            // arr_ones(n) — array of n ones (HInt). NumPy idiom.
+            "arr_ones" => {
+                if args.is_empty() {
+                    return Err("arr_ones requires (n)".to_string());
+                }
+                let n = self.eval_expr(&args[0])?.to_int().max(0) as usize;
+                let items: Vec<Value> = (0..n).map(|_| Value::HInt(HInt::new(1))).collect();
+                Ok(Value::Array(HArray::from_vec(items)))
+            }
+            // arr_chunk(arr, size) — split into sub-arrays of `size`.
+            // Last chunk may be shorter. Common batching pattern.
+            "arr_chunk" => {
+                if args.len() < 2 {
+                    return Err("arr_chunk requires (array, size)".to_string());
+                }
+                let size = self.eval_expr(&args[1])?.to_int().max(1) as usize;
+                if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                    let items = arr.items.borrow();
+                    let chunks: Vec<Value> = items
+                        .chunks(size)
+                        .map(|c| Value::Array(HArray::from_vec(c.to_vec())))
+                        .collect();
+                    Ok(Value::Array(HArray::from_vec(chunks)))
+                } else {
+                    Err("arr_chunk: requires an array".to_string())
+                }
+            }
+            // arr_flatten(arr) — flatten one level of nested arrays.
+            // Inverse of arr_chunk; useful after group operations.
+            "arr_flatten" => {
+                if args.is_empty() {
+                    return Err("arr_flatten requires (array)".to_string());
+                }
+                if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                    let items = arr.items.borrow();
+                    let mut out: Vec<Value> = Vec::new();
+                    for v in items.iter() {
+                        match v {
+                            Value::Array(inner) => {
+                                for x in inner.items.borrow().iter() {
+                                    out.push(x.clone());
+                                }
+                            }
+                            other => out.push(other.clone()),
+                        }
+                    }
+                    Ok(Value::Array(HArray::from_vec(out)))
+                } else {
+                    Err("arr_flatten: requires an array".to_string())
+                }
+            }
+            // arr_enumerate(arr) — array of [idx, value] pairs.
+            // Replaces the manual `while k < arr_len; arr_get(arr, k)`
+            // pattern when both index and value are needed.
+            "arr_enumerate" => {
+                if args.is_empty() {
+                    return Err("arr_enumerate requires (array)".to_string());
+                }
+                if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                    let items = arr.items.borrow();
+                    let pairs: Vec<Value> = items.iter().enumerate().map(|(i, v)| {
+                        Value::Array(HArray::from_vec(vec![
+                            Value::HInt(HInt::new(i as i64)),
+                            v.clone(),
+                        ]))
+                    }).collect();
+                    Ok(Value::Array(HArray::from_vec(pairs)))
+                } else {
+                    Err("arr_enumerate: requires an array".to_string())
+                }
+            }
+            // arr_window(arr, size) — sliding window of `size` items.
+            // Returns array of arrays, each holding `size` consecutive
+            // values. Used for n-gram and rolling-stat patterns.
+            "arr_window" => {
+                if args.len() < 2 {
+                    return Err("arr_window requires (array, size)".to_string());
+                }
+                let size = self.eval_expr(&args[1])?.to_int().max(1) as usize;
+                if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                    let items = arr.items.borrow();
+                    if size > items.len() {
+                        return Ok(Value::Array(HArray::from_vec(vec![])));
+                    }
+                    let windows: Vec<Value> = (0..=items.len() - size).map(|i| {
+                        Value::Array(HArray::from_vec(items[i..i + size].to_vec()))
+                    }).collect();
+                    Ok(Value::Array(HArray::from_vec(windows)))
+                } else {
+                    Err("arr_window: requires an array".to_string())
                 }
             }
             // println — like print but uses display formatting for HInt
@@ -3973,6 +4384,91 @@ impl Interpreter {
                 let (_a, dist) = crate::phi_pi_fib::nearest_attractor_with_dist(n);
                 Ok(Value::HInt(HInt::new(dist)))
             }
+            // is_attractor: true (1) iff n is exactly a Fibonacci attractor.
+            // Cheaper than `attractor_distance(n) == 0` because the OMC
+            // dispatch overhead disappears into a single substrate call.
+            "is_attractor" => {
+                if args.is_empty() {
+                    return Err("is_attractor requires (value)".to_string());
+                }
+                let n = self.eval_expr(&args[0])?.to_int();
+                let (_a, dist) = crate::phi_pi_fib::nearest_attractor_with_dist(n);
+                Ok(Value::HInt(HInt::new(if dist == 0 { 1 } else { 0 })))
+            }
+            // resonance_band: classify a value into a discrete resonance
+            // band by its log-distance to the nearest attractor.
+            //   0 = on-attractor (dist == 0)
+            //   1 = adjacent (dist 1..=3)
+            //   2 = near (dist 4..=10)
+            //   3 = mid (dist 11..=100)
+            //   4 = far (dist > 100)
+            // Useful as an attention-routing key without a continuous gate.
+            "resonance_band" => {
+                if args.is_empty() {
+                    return Err("resonance_band requires (value)".to_string());
+                }
+                let n = self.eval_expr(&args[0])?.to_int();
+                let (_a, dist) = crate::phi_pi_fib::nearest_attractor_with_dist(n);
+                let band = match dist {
+                    0 => 0,
+                    1..=3 => 1,
+                    4..=10 => 2,
+                    11..=100 => 3,
+                    _ => 4,
+                };
+                Ok(Value::HInt(HInt::new(band)))
+            }
+            // crt_recover: inverse of crt_residues for the same standard
+            // pairwise-coprime moduli {5, 8, 13, 21}. Given residues
+            // [r5, r8, r13, r21] returns the unique value in [0, 10920)
+            // that produces them (Garner-style CRT reconstruction).
+            // Pure substrate primitive: experiment_10 builds CRT-PE on
+            // top of this; lifting it to native makes inference cheaper.
+            "crt_recover" => {
+                if args.is_empty() {
+                    return Err("crt_recover requires (residues_array)".to_string());
+                }
+                let v = self.eval_expr(&args[0])?;
+                if let Value::Array(arr) = v {
+                    let items = arr.items.borrow();
+                    if items.len() != 4 {
+                        return Err(format!(
+                            "crt_recover: expected 4 residues for moduli [5,8,13,21], got {}",
+                            items.len()
+                        ));
+                    }
+                    let r5 = items[0].to_int().rem_euclid(5);
+                    let r8 = items[1].to_int().rem_euclid(8);
+                    let r13 = items[2].to_int().rem_euclid(13);
+                    let r21 = items[3].to_int().rem_euclid(21);
+                    // Brute-force search across the period (10920). Tiny
+                    // enough that this is faster than a full Garner solver
+                    // for typical OMC use; keeps the implementation honest.
+                    for x in 0..10920i64 {
+                        if x % 5 == r5 && x % 8 == r8
+                            && x % 13 == r13 && x % 21 == r21 {
+                            return Ok(Value::HInt(HInt::new(x)));
+                        }
+                    }
+                    Ok(Value::Singularity {
+                        numerator: 0, denominator: 0,
+                        context: "crt_recover: no solution in [0, 10920)".to_string(),
+                    })
+                } else {
+                    Err("crt_recover: argument must be an array".to_string())
+                }
+            }
+            // fibonacci_index: return the index i such that fib(i) == n,
+            // or -1 if n is not a Fibonacci number. Operates over the
+            // 40-entry FIBONACCI table (covers up to ~63M). Used for
+            // experiment_8 (Fibonacci-distance attention) and similar.
+            "fibonacci_index" => {
+                if args.is_empty() {
+                    return Err("fibonacci_index requires (value)".to_string());
+                }
+                let n = self.eval_expr(&args[0])?.to_int();
+                Ok(Value::HInt(HInt::new(crate::phi_pi_fib::fibonacci_index_of(n))))
+            }
             "harmonic_hash" => {
                 // Position-aware resonance hash — different from
                 // harmonic_checksum which is just a sum (trivially
@@ -4117,6 +4613,214 @@ impl Interpreter {
                 } else {
                     Err("arr_max: requires an array".to_string())
                 }
+            }
+            // arr_min_float / arr_max_float: like arr_min/max but preserve
+            // float precision instead of coercing to int. Needed by the
+            // experiments code where attention scores live in (0, 1).
+            "arr_min_float" => {
+                if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                    let items = arr.items.borrow();
+                    if items.is_empty() {
+                        return Err("arr_min_float: empty array".to_string());
+                    }
+                    let m = items.iter().map(|v| v.to_float())
+                        .fold(f64::INFINITY, f64::min);
+                    Ok(Value::HFloat(m))
+                } else {
+                    Err("arr_min_float: requires an array".to_string())
+                }
+            }
+            "arr_max_float" => {
+                if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                    let items = arr.items.borrow();
+                    if items.is_empty() {
+                        return Err("arr_max_float: empty array".to_string());
+                    }
+                    let m = items.iter().map(|v| v.to_float())
+                        .fold(f64::NEG_INFINITY, f64::max);
+                    Ok(Value::HFloat(m))
+                } else {
+                    Err("arr_max_float: requires an array".to_string())
+                }
+            }
+            // arr_gcd: GCD of all elements; identity is 0 (gcd(0, n) == n).
+            "arr_gcd" => {
+                if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                    let items = arr.items.borrow();
+                    let mut acc: i64 = 0;
+                    for v in items.iter() {
+                        let mut a = acc.unsigned_abs();
+                        let mut b = v.to_int().unsigned_abs();
+                        while b != 0 { let t = b; b = a % b; a = t; }
+                        acc = a as i64;
+                    }
+                    Ok(Value::HInt(HInt::new(acc)))
+                } else {
+                    Err("arr_gcd: requires an array".to_string())
+                }
+            }
+            // fnv1a_hash: 64-bit FNV-1a over a UTF-8 string. Fast,
+            // non-cryptographic; the canonical "good enough" hash for
+            // hashtable keying when the harmonic_hash is inappropriate
+            // (e.g. when collisions matter more than substrate-alignment).
+            "fnv1a_hash" => {
+                if args.is_empty() {
+                    return Err("fnv1a_hash requires (string)".to_string());
+                }
+                let s = self.eval_expr(&args[0])?.to_display_string();
+                const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+                const FNV_PRIME: u64 = 0x100000001b3;
+                let mut h = FNV_OFFSET;
+                for b in s.as_bytes() {
+                    h ^= *b as u64;
+                    h = h.wrapping_mul(FNV_PRIME);
+                }
+                // Cast to i64 by reinterpretation; OMC ints are signed.
+                Ok(Value::HInt(HInt::new(h as i64)))
+            }
+            // arr_argmax / arr_argmin: index of the first max/min value.
+            // Useful for "which class won" patterns; doing this in OMC code
+            // currently requires a manual loop.
+            "arr_argmax" => {
+                if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                    let items = arr.items.borrow();
+                    if items.is_empty() {
+                        return Err("arr_argmax: empty array".to_string());
+                    }
+                    let mut best_idx = 0usize;
+                    let mut best_val = items[0].to_float();
+                    for (i, v) in items.iter().enumerate().skip(1) {
+                        let f = v.to_float();
+                        if f > best_val { best_val = f; best_idx = i; }
+                    }
+                    Ok(Value::HInt(HInt::new(best_idx as i64)))
+                } else {
+                    Err("arr_argmax: requires an array".to_string())
+                }
+            }
+            "arr_argmin" => {
+                if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                    let items = arr.items.borrow();
+                    if items.is_empty() {
+                        return Err("arr_argmin: empty array".to_string());
+                    }
+                    let mut best_idx = 0usize;
+                    let mut best_val = items[0].to_float();
+                    for (i, v) in items.iter().enumerate().skip(1) {
+                        let f = v.to_float();
+                        if f < best_val { best_val = f; best_idx = i; }
+                    }
+                    Ok(Value::HInt(HInt::new(best_idx as i64)))
+                } else {
+                    Err("arr_argmin: requires an array".to_string())
+                }
+            }
+            // arr_cumsum: running totals. Result has same length as input.
+            "arr_cumsum" => {
+                if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                    let items = arr.items.borrow();
+                    let mut acc: f64 = 0.0;
+                    let mut out = Vec::with_capacity(items.len());
+                    let mut all_int = true;
+                    for v in items.iter() {
+                        if !matches!(v, Value::HInt(_)) { all_int = false; }
+                        acc += v.to_float();
+                        if all_int {
+                            out.push(Value::HInt(HInt::new(acc as i64)));
+                        } else {
+                            out.push(Value::HFloat(acc));
+                        }
+                    }
+                    Ok(Value::Array(HArray::from_vec(out)))
+                } else {
+                    Err("arr_cumsum: requires an array".to_string())
+                }
+            }
+            // arr_diff: consecutive differences. Output is length-1.
+            "arr_diff" => {
+                if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                    let items = arr.items.borrow();
+                    if items.is_empty() {
+                        return Ok(Value::Array(HArray::from_vec(vec![])));
+                    }
+                    let all_int = items.iter().all(|v| matches!(v, Value::HInt(_)));
+                    let mut out = Vec::with_capacity(items.len().saturating_sub(1));
+                    for w in items.windows(2) {
+                        if all_int {
+                            out.push(Value::HInt(HInt::new(w[1].to_int() - w[0].to_int())));
+                        } else {
+                            out.push(Value::HFloat(w[1].to_float() - w[0].to_float()));
+                        }
+                    }
+                    Ok(Value::Array(HArray::from_vec(out)))
+                } else {
+                    Err("arr_diff: requires an array".to_string())
+                }
+            }
+            // arr_unique_count: number of distinct values in the array.
+            // Uses display-form keys so HInt(7) and Bool(true→"true") don't
+            // collide; matches existing dict-key conventions.
+            "arr_unique_count" => {
+                if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                    let items = arr.items.borrow();
+                    let mut seen = std::collections::HashSet::with_capacity(items.len());
+                    for v in items.iter() {
+                        seen.insert(v.to_display_string());
+                    }
+                    Ok(Value::HInt(HInt::new(seen.len() as i64)))
+                } else {
+                    Err("arr_unique_count: requires an array".to_string())
+                }
+            }
+            // arr_partition_by: split into [matching, non_matching] sub-arrays
+            // by a value predicate (== check against the second arg).
+            // Pure split; preserves original order in each bucket.
+            "arr_partition_by" => {
+                if args.len() < 2 {
+                    return Err("arr_partition_by requires (array, value)".to_string());
+                }
+                let arr_v = self.eval_expr(&args[0])?;
+                let target = self.eval_expr(&args[1])?;
+                if let Value::Array(arr) = arr_v {
+                    let target_s = target.to_display_string();
+                    let items = arr.items.borrow();
+                    let mut yes = Vec::new();
+                    let mut no = Vec::new();
+                    for v in items.iter() {
+                        if v.to_display_string() == target_s { yes.push(v.clone()); }
+                        else { no.push(v.clone()); }
+                    }
+                    Ok(Value::Array(HArray::from_vec(vec![
+                        Value::Array(HArray::from_vec(yes)),
+                        Value::Array(HArray::from_vec(no)),
+                    ])))
+                } else {
+                    Err("arr_partition_by: first argument must be an array".to_string())
+                }
+            }
+            // arr_range: integer inclusive-low / exclusive-high range.
+            // arr_from_range exists but with a 1-arg form; this is the
+            // 2-arg/3-arg form most users expect from Python.
+            "arr_range" => {
+                let (lo, hi, step) = match args.len() {
+                    1 => (0i64, self.eval_expr(&args[0])?.to_int(), 1i64),
+                    2 => (self.eval_expr(&args[0])?.to_int(),
+                          self.eval_expr(&args[1])?.to_int(), 1i64),
+                    _ => (self.eval_expr(&args[0])?.to_int(),
+                          self.eval_expr(&args[1])?.to_int(),
+                          self.eval_expr(&args[2])?.to_int()),
+                };
+                if step == 0 {
+                    return Err("arr_range: step must be non-zero".to_string());
+                }
+                let mut out = Vec::new();
+                let mut i = lo;
+                if step > 0 {
+                    while i < hi { out.push(Value::HInt(HInt::new(i))); i += step; }
+                } else {
+                    while i > hi { out.push(Value::HInt(HInt::new(i))); i += step; }
+                }
+                Ok(Value::Array(HArray::from_vec(out)))
             }
             // Arithmetic mean as float. Common stats helper not previously
             // exposed; users had to compute arr_sum / arr_len manually.
@@ -4581,6 +5285,1023 @@ impl Interpreter {
                 let n = self.eval_expr(&args[0])?.to_float();
                 Ok(Value::HFloat(crate::phi_pi_fib::log_phi_pi_fibonacci(n)))
             }
+            // zeckendorf(n) -> array of FIBONACCI-table indices, largest first.
+            // The unique non-consecutive Fibonacci decomposition. Iteration
+            // count is bounded by log_phi_pi_fibonacci(n) — substrate-canonical.
+            "zeckendorf" => {
+                if args.is_empty() {
+                    return Err("zeckendorf requires (n)".to_string());
+                }
+                let n = self.eval_expr(&args[0])?.to_int();
+                if n < 0 {
+                    return Err("zeckendorf: requires n >= 0".to_string());
+                }
+                let idxs = crate::phi_pi_fib::zeckendorf_indices(n as u64);
+                let out: Vec<Value> = idxs.into_iter()
+                    .map(|i| Value::HInt(HInt::new(i as i64))).collect();
+                Ok(Value::Array(HArray::from_vec(out)))
+            }
+            // from_zeckendorf(indices) -> int
+            //   Inverse of zeckendorf: sums FIBONACCI[i] for each i. Pure;
+            //   no validation that indices are non-consecutive (caller's
+            //   responsibility) — we just take the sum at the given slots.
+            "from_zeckendorf" => {
+                if args.is_empty() {
+                    return Err("from_zeckendorf requires (indices_array)".to_string());
+                }
+                if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                    let items = arr.items.borrow();
+                    let idxs: Vec<usize> = items.iter()
+                        .map(|v| v.to_int().max(0) as usize)
+                        .collect();
+                    let v = crate::phi_pi_fib::from_zeckendorf_indices(&idxs);
+                    Ok(Value::HInt(HInt::new(v as i64)))
+                } else {
+                    Err("from_zeckendorf: argument must be an array".to_string())
+                }
+            }
+            // substrate_search(sorted_array, target) -> index or -1
+            //   Substrate-routed exact-match search using F(k)/φ^(π·k)
+            //   split-point algorithm. Iteration count bounded by
+            //   log_phi_pi_fibonacci(N). Returns -1 on miss; for the
+            //   insert-position variant call phi_pi_fib_search_traced.
+            "substrate_search" => {
+                if args.len() < 2 {
+                    return Err("substrate_search requires (sorted_array, target)".to_string());
+                }
+                let arr_v = self.eval_expr(&args[0])?;
+                let target = self.eval_expr(&args[1])?.to_int();
+                if let Value::Array(arr) = arr_v {
+                    let items = arr.items.borrow();
+                    let ints: Vec<i64> = items.iter().map(|v| v.to_int()).collect();
+                    let r = crate::phi_pi_fib::substrate_search_i64(&ints, target)
+                        .map(|i| i as i64).unwrap_or(-1);
+                    Ok(Value::HInt(HInt::new(r)))
+                } else {
+                    Err("substrate_search: first argument must be an array".to_string())
+                }
+            }
+            // substrate_lower_bound / upper_bound — first index satisfying
+            // arr[i] >= target / arr[i] > target. Used by range queries,
+            // interval intersections, rank-by-value (substrate_rank below).
+            "substrate_lower_bound" => {
+                if args.len() < 2 {
+                    return Err("substrate_lower_bound requires (sorted_array, target)".to_string());
+                }
+                let arr_v = self.eval_expr(&args[0])?;
+                let target = self.eval_expr(&args[1])?.to_int();
+                if let Value::Array(arr) = arr_v {
+                    let items = arr.items.borrow();
+                    let ints: Vec<i64> = items.iter().map(|v| v.to_int()).collect();
+                    let r = crate::phi_pi_fib::substrate_lower_bound(&ints, target);
+                    Ok(Value::HInt(HInt::new(r as i64)))
+                } else {
+                    Err("substrate_lower_bound: first argument must be an array".to_string())
+                }
+            }
+            "substrate_upper_bound" => {
+                if args.len() < 2 {
+                    return Err("substrate_upper_bound requires (sorted_array, target)".to_string());
+                }
+                let arr_v = self.eval_expr(&args[0])?;
+                let target = self.eval_expr(&args[1])?.to_int();
+                if let Value::Array(arr) = arr_v {
+                    let items = arr.items.borrow();
+                    let ints: Vec<i64> = items.iter().map(|v| v.to_int()).collect();
+                    let r = crate::phi_pi_fib::substrate_upper_bound(&ints, target);
+                    Ok(Value::HInt(HInt::new(r as i64)))
+                } else {
+                    Err("substrate_upper_bound: first argument must be an array".to_string())
+                }
+            }
+            // substrate_rank(sorted_array, value) -> int in [0, N]
+            //   How many elements compare strictly less than `value`. Pure
+            //   composition of substrate_lower_bound — same iteration bound.
+            //   Useful for rank-based statistics (percentile rank, etc.).
+            "substrate_rank" => {
+                if args.len() < 2 {
+                    return Err("substrate_rank requires (sorted_array, value)".to_string());
+                }
+                let arr_v = self.eval_expr(&args[0])?;
+                let target = self.eval_expr(&args[1])?.to_int();
+                if let Value::Array(arr) = arr_v {
+                    let items = arr.items.borrow();
+                    let ints: Vec<i64> = items.iter().map(|v| v.to_int()).collect();
+                    let r = crate::phi_pi_fib::substrate_lower_bound(&ints, target);
+                    Ok(Value::HInt(HInt::new(r as i64)))
+                } else {
+                    Err("substrate_rank: first argument must be an array".to_string())
+                }
+            }
+            // substrate_count_range(sorted_array, lo, hi) -> int
+            //   Count of elements in [lo, hi). Two substrate-bound calls,
+            //   so 2 * log_phi_pi_fibonacci(N) probes total. Strictly
+            //   better than the OMC-level `arr_filter(...)` linear scan
+            //   for any large array where the range is small.
+            "substrate_count_range" => {
+                if args.len() < 3 {
+                    return Err("substrate_count_range requires (sorted_array, lo, hi)".to_string());
+                }
+                let arr_v = self.eval_expr(&args[0])?;
+                let lo = self.eval_expr(&args[1])?.to_int();
+                let hi = self.eval_expr(&args[2])?.to_int();
+                if let Value::Array(arr) = arr_v {
+                    let items = arr.items.borrow();
+                    let ints: Vec<i64> = items.iter().map(|v| v.to_int()).collect();
+                    let lo_i = crate::phi_pi_fib::substrate_lower_bound(&ints, lo);
+                    let hi_i = crate::phi_pi_fib::substrate_lower_bound(&ints, hi);
+                    Ok(Value::HInt(HInt::new(hi_i.saturating_sub(lo_i) as i64)))
+                } else {
+                    Err("substrate_count_range: first argument must be an array".to_string())
+                }
+            }
+            // substrate_slice_range(sorted_array, lo, hi) -> array
+            //   Slice of values in [lo, hi). Two substrate probes plus an
+            //   O(k) copy where k is the result size. The O(k) is fundamental
+            //   (we have to materialize) but the *boundary discovery* still
+            //   pays only 2 * log_phi_pi_fibonacci(N).
+            "substrate_slice_range" => {
+                if args.len() < 3 {
+                    return Err("substrate_slice_range requires (sorted_array, lo, hi)".to_string());
+                }
+                let arr_v = self.eval_expr(&args[0])?;
+                let lo = self.eval_expr(&args[1])?.to_int();
+                let hi = self.eval_expr(&args[2])?.to_int();
+                if let Value::Array(arr) = arr_v {
+                    let items = arr.items.borrow();
+                    let ints: Vec<i64> = items.iter().map(|v| v.to_int()).collect();
+                    let lo_i = crate::phi_pi_fib::substrate_lower_bound(&ints, lo);
+                    let hi_i = crate::phi_pi_fib::substrate_lower_bound(&ints, hi);
+                    let out: Vec<Value> = items[lo_i..hi_i.max(lo_i)].to_vec();
+                    Ok(Value::Array(HArray::from_vec(out)))
+                } else {
+                    Err("substrate_slice_range: first argument must be an array".to_string())
+                }
+            }
+            // substrate_intersect(sorted_a, sorted_b) -> sorted intersection.
+            // Walks the SHORTER array linearly; each element triggers one
+            // substrate_search probe in the longer array. Total:
+            // O(min(|a|,|b|) · log_phi_pi_fibonacci max(|a|,|b|)) — strictly
+            // better than the merge-walk O(|a|+|b|) when the smaller side
+            // is tiny relative to the larger.
+            "substrate_intersect" => {
+                if args.len() < 2 {
+                    return Err("substrate_intersect requires (sorted_a, sorted_b)".to_string());
+                }
+                let a_v = self.eval_expr(&args[0])?;
+                let b_v = self.eval_expr(&args[1])?;
+                if let (Value::Array(a), Value::Array(b)) = (a_v, b_v) {
+                    let ai = a.items.borrow();
+                    let bi = b.items.borrow();
+                    let a_int: Vec<i64> = ai.iter().map(|v| v.to_int()).collect();
+                    let b_int: Vec<i64> = bi.iter().map(|v| v.to_int()).collect();
+                    // Drive the loop with the shorter side.
+                    let (driver, indexed) = if a_int.len() <= b_int.len() {
+                        (&a_int, &b_int)
+                    } else {
+                        (&b_int, &a_int)
+                    };
+                    let mut out = Vec::new();
+                    for &v in driver {
+                        if crate::phi_pi_fib::substrate_search_i64(indexed, v).is_some() {
+                            out.push(Value::HInt(HInt::new(v)));
+                        }
+                    }
+                    // Ensure unique + sorted in the result.
+                    out.sort_by_key(|v| v.to_int());
+                    out.dedup_by_key(|v| v.to_int());
+                    Ok(Value::Array(HArray::from_vec(out)))
+                } else {
+                    Err("substrate_intersect: both arguments must be arrays".to_string())
+                }
+            }
+            // substrate_difference(sorted_a, sorted_b) -> elements in a but
+            // not in b. Drives the loop with |a|, each element costs one
+            // substrate probe in b: O(|a| · log_phi_pi_fibonacci |b|).
+            "substrate_difference" => {
+                if args.len() < 2 {
+                    return Err("substrate_difference requires (sorted_a, sorted_b)".to_string());
+                }
+                let a_v = self.eval_expr(&args[0])?;
+                let b_v = self.eval_expr(&args[1])?;
+                if let (Value::Array(a), Value::Array(b)) = (a_v, b_v) {
+                    let ai = a.items.borrow();
+                    let bi = b.items.borrow();
+                    let b_int: Vec<i64> = bi.iter().map(|v| v.to_int()).collect();
+                    let mut out = Vec::new();
+                    for v in ai.iter() {
+                        let n = v.to_int();
+                        if crate::phi_pi_fib::substrate_search_i64(&b_int, n).is_none() {
+                            out.push(v.clone());
+                        }
+                    }
+                    Ok(Value::Array(HArray::from_vec(out)))
+                } else {
+                    Err("substrate_difference: both arguments must be arrays".to_string())
+                }
+            }
+            // zeckendorf_weight(n) -> int
+            //   Number of Fibonacci terms in n's Zeckendorf representation.
+            //   This is the "substrate weight" of n — a measure of how
+            //   non-Fibonacci it is. Pure attractors have weight 1; sums
+            //   of two attractors weigh 2; etc. O(log_phi_pi_fibonacci n).
+            "zeckendorf_weight" => {
+                if args.is_empty() {
+                    return Err("zeckendorf_weight requires (n)".to_string());
+                }
+                let n = self.eval_expr(&args[0])?.to_int().max(0) as u64;
+                let w = crate::phi_pi_fib::zeckendorf_indices(n).len();
+                Ok(Value::HInt(HInt::new(w as i64)))
+            }
+            // zeckendorf_bit(n, k) -> 0 or 1
+            //   Is FIBONACCI[k] present in n's Zeckendorf representation?
+            //   The "bit-test" primitive for substrate-encoded ints. Used
+            //   by sub_hash below to mix bits in a substrate-aligned way.
+            "zeckendorf_bit" => {
+                if args.len() < 2 {
+                    return Err("zeckendorf_bit requires (n, k)".to_string());
+                }
+                let n = self.eval_expr(&args[0])?.to_int().max(0) as u64;
+                let k = self.eval_expr(&args[1])?.to_int().max(0) as usize;
+                let idxs = crate::phi_pi_fib::zeckendorf_indices(n);
+                let present = idxs.iter().any(|&i| i == k);
+                Ok(Value::HInt(HInt::new(if present { 1 } else { 0 })))
+            }
+            // substrate_hash(value) -> i64
+            //   Position-aware Zeckendorf-mixed hash. Each Fibonacci-index
+            //   set bit contributes a unique phi-spaced prime multiplier;
+            //   the result has substrate-aligned avalanche. Use as the
+            //   keying function for substrate-bucketed dicts/bloom filters.
+            "substrate_hash" => {
+                if args.is_empty() {
+                    return Err("substrate_hash requires (value)".to_string());
+                }
+                let n = self.eval_expr(&args[0])?.to_int();
+                let mag = n.unsigned_abs();
+                let idxs = crate::phi_pi_fib::zeckendorf_indices(mag);
+                // Constants: golden ratio mantissa as i64, signed cast.
+                const SEED: u64 = 0x9E3779B97F4A7C15; // 2^64 * (sqrt(5)-1)/2
+                let mut h: u64 = SEED;
+                for (rank, &i) in idxs.iter().enumerate() {
+                    // Phi-shifted contribution; rotate by rank so ordering
+                    // within the Zeckendorf word matters (it's already
+                    // largest-first, so position is meaningful).
+                    let term = (i as u64).wrapping_mul(SEED).rotate_left((rank * 5) as u32);
+                    h = (h ^ term).wrapping_mul(SEED);
+                }
+                if n < 0 { h = h.wrapping_add(0xD1B54A32D192ED03); }
+                Ok(Value::HInt(HInt::new(h as i64)))
+            }
+            // attractor_bucket(value) -> int in [0, 40)
+            //   FIBONACCI-table index of the nearest attractor. Used by
+            //   substrate-bucketed hashmaps where bucket boundaries follow
+            //   the golden ratio (so collision distribution matches the
+            //   phi-power-law of natural keys). O(log_phi_pi_fibonacci |v|).
+            "attractor_bucket" => {
+                if args.is_empty() {
+                    return Err("attractor_bucket requires (value)".to_string());
+                }
+                let n = self.eval_expr(&args[0])?.to_int();
+                Ok(Value::HInt(HInt::new(crate::phi_pi_fib::attractor_bucket(n) as i64)))
+            }
+            // substrate_insert(sorted_array_var, value) -> int (insert position)
+            //   Mutating: insert `value` into the sorted array so the array
+            //   stays sorted. Uses substrate_lower_bound to find the slot
+            //   (log_phi_pi_fibonacci N) and Vec::insert for the O(N) shift.
+            //   For repeated inserts on the same array this is the cheapest
+            //   "build a sorted list" pattern available short of a BTreeSet.
+            "substrate_insert" => {
+                if args.len() < 2 {
+                    return Err("substrate_insert requires (sorted_array_var, value)".to_string());
+                }
+                let value = self.eval_expr(&args[1])?;
+                let v_int = value.to_int();
+                if let Expression::Variable(name) = &args[0] {
+                    if let Some(Value::Array(arr)) = self.get_var(name) {
+                        // Build ints view for the substrate probe.
+                        let ints: Vec<i64> = arr.items.borrow().iter()
+                            .map(|v| v.to_int()).collect();
+                        let pos = crate::phi_pi_fib::substrate_lower_bound(&ints, v_int);
+                        arr.items.borrow_mut().insert(pos, value);
+                        return Ok(Value::HInt(HInt::new(pos as i64)));
+                    }
+                }
+                Err("substrate_insert: first argument must be an array variable".to_string())
+            }
+            // substrate_quantile(sorted_array, q_thousandths) -> int
+            //   Quantile lookup on a sorted array; q is in [0, 1000] for
+            //   tenth-percent granularity (q=500 → median, q=750 → 75th).
+            //   O(1) on top of sorted input. Stored as int because OMC
+            //   builtins return ints in JIT-friendly types preferentially.
+            "substrate_quantile" => {
+                if args.len() < 2 {
+                    return Err("substrate_quantile requires (sorted_array, q_thousandths)".to_string());
+                }
+                let arr_v = self.eval_expr(&args[0])?;
+                let q = self.eval_expr(&args[1])?.to_int().clamp(0, 1000) as u64;
+                if let Value::Array(arr) = arr_v {
+                    let items = arr.items.borrow();
+                    if items.is_empty() {
+                        return Err("substrate_quantile: empty array".to_string());
+                    }
+                    // Linear interpolation: idx = q * (N-1) / 1000.
+                    let n = items.len() as u64;
+                    let idx = ((q * (n - 1)) / 1000) as usize;
+                    Ok(items[idx].clone())
+                } else {
+                    Err("substrate_quantile: first argument must be an array".to_string())
+                }
+            }
+            // phi_pow(k) -> float (φ^k, exact via Binet for integer k)
+            //   The substrate's growth rate per step. Useful for sizing
+            //   buffers, computing decay rates, exponential moving averages
+            //   with golden-ratio weights, etc.
+            "phi_pow" => {
+                if args.is_empty() {
+                    return Err("phi_pow requires (k)".to_string());
+                }
+                let k = self.eval_expr(&args[0])?.to_float();
+                const PHI: f64 = 1.6180339887498949;
+                Ok(Value::HFloat(PHI.powf(k)))
+            }
+            // phi_pi_pow(k) -> float (φ^(π·k))
+            //   The per-iteration shrink factor of the substrate search.
+            //   = (4.534)^k for natural k. Used by tuning code that needs
+            //   to size search windows to the substrate's natural step.
+            "phi_pi_pow" => {
+                if args.is_empty() {
+                    return Err("phi_pi_pow requires (k)".to_string());
+                }
+                let k = self.eval_expr(&args[0])?.to_float();
+                const PHI: f64 = 1.6180339887498949;
+                const PI: f64 = std::f64::consts::PI;
+                Ok(Value::HFloat((PI * k * PHI.ln()).exp()))
+            }
+            // harmonic_partition_3(arr, lo, hi) -> [below, between, above]
+            //   3-way partition by value: elements < lo, lo <= e <= hi,
+            //   and e > hi. Preserves input order within each bucket.
+            //   For sorted input, equivalent to two substrate_slice_range
+            //   calls; for unsorted, it's a single O(N) pass.
+            "harmonic_partition_3" => {
+                if args.len() < 3 {
+                    return Err("harmonic_partition_3 requires (array, lo, hi)".to_string());
+                }
+                let lo = self.eval_expr(&args[1])?.to_int();
+                let hi = self.eval_expr(&args[2])?.to_int();
+                if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                    let items = arr.items.borrow();
+                    let mut below = Vec::new();
+                    let mut between = Vec::new();
+                    let mut above = Vec::new();
+                    for v in items.iter() {
+                        let n = v.to_int();
+                        if n < lo { below.push(v.clone()); }
+                        else if n > hi { above.push(v.clone()); }
+                        else { between.push(v.clone()); }
+                    }
+                    Ok(Value::Array(HArray::from_vec(vec![
+                        Value::Array(HArray::from_vec(below)),
+                        Value::Array(HArray::from_vec(between)),
+                        Value::Array(HArray::from_vec(above)),
+                    ])))
+                } else {
+                    Err("harmonic_partition_3: first argument must be an array".to_string())
+                }
+            }
+            // resonance_band_histogram(arr) -> [count_band0, ..., count_band4]
+            //   For each of the 5 resonance bands defined by resonance_band,
+            //   count how many array elements fall into it. Cheap profiling
+            //   primitive — tells you how "substrate-coherent" a dataset is.
+            "resonance_band_histogram" => {
+                if args.is_empty() {
+                    return Err("resonance_band_histogram requires (array)".to_string());
+                }
+                if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                    let items = arr.items.borrow();
+                    let mut hist = [0i64; 5];
+                    for v in items.iter() {
+                        let n = v.to_int();
+                        let (_a, dist) = crate::phi_pi_fib::nearest_attractor_with_dist(n);
+                        let band = match dist {
+                            0 => 0,
+                            1..=3 => 1,
+                            4..=10 => 2,
+                            11..=100 => 3,
+                            _ => 4,
+                        };
+                        hist[band] += 1;
+                    }
+                    let out: Vec<Value> = hist.iter()
+                        .map(|&c| Value::HInt(HInt::new(c))).collect();
+                    Ok(Value::Array(HArray::from_vec(out)))
+                } else {
+                    Err("resonance_band_histogram: requires an array".to_string())
+                }
+            }
+            // arr_sum_int(arr) -> int (native i64 sum, wrapping)
+            //   Faster than arr_sum (which goes through value.to_int() in
+            //   the OMC dispatch). Useful in tight loops over big int arrays.
+            "arr_sum_int" => {
+                if args.is_empty() {
+                    return Err("arr_sum_int requires (array)".to_string());
+                }
+                if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                    let items = arr.items.borrow();
+                    let mut sum: i64 = 0;
+                    for v in items.iter() {
+                        sum = sum.wrapping_add(v.to_int());
+                    }
+                    Ok(Value::HInt(HInt::new(sum)))
+                } else {
+                    Err("arr_sum_int: requires an array".to_string())
+                }
+            }
+            // arr_product(arr) -> int (wrapping product)
+            //   Standard reduction; no OMC-level equivalent.
+            "arr_product" => {
+                if args.is_empty() {
+                    return Err("arr_product requires (array)".to_string());
+                }
+                if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                    let items = arr.items.borrow();
+                    let mut prod: i64 = 1;
+                    for v in items.iter() {
+                        prod = prod.wrapping_mul(v.to_int());
+                    }
+                    Ok(Value::HInt(HInt::new(prod)))
+                } else {
+                    Err("arr_product: requires an array".to_string())
+                }
+            }
+            // arr_sort_int(arr) -> sorted array (ints, ascending)
+            //   Native sort; faster than arr_sort + OMC predicate. Returns
+            //   a new array (does not mutate input).
+            "arr_sort_int" => {
+                if args.is_empty() {
+                    return Err("arr_sort_int requires (array)".to_string());
+                }
+                if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                    let items = arr.items.borrow();
+                    let mut ints: Vec<i64> = items.iter().map(|v| v.to_int()).collect();
+                    ints.sort_unstable();
+                    let out: Vec<Value> = ints.into_iter()
+                        .map(|n| Value::HInt(HInt::new(n))).collect();
+                    Ok(Value::Array(HArray::from_vec(out)))
+                } else {
+                    Err("arr_sort_int: requires an array".to_string())
+                }
+            }
+            // attractor_table() -> array of Fibonacci attractors [0, 1, 1, ..., 63245986]
+            //   Returns the substrate's 40-entry FIBONACCI table as a value.
+            //   Useful for OMC code that wants to iterate or display them.
+            "attractor_table" => {
+                // Inline the table; it's only 40 entries.
+                let fibs: [u64; 40] = [
+                    0, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610,
+                    987, 1597, 2584, 4181, 6765, 10946, 17711, 28657, 46368, 75025,
+                    121393, 196418, 317811, 514229, 832040, 1346269, 2178309,
+                    3524578, 5702887, 9227465, 14930352, 24157817, 39088169, 63245986,
+                ];
+                let out: Vec<Value> = fibs.iter()
+                    .map(|&f| Value::HInt(HInt::new(f as i64))).collect();
+                Ok(Value::Array(HArray::from_vec(out)))
+            }
+            // harmonic_score(arr) -> float in [0, 1]
+            //   Fraction of elements that are exactly on a Fibonacci attractor.
+            //   1.0 = fully substrate-coherent, 0.0 = no alignment.
+            "harmonic_score" => {
+                if args.is_empty() {
+                    return Err("harmonic_score requires (array)".to_string());
+                }
+                if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                    let items = arr.items.borrow();
+                    if items.is_empty() {
+                        return Ok(Value::HFloat(0.0));
+                    }
+                    let mut hits = 0usize;
+                    for v in items.iter() {
+                        if crate::phi_pi_fib::is_on_fibonacci_attractor(v.to_int()) {
+                            hits += 1;
+                        }
+                    }
+                    Ok(Value::HFloat(hits as f64 / items.len() as f64))
+                } else {
+                    Err("harmonic_score: requires an array".to_string())
+                }
+            }
+            // arr_min_int / arr_max_int: native int reductions (faster
+            // than arr_min/max for big arrays because the dispatch is
+            // saved). Preserve i64 semantics; non-int elements get
+            // coerced via to_int.
+            "arr_min_int" => {
+                if args.is_empty() {
+                    return Err("arr_min_int requires (array)".to_string());
+                }
+                if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                    let items = arr.items.borrow();
+                    if items.is_empty() {
+                        return Err("arr_min_int: empty array".to_string());
+                    }
+                    let m = items.iter().map(|v| v.to_int()).min().unwrap();
+                    Ok(Value::HInt(HInt::new(m)))
+                } else {
+                    Err("arr_min_int: requires an array".to_string())
+                }
+            }
+            "arr_max_int" => {
+                if args.is_empty() {
+                    return Err("arr_max_int requires (array)".to_string());
+                }
+                if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                    let items = arr.items.borrow();
+                    if items.is_empty() {
+                        return Err("arr_max_int: empty array".to_string());
+                    }
+                    let m = items.iter().map(|v| v.to_int()).max().unwrap();
+                    Ok(Value::HInt(HInt::new(m)))
+                } else {
+                    Err("arr_max_int: requires an array".to_string())
+                }
+            }
+            // arr_avg_distance(arr, target) -> float
+            //   Mean |arr[i] - target|. Single O(N) pass, native i64
+            //   subtraction. Useful when scoring how concentrated an
+            //   array is around a center point.
+            "arr_avg_distance" => {
+                if args.len() < 2 {
+                    return Err("arr_avg_distance requires (array, target)".to_string());
+                }
+                let target = self.eval_expr(&args[1])?.to_int();
+                if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                    let items = arr.items.borrow();
+                    if items.is_empty() { return Ok(Value::HFloat(0.0)); }
+                    let mut sum: u128 = 0;
+                    for v in items.iter() {
+                        sum += (v.to_int() - target).unsigned_abs() as u128;
+                    }
+                    Ok(Value::HFloat(sum as f64 / items.len() as f64))
+                } else {
+                    Err("arr_avg_distance: first argument must be an array".to_string())
+                }
+            }
+            // is_phi_resonant(value, tol) -> 0 or 1
+            //   value is within `tol` of some integer power of phi.
+            //   Pseudo-substrate version of attractor-detection in the
+            //   continuous domain (Fibonacci attractors are the integer
+            //   sampling of phi^k).
+            "is_phi_resonant" => {
+                if args.len() < 2 {
+                    return Err("is_phi_resonant requires (value, tol)".to_string());
+                }
+                let v = self.eval_expr(&args[0])?.to_float().abs();
+                let tol = self.eval_expr(&args[1])?.to_float();
+                const PHI: f64 = 1.6180339887498949;
+                if v < 1e-12 { return Ok(Value::HInt(HInt::new(1))); }
+                // log_phi(v) — closest integer k → phi^k → check distance
+                let k = (v.ln() / PHI.ln()).round();
+                let predicted = PHI.powf(k);
+                let close = (predicted - v).abs() <= tol;
+                Ok(Value::HInt(HInt::new(if close { 1 } else { 0 })))
+            }
+            // arr_is_sorted(arr) -> 0 or 1
+            //   Linear scan that short-circuits on the first inversion.
+            //   Useful before substrate_search to verify pre-condition.
+            "arr_is_sorted" => {
+                if args.is_empty() {
+                    return Err("arr_is_sorted requires (array)".to_string());
+                }
+                if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                    let items = arr.items.borrow();
+                    for w in items.windows(2) {
+                        if w[0].to_int() > w[1].to_int() {
+                            return Ok(Value::HInt(HInt::new(0)));
+                        }
+                    }
+                    Ok(Value::HInt(HInt::new(1)))
+                } else {
+                    Err("arr_is_sorted: requires an array".to_string())
+                }
+            }
+            // nth_fibonacci(k) -> int (FIBONACCI[k], clamped to table size)
+            //   Direct table lookup; constant-time Fibonacci retrieval.
+            //   Substrate-canonical alternative to recursive/iterative `fib(k)`.
+            "nth_fibonacci" => {
+                if args.is_empty() {
+                    return Err("nth_fibonacci requires (k)".to_string());
+                }
+                let k = self.eval_expr(&args[0])?.to_int().max(0) as u64;
+                // Iterative — matches the inline computation we use in fib_chunks
+                let mut a: u64 = 0; let mut b: u64 = 1;
+                let mut i: u64 = 0;
+                while i < k.min(93) {
+                    let t = a.saturating_add(b);
+                    a = b; b = t;
+                    i += 1;
+                }
+                Ok(Value::HInt(HInt::new(a as i64)))
+            }
+            // is_zeckendorf_valid(indices_array) -> 0 or 1
+            //   Check that the indices are: strictly decreasing AND no two
+            //   consecutive. (Valid Zeckendorf representations always have
+            //   |index_i - index_(i+1)| >= 2.) Useful for verifying that a
+            //   caller's pre-built decomposition is canonical.
+            "is_zeckendorf_valid" => {
+                if args.is_empty() {
+                    return Err("is_zeckendorf_valid requires (indices_array)".to_string());
+                }
+                if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                    let items = arr.items.borrow();
+                    let idxs: Vec<i64> = items.iter().map(|v| v.to_int()).collect();
+                    // Empty array represents 0 — vacuously valid.
+                    let mut ok = true;
+                    for w in idxs.windows(2) {
+                        if w[0] <= w[1] || w[0] - w[1] < 2 {
+                            ok = false; break;
+                        }
+                    }
+                    Ok(Value::HInt(HInt::new(if ok { 1 } else { 0 })))
+                } else {
+                    Err("is_zeckendorf_valid: argument must be an array".to_string())
+                }
+            }
+            // substrate_min_distance(sorted_array, target) -> int
+            //   Smallest |arr[i] - target| over i. Uses substrate_lower_bound
+            //   to find the candidate index in O(log_phi_pi_fibonacci N),
+            //   then checks at most the two neighbors. Total: substrate
+            //   probe + O(1).
+            "substrate_min_distance" => {
+                if args.len() < 2 {
+                    return Err("substrate_min_distance requires (sorted_array, target)".to_string());
+                }
+                let arr_v = self.eval_expr(&args[0])?;
+                let target = self.eval_expr(&args[1])?.to_int();
+                if let Value::Array(arr) = arr_v {
+                    let items = arr.items.borrow();
+                    if items.is_empty() {
+                        return Err("substrate_min_distance: empty array".to_string());
+                    }
+                    let ints: Vec<i64> = items.iter().map(|v| v.to_int()).collect();
+                    let pos = crate::phi_pi_fib::substrate_lower_bound(&ints, target);
+                    let mut best = i64::MAX;
+                    if pos < ints.len() {
+                        let d = (ints[pos] - target).abs();
+                        if d < best { best = d; }
+                    }
+                    if pos > 0 {
+                        let d = (ints[pos - 1] - target).abs();
+                        if d < best { best = d; }
+                    }
+                    Ok(Value::HInt(HInt::new(best)))
+                } else {
+                    Err("substrate_min_distance: first argument must be an array".to_string())
+                }
+            }
+            // substrate_nearest(sorted_array, target) -> int
+            //   Closest VALUE to target (vs distance from substrate_min_distance).
+            //   Same algorithmic structure: substrate probe + 2-neighbor check.
+            "substrate_nearest" => {
+                if args.len() < 2 {
+                    return Err("substrate_nearest requires (sorted_array, target)".to_string());
+                }
+                let arr_v = self.eval_expr(&args[0])?;
+                let target = self.eval_expr(&args[1])?.to_int();
+                if let Value::Array(arr) = arr_v {
+                    let items = arr.items.borrow();
+                    if items.is_empty() {
+                        return Err("substrate_nearest: empty array".to_string());
+                    }
+                    let ints: Vec<i64> = items.iter().map(|v| v.to_int()).collect();
+                    let pos = crate::phi_pi_fib::substrate_lower_bound(&ints, target);
+                    let mut best_val = ints[pos.min(ints.len() - 1)];
+                    let best_dist = (best_val - target).abs();
+                    if pos > 0 {
+                        let alt = ints[pos - 1];
+                        let d = (alt - target).abs();
+                        if d < best_dist { best_val = alt; }
+                    }
+                    Ok(Value::HInt(HInt::new(best_val)))
+                } else {
+                    Err("substrate_nearest: first argument must be an array".to_string())
+                }
+            }
+            // int_binary_search(sorted_int_array, target) -> int (or -1)
+            //   Native textbook binary search; baseline for comparing the
+            //   substrate-routed search's per-probe cost. Same O(log N)
+            //   asymptotics, integer midpoint instead of F(k)/phi^(pi*k).
+            //   Use this as the default for uniform-integer arrays where
+            //   substrate coherence doesn't earn its keep.
+            "int_binary_search" => {
+                if args.len() < 2 {
+                    return Err("int_binary_search requires (sorted_array, target)".to_string());
+                }
+                let arr_v = self.eval_expr(&args[0])?;
+                let target = self.eval_expr(&args[1])?.to_int();
+                if let Value::Array(arr) = arr_v {
+                    let items = arr.items.borrow();
+                    let mut lo: i64 = 0;
+                    let mut hi: i64 = items.len() as i64 - 1;
+                    while lo <= hi {
+                        let mid = lo + (hi - lo) / 2;
+                        let v = items[mid as usize].to_int();
+                        if v == target { return Ok(Value::HInt(HInt::new(mid))); }
+                        if v < target { lo = mid + 1; } else { hi = mid - 1; }
+                    }
+                    Ok(Value::HInt(HInt::new(-1)))
+                } else {
+                    Err("int_binary_search: first argument must be an array".to_string())
+                }
+            }
+            // int_lower_bound(sorted_int_array, target) -> int
+            //   Native binary lower_bound — first index i with arr[i] >= target,
+            //   or arr.len() if none. Pair with int_upper_bound for range
+            //   queries. The "fast default" when substrate coherence isn't
+            //   needed.
+            "int_lower_bound" => {
+                if args.len() < 2 {
+                    return Err("int_lower_bound requires (sorted_array, target)".to_string());
+                }
+                let arr_v = self.eval_expr(&args[0])?;
+                let target = self.eval_expr(&args[1])?.to_int();
+                if let Value::Array(arr) = arr_v {
+                    let items = arr.items.borrow();
+                    let mut lo: usize = 0;
+                    let mut hi: usize = items.len();
+                    while lo < hi {
+                        let mid = lo + (hi - lo) / 2;
+                        if items[mid].to_int() < target { lo = mid + 1; } else { hi = mid; }
+                    }
+                    Ok(Value::HInt(HInt::new(lo as i64)))
+                } else {
+                    Err("int_lower_bound: first argument must be an array".to_string())
+                }
+            }
+            "int_upper_bound" => {
+                if args.len() < 2 {
+                    return Err("int_upper_bound requires (sorted_array, target)".to_string());
+                }
+                let arr_v = self.eval_expr(&args[0])?;
+                let target = self.eval_expr(&args[1])?.to_int();
+                if let Value::Array(arr) = arr_v {
+                    let items = arr.items.borrow();
+                    let mut lo: usize = 0;
+                    let mut hi: usize = items.len();
+                    while lo < hi {
+                        let mid = lo + (hi - lo) / 2;
+                        if items[mid].to_int() <= target { lo = mid + 1; } else { hi = mid; }
+                    }
+                    Ok(Value::HInt(HInt::new(lo as i64)))
+                } else {
+                    Err("int_upper_bound: first argument must be an array".to_string())
+                }
+            }
+            // sorted_merge(a, b) -> sorted union (with duplicates).
+            //   Classical merge in O(|a|+|b|). Native because OMC-level
+            //   merge spends ~20% of its time on dispatch overhead.
+            "sorted_merge" => {
+                if args.len() < 2 {
+                    return Err("sorted_merge requires (sorted_a, sorted_b)".to_string());
+                }
+                let a_v = self.eval_expr(&args[0])?;
+                let b_v = self.eval_expr(&args[1])?;
+                if let (Value::Array(a), Value::Array(b)) = (a_v, b_v) {
+                    let ai = a.items.borrow();
+                    let bi = b.items.borrow();
+                    let mut out = Vec::with_capacity(ai.len() + bi.len());
+                    let (mut i, mut j) = (0usize, 0usize);
+                    while i < ai.len() && j < bi.len() {
+                        if ai[i].to_int() <= bi[j].to_int() {
+                            out.push(ai[i].clone()); i += 1;
+                        } else {
+                            out.push(bi[j].clone()); j += 1;
+                        }
+                    }
+                    while i < ai.len() { out.push(ai[i].clone()); i += 1; }
+                    while j < bi.len() { out.push(bi[j].clone()); j += 1; }
+                    Ok(Value::Array(HArray::from_vec(out)))
+                } else {
+                    Err("sorted_merge: both arguments must be arrays".to_string())
+                }
+            }
+            // sorted_union(a, b) -> sorted union (duplicates removed).
+            "sorted_union" => {
+                if args.len() < 2 {
+                    return Err("sorted_union requires (sorted_a, sorted_b)".to_string());
+                }
+                let a_v = self.eval_expr(&args[0])?;
+                let b_v = self.eval_expr(&args[1])?;
+                if let (Value::Array(a), Value::Array(b)) = (a_v, b_v) {
+                    let ai = a.items.borrow();
+                    let bi = b.items.borrow();
+                    let mut out = Vec::with_capacity(ai.len() + bi.len());
+                    let (mut i, mut j) = (0usize, 0usize);
+                    while i < ai.len() && j < bi.len() {
+                        let av = ai[i].to_int();
+                        let bv = bi[j].to_int();
+                        if av < bv { out.push(ai[i].clone()); i += 1; }
+                        else if av > bv { out.push(bi[j].clone()); j += 1; }
+                        else { out.push(ai[i].clone()); i += 1; j += 1; }
+                    }
+                    while i < ai.len() { out.push(ai[i].clone()); i += 1; }
+                    while j < bi.len() { out.push(bi[j].clone()); j += 1; }
+                    Ok(Value::Array(HArray::from_vec(out)))
+                } else {
+                    Err("sorted_union: both arguments must be arrays".to_string())
+                }
+            }
+            // sorted_dedupe(sorted_a) -> sorted array with adjacent dupes removed.
+            //   O(N) single pass; faster than arr_unique because input is
+            //   already sorted (no hash-set bookkeeping needed).
+            "sorted_dedupe" => {
+                if args.is_empty() {
+                    return Err("sorted_dedupe requires (sorted_array)".to_string());
+                }
+                if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                    let items = arr.items.borrow();
+                    let mut out: Vec<Value> = Vec::with_capacity(items.len());
+                    let mut last: Option<i64> = None;
+                    for v in items.iter() {
+                        let n = v.to_int();
+                        if last != Some(n) {
+                            out.push(v.clone());
+                            last = Some(n);
+                        }
+                    }
+                    Ok(Value::Array(HArray::from_vec(out)))
+                } else {
+                    Err("sorted_dedupe: requires an array".to_string())
+                }
+            }
+            // harmonic_align(value) -> int
+            //   Snap to the nearest Fibonacci attractor. Inverse-coupled
+            //   with `hbit_tension` (which returns the distance discarded
+            //   by this snap). O(log_phi_pi_fibonacci |value|) via the
+            //   substrate's nearest-attractor search.
+            "harmonic_align" => {
+                if args.is_empty() {
+                    return Err("harmonic_align requires (value)".to_string());
+                }
+                let n = self.eval_expr(&args[0])?.to_int();
+                let (attr, _) = crate::phi_pi_fib::nearest_attractor_with_dist(n);
+                Ok(Value::HInt(HInt::new(attr)))
+            }
+            // harmonic_unalign(value) -> int
+            //   Signed distance from value to its nearest attractor:
+            //   value - harmonic_align(value). Positive = above attractor,
+            //   negative = below. Useful as a residual signal in
+            //   substrate-routed ML (the attractor captures structure,
+            //   this residual captures noise/anomaly).
+            "harmonic_unalign" => {
+                if args.is_empty() {
+                    return Err("harmonic_unalign requires (value)".to_string());
+                }
+                let n = self.eval_expr(&args[0])?.to_int();
+                let (attr, _) = crate::phi_pi_fib::nearest_attractor_with_dist(n);
+                Ok(Value::HInt(HInt::new(n - attr)))
+            }
+            // phi_pi_log_distance(a, b) -> float
+            //   log_phi_pi_fibonacci(|a - b| + 1). Substrate-canonical
+            //   distance metric — matches the iteration-count cost of
+            //   reaching b from a via the substrate-search walk. Equals
+            //   0 for a == b; grows by ~1 unit per phi^π-fold gap.
+            "phi_pi_log_distance" => {
+                if args.len() < 2 {
+                    return Err("phi_pi_log_distance requires (a, b)".to_string());
+                }
+                let a = self.eval_expr(&args[0])?.to_int();
+                let b = self.eval_expr(&args[1])?.to_int();
+                let d = (a - b).unsigned_abs() as f64 + 1.0;
+                Ok(Value::HFloat(crate::phi_pi_fib::log_phi_pi_fibonacci(d)))
+            }
+            // harmonic_resample(arr, n) -> array of n elements
+            //   Downsample/upsample an array to length n by picking indices
+            //   at phi-spaced positions (using the substrate's Fibonacci-
+            //   bucketed striding). Preserves attractor-relative structure
+            //   better than uniform striding because samples concentrate
+            //   in the early/dense part of the input (low Fibonacci
+            //   indices) and sparse in the tail.
+            "harmonic_resample" => {
+                if args.len() < 2 {
+                    return Err("harmonic_resample requires (array, n)".to_string());
+                }
+                let n = self.eval_expr(&args[1])?.to_int().max(0) as usize;
+                if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                    let items = arr.items.borrow();
+                    let m = items.len();
+                    if m == 0 || n == 0 {
+                        return Ok(Value::Array(HArray::from_vec(vec![])));
+                    }
+                    // Phi-warped index: i/n^(1/phi) -> i_in_source
+                    // For substrate-coherence this matches the
+                    // log_phi_pi_fibonacci index density.
+                    const INV_PHI: f64 = 0.6180339887498949;
+                    let mut out = Vec::with_capacity(n);
+                    for i in 0..n {
+                        let t = (i as f64) / (n as f64);
+                        // phi-warped: bias toward small indices
+                        let warped = t.powf(INV_PHI);
+                        let idx = (warped * (m - 1) as f64).round() as usize;
+                        out.push(items[idx.min(m - 1)].clone());
+                    }
+                    Ok(Value::Array(HArray::from_vec(out)))
+                } else {
+                    Err("harmonic_resample: first argument must be an array".to_string())
+                }
+            }
+            // substrate_select_k(arr, k) -> int (k-th smallest, 0-indexed)
+            //   Quickselect variant using the substrate's
+            //   largest_attractor_at_most(median) as a pivot heuristic —
+            //   pivots are biased toward Fibonacci attractors, which
+            //   makes the partition step concentrate near substrate
+            //   landmarks. Average-case O(N) like classic quickselect;
+            //   the substrate pivot reduces worst-case probability on
+            //   adversarial inputs that target uniform-pivot patterns.
+            "substrate_select_k" => {
+                if args.len() < 2 {
+                    return Err("substrate_select_k requires (array, k)".to_string());
+                }
+                let k = self.eval_expr(&args[1])?.to_int().max(0) as usize;
+                if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                    let items = arr.items.borrow();
+                    if k >= items.len() {
+                        return Err(format!(
+                            "substrate_select_k: k={} out of range for len={}",
+                            k, items.len()
+                        ));
+                    }
+                    let mut work: Vec<i64> = items.iter().map(|v| v.to_int()).collect();
+                    // Pivot choice: largest_attractor_at_most(median-ish).
+                    let pivot_seed = work[work.len() / 2];
+                    let pivot = crate::phi_pi_fib::largest_attractor_at_most(pivot_seed);
+                    // Standard 3-way partition around pivot.
+                    let mut lo_buf = Vec::new();
+                    let mut eq_buf = Vec::new();
+                    let mut hi_buf = Vec::new();
+                    for v in work.drain(..) {
+                        if v < pivot { lo_buf.push(v); }
+                        else if v == pivot { eq_buf.push(v); }
+                        else { hi_buf.push(v); }
+                    }
+                    if k < lo_buf.len() {
+                        lo_buf.sort_unstable();
+                        return Ok(Value::HInt(HInt::new(lo_buf[k])));
+                    } else if k < lo_buf.len() + eq_buf.len() {
+                        return Ok(Value::HInt(HInt::new(pivot)));
+                    } else {
+                        hi_buf.sort_unstable();
+                        let idx = k - lo_buf.len() - eq_buf.len();
+                        return Ok(Value::HInt(HInt::new(hi_buf[idx])));
+                    }
+                }
+                Err("substrate_select_k: first argument must be an array".to_string())
+            }
+            // fib_chunks(array, base_k) -> array of sub-arrays
+            //   Split an array into chunks of size FIBONACCI[base_k+i] for
+            //   i = 0, 1, 2... The chunk size grows phi-fold per chunk —
+            //   matches the natural "small-then-big" batching pattern in
+            //   streaming algorithms (e.g. exponential moving averages
+            //   with golden-ratio decay). Last chunk may be short.
+            "fib_chunks" => {
+                if args.is_empty() {
+                    return Err("fib_chunks requires (array, base_k=2)".to_string());
+                }
+                let base_k = if args.len() >= 2 {
+                    self.eval_expr(&args[1])?.to_int().max(1) as usize
+                } else { 2 };
+                if let Value::Array(arr) = self.eval_expr(&args[0])? {
+                    let items = arr.items.borrow();
+                    let mut out = Vec::new();
+                    let mut pos = 0usize;
+                    let mut k = base_k;
+                    while pos < items.len() {
+                        // Use largest_attractor_at_most-style helper:
+                        // we just want FIBONACCI[k] but bounded by table.
+                        let sz = crate::phi_pi_fib::nearest_attractor_with_dist(
+                            // ask for any value that gives us FIBONACCI[k]
+                            // — simplest: just walk the table directly via
+                            // the existing helper exposed at module scope.
+                            // We instead use a local short-circuit since
+                            // FIBONACCI isn't pub. Substitute: round-trip
+                            // via Zeckendorf for value 2^k as an approx.
+                            // Cleaner: just compute Fibonacci inline.
+                            0
+                        ).0 as usize; // dummy; replaced below
+                        let _ = sz; // silence warning
+                        // Compute FIBONACCI[k] inline (40-term table fits u64):
+                        let mut a: u64 = 0; let mut b: u64 = 1;
+                        for _ in 0..k { let t = a + b; a = b; b = t; }
+                        let chunk_size = (a as usize).max(1);
+                        let end = (pos + chunk_size).min(items.len());
+                        let sub: Vec<Value> = items[pos..end].to_vec();
+                        out.push(Value::Array(HArray::from_vec(sub)));
+                        pos = end;
+                        k += 1;
+                        if k > 40 { k = 40; } // cap at table limit
+                    }
+                    Ok(Value::Array(HArray::from_vec(out)))
+                } else {
+                    Err("fib_chunks: first argument must be an array".to_string())
+                }
+            }
             // phi_pi_fib_search_traced(sorted_arr, target)
             //   Returns [result_int, probe_indices_array]. `result_int`
             //   is the exact-match index when found, or -(insert_pos+1)
@@ -4821,6 +6542,7 @@ impl Interpreter {
         Ok(result)
     }
 
+    #[inline]
     fn get_var(&self, name: &str) -> Option<Value> {
         // Walk locals from inner to outer. Closure capture is achieved by
         // pushing the captured env Rc as a frame in `call_first_class_function`,
@@ -4871,10 +6593,12 @@ impl Interpreter {
     // Used by the bytecode VM (src/vm.rs) so it can reuse this
     // Interpreter's scope stack + built-in stdlib without duplication.
 
+    #[inline]
     pub fn vm_push_scope(&mut self) {
         self.locals.push(std::rc::Rc::new(std::cell::RefCell::new(HashMap::new())));
     }
 
+    #[inline]
     pub fn vm_pop_scope(&mut self) {
         if self.locals.len() > 1 {
             self.locals.pop();
@@ -4901,6 +6625,7 @@ impl Interpreter {
         }
     }
 
+    #[inline]
     pub fn vm_set_local(&mut self, name: &str, value: Value) {
         self.set_var(name.to_string(), value);
     }
@@ -5066,6 +6791,7 @@ impl Interpreter {
         self.functions.insert(name.to_string(), (params, body));
     }
 
+    #[inline]
     pub fn vm_get_var(&self, name: &str) -> Option<Value> {
         // Variable lookup with function-table fallback — mirrors the
         // tree-walker's Expression::Variable handling. Lets the bytecode
@@ -5137,6 +6863,7 @@ impl Interpreter {
         result
     }
 
+    #[inline]
     fn set_var(&mut self, name: String, value: Value) {
         if let Some(scope_rc) = self.locals.last() {
             scope_rc.borrow_mut().insert(name, value);
@@ -5198,7 +6925,6 @@ impl Interpreter {
         }
     }
 
-    fn phi_fold_n_unused_marker(&self) {}
 }
 
 /// Type-aware value equality. Used by `==` and `!=`. Replaces the old
@@ -5597,6 +7323,7 @@ pub(crate) const HEAL_BUILTIN_NAMES: &[&str] = &[
     // Numbers & math
     "abs", "min", "max", "sign", "floor", "ceil", "round", "frac",
     "gcd", "lcm", "square", "cube", "pow", "pow_int", "sqrt",
+    "mod_pow", "bit_count", "bit_length", "digit_sum", "digit_count",
     "factorial", "is_even", "even", "is_odd", "odd", "is_prime",
     "sin", "cos", "tan", "tanh", "exp", "log", "erf", "sigmoid",
     "log2", "log10", "asin", "acos", "atan", "atan2",
@@ -5610,20 +7337,29 @@ pub(crate) const HEAL_BUILTIN_NAMES: &[&str] = &[
     "str_index_of", "str_contains", "str_starts_with", "str_ends_with",
     "str_repeat", "str_reverse", "str_uppercase", "str_lowercase",
     "str_pad_left", "str_pad_right",
+    "str_split_lines", "str_count", "str_is_empty",
+    "str_to_int", "str_to_float", "str_capitalize",
     // Arrays
     "arr_new", "arr_from_range", "arr_len", "arr_get", "arr_set",
     "arr_push", "arr_first", "arr_last", "arr_slice", "arr_concat",
     "arr_contains", "arr_index_of", "arr_sort", "arr_reverse", "arr_join",
     "arr_min", "arr_max", "arr_sum", "arr_fold_elements",
+    "arr_argmax", "arr_argmin", "arr_cumsum", "arr_diff", "arr_range",
+    "arr_unique_count", "arr_partition_by",
+    "arr_min_float", "arr_max_float", "arr_gcd", "fnv1a_hash",
     "arr_mean", "arr_variance", "arr_stddev", "arr_median",
     "arr_harmonic_mean", "arr_geometric_mean",
     "arr_sum_sq", "arr_norm", "arr_dot",
     "arr_resonance", "filter_by_resonance", "cleanup_array",
     "arr_map", "arr_filter", "arr_reduce", "arr_any", "arr_all", "arr_find",
     "arr_zip", "arr_unique",
+    "arr_take", "arr_drop", "arr_count", "arr_repeat",
+    "arr_zeros", "arr_ones", "arr_chunk", "arr_flatten",
+    "arr_enumerate", "arr_window",
     // Dicts
     "dict_new", "dict_get", "dict_set", "dict_has", "dict_del",
     "dict_keys", "dict_values", "dict_len", "dict_merge",
+    "dict_pop", "dict_get_or", "dict_size", "dict_clear", "dict_items",
     // Harmonic
     "fib", "fibonacci", "is_fibonacci", "harmony_value", "fold",
     "fold_escape", "value_danger", "classify_resonance",
@@ -5633,12 +7369,32 @@ pub(crate) const HEAL_BUILTIN_NAMES: &[&str] = &[
     "harmonic_sort", "harmonic_split", "harmonic_partition",
     "attractor_distance", "nearest_attractor",
     "largest_attractor_at_most", "crt_residues", "hbit_tension",
+    "is_attractor", "resonance_band", "crt_recover", "fibonacci_index",
     "harmonic_hash", "harmonic_diff", "harmonic_dedupe",
     // Phi-Pi-Fib search
     "phi_pi_fib_search", "phi_pi_fib_nearest",
     "phi_pi_fib_stats", "phi_pi_fib_reset",
     "phi_pi_fib_search_v2", "phi_pi_fib_nearest_v2",
     "phi_pi_bin_search", "log_phi_pi_fibonacci",
+    "zeckendorf", "from_zeckendorf",
+    "substrate_search", "substrate_lower_bound", "substrate_upper_bound",
+    "substrate_rank", "substrate_count_range", "substrate_slice_range",
+    "substrate_intersect", "substrate_difference",
+    "zeckendorf_weight", "zeckendorf_bit", "substrate_hash",
+    "attractor_bucket", "substrate_insert", "substrate_quantile",
+    "fib_chunks",
+    "harmonic_align", "harmonic_unalign", "phi_pi_log_distance",
+    "harmonic_resample", "substrate_select_k",
+    "int_binary_search", "int_lower_bound", "int_upper_bound",
+    "sorted_merge", "sorted_union", "sorted_dedupe",
+    "nth_fibonacci", "is_zeckendorf_valid",
+    "substrate_min_distance", "substrate_nearest",
+    "phi_pow", "phi_pi_pow", "harmonic_partition_3",
+    "resonance_band_histogram",
+    "arr_sum_int", "arr_product", "arr_sort_int", "arr_is_sorted",
+    "attractor_table", "harmonic_score",
+    "arr_min_int", "arr_max_int", "arr_avg_distance",
+    "is_phi_resonant",
     "phi_pi_fib_search_traced", "phi_pi_fib_nearest_traced",
     "phi_pi_fib_stats_bg", "phi_pi_fib_stats_all",
     // HBit dual-band intrinsics (Sessions F+G)

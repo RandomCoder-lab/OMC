@@ -55,6 +55,7 @@ pub struct Compiler {
 }
 
 impl Compiler {
+    #[allow(dead_code)] // alternate constructor; primary compile entry points use seeded variants
     fn new() -> Self {
         Compiler {
             constants: Vec::new(),
@@ -154,6 +155,22 @@ impl Compiler {
                         // Substrate primitives — int returns
                         | "attractor_distance" | "nearest_attractor"
                         | "largest_attractor_at_most" | "hbit_tension"
+                        | "is_attractor" | "resonance_band"
+                        | "crt_recover" | "fibonacci_index"
+                        // Substrate-routed O(log_phi_pi_fibonacci N) search ints
+                        | "substrate_search" | "substrate_lower_bound"
+                        | "substrate_upper_bound" | "substrate_rank"
+                        | "substrate_count_range" | "from_zeckendorf"
+                        | "zeckendorf_weight" | "zeckendorf_bit" | "substrate_hash"
+                        | "attractor_bucket" | "substrate_insert"
+                        | "harmonic_align" | "harmonic_unalign"
+                        | "substrate_select_k"
+                        | "int_binary_search" | "int_lower_bound" | "int_upper_bound"
+                        | "nth_fibonacci" | "is_zeckendorf_valid"
+                        | "substrate_min_distance" | "substrate_nearest"
+                        | "arr_sum_int" | "arr_product" | "arr_is_sorted"
+                        | "arr_min_int" | "arr_max_int"
+                        | "is_phi_resonant"
                         // 2026-05-14 stdlib expansion (ints)
                         | "str_index_of" | "str_starts_with" | "str_ends_with"
                         | "file_exists" | "write_file" | "gcd" | "lcm"
@@ -161,7 +178,16 @@ impl Compiler {
                         // polish round (ints)
                         | "random_int" | "random_seed"
                         // test runner ints
-                        | "test_failure_count" | "test_record_failure" => Some("int"),
+                        | "test_failure_count" | "test_record_failure"
+                        // String → int parsers + counters + size queries
+                        | "str_to_int" | "str_count" | "str_is_empty"
+                        | "dict_size" | "dict_pop"
+                        // Array index/aggregate ints
+                        | "arr_argmax" | "arr_argmin"
+                        // Bit/digit/modular int returns
+                        | "mod_pow" | "bit_count" | "bit_length"
+                        | "digit_sum" | "digit_count"
+                        | "arr_unique_count" | "arr_gcd" | "fnv1a_hash" => Some("int"),
                         "pow" | "sqrt" | "log" | "log2" | "log10"
                         | "exp" | "sin" | "cos" | "tan" | "asin" | "acos"
                         | "atan" | "atan2" | "hypot" | "lerp"
@@ -184,7 +210,17 @@ impl Compiler {
                         // producing garbage.
                         | "log_phi_pi_fibonacci"
                         // polish round (floats)
-                        | "random_float" => Some("float"),
+                        | "random_float"
+                        // String → float parser
+                        | "str_to_float"
+                        // Float-preserving array reductions
+                        | "arr_min_float" | "arr_max_float"
+                        // Substrate-canonical distance metric
+                        | "phi_pi_log_distance"
+                        // Substrate growth rates
+                        | "phi_pow" | "phi_pi_pow"
+                        // Substrate-coherence + array-stat float returns
+                        | "harmonic_score" | "arr_avg_distance" => Some("float"),
                         "to_string" | "string" | "str_concat"
                         | "str_uppercase" | "str_lowercase" | "str_reverse"
                         | "str_slice" | "concat_many"

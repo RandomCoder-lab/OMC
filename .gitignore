@@ -37,3 +37,6 @@ omnimcode-ffi/.cargo/
 examples/movielens_*.csv
 examples/recommend/sample_10k.csv
 examples/recommend/sample_100k.csv
+
+# Gdextension built artifacts (rebuild from src/)
+omnimcode-gdextension/bin/

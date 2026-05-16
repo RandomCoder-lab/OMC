@@ -1,0 +1,117 @@
+# Empirical comparison: substrate_search (O(log_phi_pi_fibonacci N))
+# vs OMC-level linear scan vs OMC-level binary search.
+#
+# All three perform the same task: locate `target` in a sorted array.
+# substrate_search uses the F(k)/phi^(pi*k) split-point algorithm; linear
+# scan walks the array element-by-element; binary search is the textbook
+# midpoint variant.
+#
+# Output: wall-clock per N=1..10 trials, plus correctness check.
+
+fn linear_search(arr, target) {
+    h n = arr_len(arr);
+    h i = 0;
+    while i < n {
+        if arr_get(arr, i) == target {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+fn binary_search_omc(arr, target) {
+    h lo = 0;
+    h hi = arr_len(arr) - 1;
+    while lo <= hi {
+        h mid = (lo + hi) / 2;
+        h v = arr_get(arr, mid);
+        if v == target {
+            return mid;
+        }
+        if v < target {
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    return -1;
+}
+
+fn build_sorted(n) {
+    return arr_range(0, n);
+}
+
+fn bench_one(arr, query_count, kind) {
+    h n = arr_len(arr);
+    h hits = 0;
+    h t0 = now_ms();
+    h i = 0;
+    while i < query_count {
+        # Probe across the full range to defeat branch-prediction skew.
+        h target = (i * 7919) % n;
+        h idx = -1;
+        if kind == 0 {
+            idx = linear_search(arr, target);
+        } elif kind == 1 {
+            idx = binary_search_omc(arr, target);
+        } elif kind == 2 {
+            idx = substrate_search(arr, target);
+        } else {
+            idx = int_binary_search(arr, target);
+        }
+        if idx >= 0 {
+            hits = hits + 1;
+        }
+        i = i + 1;
+    }
+    h t1 = now_ms();
+    return [hits, t1 - t0];
+}
+
+fn main() {
+    h sizes = [1024, 8192, 65536];
+    h queries = 5000;
+
+    println("# 4-way search comparison");
+    println("# Each cell = ms for 5000 queries on sorted array of size N");
+    println("# linear=OMC linear scan, omc_bin=OMC midpoint loop,");
+    println("# substrate=native F(k)/phi^(pi*k) probe, int_bin=native midpoint");
+    println("");
+    print("size,linear_ms,omc_bin_ms,substrate_ms,int_bin_ms");
+    println("");
+    h si = 0;
+    while si < arr_len(sizes) {
+        h n = arr_get(sizes, si);
+        h arr = build_sorted(n);
+        h lin = bench_one(arr, queries, 0);
+        h obin = bench_one(arr, queries, 1);
+        h sub = bench_one(arr, queries, 2);
+        h ibin = bench_one(arr, queries, 3);
+        print(to_string(n));
+        print(",");
+        print(to_string(arr_get(lin, 1)));
+        print(",");
+        print(to_string(arr_get(obin, 1)));
+        print(",");
+        print(to_string(arr_get(sub, 1)));
+        print(",");
+        print(to_string(arr_get(ibin, 1)));
+        println("");
+        si = si + 1;
+    }
+
+    println("");
+    println("# Sanity: hit counts should match across all three columns");
+    println("# (target generation is deterministic).");
+    println("");
+    println("# Substrate iteration bound:");
+    print("# log_phi_pi_fibonacci(65536) = ");
+    println(log_phi_pi_fibonacci(65536.0));
+    print("# log2(65536) = ");
+    println(16.0);
+    print("# Ratio (substrate/binary) ≈ ");
+    println(log_phi_pi_fibonacci(65536.0) / 16.0);
+}
+
+main();

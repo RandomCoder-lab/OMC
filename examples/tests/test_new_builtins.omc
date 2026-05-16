@@ -177,3 +177,328 @@ fn test_hbit_tension() {
     assert_eq(hbit_tension(89), 0, "on-attractor tension is 0");
     assert_eq(hbit_tension(100), 11, "off-attractor tension matches distance");
 }
+
+# ---------- Array helpers (take/drop/count/repeat/zeros/ones/...) ----------
+
+fn test_arr_take() {
+    h r = arr_take([1, 2, 3, 4, 5], 3);
+    assert_eq(arr_len(r), 3, "arr_take(_, 3) returns 3 elements");
+    assert_eq(arr_get(r, 2), 3, "third element is 3");
+}
+
+fn test_arr_take_overflow() {
+    # take more than available — clamps to len
+    h r = arr_take([1, 2, 3], 10);
+    assert_eq(arr_len(r), 3, "arr_take overflow returns whole array");
+}
+
+fn test_arr_drop() {
+    h r = arr_drop([1, 2, 3, 4, 5], 2);
+    assert_eq(arr_len(r), 3, "arr_drop(_, 2) returns 3 elements");
+    assert_eq(arr_get(r, 0), 3, "first remaining element is 3");
+}
+
+fn test_arr_count() {
+    h r = arr_count([1, 2, 3, 2, 1, 2], 2);
+    assert_eq(r, 3, "value 2 appears 3 times");
+}
+
+fn test_arr_repeat() {
+    h r = arr_repeat(7, 4);
+    assert_eq(arr_len(r), 4, "arr_repeat returns n elements");
+    assert_eq(arr_get(r, 0), 7, "first element matches value");
+    assert_eq(arr_get(r, 3), 7, "last element matches value");
+}
+
+fn test_arr_zeros() {
+    h r = arr_zeros(5);
+    assert_eq(arr_len(r), 5, "arr_zeros has correct length");
+    assert_eq(arr_get(r, 0), 0, "elements are zero");
+    assert_eq(arr_get(r, 4), 0, "all elements zero");
+}
+
+fn test_arr_ones() {
+    h r = arr_ones(3);
+    assert_eq(arr_len(r), 3, "arr_ones has correct length");
+    assert_eq(arr_get(r, 0), 1, "elements are 1");
+    assert_eq(arr_get(r, 2), 1, "all elements 1");
+}
+
+fn test_arr_chunk() {
+    h r = arr_chunk([1, 2, 3, 4, 5, 6, 7], 3);
+    assert_eq(arr_len(r), 3, "7 elements / chunk 3 -> 3 chunks (3+3+1)");
+    assert_eq(arr_len(arr_get(r, 0)), 3, "first chunk has 3");
+    assert_eq(arr_len(arr_get(r, 2)), 1, "last chunk has 1 (remainder)");
+}
+
+fn test_arr_flatten() {
+    h r = arr_flatten([[1, 2], [3, 4], [5]]);
+    assert_eq(arr_len(r), 5, "flatten produces 5 elements");
+    assert_eq(arr_get(r, 0), 1, "first element preserved");
+    assert_eq(arr_get(r, 4), 5, "last element preserved");
+}
+
+fn test_arr_enumerate() {
+    h r = arr_enumerate(["a", "b", "c"]);
+    assert_eq(arr_len(r), 3, "enumerate preserves length");
+    h pair0 = arr_get(r, 0);
+    assert_eq(arr_get(pair0, 0), 0, "first index is 0");
+    h pair2 = arr_get(r, 2);
+    assert_eq(arr_get(pair2, 0), 2, "third index is 2");
+}
+
+fn test_arr_window() {
+    h r = arr_window([1, 2, 3, 4, 5], 3);
+    assert_eq(arr_len(r), 3, "5 - 3 + 1 = 3 windows");
+    h w0 = arr_get(r, 0);
+    assert_eq(arr_get(w0, 0), 1, "first window starts at 1");
+    h w2 = arr_get(r, 2);
+    assert_eq(arr_get(w2, 2), 5, "last window ends at 5");
+}
+
+fn test_arr_window_oversized() {
+    # window larger than array -> empty
+    h r = arr_window([1, 2], 5);
+    assert_eq(arr_len(r), 0, "oversize window returns empty");
+}
+
+# ---------- Dict helpers (size/pop/get_or/clear/items) ----------
+
+fn test_dict_size() {
+    h d = dict_new();
+    dict_set(d, "a", 1);
+    dict_set(d, "b", 2);
+    assert_eq(dict_size(d), 2, "dict_size matches inserted keys");
+}
+
+fn test_dict_get_or() {
+    h d = dict_new();
+    dict_set(d, "x", 42);
+    assert_eq(dict_get_or(d, "x", 0), 42, "present key returns its value");
+    assert_eq(dict_get_or(d, "missing", 99), 99, "missing key returns default");
+}
+
+fn test_dict_pop() {
+    h d = dict_new();
+    dict_set(d, "k", 7);
+    h v = dict_pop(d, "k");
+    assert_eq(v, 7, "pop returns the value");
+    assert_eq(dict_size(d), 0, "pop removes the entry");
+}
+
+fn test_dict_clear() {
+    h d = dict_new();
+    dict_set(d, "a", 1);
+    dict_set(d, "b", 2);
+    dict_clear(d);
+    assert_eq(dict_size(d), 0, "clear empties the dict");
+}
+
+fn test_dict_items() {
+    h d = dict_new();
+    dict_set(d, "a", 1);
+    dict_set(d, "b", 2);
+    h items = dict_items(d);
+    assert_eq(arr_len(items), 2, "items count matches");
+    # BTreeMap orders alphabetically -- first pair is ["a", 1]
+    h pair = arr_get(items, 0);
+    assert_eq(arr_get(pair, 0), "a", "first key is 'a'");
+    assert_eq(arr_get(pair, 1), 1, "first value is 1");
+}
+
+# ---------- String helpers (split_lines/count/parse/capitalize) ----------
+
+fn test_str_split_lines() {
+    h r = str_split_lines("alpha\nbeta\ngamma");
+    assert_eq(arr_len(r), 3, "3 lines");
+    assert_eq(arr_get(r, 1), "beta", "second line preserved");
+}
+
+fn test_str_count() {
+    assert_eq(str_count("ababab", "ab"), 3, "3 non-overlapping matches");
+    assert_eq(str_count("xxx", "y"), 0, "no matches");
+}
+
+fn test_str_is_empty() {
+    assert_eq(str_is_empty(""), 1, "empty is empty");
+    assert_eq(str_is_empty("a"), 0, "non-empty is not");
+}
+
+fn test_str_to_int() {
+    assert_eq(str_to_int("42"), 42, "parses positive");
+    assert_eq(str_to_int("-7"), -7, "parses negative");
+    assert_eq(str_to_int("  100  "), 100, "trims whitespace");
+}
+
+fn test_str_to_float() {
+    h v = str_to_float("3.14");
+    assert_true(approx_eq(v, 3.14, 0.0001), "parses float");
+}
+
+fn test_str_capitalize() {
+    assert_eq(str_capitalize("hello"), "Hello", "lowercase capitalized");
+    assert_eq(str_capitalize(""), "", "empty stays empty");
+    assert_eq(str_capitalize("aBC"), "ABC", "first char uppercased, tail preserved");
+}
+
+# ---------- Array aggregates (argmax/argmin/cumsum/diff/range) ----------
+
+fn test_arr_argmax() {
+    assert_eq(arr_argmax([3, 1, 4, 1, 5, 9, 2, 6]), 5, "max is at index 5");
+    assert_eq(arr_argmax([10]), 0, "single-element argmax is 0");
+}
+
+fn test_arr_argmin() {
+    assert_eq(arr_argmin([3, 1, 4, 1, 5]), 1, "first min is at index 1");
+}
+
+fn test_arr_cumsum() {
+    h r = arr_cumsum([1, 2, 3, 4]);
+    assert_eq(arr_len(r), 4, "cumsum preserves length");
+    assert_eq(arr_get(r, 0), 1, "first is 1");
+    assert_eq(arr_get(r, 1), 3, "2nd is 1+2");
+    assert_eq(arr_get(r, 3), 10, "4th is 1+2+3+4");
+}
+
+fn test_arr_diff() {
+    h r = arr_diff([1, 3, 6, 10]);
+    assert_eq(arr_len(r), 3, "diff is len-1");
+    assert_eq(arr_get(r, 0), 2, "3-1=2");
+    assert_eq(arr_get(r, 1), 3, "6-3=3");
+    assert_eq(arr_get(r, 2), 4, "10-6=4");
+}
+
+fn test_arr_range_one_arg() {
+    h r = arr_range(5);
+    assert_eq(arr_len(r), 5, "5 elements");
+    assert_eq(arr_get(r, 0), 0, "starts at 0");
+    assert_eq(arr_get(r, 4), 4, "ends at 4");
+}
+
+fn test_arr_range_two_arg() {
+    h r = arr_range(2, 7);
+    assert_eq(arr_len(r), 5, "5 elements between 2 and 7");
+    assert_eq(arr_get(r, 0), 2, "starts at 2");
+}
+
+fn test_arr_range_step() {
+    h r = arr_range(0, 10, 3);
+    assert_eq(arr_len(r), 4, "0,3,6,9");
+    assert_eq(arr_get(r, 3), 9, "last is 9");
+}
+
+# ---------- Math helpers (mod_pow/bit/digit) ----------
+
+fn test_mod_pow() {
+    # 3^5 mod 7 = 243 mod 7 = 5
+    assert_eq(mod_pow(3, 5, 7), 5, "3^5 mod 7 = 5");
+    # 2^10 mod 1000 = 24
+    assert_eq(mod_pow(2, 10, 1000), 24, "2^10 mod 1000 = 24");
+    # exp=0 -> 1
+    assert_eq(mod_pow(7, 0, 5), 1, "anything^0 = 1");
+}
+
+fn test_bit_count() {
+    assert_eq(bit_count(0), 0, "0 has 0 bits");
+    assert_eq(bit_count(7), 3, "7 = 0b111 has 3 bits");
+    assert_eq(bit_count(255), 8, "255 has 8 bits");
+}
+
+fn test_bit_length() {
+    assert_eq(bit_length(0), 0, "0 needs 0 bits");
+    assert_eq(bit_length(1), 1, "1 needs 1 bit");
+    assert_eq(bit_length(255), 8, "255 needs 8 bits");
+    assert_eq(bit_length(256), 9, "256 needs 9 bits");
+}
+
+fn test_digit_sum() {
+    assert_eq(digit_sum(0), 0, "0 -> 0");
+    assert_eq(digit_sum(123), 6, "1+2+3=6");
+    assert_eq(digit_sum(9999), 36, "9*4=36");
+}
+
+fn test_digit_count() {
+    assert_eq(digit_count(0), 1, "0 has 1 digit");
+    assert_eq(digit_count(7), 1, "single digit");
+    assert_eq(digit_count(100), 3, "3 digits");
+}
+
+fn test_arr_unique_count() {
+    assert_eq(arr_unique_count([1, 2, 3, 2, 1, 4]), 4, "4 distinct");
+    assert_eq(arr_unique_count([]), 0, "empty -> 0");
+    assert_eq(arr_unique_count([7, 7, 7]), 1, "all same -> 1");
+}
+
+fn test_arr_partition_by() {
+    h r = arr_partition_by([1, 2, 3, 2, 4, 2], 2);
+    assert_eq(arr_len(r), 2, "result has 2 buckets");
+    h yes = arr_get(r, 0);
+    h no = arr_get(r, 1);
+    assert_eq(arr_len(yes), 3, "3 matches");
+    assert_eq(arr_len(no), 3, "3 non-matches");
+    assert_eq(arr_get(no, 0), 1, "non-matches preserve order");
+    assert_eq(arr_get(no, 2), 4, "non-matches preserve order");
+}
+
+# ---------- Substrate primitives (is_attractor/band/crt_recover/fib_index) ----------
+
+fn test_is_attractor() {
+    assert_eq(is_attractor(89), 1, "89 is a Fibonacci attractor");
+    assert_eq(is_attractor(100), 0, "100 is not");
+    assert_eq(is_attractor(0), 1, "0 is on-attractor");
+}
+
+fn test_resonance_band() {
+    assert_eq(resonance_band(89), 0, "on-attractor");
+    assert_eq(resonance_band(90), 1, "dist 1 -> adjacent");
+    assert_eq(resonance_band(100), 3, "dist 11 -> mid (11..=100)");
+    assert_eq(resonance_band(95), 2, "dist 6 -> near (4..=10)");
+    assert_eq(resonance_band(100000), 4, "far away");
+}
+
+fn test_crt_recover() {
+    # crt_residues(pos, [5,8,13,21]) -> [pos%5, pos%8, pos%13, pos%21]
+    # crt_recover([r5, r8, r13, r21]) should round-trip in [0, 10920).
+    h r1 = crt_residues(42, [5, 8, 13, 21]);
+    h v = crt_recover(r1);
+    assert_eq(v, 42, "round-trip 42");
+    h r2 = crt_residues(1234, [5, 8, 13, 21]);
+    h v2 = crt_recover(r2);
+    assert_eq(v2, 1234, "round-trip 1234");
+}
+
+fn test_fibonacci_index() {
+    assert_eq(fibonacci_index(89), 11, "fib(11) = 89");
+    assert_eq(fibonacci_index(0), 0, "fib(0) = 0");
+    assert_eq(fibonacci_index(1), 1, "fib(1) = 1 -- first 1");
+    assert_eq(fibonacci_index(7), -1, "7 is not a Fibonacci");
+}
+
+# ---------- Float reductions + arr_gcd + fnv1a_hash ----------
+
+fn test_arr_min_float() {
+    h v = arr_min_float([3.14, 2.71, 1.41]);
+    assert_true(approx_eq(v, 1.41, 0.0001), "sqrt 2 is the smallest");
+}
+
+fn test_arr_max_float() {
+    h v = arr_max_float([3.14, 2.71, 1.41]);
+    assert_true(approx_eq(v, 3.14, 0.0001), "pi is the largest");
+}
+
+fn test_arr_gcd() {
+    assert_eq(arr_gcd([12, 18, 24]), 6, "gcd(12,18,24) = 6");
+    assert_eq(arr_gcd([7, 11, 13]), 1, "coprime -> 1");
+    assert_eq(arr_gcd([]), 0, "empty -> 0 (identity)");
+}
+
+fn test_fnv1a_hash() {
+    h h1 = fnv1a_hash("hello");
+    h h2 = fnv1a_hash("hello");
+    assert_eq(h1, h2, "deterministic same-input");
+    h h3 = fnv1a_hash("world");
+    assert_true(h1 != h3, "different strings produce different hashes");
+    h he = fnv1a_hash("");
+    # FNV-1a empty input -> offset basis (signed-cast of 0xcbf29ce484222325).
+    assert_true(he != 0, "empty string hash is non-zero (offset basis)");
+}

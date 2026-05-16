@@ -40,6 +40,7 @@ impl OptimizationStats {
 /// Circuit optimizer
 pub struct CircuitOptimizer {
     stats: OptimizationStats,
+    #[allow(dead_code)] // future: used by gate-rewriting passes
     gate_map: HashMap<GateId, GateId>, // Maps old gate IDs to new gate IDs
 }
 
@@ -540,6 +541,7 @@ impl CircuitOptimizer {
 }
 
 /// Simplification result
+#[allow(dead_code)] // None preserved for symmetry; future passes may emit it
 enum SimplifyResult {
     Constant(bool),
     Gate(Gate),

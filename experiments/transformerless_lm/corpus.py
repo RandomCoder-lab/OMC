@@ -36,15 +36,29 @@ and never pays a cost when the key is on the substrate.
 """
 
 
-def make_dataset(seq_len: int = 64):
+def make_dataset(seq_len: int = 64, source: str = "embedded"):
     """Return (vocab, encoded_text) where encoded_text is a 1-D
     int tensor of token indices. Char-level vocab built from the
-    corpus's unique characters."""
+    corpus's unique characters.
+
+    `source` chooses corpus:
+      - "embedded": the small 1.5KB inline CORPUS (default; kept for
+                    fast smoke tests and the original tiny-bench)
+      - "tinyshakespeare": load tinyshakespeare.txt (1.1 MB) — used
+                           by the scale experiment
+    """
+    import os
     import torch
-    chars = sorted(set(CORPUS))
+    if source == "tinyshakespeare":
+        path = os.path.join(os.path.dirname(__file__), "tinyshakespeare.txt")
+        with open(path, "r") as f:
+            text = f.read()
+    else:
+        text = CORPUS
+    chars = sorted(set(text))
     stoi = {c: i for i, c in enumerate(chars)}
     itos = {i: c for c, i in stoi.items()}
-    encoded = torch.tensor([stoi[c] for c in CORPUS], dtype=torch.long)
+    encoded = torch.tensor([stoi[c] for c in text], dtype=torch.long)
     return chars, stoi, itos, encoded
 
 

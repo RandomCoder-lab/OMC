@@ -1,0 +1,90 @@
+# substrate.omc — high-level wrappers around the O(log_phi_pi_fibonacci N)
+# primitives in the OMC native runtime.
+#
+# Conventions:
+#   - Functions named `s_*` are substrate-routed (use the F(k)/phi^(pi*k)
+#     probe sequence). They preserve harmonic structure across probes.
+#   - Functions named `i_*` are native int-binary equivalents. Use them
+#     when raw throughput on uniform data matters more than substrate
+#     coherence.
+#   - Functions named `h_*` are harmonic-aligned operations (Fibonacci
+#     attractor / Zeckendorf operations).
+
+# Build an empty substrate-friendly sorted-int container. Just an alias
+# for an empty array — used to signal intent to other readers.
+fn s_new() {
+    return [];
+}
+
+# Add a value into a sorted container, keeping it sorted. Returns the
+# insertion index.
+fn s_add(container, value) {
+    return substrate_insert(container, value);
+}
+
+# Substrate-routed exact lookup: returns the index or -1.
+fn s_find(container, value) {
+    return substrate_search(container, value);
+}
+
+# Substrate-routed range count: how many elements in [lo, hi).
+fn s_count_range(container, lo, hi) {
+    return substrate_count_range(container, lo, hi);
+}
+
+# Substrate-routed range slice: array of elements in [lo, hi).
+fn s_slice_range(container, lo, hi) {
+    return substrate_slice_range(container, lo, hi);
+}
+
+# Substrate-routed nearest value lookup.
+fn s_nearest(container, value) {
+    return substrate_nearest(container, value);
+}
+
+# Substrate-routed median (50th percentile).
+fn s_median(container) {
+    return substrate_quantile(container, 500);
+}
+
+# Substrate-routed percentile [0, 100].
+fn s_percentile(container, p) {
+    return substrate_quantile(container, p * 10);
+}
+
+# Snap a value to the nearest Fibonacci attractor.
+fn h_snap(value) {
+    return harmonic_align(value);
+}
+
+# Residual after substrate alignment (non-attractor component).
+fn h_residual(value) {
+    return harmonic_unalign(value);
+}
+
+# Substrate-distance: ln(|a-b|+1) / (pi * ln(phi)).
+fn h_distance(a, b) {
+    return phi_pi_log_distance(a, b);
+}
+
+# Substrate-aligned hash for keying into dict/bloom structures.
+fn h_hash(value) {
+    return substrate_hash(value);
+}
+
+# Zeckendorf weight: number of Fibonacci terms in n's decomposition.
+fn h_weight(n) {
+    return zeckendorf_weight(n);
+}
+
+# Substrate-coherence score for an array (0.0 .. 1.0).
+fn h_score(arr) {
+    return harmonic_score(arr);
+}
+
+# Build a sorted set from an unsorted array via substrate operations.
+# Result is sorted, deduplicated, and ready for s_find / s_count_range.
+fn s_from_array(arr) {
+    h sorted = arr_sort_int(arr);
+    return sorted_dedupe(sorted);
+}

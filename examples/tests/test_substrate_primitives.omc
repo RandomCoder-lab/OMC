@@ -1,0 +1,431 @@
+# Tests for the substrate-routed O(log_phi_pi_fibonacci N) primitives.
+# Covers zeckendorf/from_zeckendorf, substrate_search/lower_bound/upper_bound/
+# rank/count_range/slice_range, sorted_intersect/difference/merge/union/dedupe,
+# attractor_bucket, substrate_insert/quantile, fib_chunks, harmonic_align/
+# unalign/resample, substrate_select_k, phi_pi_log_distance, substrate_hash,
+# int_binary_search/lower_bound/upper_bound, zeckendorf_weight/bit.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) {
+    if !cond {
+        test_record_failure(msg);
+    }
+}
+
+fn approx_eq(a, b, tol) {
+    h d = a - b;
+    if d < 0 { d = 0 - d; }
+    return d <= tol;
+}
+
+# ---------- Zeckendorf decomposition ----------
+
+fn test_zeckendorf_zero() {
+    assert_eq(arr_len(zeckendorf(0)), 0, "zeckendorf(0) is empty");
+}
+
+fn test_zeckendorf_attractor() {
+    # 89 is an attractor -> single-term decomposition
+    h z = zeckendorf(89);
+    assert_eq(arr_len(z), 1, "single term for 89");
+    assert_eq(arr_get(z, 0), 11, "FIBONACCI[11] = 89");
+}
+
+fn test_zeckendorf_compound() {
+    # 100 = 89 + 8 + 3 -> indices [11, 6, 4]
+    h z = zeckendorf(100);
+    assert_eq(arr_len(z), 3, "three terms");
+    assert_eq(arr_get(z, 0), 11, "largest term first");
+    assert_eq(arr_get(z, 2), 4, "smallest term last");
+}
+
+fn test_zeckendorf_roundtrip() {
+    h cases = [0, 1, 7, 42, 100, 1234, 63245985];
+    h i = 0;
+    while i < arr_len(cases) {
+        h n = arr_get(cases, i);
+        h z = zeckendorf(n);
+        h back = from_zeckendorf(z);
+        assert_eq(back, n, "round-trip " + to_string(n));
+        i = i + 1;
+    }
+}
+
+fn test_zeckendorf_weight_bound() {
+    # Iteration count <= log_phi_pi_fibonacci(n * sqrt(5)) approximately.
+    # Conservative: <= 40 (table size).
+    h n = 63245985;
+    assert_true(zeckendorf_weight(n) < 40, "weight bounded by table size");
+}
+
+fn test_zeckendorf_bit() {
+    h n = 100;  # = [11, 6, 4]
+    assert_eq(zeckendorf_bit(n, 11), 1, "bit 11 set");
+    assert_eq(zeckendorf_bit(n, 6), 1, "bit 6 set");
+    assert_eq(zeckendorf_bit(n, 5), 0, "bit 5 not set (non-consecutive)");
+}
+
+# ---------- Substrate search ----------
+
+fn test_substrate_search_hit() {
+    h arr = arr_range(0, 100);
+    assert_eq(substrate_search(arr, 42), 42, "hit");
+    assert_eq(substrate_search(arr, 0), 0, "first");
+    assert_eq(substrate_search(arr, 99), 99, "last");
+}
+
+fn test_substrate_search_miss() {
+    h arr = [1, 3, 5, 7, 11, 13, 17, 19];
+    assert_eq(substrate_search(arr, 4), -1, "miss returns -1");
+    assert_eq(substrate_search(arr, 0), -1, "below range");
+    assert_eq(substrate_search(arr, 100), -1, "above range");
+}
+
+fn test_substrate_search_empty() {
+    assert_eq(substrate_search([], 5), -1, "empty array");
+}
+
+fn test_substrate_lower_bound() {
+    h arr = [1, 3, 5, 7, 9];
+    assert_eq(substrate_lower_bound(arr, 5), 2, "exact match");
+    assert_eq(substrate_lower_bound(arr, 4), 2, "between elements");
+    assert_eq(substrate_lower_bound(arr, 0), 0, "below all");
+    assert_eq(substrate_lower_bound(arr, 100), 5, "above all = len");
+}
+
+fn test_substrate_upper_bound() {
+    h arr = [1, 3, 5, 7, 9];
+    assert_eq(substrate_upper_bound(arr, 5), 3, "first > 5");
+    assert_eq(substrate_upper_bound(arr, 4), 2, "between");
+    assert_eq(substrate_upper_bound(arr, 9), 5, "above last");
+}
+
+fn test_substrate_rank() {
+    h arr = [10, 20, 30, 40, 50];
+    assert_eq(substrate_rank(arr, 25), 2, "rank of 25 is 2");
+    assert_eq(substrate_rank(arr, 10), 0, "rank of min is 0");
+    assert_eq(substrate_rank(arr, 60), 5, "rank above all is len");
+}
+
+fn test_substrate_count_range() {
+    h arr = arr_range(0, 100);
+    assert_eq(substrate_count_range(arr, 10, 20), 10, "[10,20) has 10 items");
+    assert_eq(substrate_count_range(arr, 0, 100), 100, "full range");
+    assert_eq(substrate_count_range(arr, 50, 50), 0, "empty range");
+}
+
+fn test_substrate_slice_range() {
+    h arr = arr_range(0, 20);
+    h s = substrate_slice_range(arr, 5, 8);
+    assert_eq(arr_len(s), 3, "slice has 3 items");
+    assert_eq(arr_get(s, 0), 5, "first");
+    assert_eq(arr_get(s, 2), 7, "last (exclusive hi)");
+}
+
+# ---------- Set operations on sorted arrays ----------
+
+fn test_substrate_intersect() {
+    h r = substrate_intersect([1, 3, 5, 7, 11], [3, 7, 11, 23]);
+    assert_eq(arr_len(r), 3, "3 common");
+    assert_eq(arr_get(r, 0), 3, "first common");
+    assert_eq(arr_get(r, 2), 11, "last common");
+}
+
+fn test_substrate_intersect_disjoint() {
+    h r = substrate_intersect([1, 3, 5], [2, 4, 6]);
+    assert_eq(arr_len(r), 0, "disjoint -> empty");
+}
+
+fn test_substrate_difference() {
+    h r = substrate_difference([1, 2, 3, 4, 5], [2, 4]);
+    assert_eq(arr_len(r), 3, "3 elements left");
+    assert_eq(arr_get(r, 0), 1, "1 stays");
+    assert_eq(arr_get(r, 2), 5, "5 stays");
+}
+
+fn test_sorted_merge() {
+    h r = sorted_merge([1, 3, 5], [2, 4, 6]);
+    assert_eq(arr_len(r), 6, "6 elements");
+    assert_eq(arr_get(r, 0), 1, "min first");
+    assert_eq(arr_get(r, 5), 6, "max last");
+}
+
+fn test_sorted_merge_with_dups() {
+    h r = sorted_merge([1, 2, 3], [2, 3, 4]);
+    assert_eq(arr_len(r), 6, "dups preserved");
+}
+
+fn test_sorted_union() {
+    h r = sorted_union([1, 2, 3], [2, 3, 4]);
+    assert_eq(arr_len(r), 4, "dups removed");
+    assert_eq(arr_get(r, 0), 1, "first");
+    assert_eq(arr_get(r, 3), 4, "last");
+}
+
+fn test_sorted_dedupe() {
+    h r = sorted_dedupe([1, 1, 2, 3, 3, 3, 4, 4, 5]);
+    assert_eq(arr_len(r), 5, "5 unique values");
+}
+
+# ---------- Substrate hash ----------
+
+fn test_substrate_hash_deterministic() {
+    h h1 = substrate_hash(42);
+    h h2 = substrate_hash(42);
+    assert_eq(h1, h2, "same input -> same hash");
+}
+
+fn test_substrate_hash_differs() {
+    h h1 = substrate_hash(42);
+    h h2 = substrate_hash(43);
+    assert_true(h1 != h2, "different inputs -> different hashes");
+}
+
+fn test_substrate_hash_negative() {
+    h h_pos = substrate_hash(42);
+    h h_neg = substrate_hash(-42);
+    assert_true(h_pos != h_neg, "sign affects hash");
+}
+
+# ---------- Attractor bucket / align / unalign ----------
+
+fn test_attractor_bucket() {
+    assert_eq(attractor_bucket(89), 11, "89 is FIB[11]");
+    assert_eq(attractor_bucket(50), 9, "50 nearest = 34 = FIB[9]");
+    assert_eq(attractor_bucket(0), 0, "0 is FIB[0]");
+}
+
+fn test_harmonic_align_unalign() {
+    assert_eq(harmonic_align(89), 89, "exact attractor");
+    assert_eq(harmonic_align(100), 89, "snaps down to 89");
+    assert_eq(harmonic_unalign(100), 11, "residual = 11");
+    assert_eq(harmonic_unalign(89), 0, "on-attractor residual = 0");
+}
+
+# ---------- substrate_insert + quantile ----------
+
+fn test_substrate_insert_keeps_sorted() {
+    h arr = [1, 5, 10, 20];
+    substrate_insert(arr, 7);
+    assert_eq(arr_len(arr), 5, "len grew by 1");
+    # Should be [1, 5, 7, 10, 20]
+    assert_eq(arr_get(arr, 2), 7, "inserted at correct position");
+}
+
+fn test_substrate_quantile() {
+    h arr = arr_range(0, 101);  # 0..100 inclusive
+    assert_eq(substrate_quantile(arr, 500), 50, "median");
+    assert_eq(substrate_quantile(arr, 0), 0, "0th percentile");
+    assert_eq(substrate_quantile(arr, 1000), 100, "100th percentile");
+}
+
+# ---------- fib_chunks ----------
+
+fn test_fib_chunks() {
+    h r = fib_chunks([10, 20, 30, 40, 50, 60, 70, 80, 90, 100], 2);
+    # FIB[2]=1, FIB[3]=2, FIB[4]=3, FIB[5]=5 -> chunks [1, 2, 3, 4 (truncated)]
+    assert_eq(arr_len(r), 4, "4 chunks for 10 items starting k=2");
+    assert_eq(arr_len(arr_get(r, 0)), 1, "first chunk size 1");
+    assert_eq(arr_len(arr_get(r, 1)), 2, "second chunk size 2");
+    assert_eq(arr_len(arr_get(r, 2)), 3, "third chunk size 3");
+    assert_eq(arr_len(arr_get(r, 3)), 4, "fourth chunk: 4 remaining (would be 5)");
+}
+
+# ---------- harmonic_resample ----------
+
+fn test_harmonic_resample_smaller() {
+    h arr = arr_range(0, 100);
+    h r = harmonic_resample(arr, 5);
+    assert_eq(arr_len(r), 5, "5 samples");
+    assert_eq(arr_get(r, 0), 0, "first is from index 0");
+    # phi-warped: indices bias toward small values
+    assert_true(arr_get(r, 4) <= 99, "last is in range");
+}
+
+# ---------- substrate_select_k ----------
+
+fn test_substrate_select_k_min() {
+    assert_eq(substrate_select_k([5, 1, 9, 3, 7], 0), 1, "min");
+}
+
+fn test_substrate_select_k_max() {
+    assert_eq(substrate_select_k([5, 1, 9, 3, 7], 4), 9, "max");
+}
+
+fn test_substrate_select_k_median() {
+    assert_eq(substrate_select_k([5, 1, 9, 3, 7], 2), 5, "median");
+}
+
+# ---------- phi_pi_log_distance ----------
+
+fn test_phi_pi_log_distance_zero() {
+    h d = phi_pi_log_distance(42, 42);
+    assert_true(approx_eq(d, 0.0, 0.001), "same value -> 0");
+}
+
+fn test_phi_pi_log_distance_monotonic() {
+    h d1 = phi_pi_log_distance(0, 10);
+    h d2 = phi_pi_log_distance(0, 1000);
+    assert_true(d2 > d1, "larger gap -> larger distance");
+}
+
+# ---------- int_binary_search baselines ----------
+
+fn test_int_binary_search() {
+    h arr = arr_range(0, 1000);
+    assert_eq(int_binary_search(arr, 500), 500, "hit");
+    assert_eq(int_binary_search(arr, -1), -1, "miss");
+    assert_eq(int_binary_search(arr, 999), 999, "last");
+}
+
+fn test_int_lower_bound() {
+    h arr = [10, 20, 30, 40];
+    assert_eq(int_lower_bound(arr, 25), 2, "between");
+    assert_eq(int_lower_bound(arr, 20), 1, "exact");
+}
+
+fn test_int_upper_bound() {
+    h arr = [10, 20, 20, 30];
+    assert_eq(int_upper_bound(arr, 20), 3, "past last dup");
+}
+
+# ---------- Cross-primitive consistency ----------
+
+fn test_substrate_vs_int_consistency() {
+    # substrate_search and int_binary_search must agree on all queries.
+    h arr = arr_range(0, 500);
+    h i = 0;
+    while i < 100 {
+        h target = (i * 17) % 500;
+        h a = substrate_search(arr, target);
+        h b = int_binary_search(arr, target);
+        assert_eq(a, b, "substrate vs int_binary at " + to_string(target));
+        i = i + 1;
+    }
+}
+
+# ---------- nth_fibonacci + is_zeckendorf_valid + nearest helpers ----------
+
+fn test_nth_fibonacci() {
+    assert_eq(nth_fibonacci(0), 0, "F(0) = 0");
+    assert_eq(nth_fibonacci(1), 1, "F(1) = 1");
+    assert_eq(nth_fibonacci(11), 89, "F(11) = 89");
+    assert_eq(nth_fibonacci(20), 6765, "F(20) = 6765");
+}
+
+fn test_is_zeckendorf_valid() {
+    assert_eq(is_zeckendorf_valid([11, 6, 4]), 1, "valid non-consecutive");
+    assert_eq(is_zeckendorf_valid([11, 10]), 0, "consecutive invalid");
+    assert_eq(is_zeckendorf_valid([4, 6]), 0, "ascending invalid");
+    assert_eq(is_zeckendorf_valid([]), 1, "empty (represents 0) valid");
+    assert_eq(is_zeckendorf_valid([5]), 1, "singleton valid");
+}
+
+fn test_substrate_min_distance() {
+    h arr = [1, 5, 10, 20, 50];
+    assert_eq(substrate_min_distance(arr, 7), 2, "min |x-7| = 2 (5)");
+    assert_eq(substrate_min_distance(arr, 1), 0, "exact match -> 0");
+    assert_eq(substrate_min_distance(arr, 100), 50, "above all");
+}
+
+fn test_substrate_nearest() {
+    h arr = [1, 5, 10, 20, 50];
+    assert_eq(substrate_nearest(arr, 7), 5, "nearest to 7");
+    assert_eq(substrate_nearest(arr, 100), 50, "above all -> 50");
+    assert_eq(substrate_nearest(arr, 0), 1, "below all -> 1");
+}
+
+# ---------- phi powers + partitioning + histogram ----------
+
+fn test_phi_pow_identity() {
+    assert_true(approx_eq(phi_pow(0), 1.0, 0.0001), "phi^0 = 1");
+    assert_true(approx_eq(phi_pow(1), 1.618, 0.001), "phi^1 ~ 1.618");
+}
+
+fn test_phi_pi_pow_baseline() {
+    # phi^pi ~ 4.534
+    assert_true(approx_eq(phi_pi_pow(1), 4.534, 0.005), "phi^pi ~ 4.534");
+}
+
+fn test_harmonic_partition_3() {
+    h r = harmonic_partition_3([1, 5, 10, 15, 20, 25, 30], 5, 20);
+    assert_eq(arr_len(arr_get(r, 0)), 1, "1 below");
+    assert_eq(arr_len(arr_get(r, 1)), 4, "4 between");
+    assert_eq(arr_len(arr_get(r, 2)), 2, "2 above");
+}
+
+fn test_resonance_band_histogram() {
+    h hist = resonance_band_histogram([89, 1, 90, 100, 1000]);
+    # band 0: 89, 1 -> 2; band 1: 90 (dist 1) -> 1; band 3: 100 (dist 11), 1000 (dist 13) -> 2
+    assert_eq(arr_get(hist, 0), 2, "2 on-attractor");
+    assert_eq(arr_get(hist, 1), 1, "1 adjacent");
+}
+
+# ---------- Native int aggregates ----------
+
+fn test_arr_sum_int() {
+    assert_eq(arr_sum_int([1, 2, 3, 4, 5]), 15, "1..5 sum");
+    assert_eq(arr_sum_int([]), 0, "empty -> 0");
+}
+
+fn test_arr_product() {
+    assert_eq(arr_product([1, 2, 3, 4, 5]), 120, "5!");
+    assert_eq(arr_product([]), 1, "empty -> 1");
+}
+
+fn test_arr_sort_int() {
+    h r = arr_sort_int([5, 1, 9, 3, 7]);
+    assert_eq(arr_get(r, 0), 1, "min");
+    assert_eq(arr_get(r, 4), 9, "max");
+}
+
+fn test_arr_is_sorted() {
+    assert_eq(arr_is_sorted([1, 2, 3, 4]), 1, "sorted");
+    assert_eq(arr_is_sorted([1, 3, 2]), 0, "unsorted");
+    assert_eq(arr_is_sorted([]), 1, "empty -> sorted (vacuous)");
+    assert_eq(arr_is_sorted([5]), 1, "singleton -> sorted");
+}
+
+fn test_arr_min_int() {
+    assert_eq(arr_min_int([5, 1, 9, 3, 7]), 1, "min");
+}
+
+fn test_arr_max_int() {
+    assert_eq(arr_max_int([5, 1, 9, 3, 7]), 9, "max");
+}
+
+fn test_arr_avg_distance() {
+    h v = arr_avg_distance([10, 12, 14], 11);
+    assert_true(approx_eq(v, 1.6666, 0.01), "(1+1+3)/3 ~ 1.667");
+}
+
+# ---------- attractor_table + harmonic_score ----------
+
+fn test_attractor_table() {
+    h tab = attractor_table();
+    assert_eq(arr_len(tab), 40, "40 entries");
+    assert_eq(arr_get(tab, 0), 0, "[0] = 0");
+    assert_eq(arr_get(tab, 11), 89, "[11] = 89");
+}
+
+fn test_harmonic_score() {
+    h all_attr = [1, 1, 2, 3, 5, 8, 13];
+    h v = harmonic_score(all_attr);
+    assert_true(approx_eq(v, 1.0, 0.001), "all Fibonacci -> 1.0");
+    h none = [7, 100, 99];
+    h v2 = harmonic_score(none);
+    assert_true(approx_eq(v2, 0.0, 0.001), "none Fibonacci -> 0.0");
+}
+
+# ---------- is_phi_resonant ----------
+
+fn test_is_phi_resonant() {
+    assert_eq(is_phi_resonant(1.618, 0.001), 1, "phi^1 resonant");
+    assert_eq(is_phi_resonant(2.618, 0.001), 1, "phi^2 resonant");
+    assert_eq(is_phi_resonant(3.14, 0.001), 0, "pi not resonant");
+}

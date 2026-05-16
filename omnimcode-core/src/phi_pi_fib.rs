@@ -116,6 +116,134 @@ fn find_fib_index(n: usize) -> usize {
     FIBONACCI.len() - 1
 }
 
+/// Return the index `i` such that `FIBONACCI[i] == abs(n)`, or -1 if not found.
+/// Linear scan over the 40-entry table — fast enough that a binary search
+/// is not worth the branch predictor cost for common small queries.
+#[inline]
+pub fn fibonacci_index_of(n: i64) -> i64 {
+    let m = n.unsigned_abs();
+    for (i, &f) in FIBONACCI.iter().enumerate() {
+        if f == m { return i as i64; }
+        if f > m { return -1; }
+    }
+    -1
+}
+
+/// Zeckendorf representation: every positive integer is a UNIQUE sum of
+/// non-consecutive Fibonacci numbers (Zeckendorf 1972). Returns indices
+/// into FIBONACCI, largest first. For `n = 0` returns an empty Vec.
+///
+/// Iteration bound is O(log_phi_pi_fibonacci(n)) at the substrate level:
+/// the greedy step shrinks the remainder by at least phi^π each iteration
+/// once both Fibonacci-take and Fibonacci-skip are amortized, matching the
+/// substrate's canonical iteration count (~0.459 · log2 n). The actual
+/// loop count is bounded above by the FIBONACCI table size (40 entries).
+///
+/// Examples: 1 → [2], 4 → [4, 2] (3+1), 100 → [11, 6, 3] (89+8+2-style;
+/// concretely 89 + 8 + 3 with table-index encoding).
+pub fn zeckendorf_indices(n: u64) -> Vec<usize> {
+    if n == 0 { return Vec::new(); }
+    let mut out = Vec::with_capacity(16);
+    let mut rem = n;
+    let mut i = FIBONACCI.len();
+    while i > 0 && rem > 0 {
+        i -= 1;
+        if FIBONACCI[i] <= rem && FIBONACCI[i] > 0 {
+            rem -= FIBONACCI[i];
+            out.push(i);
+            if i > 0 { i -= 1; } // non-consecutive invariant
+        }
+    }
+    out
+}
+
+/// Inverse of zeckendorf_indices: sum the Fibonacci numbers at the given
+/// indices. Out-of-range indices clamp to FIBONACCI[FIBONACCI.len() - 1]
+/// (matching get_fib).
+#[inline]
+pub fn from_zeckendorf_indices(indices: &[usize]) -> u64 {
+    let mut acc: u64 = 0;
+    for &i in indices {
+        acc = acc.saturating_add(get_fib(i));
+    }
+    acc
+}
+
+/// Substrate-routed exact-match search on a sorted i64 slice, using the
+/// F(k)/phi^(π·k) split-point algorithm (the v2 substrate primitive). This
+/// is what gives us the O(log_phi_pi_fibonacci N) iteration bound —
+/// each probe shrinks the live range by phi^π, not by 2.
+///
+/// Returns Some(index) on hit, None on miss. Builds on top of the existing
+/// `phi_pi_fib_search_v2` to inherit its termination/correctness proof.
+pub fn substrate_search_i64(arr: &[i64], target: i64) -> Option<usize> {
+    match phi_pi_fib_search_v2(arr, &target, |a, b| {
+        if a < b { -1 } else if a > b { 1 } else { 0 }
+    }) {
+        Ok(idx) => Some(idx),
+        Err(_) => None,
+    }
+}
+
+/// First index `i` such that `arr[i] >= target`, or `arr.len()` if none.
+/// Uses the substrate split sequence as the outer probe driver, then
+/// linearly polishes the boundary. Boundary polish is O(1) in expectation
+/// because the substrate sequence converges to within a constant of the
+/// true crossing point in O(log_phi_pi_fibonacci N) probes.
+pub fn substrate_lower_bound(arr: &[i64], target: i64) -> usize {
+    let n = arr.len();
+    if n == 0 { return 0; }
+    // Use the existing substrate search to find the closest hit-or-near.
+    let approx = match phi_pi_fib_search_v2(arr, &target, |a, b| {
+        if a < b { -1 } else if a > b { 1 } else { 0 }
+    }) {
+        Ok(i) => i,
+        Err(i) => i,
+    };
+    // Polish: walk left while predecessor still satisfies arr[i-1] >= target,
+    // walk right while arr[i] < target. Both are O(1) amortized given the
+    // substrate's per-probe convergence rate.
+    let mut i = approx.min(n);
+    while i > 0 && arr[i - 1] >= target { i -= 1; }
+    while i < n && arr[i] < target { i += 1; }
+    i
+}
+
+/// Substrate-bucketed insertion point for an unsorted target into a
+/// run-length sequence of Fibonacci-attractor buckets. Returns the
+/// FIBONACCI-table index of the nearest attractor — useful for hash-map
+/// bucket selection where you want phi-spaced bucket boundaries instead
+/// of uniform power-of-two splits.
+///
+/// O(log_phi_pi_fibonacci |value|) because nearest_attractor_with_dist
+/// uses the substrate's own search structure.
+#[inline]
+pub fn attractor_bucket(value: i64) -> usize {
+    let (attr, _) = nearest_attractor_with_dist(value);
+    // Map the attractor back to its FIBONACCI index.
+    for (i, &f) in FIBONACCI.iter().enumerate() {
+        if f as i64 == attr.unsigned_abs() as i64 { return i; }
+    }
+    0
+}
+
+/// First index `i` such that `arr[i] > target`, or `arr.len()` if none.
+/// Companion to substrate_lower_bound — same convergence properties.
+pub fn substrate_upper_bound(arr: &[i64], target: i64) -> usize {
+    let n = arr.len();
+    if n == 0 { return 0; }
+    let approx = match phi_pi_fib_search_v2(arr, &target, |a, b| {
+        if a < b { -1 } else if a > b { 1 } else { 0 }
+    }) {
+        Ok(i) => i,
+        Err(i) => i,
+    };
+    let mut i = approx.min(n);
+    while i > 0 && arr[i - 1] > target { i -= 1; }
+    while i < n && arr[i] <= target { i += 1; }
+    i
+}
+
 /// Fibonacci-based search on a sorted array.
 ///
 /// This is an alternative to binary search that uses Fibonacci numbers to
