@@ -1,0 +1,115 @@
+# Coverage for math builtins.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+
+fn approx_eq(a, b, tol) {
+    h d = a - b;
+    if d < 0.0 { d = 0.0 - d; }
+    return d <= tol;
+}
+
+# abs
+fn test_abs_positive() { assert_eq(abs(5), 5, "abs of 5"); }
+fn test_abs_negative() { assert_eq(abs(0 - 5), 5, "abs of -5"); }
+fn test_abs_zero() { assert_eq(abs(0), 0, "abs of 0"); }
+
+# sign
+fn test_sign_positive() { assert_eq(sign(7), 1, "sign +"); }
+fn test_sign_negative() { assert_eq(sign(0 - 3), 0 - 1, "sign -"); }
+fn test_sign_zero() { assert_eq(sign(0), 0, "sign 0"); }
+
+# min / max
+fn test_min_basic() { assert_eq(min(3, 7), 3, "min 3,7"); }
+fn test_max_basic() { assert_eq(max(3, 7), 7, "max 3,7"); }
+fn test_min_equal() { assert_eq(min(5, 5), 5, "min equal"); }
+
+# clamp
+fn test_clamp_below() { assert_eq(clamp(0 - 5, 0, 10), 0, "below → lo"); }
+fn test_clamp_above() { assert_eq(clamp(15, 0, 10), 10, "above → hi"); }
+fn test_clamp_inside() { assert_eq(clamp(5, 0, 10), 5, "inside unchanged"); }
+
+# pow / sqrt
+fn test_pow_basic() {
+    h p = pow(2, 10);
+    assert_true(approx_eq(p, 1024.0, 0.001), "2^10");
+}
+
+fn test_sqrt_basic() {
+    h s = sqrt(16);
+    assert_true(approx_eq(s, 4.0, 0.001), "sqrt 16");
+}
+
+fn test_sqrt_zero() {
+    assert_true(approx_eq(sqrt(0), 0.0, 0.001), "sqrt 0");
+}
+
+# log family
+fn test_log_e() {
+    assert_true(approx_eq(log(2.718281828), 1.0, 0.01), "log(e) ≈ 1");
+}
+
+fn test_log2_8() {
+    assert_true(approx_eq(log2(8), 3.0, 0.001), "log2 8");
+}
+
+fn test_log10_1000() {
+    assert_true(approx_eq(log10(1000), 3.0, 0.001), "log10 1000");
+}
+
+# exp
+fn test_exp_zero() {
+    assert_true(approx_eq(exp(0), 1.0, 0.001), "exp 0");
+}
+
+# trig
+fn test_sin_zero() {
+    assert_true(approx_eq(sin(0), 0.0, 0.001), "sin 0");
+}
+
+fn test_cos_zero() {
+    assert_true(approx_eq(cos(0), 1.0, 0.001), "cos 0");
+}
+
+fn test_tan_zero() {
+    assert_true(approx_eq(tan(0), 0.0, 0.001), "tan 0");
+}
+
+# floor / ceil / round / trunc
+fn test_floor_basic() { assert_eq(floor(1.7), 1, "floor 1.7"); }
+fn test_ceil_basic() { assert_eq(ceil(1.2), 2, "ceil 1.2"); }
+fn test_round_up() { assert_eq(round(1.5), 2, "round 1.5"); }
+fn test_round_down() { assert_eq(round(1.4), 1, "round 1.4"); }
+# trunc() not in interpreter; use floor for positives.
+
+# gcd / lcm
+fn test_gcd_basic() { assert_eq(gcd(12, 18), 6, "gcd 12,18"); }
+fn test_gcd_coprime() { assert_eq(gcd(7, 11), 1, "coprime"); }
+fn test_lcm_basic() { assert_eq(lcm(4, 6), 12, "lcm 4,6"); }
+
+# mod_pow
+fn test_mod_pow_basic() {
+    assert_eq(mod_pow(2, 10, 1000), 24, "2^10 mod 1000");
+}
+
+# bit_count / bit_length
+fn test_bit_count_basic() { assert_eq(bit_count(7), 3, "0b111 has 3"); }
+fn test_bit_length_basic() { assert_eq(bit_length(8), 4, "0b1000 width 4"); }
+
+# digit_sum / digit_count
+fn test_digit_sum_basic() { assert_eq(digit_sum(123), 6, "1+2+3"); }
+fn test_digit_count_basic() { assert_eq(digit_count(1234), 4, "four digits"); }
+
+# fnv1a_hash determinism
+fn test_fnv1a_deterministic() {
+    assert_eq(fnv1a_hash("foo"), fnv1a_hash("foo"), "deterministic");
+}
+
+fn test_fnv1a_different() {
+    assert_true(fnv1a_hash("foo") != fnv1a_hash("bar"), "different inputs");
+}

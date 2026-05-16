@@ -1,0 +1,111 @@
+# Coverage for str_* builtins.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+
+fn test_str_len_ascii() {
+    assert_eq(str_len("hello"), 5, "5 chars/bytes");
+}
+
+fn test_str_len_empty() {
+    assert_eq(str_len(""), 0, "empty length");
+}
+
+fn test_str_split_basic() {
+    h parts = str_split("a,b,c", ",");
+    assert_eq(arr_len(parts), 3, "3 parts");
+    assert_eq(arr_get(parts, 0), "a", "first");
+}
+
+fn test_str_split_single_sep() {
+    h parts = str_split("nosep", ",");
+    assert_eq(arr_len(parts), 1, "no sep → one part");
+    assert_eq(arr_get(parts, 0), "nosep", "value preserved");
+}
+
+fn test_str_join_basic() {
+    assert_eq(str_join(["a", "b", "c"], "-"), "a-b-c", "joined");
+}
+
+fn test_str_join_empty() {
+    assert_eq(str_join([], "-"), "", "empty join");
+}
+
+fn test_str_slice_basic() {
+    assert_eq(str_slice("abcdef", 1, 4), "bcd", "slice 1..4");
+}
+
+fn test_str_slice_full() {
+    assert_eq(str_slice("hello", 0, 5), "hello", "full");
+}
+
+fn test_str_slice_empty() {
+    assert_eq(str_slice("hello", 2, 2), "", "empty slice");
+}
+
+# str_lower / str_upper not in current interpreter — skipped.
+
+fn test_str_trim_basic() {
+    assert_eq(str_trim("  hello  "), "hello", "trimmed");
+}
+
+fn test_str_trim_no_whitespace() {
+    assert_eq(str_trim("hello"), "hello", "no-op when clean");
+}
+
+fn test_str_replace_basic() {
+    assert_eq(str_replace("a.b.c", ".", "_"), "a_b_c", "replaced");
+}
+
+fn test_str_replace_no_match() {
+    assert_eq(str_replace("abc", "x", "y"), "abc", "no match preserves");
+}
+
+fn test_str_starts_with_yes() {
+    assert_eq(str_starts_with("hello world", "hello"), 1, "starts with");
+}
+
+fn test_str_starts_with_no() {
+    assert_eq(str_starts_with("hello", "world"), 0, "no match");
+}
+
+fn test_str_ends_with_yes() {
+    assert_eq(str_ends_with("hello world", "world"), 1, "ends with");
+}
+
+fn test_str_ends_with_no() {
+    assert_eq(str_ends_with("hello", "world"), 0, "no match");
+}
+
+fn test_str_index_of_found() {
+    assert_eq(str_index_of("hello", "ll"), 2, "ll at 2");
+}
+
+fn test_str_index_of_missing() {
+    assert_eq(str_index_of("hello", "zz"), 0 - 1, "-1 missing");
+}
+
+fn test_str_count_basic() {
+    assert_eq(str_count("banana", "a"), 3, "three a's");
+}
+
+fn test_concat_many_basic() {
+    assert_eq(concat_many("x=", 42, " y=", 99), "x=42 y=99", "mixed concat");
+}
+
+fn test_to_string_int() {
+    assert_eq(to_string(42), "42", "int → string");
+}
+
+fn test_to_string_float() {
+    assert_true(re_match("^1", to_string(1.5)) == 1, "starts with 1");
+}
+
+fn test_to_string_bool() {
+    assert_true(str_len(to_string(true)) > 0, "non-empty");
+}

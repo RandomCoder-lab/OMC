@@ -1,0 +1,123 @@
+# Coverage for dict_* builtins.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+
+fn test_dict_new_is_empty() {
+    h d = dict_new();
+    assert_eq(dict_size(d), 0, "new dict has 0 entries");
+}
+
+fn test_dict_set_and_get() {
+    h d = dict_new();
+    dict_set(d, "k", 42);
+    assert_eq(dict_get(d, "k"), 42, "set then get");
+}
+
+fn test_dict_has_true() {
+    h d = dict_new();
+    dict_set(d, "k", 1);
+    assert_eq(dict_has(d, "k"), 1, "has key");
+}
+
+fn test_dict_has_false() {
+    h d = dict_new();
+    assert_eq(dict_has(d, "missing"), 0, "missing key");
+}
+
+fn test_dict_get_or_default() {
+    h d = dict_new();
+    assert_eq(dict_get_or(d, "k", 99), 99, "default used");
+    dict_set(d, "k", 42);
+    assert_eq(dict_get_or(d, "k", 99), 42, "value used");
+}
+
+fn test_dict_del_removes() {
+    h d = dict_new();
+    dict_set(d, "k", 1);
+    dict_del(d, "k");
+    assert_eq(dict_has(d, "k"), 0, "key removed");
+}
+
+fn test_dict_size_grows() {
+    h d = dict_new();
+    dict_set(d, "a", 1);
+    dict_set(d, "b", 2);
+    dict_set(d, "c", 3);
+    assert_eq(dict_size(d), 3, "three entries");
+}
+
+fn test_dict_keys() {
+    h d = dict_new();
+    dict_set(d, "x", 1);
+    dict_set(d, "y", 2);
+    h k = dict_keys(d);
+    assert_eq(arr_len(k), 2, "two keys");
+}
+
+fn test_dict_values() {
+    h d = dict_new();
+    dict_set(d, "x", 10);
+    dict_set(d, "y", 20);
+    h v = dict_values(d);
+    assert_eq(arr_len(v), 2, "two values");
+}
+
+fn test_dict_items() {
+    h d = dict_new();
+    dict_set(d, "k", 42);
+    h items = dict_items(d);
+    assert_eq(arr_len(items), 1, "one pair");
+}
+
+fn test_dict_clear() {
+    h d = dict_new();
+    dict_set(d, "a", 1);
+    dict_set(d, "b", 2);
+    dict_clear(d);
+    assert_eq(dict_size(d), 0, "cleared");
+}
+
+fn test_dict_merge() {
+    h d1 = dict_new();
+    dict_set(d1, "a", 1);
+    h d2 = dict_new();
+    dict_set(d2, "b", 2);
+    h merged = dict_merge(d1, d2);
+    assert_eq(dict_size(merged), 2, "merged has both");
+    assert_eq(dict_get(merged, "a"), 1, "a preserved");
+    assert_eq(dict_get(merged, "b"), 2, "b added");
+}
+
+fn test_dict_pop_returns_and_removes() {
+    h d = dict_new();
+    dict_set(d, "k", 42);
+    h v = dict_pop(d, "k");
+    assert_eq(v, 42, "got value");
+    assert_eq(dict_has(d, "k"), 0, "key removed");
+}
+
+fn test_dict_get_missing_returns_null() {
+    h d = dict_new();
+    h v = dict_get(d, "missing");
+    assert_true(v == null, "missing → null");
+}
+
+fn test_dict_overwrite() {
+    h d = dict_new();
+    dict_set(d, "k", 1);
+    dict_set(d, "k", 2);
+    assert_eq(dict_get(d, "k"), 2, "overwritten");
+    assert_eq(dict_size(d), 1, "still one entry");
+}
+
+fn test_dict_len_alias() {
+    h d = dict_new();
+    dict_set(d, "k", 1);
+    assert_eq(dict_len(d), 1, "dict_len works");
+}

@@ -1,0 +1,261 @@
+# Coverage for arr_* builtins not yet tested.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+
+fn approx_eq(a, b, tol) {
+    h d = a - b;
+    if d < 0.0 { d = 0.0 - d; }
+    return d <= tol;
+}
+
+# ---- arr_cumsum ----
+
+fn test_cumsum_basic() {
+    h c = arr_cumsum([1, 2, 3, 4]);
+    assert_eq(arr_get(c, 0), 1, "first cumsum");
+    assert_eq(arr_get(c, 1), 3, "second cumsum");
+    assert_eq(arr_get(c, 2), 6, "third cumsum");
+    assert_eq(arr_get(c, 3), 10, "fourth cumsum");
+}
+
+fn test_cumsum_empty() {
+    h c = arr_cumsum([]);
+    assert_eq(arr_len(c), 0, "empty cumsum");
+}
+
+fn test_cumsum_single() {
+    h c = arr_cumsum([42]);
+    assert_eq(arr_len(c), 1, "single element");
+    assert_eq(arr_get(c, 0), 42, "value preserved");
+}
+
+# ---- arr_diff ----
+
+fn test_diff_basic() {
+    h d = arr_diff([1, 3, 6, 10]);
+    assert_eq(arr_get(d, 0), 2, "3-1");
+    assert_eq(arr_get(d, 1), 3, "6-3");
+    assert_eq(arr_get(d, 2), 4, "10-6");
+}
+
+fn test_diff_length() {
+    h d = arr_diff([1, 2, 3]);
+    assert_eq(arr_len(d), 2, "diff len = n-1");
+}
+
+# ---- arr_chunk ----
+
+fn test_chunk_even() {
+    h c = arr_chunk([1, 2, 3, 4], 2);
+    assert_eq(arr_len(c), 2, "two chunks");
+    h c0 = arr_get(c, 0);
+    assert_eq(arr_get(c0, 0), 1, "first");
+}
+
+fn test_chunk_uneven() {
+    h c = arr_chunk([1, 2, 3, 4, 5], 2);
+    assert_eq(arr_len(c), 3, "three chunks for size-2 of 5");
+}
+
+# ---- arr_zip ----
+
+fn test_zip_pairs() {
+    h z = arr_zip([1, 2, 3], [10, 20, 30]);
+    assert_eq(arr_len(z), 3, "3 pairs");
+    h p0 = arr_get(z, 0);
+    assert_eq(arr_get(p0, 0), 1, "first.0");
+    assert_eq(arr_get(p0, 1), 10, "first.1");
+}
+
+# ---- arr_window ----
+
+fn test_window_basic() {
+    h w = arr_window([1, 2, 3, 4], 2);
+    assert_eq(arr_len(w), 3, "3 windows for size-2 of 4");
+    h w0 = arr_get(w, 0);
+    assert_eq(arr_get(w0, 0), 1, "first window first");
+    assert_eq(arr_get(w0, 1), 2, "first window second");
+}
+
+# ---- arr_unique ----
+
+fn test_unique_basic() {
+    h u = arr_unique([1, 2, 2, 3, 1, 4]);
+    # Should preserve first-occurrence order.
+    assert_eq(arr_len(u), 4, "4 unique");
+}
+
+fn test_unique_count_basic() {
+    assert_eq(arr_unique_count([1, 1, 2, 2, 3]), 3, "3 distinct");
+}
+
+# ---- arr_take / arr_drop ----
+
+fn test_take_basic() {
+    h t = arr_take([1, 2, 3, 4, 5], 3);
+    assert_eq(arr_len(t), 3, "took 3");
+    assert_eq(arr_get(t, 2), 3, "last taken");
+}
+
+fn test_drop_basic() {
+    h d = arr_drop([1, 2, 3, 4, 5], 2);
+    assert_eq(arr_len(d), 3, "dropped 2 → 3 left");
+    assert_eq(arr_get(d, 0), 3, "first remaining");
+}
+
+# ---- arr_range / arr_from_range ----
+
+fn test_from_range_basic() {
+    h r = arr_from_range(0, 5);
+    assert_eq(arr_len(r), 5, "0..5 has 5 elements");
+    assert_eq(arr_get(r, 0), 0, "starts at 0");
+    assert_eq(arr_get(r, 4), 4, "ends at 4");
+}
+
+# ---- arr_zeros / arr_ones ----
+
+fn test_zeros_basic() {
+    h z = arr_zeros(5);
+    assert_eq(arr_len(z), 5, "5 zeros");
+    assert_eq(arr_get(z, 0), 0, "is zero");
+}
+
+fn test_ones_basic() {
+    h o = arr_ones(3);
+    assert_eq(arr_len(o), 3, "3 ones");
+    assert_eq(arr_get(o, 0), 1, "is one");
+}
+
+fn test_ones_zero_length() {
+    h o = arr_ones(0);
+    assert_eq(arr_len(o), 0, "empty");
+}
+
+# ---- arr_repeat ----
+
+fn test_repeat_basic() {
+    h r = arr_repeat("x", 3);
+    assert_eq(arr_len(r), 3, "3 copies");
+    assert_eq(arr_get(r, 0), "x", "first is x");
+}
+
+# ---- arr_argmax / arr_argmin ----
+
+fn test_argmax_basic() {
+    assert_eq(arr_argmax([3, 1, 4, 1, 5, 9, 2]), 5, "9 at index 5");
+}
+
+fn test_argmin_basic() {
+    assert_eq(arr_argmin([3, 1, 4, 1, 5]), 1, "1 first at index 1");
+}
+
+# ---- arr_max / arr_min ----
+
+fn test_max_basic() {
+    assert_eq(arr_max([3, 1, 4, 1, 5]), 5, "max is 5");
+}
+
+fn test_min_basic() {
+    assert_eq(arr_min([3, 1, 4, 1, 5]), 1, "min is 1");
+}
+
+# ---- arr_product ----
+
+fn test_product_basic() {
+    assert_eq(arr_product([2, 3, 4]), 24, "2*3*4");
+}
+
+fn test_product_with_zero() {
+    assert_eq(arr_product([2, 0, 5]), 0, "with zero → 0");
+}
+
+# ---- arr_norm ----
+
+fn test_norm_345() {
+    h n = arr_norm([3.0, 4.0]);
+    assert_true(approx_eq(n, 5.0, 0.001), "3-4-5 triangle");
+}
+
+fn test_norm_3d() {
+    h n = arr_norm([2.0, 3.0, 6.0]);
+    assert_true(approx_eq(n, 7.0, 0.001), "2-3-6 norm = 7");
+}
+
+# ---- arr_median ----
+
+fn test_median_odd() {
+    h m = arr_median([3.0, 1.0, 2.0]);
+    assert_true(approx_eq(m, 2.0, 0.001), "median 1,2,3 = 2");
+}
+
+# ---- arr_first / arr_last ----
+
+fn test_first_last() {
+    h xs = [10, 20, 30];
+    assert_eq(arr_first(xs), 10, "first");
+    assert_eq(arr_last(xs), 30, "last");
+}
+
+# ---- arr_flatten ----
+
+fn test_flatten_basic() {
+    h f = arr_flatten([[1, 2], [3, 4]]);
+    assert_eq(arr_len(f), 4, "4 elements");
+    assert_eq(arr_get(f, 0), 1, "first");
+    assert_eq(arr_get(f, 3), 4, "last");
+}
+
+# ---- arr_join ----
+
+fn test_join_basic() {
+    h s = arr_join([1, 2, 3], "-");
+    assert_eq(s, "1-2-3", "joined with -");
+}
+
+# ---- arr_index_of / arr_contains ----
+
+fn test_index_of_found() {
+    assert_eq(arr_index_of([10, 20, 30], 20), 1, "20 at 1");
+}
+
+fn test_index_of_missing() {
+    assert_eq(arr_index_of([10, 20, 30], 99), 0 - 1, "-1 for missing");
+}
+
+fn test_contains_true() {
+    assert_eq(arr_contains([1, 2, 3], 2), 1, "found");
+}
+
+fn test_contains_false() {
+    assert_eq(arr_contains([1, 2, 3], 99), 0, "not found");
+}
+
+# ---- arr_count ----
+
+fn test_count_basic() {
+    assert_eq(arr_count([1, 2, 2, 3, 2], 2), 3, "three 2s");
+}
+
+# ---- arr_sum_sq ----
+
+fn test_sum_sq_basic() {
+    assert_eq(arr_sum_sq([3, 4]), 25, "9 + 16");
+}
+
+# ---- arr_geometric_mean / arr_harmonic_mean ----
+
+fn test_geometric_mean_basic() {
+    h g = arr_geometric_mean([1.0, 4.0]);
+    assert_true(approx_eq(g, 2.0, 0.001), "geomean 1,4 = 2");
+}
+
+fn test_harmonic_mean_basic() {
+    h hm = arr_harmonic_mean([2.0, 2.0]);
+    assert_true(approx_eq(hm, 2.0, 0.001), "harmonic mean of equal = 2");
+}
