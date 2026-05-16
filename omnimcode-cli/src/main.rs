@@ -186,16 +186,63 @@ fn maybe_register_jit(
             if args.len() != jf.arity {
                 return None;
             }
+            // L1.6: Array↔JIT bridging. Convert each Value::Array (whose
+            // elements are all HInt) to a length-prefixed Box<[i64]> with
+            // layout `[len, v0, v1, ..., vN]`. The JIT'd fn was lowered
+            // assuming NewArray-style alloca layout (slot 0 = length,
+            // slots 1..=N = elements) so the same access pattern works
+            // for both internal and external arrays. We hand the raw
+            // pointer to the JIT as the i64 arg.
+            //
+            // The Boxes are held in `_pinned` for the duration of the
+            // call so the JIT'd code can dereference them safely. Drop
+            // happens after .call() returns; the JIT'd fn must NOT
+            // retain the pointer beyond the call (it doesn't — arrays
+            // are stack-local in the lowered IR).
+            //
+            // Read-only contract: we don't write back to the original
+            // HArray even if the JIT'd fn mutated the buffer. The
+            // common case (sum, score, count) is read-only; mutating
+            // array fns currently fall through to tree-walk on the
+            // OUTPUT side (their return is i64, not the array).
             let mut int_args: Vec<i64> = Vec::with_capacity(args.len());
+            let mut _pinned: Vec<Box<[i64]>> = Vec::new();
             for a in args {
                 match a {
                     Value::HInt(h) => int_args.push(h.value),
                     Value::Bool(b) => int_args.push(if *b { 1 } else { 0 }),
-                    _ => return None, // non-int arg → fall through to tree-walk
+                    Value::Array(arr) => {
+                        let items = arr.items.borrow();
+                        // Only support int-typed arrays at the boundary.
+                        // Any non-int element → fall through to tree-walk.
+                        if !items.iter().all(|v| matches!(v, Value::HInt(_) | Value::Bool(_))) {
+                            return None;
+                        }
+                        // Layout: slot 0 = length, slots 1..=N = elements.
+                        let mut buf: Vec<i64> = Vec::with_capacity(items.len() + 1);
+                        buf.push(items.len() as i64);
+                        for v in items.iter() {
+                            buf.push(match v {
+                                Value::HInt(h) => h.value,
+                                Value::Bool(b) => if *b { 1 } else { 0 },
+                                _ => unreachable!(),
+                            });
+                        }
+                        let boxed = buf.into_boxed_slice();
+                        let ptr = boxed.as_ptr() as i64;
+                        _pinned.push(boxed);
+                        int_args.push(ptr);
+                    }
+                    _ => return None, // other non-int args → fall through to tree-walk
                 }
             }
-            jf.call(&int_args)
-                .map(|r| Ok(Value::HInt(HInt::new(r))))
+            let result = jf.call(&int_args)
+                .map(|r| Ok(Value::HInt(HInt::new(r))));
+            // _pinned drops here, freeing the marshalled buffers.
+            // Safe because the JIT'd code didn't retain the pointers
+            // (verified by the lowerer's stack-local array discipline).
+            drop(_pinned);
+            result
         },
     );
     interp.set_jit_dispatch(Some(dispatch));
