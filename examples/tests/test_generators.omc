@@ -1,0 +1,154 @@
+# Tests for generator functions (eager-list MVP).
+#
+# Any fn whose body contains `yield expr;` is a generator. Calling
+# it runs the body to completion, collecting each yielded value into
+# an array, and returns the array. This is NOT lazy — `yield` in an
+# infinite loop would hang. Lazy coroutine-based generators are
+# future work; eager list-building lets us ship the syntax and
+# compose with `for x in gen` today.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) {
+    if !cond { test_record_failure(msg); }
+}
+
+# ---- basics ----
+
+fn naturals(n) {
+    h i = 0;
+    while i < n {
+        yield i;
+        i = i + 1;
+    }
+}
+
+fn test_yield_loop() {
+    h r = naturals(5);
+    assert_eq(arr_len(r), 5, "5 values yielded");
+    assert_eq(arr_get(r, 0), 0, "first is 0");
+    assert_eq(arr_get(r, 4), 4, "last is 4");
+}
+
+fn test_yield_empty() {
+    h r = naturals(0);
+    assert_eq(arr_len(r), 0, "zero yields → empty array");
+}
+
+# ---- yield with computed values ----
+
+fn squares(n) {
+    h i = 1;
+    while i <= n {
+        yield i * i;
+        i = i + 1;
+    }
+}
+
+fn test_yield_computed() {
+    h r = squares(4);
+    assert_eq(arr_get(r, 0), 1, "1^2");
+    assert_eq(arr_get(r, 3), 16, "4^2");
+}
+
+# ---- yield in conditional branch ----
+
+fn even_only(n) {
+    h i = 0;
+    while i < n {
+        if i % 2 == 0 {
+            yield i;
+        }
+        i = i + 1;
+    }
+}
+
+fn test_yield_in_if() {
+    h r = even_only(10);
+    assert_eq(arr_len(r), 5, "5 evens in 0..10");
+    assert_eq(arr_get(r, 0), 0, "first even");
+    assert_eq(arr_get(r, 4), 8, "last even");
+}
+
+# ---- multiple yields per loop iteration ----
+
+fn pairs(n) {
+    h i = 0;
+    while i < n {
+        yield i;
+        yield i * 10;
+        i = i + 1;
+    }
+}
+
+fn test_multiple_yields() {
+    h r = pairs(3);
+    assert_eq(arr_len(r), 6, "2 yields × 3 iters");
+    assert_eq(arr_get(r, 0), 0, "first yield, iter 0");
+    assert_eq(arr_get(r, 1), 0, "second yield, iter 0");
+    assert_eq(arr_get(r, 2), 1, "first yield, iter 1");
+    assert_eq(arr_get(r, 3), 10, "second yield, iter 1");
+}
+
+# ---- generator composes with for loop ----
+
+fn fibs(n) {
+    h a = 0;
+    h b = 1;
+    h k = 0;
+    while k < n {
+        yield a;
+        h t = a + b;
+        a = b;
+        b = t;
+        k = k + 1;
+    }
+}
+
+fn test_generator_with_for() {
+    h sum = 0;
+    for v in fibs(10) {
+        sum = sum + v;
+    }
+    # fib(0..9) = 0,1,1,2,3,5,8,13,21,34 — sum = 88
+    assert_eq(sum, 88, "sum of first 10 Fibonaccis");
+}
+
+# ---- nested generators ----
+
+fn outer(n) {
+    h r = naturals(n);
+    h k = 0;
+    while k < arr_len(r) {
+        yield arr_get(r, k) * 2;
+        k = k + 1;
+    }
+}
+
+fn test_nested_generator_call() {
+    h r = outer(4);
+    # naturals(4) = [0,1,2,3], doubled = [0,2,4,6]
+    assert_eq(arr_len(r), 4, "4 values");
+    assert_eq(arr_get(r, 3), 6, "last is 6");
+}
+
+# ---- yield + substrate primitives ----
+
+fn substrate_aligned_fibs(n) {
+    h i = 0;
+    while i < n {
+        yield nth_fibonacci(i);
+        i = i + 1;
+    }
+}
+
+fn test_yield_substrate_primitives() {
+    h r = substrate_aligned_fibs(6);
+    # nth_fibonacci(0..5) = 0, 1, 1, 2, 3, 5
+    assert_eq(arr_get(r, 0), 0, "fib(0)");
+    assert_eq(arr_get(r, 5), 5, "fib(5)");
+}

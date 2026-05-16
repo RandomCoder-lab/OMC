@@ -199,6 +199,11 @@ fn format_stmt(stmt: &Statement, level: usize, out: &mut String) {
             format_expr(e, out);
             out.push_str(";\n");
         }
+        Statement::Yield(e) => {
+            out.push_str("yield ");
+            format_expr(e, out);
+            out.push_str(";\n");
+        }
         Statement::Match { scrutinee, arms } => {
             out.push_str("match ");
             format_expr(scrutinee, out);

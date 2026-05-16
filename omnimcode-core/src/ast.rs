@@ -105,6 +105,14 @@ pub enum Statement {
     /// Future work: carry the thrown Value through Err(Value) instead
     /// of stringifying, enabling typed-catch hierarchies.
     Throw(Expression),
+    /// `yield expr` — emit one value from a generator function.
+    /// MVP semantics (eager list-building): a fn containing any Yield
+    /// statement is a generator. Calling it runs the body to completion,
+    /// collecting yielded values into an array, and returns that array.
+    /// This is NOT lazy — infinite generators would hang. Real
+    /// coroutine-based lazy generators are future work; the eager
+    /// list-building approach unlocks the syntactic shape today.
+    Yield(Expression),
     /// `class Name { field1; field2; fn method1(self, ...) { ... } }`
     /// (optional `extends Parent` clause for inheritance).
     ///

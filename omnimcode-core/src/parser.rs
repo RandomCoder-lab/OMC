@@ -43,6 +43,7 @@ pub enum Token {
     Match,
     Class,
     Extends,
+    Yield,
     /// f-string template — alternating literal and expression segments.
     /// Parser turns this into `concat_many(parts...)` at expression
     /// position.
@@ -477,6 +478,7 @@ impl Lexer {
                         "throw" => Token::Throw,
                         "class" => Token::Class,
                         "extends" => Token::Extends,
+                        "yield" => Token::Yield,
                         "match" => Token::Match,
                         "and" => Token::And,
                         "or" => Token::Or,
@@ -882,6 +884,15 @@ impl Parser {
                 let expr = self.parse_expression()?;
                 self.expect(Token::Semicolon)?;
                 Ok(Statement::Throw(expr))
+            }
+            Token::Yield => {
+                // `yield expr;` — emit one value from a generator fn.
+                // Eager-list MVP: each yield appends to a collector
+                // that the call boundary turns into a Value::Array.
+                self.advance();
+                let expr = self.parse_expression()?;
+                self.expect(Token::Semicolon)?;
+                Ok(Statement::Yield(expr))
             }
             Token::Match => self.parse_match_stmt(),
             // `import core;` or `import core as c;` or `load "path";`

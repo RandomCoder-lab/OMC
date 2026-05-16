@@ -20,6 +20,13 @@ pub struct Interpreter {
     /// dispatch path walks this chain when `<Child>__<method>` isn't
     /// found, trying `<Parent>__<method>` and so on.
     class_parents: HashMap<String, String>,
+    /// Active yield collector for the current generator frame. Set
+    /// by invoke_user_function when entering a generator fn (one
+    /// whose body contains Yield); each Yield statement appends to
+    /// the top of this stack. On exit, the collector is popped and
+    /// returned as a Value::Array. Stack-of-vecs supports nested
+    /// generator invocations.
+    yield_stacks: Vec<Vec<Value>>,
     /// Optional JIT dispatch hook. When set, `invoke_user_function_at`
     /// consults this BEFORE running the tree-walk body. If the hook
     /// returns `Some(result)`, that result wins; otherwise tree-walk
@@ -105,6 +112,7 @@ impl Interpreter {
             call_stack: Vec::new(),
             host_builtins: HashMap::new(),
             class_parents: HashMap::new(),
+            yield_stacks: Vec::new(),
         }
     }
 
@@ -665,6 +673,9 @@ impl Interpreter {
                     .collect()),
             },
             Statement::Throw(e) => Statement::Throw(
+                Self::rewrite_call_expr(e, module_names, alias),
+            ),
+            Statement::Yield(e) => Statement::Yield(
                 Self::rewrite_call_expr(e, module_names, alias),
             ),
             Statement::Match { scrutinee, arms } => Statement::Match {
@@ -1588,6 +1599,18 @@ impl Interpreter {
                 // up to the top-level error handler.
                 let v = self.eval_expr(expr)?;
                 Err(v.to_display_string())
+            }
+            Statement::Yield(expr) => {
+                // Append the yielded value to the current generator
+                // frame's collector (top of yield_stacks). If we're
+                // not inside a generator (no collector pushed), it's
+                // a programming error — but rather than panic, we
+                // accept silently for ergonomics during dev.
+                let v = self.eval_expr(expr)?;
+                if let Some(top) = self.yield_stacks.last_mut() {
+                    top.push(v);
+                }
+                Ok(())
             }
             _ => Ok(()),
         }
@@ -6895,6 +6918,20 @@ impl Interpreter {
         // and error paths so the trace doesn't leak across calls.
         self.call_stack.push((name.to_string(), call_site));
 
+        // Generator detection: a fn body that contains any Yield
+        // statement is a generator. We push a fresh yield-collector
+        // onto yield_stacks; every Yield in the body appends to it.
+        // On exit, the collector is popped and returned as a
+        // Value::Array. Any explicit `return` inside a generator is
+        // silently ignored (Python's behavior: `return` in a
+        // generator without an expression ends iteration; with an
+        // expression, it becomes the StopIteration value, which OMC
+        // doesn't represent in the eager-list model).
+        let is_generator = stmts_contain_yield(body);
+        if is_generator {
+            self.yield_stacks.push(Vec::new());
+        }
+
         let mut exec_err: Option<String> = None;
         for stmt in body {
             if let Err(e) = self.execute_stmt(stmt) {
@@ -6910,15 +6947,22 @@ impl Interpreter {
         self.locals.pop();
 
         if let Some(e) = exec_err {
-            // Append our own frame + the call site and rethrow.
-            // Each invoke_user_function up the stack does the same,
-            // so the final message lists every frame innermost-first.
+            // Drop the generator's collector on error.
+            if is_generator { self.yield_stacks.pop(); }
             return Err(format!(
                 "{}\n  at {}{}",
                 e,
                 display_frame_name(name),
                 format_call_site(call_site),
             ));
+        }
+
+        if is_generator {
+            // Return the collected yields as an array. Ignore the
+            // fn's return slot — generators communicate via yield.
+            self.return_value.take();
+            let yields = self.yield_stacks.pop().unwrap_or_default();
+            return Ok(Value::Array(crate::value::HArray::from_vec(yields)));
         }
 
         let result = self.return_value.take().unwrap_or(Value::Null);
@@ -8056,6 +8100,35 @@ fn stmt_contains_return(s: &Statement) -> bool {
                 || else_body.as_ref().is_some_and(|b| stmts_contain_return(b))
         }
         Statement::While { body, .. } => stmts_contain_return(body),
+        _ => false,
+    }
+}
+
+/// Does a statement list contain any `yield` statement? Used by the
+/// generator-fn detector — a fn body with at least one Yield is
+/// dispatched through the yield-collector path at call time.
+pub(crate) fn stmts_contain_yield(stmts: &[Statement]) -> bool {
+    for s in stmts {
+        if stmt_contains_yield(s) { return true; }
+    }
+    false
+}
+
+fn stmt_contains_yield(s: &Statement) -> bool {
+    match s {
+        Statement::Yield(_) => true,
+        Statement::If { then_body, elif_parts, else_body, .. } => {
+            stmts_contain_yield(then_body)
+                || elif_parts.iter().any(|(_, b)| stmts_contain_yield(b))
+                || else_body.as_ref().is_some_and(|b| stmts_contain_yield(b))
+        }
+        Statement::While { body, .. } => stmts_contain_yield(body),
+        Statement::For { body, .. } => stmts_contain_yield(body),
+        Statement::Try { body, handler, finally, .. } => {
+            stmts_contain_yield(body)
+                || stmts_contain_yield(handler)
+                || finally.as_ref().is_some_and(|b| stmts_contain_yield(b))
+        }
         _ => false,
     }
 }
