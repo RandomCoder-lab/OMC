@@ -2,29 +2,32 @@
 
 Auto-generated from `omnimcode-core/src/docs.rs`. Run `omc --gen-docs > OMC_REFERENCE.md` to regenerate.
 
-**Total documented builtins**: 112
+**Total documented builtins**: 376
 
-**OMC-unique**: 24 (no direct Python/NumPy equivalent — these are why you reach for OMC over numpy)
+**OMC-unique**: 37 (no direct Python/NumPy equivalent — these are why you reach for OMC over numpy)
 
 ---
 
 ## Categories
 
-- [core](#core) (4 builtins)
-- [arrays](#arrays) (26 builtins)
+- [core](#core) (124 builtins)
+- [arrays](#arrays) (70 builtins)
 - [linalg](#linalg) (4 builtins)
 - [ml_kernels](#ml_kernels) (6 builtins)
-- [substrate](#substrate) (11 builtins)
-- [autograd](#autograd) (14 builtins)
-- [duals](#duals) (3 builtins)
+- [substrate](#substrate) (24 builtins)
+- [autograd](#autograd) (16 builtins)
+- [duals](#duals) (12 builtins)
 - [generators](#generators) (5 builtins)
-- [strings](#strings) (5 builtins)
-- [regex](#regex) (3 builtins)
+- [strings](#strings) (25 builtins)
+- [regex](#regex) (5 builtins)
 - [json](#json) (2 builtins)
-- [stdlib](#stdlib) (8 builtins)
-- [exceptions](#exceptions) (1 builtins)
-- [introspection](#introspection) (8 builtins)
+- [stdlib](#stdlib) (12 builtins)
+- [exceptions](#exceptions) (2 builtins)
+- [introspection](#introspection) (10 builtins)
 - [tokenizer](#tokenizer) (12 builtins)
+- [math](#math) (29 builtins)
+- [dicts](#dicts) (14 builtins)
+- [test_runner](#test_runner) (4 builtins)
 
 ---
 
@@ -68,6 +71,1206 @@ Length in bytes (string) or elements (array).
 
 ```omc
 len([1,2,3])  // 3
+```
+
+### `attractor_table`
+
+**Signature**: `(...) -> any`
+
+`attractor_table`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+attractor_table(...)  // see omc_help
+```
+
+### `call`
+
+**Signature**: `(...) -> any`
+
+`call`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+call(...)  // see omc_help
+```
+
+### `classify_resonance`
+
+**Signature**: `(...) -> any`
+
+`classify_resonance`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+classify_resonance(...)  // see omc_help
+```
+
+### `collapse`
+
+**Signature**: `(...) -> any`
+
+`collapse`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+collapse(...)  // see omc_help
+```
+
+### `cube`
+
+**Signature**: `(...) -> any`
+
+`cube`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+cube(...)  // see omc_help
+```
+
+### `e`
+
+**Signature**: `(...) -> any`
+
+`e`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+e(...)  // see omc_help
+```
+
+### `ensure_clean`
+
+**Signature**: `(...) -> any`
+
+`ensure_clean`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+ensure_clean(...)  // see omc_help
+```
+
+### `erf`
+
+**Signature**: `(...) -> any`
+
+`erf`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+erf(...)  // see omc_help
+```
+
+### `even`
+
+**Signature**: `(...) -> any`
+
+`even`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+even(...)  // see omc_help
+```
+
+### `factorial`
+
+**Signature**: `(...) -> any`
+
+`factorial`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+factorial(...)  // see omc_help
+```
+
+### `fib`
+
+**Signature**: `(...) -> any`
+
+`fib`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+fib(...)  // see omc_help
+```
+
+### `fib_chunks`
+
+**Signature**: `(...) -> any`
+
+`fib_chunks`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+fib_chunks(...)  // see omc_help
+```
+
+### `fibonacci`
+
+**Signature**: `(...) -> any`
+
+`fibonacci`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+fibonacci(...)  // see omc_help
+```
+
+### `filter_by_resonance`
+
+**Signature**: `(...) -> any`
+
+`filter_by_resonance`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+filter_by_resonance(...)  // see omc_help
+```
+
+### `float`
+
+**Signature**: `(...) -> any`
+
+`float`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+float(...)  // see omc_help
+```
+
+### `fold`
+
+**Signature**: `(...) -> any`
+
+`fold`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+fold(...)  // see omc_help
+```
+
+### `fold_escape`
+
+**Signature**: `(...) -> any`
+
+`fold_escape`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+fold_escape(...)  // see omc_help
+```
+
+### `frac`
+
+**Signature**: `(...) -> any`
+
+`frac`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+frac(...)  // see omc_help
+```
+
+### `from_zeckendorf`
+
+**Signature**: `(...) -> any`
+
+`from_zeckendorf`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+from_zeckendorf(...)  // see omc_help
+```
+
+### `harmonic_align`
+
+**Signature**: `(...) -> any`
+
+`harmonic_align`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+harmonic_align(...)  // see omc_help
+```
+
+### `harmonic_checksum`
+
+**Signature**: `(...) -> any`
+
+`harmonic_checksum`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+harmonic_checksum(...)  // see omc_help
+```
+
+### `harmonic_interfere`
+
+**Signature**: `(...) -> any`
+
+`harmonic_interfere`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+harmonic_interfere(...)  // see omc_help
+```
+
+### `harmonic_partition_3`
+
+**Signature**: `(...) -> any`
+
+`harmonic_partition_3`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+harmonic_partition_3(...)  // see omc_help
+```
+
+### `harmonic_resample`
+
+**Signature**: `(...) -> any`
+
+`harmonic_resample`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+harmonic_resample(...)  // see omc_help
+```
+
+### `harmonic_unalign`
+
+**Signature**: `(...) -> any`
+
+`harmonic_unalign`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+harmonic_unalign(...)  // see omc_help
+```
+
+### `harmonic_write_file`
+
+**Signature**: `(...) -> any`
+
+`harmonic_write_file`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+harmonic_write_file(...)  // see omc_help
+```
+
+### `harmony_value`
+
+**Signature**: `(...) -> any`
+
+`harmony_value`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+harmony_value(...)  // see omc_help
+```
+
+### `hypot`
+
+**Signature**: `(...) -> any`
+
+`hypot`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+hypot(...)  // see omc_help
+```
+
+### `int`
+
+**Signature**: `(...) -> any`
+
+`int`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+int(...)  // see omc_help
+```
+
+### `int_binary_search`
+
+**Signature**: `(...) -> any`
+
+`int_binary_search`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+int_binary_search(...)  // see omc_help
+```
+
+### `int_lower_bound`
+
+**Signature**: `(...) -> any`
+
+`int_lower_bound`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+int_lower_bound(...)  // see omc_help
+```
+
+### `int_upper_bound`
+
+**Signature**: `(...) -> any`
+
+`int_upper_bound`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+int_upper_bound(...)  // see omc_help
+```
+
+### `interfere`
+
+**Signature**: `(...) -> any`
+
+`interfere`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+interfere(...)  // see omc_help
+```
+
+### `is_even`
+
+**Signature**: `(...) -> any`
+
+`is_even`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+is_even(...)  // see omc_help
+```
+
+### `is_fibonacci`
+
+**Signature**: `(...) -> any`
+
+`is_fibonacci`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+is_fibonacci(...)  // see omc_help
+```
+
+### `is_odd`
+
+**Signature**: `(...) -> any`
+
+`is_odd`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+is_odd(...)  // see omc_help
+```
+
+### `is_phi_resonant`
+
+**Signature**: `(...) -> any`
+
+`is_phi_resonant`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+is_phi_resonant(...)  // see omc_help
+```
+
+### `is_prime`
+
+**Signature**: `(...) -> any`
+
+`is_prime`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+is_prime(...)  // see omc_help
+```
+
+### `is_singularity`
+
+**Signature**: `(...) -> any`
+
+`is_singularity`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+is_singularity(...)  // see omc_help
+```
+
+### `is_zeckendorf_valid`
+
+**Signature**: `(...) -> any`
+
+`is_zeckendorf_valid`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+is_zeckendorf_valid(...)  // see omc_help
+```
+
+### `lerp`
+
+**Signature**: `(...) -> any`
+
+`lerp`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+lerp(...)  // see omc_help
+```
+
+### `ln_2`
+
+**Signature**: `(...) -> any`
+
+`ln_2`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+ln_2(...)  // see omc_help
+```
+
+### `log_phi_pi_fibonacci`
+
+**Signature**: `(...) -> any`
+
+`log_phi_pi_fibonacci`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+log_phi_pi_fibonacci(...)  // see omc_help
+```
+
+### `mean_omni_weight`
+
+**Signature**: `(...) -> any`
+
+`mean_omni_weight`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+mean_omni_weight(...)  // see omc_help
+```
+
+### `measure_coherence`
+
+**Signature**: `(...) -> any`
+
+`measure_coherence`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+measure_coherence(...)  // see omc_help
+```
+
+### `nearest_attractor`
+
+**Signature**: `(...) -> any`
+
+`nearest_attractor`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+nearest_attractor(...)  // see omc_help
+```
+
+### `now_ms`
+
+**Signature**: `(...) -> any`
+
+`now_ms`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+now_ms(...)  // see omc_help
+```
+
+### `nth_fibonacci`
+
+**Signature**: `(...) -> any`
+
+`nth_fibonacci`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+nth_fibonacci(...)  // see omc_help
+```
+
+### `odd`
+
+**Signature**: `(...) -> any`
+
+`odd`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+odd(...)  // see omc_help
+```
+
+### `phi`
+
+**Signature**: `(...) -> any`
+
+`phi`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+phi(...)  // see omc_help
+```
+
+### `phi_inv`
+
+**Signature**: `(...) -> any`
+
+`phi_inv`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+phi_inv(...)  // see omc_help
+```
+
+### `phi_pi_bin_search`
+
+**Signature**: `(...) -> any`
+
+`phi_pi_bin_search`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+phi_pi_bin_search(...)  // see omc_help
+```
+
+### `phi_pi_fib_nearest`
+
+**Signature**: `(...) -> any`
+
+`phi_pi_fib_nearest`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+phi_pi_fib_nearest(...)  // see omc_help
+```
+
+### `phi_pi_fib_nearest_traced`
+
+**Signature**: `(...) -> any`
+
+`phi_pi_fib_nearest_traced`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+phi_pi_fib_nearest_traced(...)  // see omc_help
+```
+
+### `phi_pi_fib_nearest_v2`
+
+**Signature**: `(...) -> any`
+
+`phi_pi_fib_nearest_v2`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+phi_pi_fib_nearest_v2(...)  // see omc_help
+```
+
+### `phi_pi_fib_reset`
+
+**Signature**: `(...) -> any`
+
+`phi_pi_fib_reset`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+phi_pi_fib_reset(...)  // see omc_help
+```
+
+### `phi_pi_fib_search`
+
+**Signature**: `(...) -> any`
+
+`phi_pi_fib_search`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+phi_pi_fib_search(...)  // see omc_help
+```
+
+### `phi_pi_fib_search_traced`
+
+**Signature**: `(...) -> any`
+
+`phi_pi_fib_search_traced`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+phi_pi_fib_search_traced(...)  // see omc_help
+```
+
+### `phi_pi_fib_search_v2`
+
+**Signature**: `(...) -> any`
+
+`phi_pi_fib_search_v2`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+phi_pi_fib_search_v2(...)  // see omc_help
+```
+
+### `phi_pi_fib_stats`
+
+**Signature**: `(...) -> any`
+
+`phi_pi_fib_stats`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+phi_pi_fib_stats(...)  // see omc_help
+```
+
+### `phi_pi_fib_stats_all`
+
+**Signature**: `(...) -> any`
+
+`phi_pi_fib_stats_all`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+phi_pi_fib_stats_all(...)  // see omc_help
+```
+
+### `phi_pi_fib_stats_bg`
+
+**Signature**: `(...) -> any`
+
+`phi_pi_fib_stats_bg`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+phi_pi_fib_stats_bg(...)  // see omc_help
+```
+
+### `phi_pi_log_distance`
+
+**Signature**: `(...) -> any`
+
+`phi_pi_log_distance`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+phi_pi_log_distance(...)  // see omc_help
+```
+
+### `phi_pi_pow`
+
+**Signature**: `(...) -> any`
+
+`phi_pi_pow`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+phi_pi_pow(...)  // see omc_help
+```
+
+### `phi_pow`
+
+**Signature**: `(...) -> any`
+
+`phi_pow`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+phi_pow(...)  // see omc_help
+```
+
+### `phi_sq`
+
+**Signature**: `(...) -> any`
+
+`phi_sq`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+phi_sq(...)  // see omc_help
+```
+
+### `phi_squared`
+
+**Signature**: `(...) -> any`
+
+`phi_squared`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+phi_squared(...)  // see omc_help
+```
+
+### `pi`
+
+**Signature**: `(...) -> any`
+
+`pi`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+pi(...)  // see omc_help
+```
+
+### `pow_int`
+
+**Signature**: `(...) -> any`
+
+`pow_int`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+pow_int(...)  // see omc_help
+```
+
+### `print_raw`
+
+**Signature**: `(...) -> any`
+
+`print_raw`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+print_raw(...)  // see omc_help
+```
+
+### `println`
+
+**Signature**: `(...) -> any`
+
+`println`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+println(...)  // see omc_help
+```
+
+### `quantization_ratio`
+
+**Signature**: `(...) -> any`
+
+`quantization_ratio`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+quantization_ratio(...)  // see omc_help
+```
+
+### `quantize`
+
+**Signature**: `(...) -> any`
+
+`quantize`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+quantize(...)  // see omc_help
+```
+
+### `random_float`
+
+**Signature**: `(...) -> any`
+
+`random_float`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+random_float(...)  // see omc_help
+```
+
+### `random_int`
+
+**Signature**: `(...) -> any`
+
+`random_int`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+random_int(...)  // see omc_help
+```
+
+### `random_seed`
+
+**Signature**: `(...) -> any`
+
+`random_seed`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+random_seed(...)  // see omc_help
+```
+
+### `resolve_singularity`
+
+**Signature**: `(...) -> any`
+
+`resolve_singularity`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+resolve_singularity(...)  // see omc_help
+```
+
+### `resonance_band`
+
+**Signature**: `(...) -> any`
+
+`resonance_band`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+resonance_band(...)  // see omc_help
+```
+
+### `resonance_band_histogram`
+
+**Signature**: `(...) -> any`
+
+`resonance_band_histogram`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+resonance_band_histogram(...)  // see omc_help
+```
+
+### `safe_add`
+
+**Signature**: `(...) -> any`
+
+`safe_add`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+safe_add(...)  // see omc_help
+```
+
+### `safe_arr_get`
+
+**Signature**: `(...) -> any`
+
+`safe_arr_get`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+safe_arr_get(...)  // see omc_help
+```
+
+### `safe_arr_set`
+
+**Signature**: `(...) -> any`
+
+`safe_arr_set`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+safe_arr_set(...)  // see omc_help
+```
+
+### `safe_divide`
+
+**Signature**: `(...) -> any`
+
+`safe_divide`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+safe_divide(...)  // see omc_help
+```
+
+### `safe_log`
+
+**Signature**: `(...) -> any`
+
+`safe_log`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+safe_log(...)  // see omc_help
+```
+
+### `safe_mod`
+
+**Signature**: `(...) -> any`
+
+`safe_mod`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+safe_mod(...)  // see omc_help
+```
+
+### `safe_mul`
+
+**Signature**: `(...) -> any`
+
+`safe_mul`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+safe_mul(...)  // see omc_help
+```
+
+### `safe_sqrt`
+
+**Signature**: `(...) -> any`
+
+`safe_sqrt`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+safe_sqrt(...)  // see omc_help
+```
+
+### `safe_sub`
+
+**Signature**: `(...) -> any`
+
+`safe_sub`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+safe_sub(...)  // see omc_help
+```
+
+### `sigmoid`
+
+**Signature**: `(...) -> any`
+
+`sigmoid`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+sigmoid(...)  // see omc_help
+```
+
+### `sorted_dedupe`
+
+**Signature**: `(...) -> any`
+
+`sorted_dedupe`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+sorted_dedupe(...)  // see omc_help
+```
+
+### `sorted_merge`
+
+**Signature**: `(...) -> any`
+
+`sorted_merge`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+sorted_merge(...)  // see omc_help
+```
+
+### `sorted_union`
+
+**Signature**: `(...) -> any`
+
+`sorted_union`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+sorted_union(...)  // see omc_help
+```
+
+### `sqrt_2`
+
+**Signature**: `(...) -> any`
+
+`sqrt_2`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+sqrt_2(...)  // see omc_help
+```
+
+### `sqrt_5`
+
+**Signature**: `(...) -> any`
+
+`sqrt_5`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+sqrt_5(...)  // see omc_help
+```
+
+### `square`
+
+**Signature**: `(...) -> any`
+
+`square`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+square(...)  // see omc_help
+```
+
+### `string`
+
+**Signature**: `(...) -> any`
+
+`string`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+string(...)  // see omc_help
+```
+
+### `substrate_count_range`
+
+**Signature**: `(...) -> any`
+
+`substrate_count_range`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+substrate_count_range(...)  // see omc_help
+```
+
+### `substrate_difference`
+
+**Signature**: `(...) -> any`
+
+`substrate_difference`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+substrate_difference(...)  // see omc_help
+```
+
+### `substrate_hash`
+
+**Signature**: `(...) -> any`
+
+`substrate_hash`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+substrate_hash(...)  // see omc_help
+```
+
+### `substrate_insert`
+
+**Signature**: `(...) -> any`
+
+`substrate_insert`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+substrate_insert(...)  // see omc_help
+```
+
+### `substrate_intersect`
+
+**Signature**: `(...) -> any`
+
+`substrate_intersect`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+substrate_intersect(...)  // see omc_help
+```
+
+### `substrate_lower_bound`
+
+**Signature**: `(...) -> any`
+
+`substrate_lower_bound`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+substrate_lower_bound(...)  // see omc_help
+```
+
+### `substrate_min_distance`
+
+**Signature**: `(...) -> any`
+
+`substrate_min_distance`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+substrate_min_distance(...)  // see omc_help
+```
+
+### `substrate_nearest`
+
+**Signature**: `(...) -> any`
+
+`substrate_nearest`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+substrate_nearest(...)  // see omc_help
+```
+
+### `substrate_quantile`
+
+**Signature**: `(...) -> any`
+
+`substrate_quantile`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+substrate_quantile(...)  // see omc_help
+```
+
+### `substrate_rank`
+
+**Signature**: `(...) -> any`
+
+`substrate_rank`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+substrate_rank(...)  // see omc_help
+```
+
+### `substrate_search`
+
+**Signature**: `(...) -> any`
+
+`substrate_search`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+substrate_search(...)  // see omc_help
+```
+
+### `substrate_select_k`
+
+**Signature**: `(...) -> any`
+
+`substrate_select_k`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+substrate_select_k(...)  // see omc_help
+```
+
+### `substrate_slice_range`
+
+**Signature**: `(...) -> any`
+
+`substrate_slice_range`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+substrate_slice_range(...)  // see omc_help
+```
+
+### `substrate_upper_bound`
+
+**Signature**: `(...) -> any`
+
+`substrate_upper_bound`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+substrate_upper_bound(...)  // see omc_help
+```
+
+### `tanh`
+
+**Signature**: `(...) -> any`
+
+`tanh`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+tanh(...)  // see omc_help
+```
+
+### `tau`
+
+**Signature**: `(...) -> any`
+
+`tau`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+tau(...)  // see omc_help
+```
+
+### `test_clear_failures`
+
+**Signature**: `(...) -> any`
+
+`test_clear_failures`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+test_clear_failures(...)  // see omc_help
+```
+
+### `test_get_current`
+
+**Signature**: `(...) -> any`
+
+`test_get_current`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+test_get_current(...)  // see omc_help
+```
+
+### `to_float`
+
+**Signature**: `(...) -> any`
+
+`to_float`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+to_float(...)  // see omc_help
+```
+
+### `to_int`
+
+**Signature**: `(...) -> any`
+
+`to_int`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+to_int(...)  // see omc_help
+```
+
+### `value_danger`
+
+**Signature**: `(...) -> any`
+
+`value_danger`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+value_danger(...)  // see omc_help
+```
+
+### `zeckendorf`
+
+**Signature**: `(...) -> any`
+
+`zeckendorf`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+zeckendorf(...)  // see omc_help
+```
+
+### `zeckendorf_bit`
+
+**Signature**: `(...) -> any`
+
+`zeckendorf_bit`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+zeckendorf_bit(...)  // see omc_help
+```
+
+### `zeckendorf_weight`
+
+**Signature**: `(...) -> any`
+
+`zeckendorf_weight`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+zeckendorf_weight(...)  // see omc_help
 ```
 
 ---
@@ -334,6 +1537,446 @@ Multiply every element by a scalar.
 arr_scale([1,2,3], 10)  // [10,20,30]
 ```
 
+### `arr_all`
+
+**Signature**: `(arr, val_or_pred) -> int`
+
+`arr_all`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+arr_all(...)  // see omc_help
+```
+
+### `arr_any`
+
+**Signature**: `(arr, val_or_pred) -> int`
+
+`arr_any`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+arr_any(...)  // see omc_help
+```
+
+### `arr_avg_distance`
+
+**Signature**: `(arr) -> float`
+
+`arr_avg_distance`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+arr_avg_distance(...)  // see omc_help
+```
+
+### `arr_chunk`
+
+**Signature**: `(arr, ...) -> array`
+
+`arr_chunk`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+arr_chunk(...)  // see omc_help
+```
+
+### `arr_contains`
+
+**Signature**: `(arr, val_or_pred) -> int`
+
+`arr_contains`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+arr_contains(...)  // see omc_help
+```
+
+### `arr_count`
+
+**Signature**: `(arr) -> int`
+
+`arr_count`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+arr_count(...)  // see omc_help
+```
+
+### `arr_cumsum`
+
+**Signature**: `(arr, ...) -> array`
+
+`arr_cumsum`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+arr_cumsum(...)  // see omc_help
+```
+
+### `arr_diff`
+
+**Signature**: `(arr, ...) -> array`
+
+`arr_diff`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+arr_diff(...)  // see omc_help
+```
+
+### `arr_drop`
+
+**Signature**: `(arr, ...) -> array`
+
+`arr_drop`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+arr_drop(...)  // see omc_help
+```
+
+### `arr_enumerate`
+
+**Signature**: `(arr, ...) -> array`
+
+`arr_enumerate`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+arr_enumerate(...)  // see omc_help
+```
+
+### `arr_find`
+
+**Signature**: `(arr) -> int`
+
+`arr_find`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+arr_find(...)  // see omc_help
+```
+
+### `arr_first`
+
+**Signature**: `(arr) -> int`
+
+`arr_first`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+arr_first(...)  // see omc_help
+```
+
+### `arr_flatten`
+
+**Signature**: `(arr, ...) -> array`
+
+`arr_flatten`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+arr_flatten(...)  // see omc_help
+```
+
+### `arr_fold_elements`
+
+**Signature**: `(arr, ...) -> array`
+
+`arr_fold_elements`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+arr_fold_elements(...)  // see omc_help
+```
+
+### `arr_from_range`
+
+**Signature**: `(arr, ...) -> array`
+
+`arr_from_range`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+arr_from_range(...)  // see omc_help
+```
+
+### `arr_gcd`
+
+**Signature**: `(arr, ...) -> array`
+
+`arr_gcd`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+arr_gcd(...)  // see omc_help
+```
+
+### `arr_geometric_mean`
+
+**Signature**: `(arr) -> float`
+
+`arr_geometric_mean`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+arr_geometric_mean(...)  // see omc_help
+```
+
+### `arr_harmonic_mean`
+
+**Signature**: `(arr) -> float`
+
+`arr_harmonic_mean`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+arr_harmonic_mean(...)  // see omc_help
+```
+
+### `arr_index_of`
+
+**Signature**: `(arr) -> int`
+
+`arr_index_of`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+arr_index_of(...)  // see omc_help
+```
+
+### `arr_is_sorted`
+
+**Signature**: `(arr, val_or_pred) -> int`
+
+`arr_is_sorted`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+arr_is_sorted(...)  // see omc_help
+```
+
+### `arr_join`
+
+**Signature**: `(arr, ...) -> array`
+
+`arr_join`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+arr_join(...)  // see omc_help
+```
+
+### `arr_last`
+
+**Signature**: `(arr) -> int`
+
+`arr_last`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+arr_last(...)  // see omc_help
+```
+
+### `arr_max`
+
+**Signature**: `(arr, ...) -> array`
+
+`arr_max`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+arr_max(...)  // see omc_help
+```
+
+### `arr_max_float`
+
+**Signature**: `(arr) -> int`
+
+`arr_max_float`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+arr_max_float(...)  // see omc_help
+```
+
+### `arr_median`
+
+**Signature**: `(arr) -> float`
+
+`arr_median`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+arr_median(...)  // see omc_help
+```
+
+### `arr_min`
+
+**Signature**: `(arr, ...) -> array`
+
+`arr_min`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+arr_min(...)  // see omc_help
+```
+
+### `arr_min_float`
+
+**Signature**: `(arr) -> int`
+
+`arr_min_float`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+arr_min_float(...)  // see omc_help
+```
+
+### `arr_norm`
+
+**Signature**: `(arr) -> float`
+
+`arr_norm`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+arr_norm(...)  // see omc_help
+```
+
+### `arr_ones`
+
+**Signature**: `(arr, ...) -> array`
+
+`arr_ones`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+arr_ones(...)  // see omc_help
+```
+
+### `arr_partition_by`
+
+**Signature**: `(arr, ...) -> array`
+
+`arr_partition_by`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+arr_partition_by(...)  // see omc_help
+```
+
+### `arr_product`
+
+**Signature**: `(arr, ...) -> array`
+
+`arr_product`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+arr_product(...)  // see omc_help
+```
+
+### `arr_range`
+
+**Signature**: `(arr, ...) -> array`
+
+`arr_range`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+arr_range(...)  // see omc_help
+```
+
+### `arr_reduce`
+
+**Signature**: `(arr, ...) -> array`
+
+`arr_reduce`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+arr_reduce(...)  // see omc_help
+```
+
+### `arr_repeat`
+
+**Signature**: `(arr, ...) -> array`
+
+`arr_repeat`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+arr_repeat(...)  // see omc_help
+```
+
+### `arr_resonance`
+
+**Signature**: `(arr, ...) -> array`
+
+`arr_resonance`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+arr_resonance(...)  // see omc_help
+```
+
+### `arr_sort_int`
+
+**Signature**: `(arr) -> int`
+
+`arr_sort_int`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+arr_sort_int(...)  // see omc_help
+```
+
+### `arr_sum`
+
+**Signature**: `(arr, ...) -> array`
+
+`arr_sum`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+arr_sum(...)  // see omc_help
+```
+
+### `arr_sum_sq`
+
+**Signature**: `(arr) -> float`
+
+`arr_sum_sq`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+arr_sum_sq(...)  // see omc_help
+```
+
+### `arr_take`
+
+**Signature**: `(arr, ...) -> array`
+
+`arr_take`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+arr_take(...)  // see omc_help
+```
+
+### `arr_unique`
+
+**Signature**: `(arr, ...) -> array`
+
+`arr_unique`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+arr_unique(...)  // see omc_help
+```
+
+### `arr_unique_count`
+
+**Signature**: `(arr) -> int`
+
+`arr_unique_count`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+arr_unique_count(...)  // see omc_help
+```
+
+### `arr_window`
+
+**Signature**: `(arr, ...) -> array`
+
+`arr_window`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+arr_window(...)  // see omc_help
+```
+
+### `arr_zeros`
+
+**Signature**: `(arr, ...) -> array`
+
+`arr_zeros`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+arr_zeros(...)  // see omc_help
+```
+
+### `arr_zip`
+
+**Signature**: `(arr, ...) -> array`
+
+`arr_zip`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+arr_zip(...)  // see omc_help
+```
+
 ---
 
 ## linalg
@@ -556,6 +2199,136 @@ HBit harmony score derived from substrate alignment.
 harmony(89)  // high (89 is Fibonacci)
 ```
 
+### `attractor_bucket` 🔱 *OMC-unique*
+
+**Signature**: `(...) -> any`
+
+`attractor_bucket`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+attractor_bucket(...)  // see omc_help
+```
+
+### `crt_residues` 🔱 *OMC-unique*
+
+**Signature**: `(...) -> any`
+
+`crt_residues`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+crt_residues(...)  // see omc_help
+```
+
+### `harmonic_dedupe` 🔱 *OMC-unique*
+
+**Signature**: `(...) -> any`
+
+`harmonic_dedupe`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+harmonic_dedupe(...)  // see omc_help
+```
+
+### `harmonic_diff` 🔱 *OMC-unique*
+
+**Signature**: `(...) -> any`
+
+`harmonic_diff`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+harmonic_diff(...)  // see omc_help
+```
+
+### `harmonic_hash` 🔱 *OMC-unique*
+
+**Signature**: `(...) -> any`
+
+`harmonic_hash`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+harmonic_hash(...)  // see omc_help
+```
+
+### `harmonic_partition` 🔱 *OMC-unique*
+
+**Signature**: `(...) -> any`
+
+`harmonic_partition`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+harmonic_partition(...)  // see omc_help
+```
+
+### `harmonic_read_file` 🔱 *OMC-unique*
+
+**Signature**: `(...) -> any`
+
+`harmonic_read_file`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+harmonic_read_file(...)  // see omc_help
+```
+
+### `harmonic_score` 🔱 *OMC-unique*
+
+**Signature**: `(...) -> any`
+
+`harmonic_score`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+harmonic_score(...)  // see omc_help
+```
+
+### `harmonic_sort` 🔱 *OMC-unique*
+
+**Signature**: `(...) -> any`
+
+`harmonic_sort`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+harmonic_sort(...)  // see omc_help
+```
+
+### `harmonic_split` 🔱 *OMC-unique*
+
+**Signature**: `(...) -> any`
+
+`harmonic_split`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+harmonic_split(...)  // see omc_help
+```
+
+### `hbit_tension` 🔱 *OMC-unique*
+
+**Signature**: `(...) -> any`
+
+`hbit_tension`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+hbit_tension(...)  // see omc_help
+```
+
+### `largest_attractor_at_most` 🔱 *OMC-unique*
+
+**Signature**: `(...) -> any`
+
+`largest_attractor_at_most`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+largest_attractor_at_most(...)  // see omc_help
+```
+
+### `phi_shadow` 🔱 *OMC-unique*
+
+**Signature**: `(...) -> any`
+
+`phi_shadow`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+phi_shadow(...)  // see omc_help
+```
+
 ---
 
 ## autograd
@@ -700,6 +2473,26 @@ In-place SGD step: value -= lr * grad.
 tape_update(W, 0.01);
 ```
 
+### `tape_neg`
+
+**Signature**: `(...) -> int`
+
+`tape_neg`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+tape_neg(...)  // see omc_help
+```
+
+### `tape_pow_int`
+
+**Signature**: `(...) -> int`
+
+`tape_pow_int`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+tape_pow_int(...)  // see omc_help
+```
+
 ---
 
 ## duals
@@ -732,6 +2525,96 @@ Read the derivative component.
 
 ```omc
 dual_d(y)  // current df/dx
+```
+
+### `dual_cos`
+
+**Signature**: `(...) -> any`
+
+`dual_cos`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+dual_cos(...)  // see omc_help
+```
+
+### `dual_exp`
+
+**Signature**: `(...) -> any`
+
+`dual_exp`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+dual_exp(...)  // see omc_help
+```
+
+### `dual_neg`
+
+**Signature**: `(...) -> any`
+
+`dual_neg`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+dual_neg(...)  // see omc_help
+```
+
+### `dual_pow_int`
+
+**Signature**: `(...) -> any`
+
+`dual_pow_int`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+dual_pow_int(...)  // see omc_help
+```
+
+### `dual_relu`
+
+**Signature**: `(...) -> any`
+
+`dual_relu`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+dual_relu(...)  // see omc_help
+```
+
+### `dual_sigmoid`
+
+**Signature**: `(...) -> any`
+
+`dual_sigmoid`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+dual_sigmoid(...)  // see omc_help
+```
+
+### `dual_sin`
+
+**Signature**: `(...) -> any`
+
+`dual_sin`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+dual_sin(...)  // see omc_help
+```
+
+### `dual_tanh`
+
+**Signature**: `(...) -> any`
+
+`dual_tanh`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+dual_tanh(...)  // see omc_help
+```
+
+### `dual_v`
+
+**Signature**: `(...) -> any`
+
+`dual_v`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+dual_v(...)  // see omc_help
 ```
 
 ---
@@ -842,6 +2725,206 @@ Concatenate any number of values as strings.
 concat_many("x=", 42, " y=", 99)  // "x=42 y=99"
 ```
 
+### `str_capitalize`
+
+**Signature**: `(s, ...) -> string`
+
+`str_capitalize`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+str_capitalize(...)  // see omc_help
+```
+
+### `str_chars`
+
+**Signature**: `(s, ...) -> string`
+
+`str_chars`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+str_chars(...)  // see omc_help
+```
+
+### `str_concat`
+
+**Signature**: `(s, ...) -> string`
+
+`str_concat`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+str_concat(...)  // see omc_help
+```
+
+### `str_contains`
+
+**Signature**: `(s, ...) -> string`
+
+`str_contains`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+str_contains(...)  // see omc_help
+```
+
+### `str_count`
+
+**Signature**: `(s) -> int`
+
+`str_count`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+str_count(...)  // see omc_help
+```
+
+### `str_ends_with`
+
+**Signature**: `(s, ...) -> string`
+
+`str_ends_with`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+str_ends_with(...)  // see omc_help
+```
+
+### `str_index_of`
+
+**Signature**: `(s) -> int`
+
+`str_index_of`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+str_index_of(...)  // see omc_help
+```
+
+### `str_is_empty`
+
+**Signature**: `(s, ...) -> string`
+
+`str_is_empty`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+str_is_empty(...)  // see omc_help
+```
+
+### `str_lowercase`
+
+**Signature**: `(s, ...) -> string`
+
+`str_lowercase`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+str_lowercase(...)  // see omc_help
+```
+
+### `str_pad_left`
+
+**Signature**: `(s, ...) -> string`
+
+`str_pad_left`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+str_pad_left(...)  // see omc_help
+```
+
+### `str_pad_right`
+
+**Signature**: `(s, ...) -> string`
+
+`str_pad_right`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+str_pad_right(...)  // see omc_help
+```
+
+### `str_repeat`
+
+**Signature**: `(s, ...) -> string`
+
+`str_repeat`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+str_repeat(...)  // see omc_help
+```
+
+### `str_replace`
+
+**Signature**: `(s, ...) -> string`
+
+`str_replace`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+str_replace(...)  // see omc_help
+```
+
+### `str_reverse`
+
+**Signature**: `(s, ...) -> string`
+
+`str_reverse`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+str_reverse(...)  // see omc_help
+```
+
+### `str_split_lines`
+
+**Signature**: `(s, ...) -> string`
+
+`str_split_lines`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+str_split_lines(...)  // see omc_help
+```
+
+### `str_starts_with`
+
+**Signature**: `(s, ...) -> string`
+
+`str_starts_with`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+str_starts_with(...)  // see omc_help
+```
+
+### `str_to_float`
+
+**Signature**: `(s, ...) -> string`
+
+`str_to_float`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+str_to_float(...)  // see omc_help
+```
+
+### `str_to_int`
+
+**Signature**: `(s, ...) -> string`
+
+`str_to_int`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+str_to_int(...)  // see omc_help
+```
+
+### `str_trim`
+
+**Signature**: `(s, ...) -> string`
+
+`str_trim`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+str_trim(...)  // see omc_help
+```
+
+### `str_uppercase`
+
+**Signature**: `(s, ...) -> string`
+
+`str_uppercase`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+str_uppercase(...)  // see omc_help
+```
+
 ---
 
 ## regex
@@ -874,6 +2957,26 @@ Replace all matches.
 
 ```omc
 re_replace("\\d+", "a1b2", "X")  // "aXbX"
+```
+
+### `re_find`
+
+**Signature**: `(pattern, s, ...) -> string|int|array`
+
+`re_find`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+re_find(...)  // see omc_help
+```
+
+### `re_split`
+
+**Signature**: `(pattern, s, ...) -> string|int|array`
+
+`re_split`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+re_split(...)  // see omc_help
 ```
 
 ---
@@ -984,6 +3087,46 @@ Parse string via strftime fmt into unix timestamp.
 parse_time("2026-05-16", "%Y-%m-%d")  // 1747353600
 ```
 
+### `csv_parse`
+
+**Signature**: `(...) -> any`
+
+`csv_parse`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+csv_parse(...)  // see omc_help
+```
+
+### `file_exists`
+
+**Signature**: `(...) -> any`
+
+`file_exists`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+file_exists(...)  // see omc_help
+```
+
+### `read_file`
+
+**Signature**: `(...) -> any`
+
+`read_file`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+read_file(...)  // see omc_help
+```
+
+### `write_file`
+
+**Signature**: `(...) -> any`
+
+`write_file`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+write_file(...)  // see omc_help
+```
+
 ---
 
 ## exceptions
@@ -996,6 +3139,16 @@ parse_time("2026-05-16", "%Y-%m-%d")  // 1747353600
 
 ```omc
 is_instance(HttpError(...), "AppError")  // 1 if HttpError extends AppError
+```
+
+### `error`
+
+**Signature**: `(...) -> any`
+
+`error`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+error(...)  // see omc_help
 ```
 
 ---
@@ -1080,6 +3233,26 @@ Number of curated error patterns. The knowledge base size.
 
 ```omc
 omc_error_count()  // 42+
+```
+
+### `cleanup_array`
+
+**Signature**: `(...) -> any`
+
+`cleanup_array`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+cleanup_array(...)  // see omc_help
+```
+
+### `defined_functions`
+
+**Signature**: `(...) -> any`
+
+`defined_functions`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+defined_functions(...)  // see omc_help
 ```
 
 ---
@@ -1204,6 +3377,488 @@ omc_code_canonical("fn f(x) { return x; }") == omc_code_canonical("fn f(a) { ret
 
 ```omc
 omc_code_equivalent("fn f(x) { return x; }", "fn f(a) { return a; }")  // 1
+```
+
+---
+
+## math
+
+### `abs`
+
+**Signature**: `(n) -> int|float`
+
+`abs`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+abs(...)  // see omc_help
+```
+
+### `acos`
+
+**Signature**: `(...) -> any`
+
+`acos`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+acos(...)  // see omc_help
+```
+
+### `asin`
+
+**Signature**: `(...) -> any`
+
+`asin`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+asin(...)  // see omc_help
+```
+
+### `atan`
+
+**Signature**: `(...) -> any`
+
+`atan`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+atan(...)  // see omc_help
+```
+
+### `atan2`
+
+**Signature**: `(...) -> any`
+
+`atan2`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+atan2(...)  // see omc_help
+```
+
+### `bit_count`
+
+**Signature**: `(...) -> any`
+
+`bit_count`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+bit_count(...)  // see omc_help
+```
+
+### `bit_length`
+
+**Signature**: `(...) -> any`
+
+`bit_length`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+bit_length(...)  // see omc_help
+```
+
+### `ceil`
+
+**Signature**: `(n) -> int|float`
+
+`ceil`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+ceil(...)  // see omc_help
+```
+
+### `clamp`
+
+**Signature**: `(...) -> any`
+
+`clamp`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+clamp(...)  // see omc_help
+```
+
+### `cos`
+
+**Signature**: `(...) -> any`
+
+`cos`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+cos(...)  // see omc_help
+```
+
+### `digit_count`
+
+**Signature**: `(...) -> any`
+
+`digit_count`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+digit_count(...)  // see omc_help
+```
+
+### `digit_sum`
+
+**Signature**: `(...) -> any`
+
+`digit_sum`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+digit_sum(...)  // see omc_help
+```
+
+### `exp`
+
+**Signature**: `(...) -> any`
+
+`exp`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+exp(...)  // see omc_help
+```
+
+### `floor`
+
+**Signature**: `(n) -> int|float`
+
+`floor`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+floor(...)  // see omc_help
+```
+
+### `fnv1a_hash`
+
+**Signature**: `(...) -> any`
+
+`fnv1a_hash`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+fnv1a_hash(...)  // see omc_help
+```
+
+### `gcd`
+
+**Signature**: `(...) -> any`
+
+`gcd`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+gcd(...)  // see omc_help
+```
+
+### `lcm`
+
+**Signature**: `(...) -> any`
+
+`lcm`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+lcm(...)  // see omc_help
+```
+
+### `log`
+
+**Signature**: `(...) -> any`
+
+`log`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+log(...)  // see omc_help
+```
+
+### `log10`
+
+**Signature**: `(...) -> any`
+
+`log10`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+log10(...)  // see omc_help
+```
+
+### `log2`
+
+**Signature**: `(...) -> any`
+
+`log2`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+log2(...)  // see omc_help
+```
+
+### `max`
+
+**Signature**: `(...) -> any`
+
+`max`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+max(...)  // see omc_help
+```
+
+### `min`
+
+**Signature**: `(...) -> any`
+
+`min`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+min(...)  // see omc_help
+```
+
+### `mod_pow`
+
+**Signature**: `(...) -> any`
+
+`mod_pow`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+mod_pow(...)  // see omc_help
+```
+
+### `pow`
+
+**Signature**: `(...) -> any`
+
+`pow`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+pow(...)  // see omc_help
+```
+
+### `round`
+
+**Signature**: `(n) -> int|float`
+
+`round`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+round(...)  // see omc_help
+```
+
+### `sign`
+
+**Signature**: `(n) -> int|float`
+
+`sign`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+sign(...)  // see omc_help
+```
+
+### `sin`
+
+**Signature**: `(...) -> any`
+
+`sin`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+sin(...)  // see omc_help
+```
+
+### `sqrt`
+
+**Signature**: `(...) -> any`
+
+`sqrt`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+sqrt(...)  // see omc_help
+```
+
+### `tan`
+
+**Signature**: `(...) -> any`
+
+`tan`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+tan(...)  // see omc_help
+```
+
+---
+
+## dicts
+
+### `dict_clear`
+
+**Signature**: `(dict, ...) -> any`
+
+`dict_clear`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+dict_clear(...)  // see omc_help
+```
+
+### `dict_del`
+
+**Signature**: `(dict, ...) -> any`
+
+`dict_del`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+dict_del(...)  // see omc_help
+```
+
+### `dict_get`
+
+**Signature**: `(dict, ...) -> any`
+
+`dict_get`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+dict_get(...)  // see omc_help
+```
+
+### `dict_get_or`
+
+**Signature**: `(dict, ...) -> any`
+
+`dict_get_or`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+dict_get_or(...)  // see omc_help
+```
+
+### `dict_has`
+
+**Signature**: `(dict, ...) -> int`
+
+`dict_has`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+dict_has(...)  // see omc_help
+```
+
+### `dict_items`
+
+**Signature**: `(dict, ...) -> any`
+
+`dict_items`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+dict_items(...)  // see omc_help
+```
+
+### `dict_keys`
+
+**Signature**: `(dict, ...) -> any`
+
+`dict_keys`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+dict_keys(...)  // see omc_help
+```
+
+### `dict_len`
+
+**Signature**: `(dict, ...) -> int`
+
+`dict_len`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+dict_len(...)  // see omc_help
+```
+
+### `dict_merge`
+
+**Signature**: `(dict, ...) -> any`
+
+`dict_merge`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+dict_merge(...)  // see omc_help
+```
+
+### `dict_new`
+
+**Signature**: `(dict, ...) -> any`
+
+`dict_new`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+dict_new(...)  // see omc_help
+```
+
+### `dict_pop`
+
+**Signature**: `(dict, ...) -> any`
+
+`dict_pop`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+dict_pop(...)  // see omc_help
+```
+
+### `dict_set`
+
+**Signature**: `(dict, ...) -> any`
+
+`dict_set`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+dict_set(...)  // see omc_help
+```
+
+### `dict_size`
+
+**Signature**: `(dict, ...) -> int`
+
+`dict_size`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+dict_size(...)  // see omc_help
+```
+
+### `dict_values`
+
+**Signature**: `(dict, ...) -> any`
+
+`dict_values`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+dict_values(...)  // see omc_help
+```
+
+---
+
+## test_runner
+
+### `test_failure_count`
+
+**Signature**: `(...) -> any`
+
+`test_failure_count`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+test_failure_count(...)  // see omc_help
+```
+
+### `test_get_failures`
+
+**Signature**: `(...) -> any`
+
+`test_get_failures`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+test_get_failures(...)  // see omc_help
+```
+
+### `test_record_failure`
+
+**Signature**: `(...) -> any`
+
+`test_record_failure`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+test_record_failure(...)  // see omc_help
+```
+
+### `test_set_current`
+
+**Signature**: `(...) -> any`
+
+`test_set_current`: see omc_explain or source for details. Auto-generated stub.
+
+```omc
+test_set_current(...)  // see omc_help
 ```
 
 ---
