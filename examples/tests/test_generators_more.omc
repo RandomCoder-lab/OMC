@@ -1,0 +1,109 @@
+# More generator tests.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+
+fn squares_to(n) {
+    h i = 1;
+    while i <= n {
+        yield i * i;
+        i = i + 1;
+    }
+}
+
+fn fib_gen(limit) {
+    h a = 0;
+    h b = 1;
+    while a < limit {
+        yield a;
+        h t = a + b;
+        a = b;
+        b = t;
+    }
+}
+
+# Eager: squares
+fn test_eager_squares() {
+    h xs = squares_to(5);
+    assert_eq(arr_len(xs), 5, "5 squares");
+    assert_eq(arr_get(xs, 0), 1, "1");
+    assert_eq(arr_get(xs, 4), 25, "25");
+}
+
+# Eager: fib
+fn test_eager_fib() {
+    h xs = fib_gen(20);
+    # Fibs < 20: 0,1,1,2,3,5,8,13
+    assert_eq(arr_len(xs), 8, "8 fibs");
+    assert_eq(arr_get(xs, 0), 0, "first");
+    assert_eq(arr_get(xs, 7), 13, "last");
+}
+
+# Lazy: count of squares
+fn test_lazy_squares_count() {
+    h n = gen_count(fn() { return squares_to(50); });
+    assert_eq(n, 50, "50 yields");
+}
+
+# Lazy: sum of squares
+fn test_lazy_squares_sum() {
+    h s = gen_sum(fn() { return squares_to(10); });
+    # 1+4+9+16+25+36+49+64+81+100 = 385
+    assert_eq(s, 385, "sum of first 10 squares");
+}
+
+# Lazy: take first 3
+fn test_lazy_take_3() {
+    h xs = gen_take(fn() { return squares_to(100); }, 3);
+    assert_eq(arr_len(xs), 3, "3 items");
+    assert_eq(arr_get(xs, 0), 1, "first square");
+    assert_eq(arr_get(xs, 2), 9, "third square");
+}
+
+# Substrate fib over a small limit
+fn test_substrate_fib_collect() {
+    h xs = [];
+    gen_substrate_fib(
+        fn(v) { arr_push(xs, v); return 1; },
+        100
+    );
+    # Fibs <= 100: 0,1,1,2,3,5,8,13,21,34,55,89 = 12
+    assert_eq(arr_len(xs), 12, "12 fibs");
+}
+
+# Substrate fib early stop
+fn test_substrate_fib_stop() {
+    h count = [0];
+    gen_substrate_fib(
+        fn(v) {
+            arr_set(count, 0, arr_get(count, 0) + 1);
+            if arr_get(count, 0) >= 5 { return 0; }
+            return 1;
+        },
+        1000
+    );
+    assert_eq(arr_get(count, 0), 5, "stopped at 5");
+}
+
+# Compose: gen_sum after squares_to
+fn test_lazy_sum_50_squares() {
+    h s = gen_sum(fn() { return squares_to(50); });
+    # Formula: n(n+1)(2n+1)/6 for n=50 = 50*51*101/6 = 42925
+    assert_eq(s, 42925, "sum of 1^2 to 50^2");
+}
+
+# Empty generator
+fn empty() { return; }
+
+fn test_empty_count() {
+    assert_eq(gen_count(fn() { return empty(); }), 0, "empty");
+}
+
+fn test_empty_sum() {
+    assert_eq(gen_sum(fn() { return empty(); }), 0, "empty sum");
+}

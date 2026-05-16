@@ -1,0 +1,162 @@
+# More class system tests.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+
+class Point {
+    x;
+    y;
+    fn distance_from_origin(self) {
+        h x = dict_get(self, "x");
+        h y = dict_get(self, "y");
+        return sqrt(x * x + y * y);
+    }
+    fn translate(self, dx, dy) {
+        h nx = dict_get(self, "x") + dx;
+        h ny = dict_get(self, "y") + dy;
+        return Point(nx, ny);
+    }
+    fn equals(self, other) {
+        if dict_get(self, "x") != dict_get(other, "x") { return 0; }
+        if dict_get(self, "y") != dict_get(other, "y") { return 0; }
+        return 1;
+    }
+}
+
+fn approx_eq(a, b, tol) {
+    h d = a - b;
+    if d < 0.0 { d = 0.0 - d; }
+    return d <= tol;
+}
+
+fn test_point_construct() {
+    h p = Point(3, 4);
+    assert_eq(dict_get(p, "x"), 3, "x");
+    assert_eq(dict_get(p, "y"), 4, "y");
+}
+
+fn test_point_distance() {
+    h p = Point(3, 4);
+    h d = p.distance_from_origin();
+    assert_true(approx_eq(d, 5.0, 0.001), "3-4-5 distance");
+}
+
+fn test_point_translate() {
+    h p = Point(1, 2);
+    h q = p.translate(10, 20);
+    assert_eq(dict_get(q, "x"), 11, "translated x");
+    assert_eq(dict_get(q, "y"), 22, "translated y");
+}
+
+fn test_point_equals() {
+    h a = Point(1, 2);
+    h b = Point(1, 2);
+    h c = Point(3, 4);
+    assert_eq(a.equals(b), 1, "a == b");
+    assert_eq(a.equals(c), 0, "a != c");
+}
+
+fn test_point_is_instance() {
+    h p = Point(0, 0);
+    assert_eq(is_instance(p, "Point"), 1, "Point");
+    assert_eq(is_instance(p, "Vector"), 0, "not Vector");
+}
+
+class Vector {
+    dx;
+    dy;
+    fn magnitude(self) {
+        h dx = dict_get(self, "dx");
+        h dy = dict_get(self, "dy");
+        return sqrt(dx * dx + dy * dy);
+    }
+    fn add(self, other) {
+        return Vector(
+            dict_get(self, "dx") + dict_get(other, "dx"),
+            dict_get(self, "dy") + dict_get(other, "dy")
+        );
+    }
+}
+
+fn test_vector_magnitude() {
+    h v = Vector(3, 4);
+    h m = v.magnitude();
+    assert_true(approx_eq(m, 5.0, 0.001), "magnitude");
+}
+
+fn test_vector_add() {
+    h v1 = Vector(1, 2);
+    h v2 = Vector(3, 4);
+    h sum = v1.add(v2);
+    assert_eq(dict_get(sum, "dx"), 4, "dx");
+    assert_eq(dict_get(sum, "dy"), 6, "dy");
+}
+
+class Counter {
+    value;
+    fn increment(self) {
+        dict_set(self, "value", dict_get(self, "value") + 1);
+        return self;
+    }
+    fn decrement(self) {
+        dict_set(self, "value", dict_get(self, "value") - 1);
+        return self;
+    }
+    fn get(self) { return dict_get(self, "value"); }
+}
+
+fn test_counter_increment() {
+    h c = Counter(0);
+    c.increment();
+    c.increment();
+    c.increment();
+    assert_eq(c.get(), 3, "incremented 3 times");
+}
+
+fn test_counter_chaining_via_method_return() {
+    h c = Counter(10);
+    c.decrement();
+    c.decrement();
+    assert_eq(c.get(), 8, "decremented 2");
+}
+
+# class composition
+class Stack {
+    items;
+    fn push(self, v) {
+        h xs = dict_get(self, "items");
+        arr_push(xs, v);
+        return self;
+    }
+    fn pop(self) {
+        h xs = dict_get(self, "items");
+        h n = arr_len(xs);
+        if n == 0 { return null; }
+        h v = arr_get(xs, n - 1);
+        # No arr_pop builtin; use arr_slice to drop last
+        h new = arr_slice(xs, 0, n - 1);
+        dict_set(self, "items", new);
+        return v;
+    }
+    fn size(self) { return arr_len(dict_get(self, "items")); }
+}
+
+fn test_stack_push_size() {
+    h s = Stack([]);
+    s.push(1);
+    s.push(2);
+    s.push(3);
+    assert_eq(s.size(), 3, "3 items");
+}
+
+fn test_stack_pop_returns_last() {
+    h s = Stack([10, 20, 30]);
+    h v = s.pop();
+    assert_eq(v, 30, "popped 30");
+    assert_eq(s.size(), 2, "2 left");
+}
