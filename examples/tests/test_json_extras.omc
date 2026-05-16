@@ -1,0 +1,82 @@
+# More JSON tests.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+
+fn test_json_parse_int() {
+    h v = json_parse("42");
+    assert_eq(v, 42, "parses int");
+}
+
+fn test_json_parse_string() {
+    h v = json_parse("\"hi\"");
+    assert_eq(v, "hi", "parses string");
+}
+
+fn test_json_parse_array_ints() {
+    h v = json_parse("[1, 2, 3]");
+    assert_eq(arr_len(v), 3, "3 elements");
+    assert_eq(arr_get(v, 0), 1, "first");
+}
+
+fn test_json_parse_array_mixed_types() {
+    h v = json_parse("[1, \"x\", true, null]");
+    assert_eq(arr_len(v), 4, "4 elements");
+}
+
+fn test_json_parse_dict() {
+    h v = json_parse("{\"a\": 1, \"b\": 2}");
+    assert_eq(dict_get(v, "a"), 1, "a=1");
+    assert_eq(dict_get(v, "b"), 2, "b=2");
+}
+
+fn test_json_parse_nested() {
+    h v = json_parse("{\"outer\": {\"inner\": 42}}");
+    h o = dict_get(v, "outer");
+    assert_eq(dict_get(o, "inner"), 42, "nested");
+}
+
+fn test_json_stringify_int() {
+    assert_eq(json_stringify(42), "42", "int → 42");
+}
+
+fn test_json_stringify_string() {
+    assert_eq(json_stringify("hi"), "\"hi\"", "string quoted");
+}
+
+fn test_json_stringify_array() {
+    assert_eq(json_stringify([1, 2, 3]), "[1,2,3]", "array");
+}
+
+fn test_json_roundtrip_int() {
+    h v = json_parse(json_stringify(42));
+    assert_eq(v, 42, "roundtrip int");
+}
+
+fn test_json_roundtrip_dict() {
+    h d = dict_new();
+    dict_set(d, "k", 1);
+    h v = json_parse(json_stringify(d));
+    assert_eq(dict_get(v, "k"), 1, "roundtrip dict");
+}
+
+fn test_json_parse_bool() {
+    assert_eq(json_parse("true"), true, "true");
+    assert_eq(json_parse("false"), false, "false");
+}
+
+fn test_json_parse_null() {
+    h v = json_parse("null");
+    assert_true(v == null, "null parses");
+}
+
+fn test_json_parse_float() {
+    h v = json_parse("3.14");
+    assert_true(v > 3.0, ">3");
+    assert_true(v < 4.0, "<4");
+}
