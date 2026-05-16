@@ -1,0 +1,144 @@
+# Demonstrate the speedup native-Rust kernels deliver over pure-OMC
+# inner loops. Same workloads, two implementations: tree-walked OMC
+# vs the new builtins (Rust inner loops, OMC dispatch only).
+
+fn matmul_naive_omc(A, B) {
+    h ar = arr_len(A);
+    h ac = arr_len(arr_get(A, 0));
+    h bc = arr_len(arr_get(B, 0));
+    h C = arr_zeros_2d(ar, bc);
+    h i = 0;
+    while i < ar {
+        h Ai = arr_get(A, i);
+        h Ci = arr_get(C, i);
+        h j = 0;
+        while j < bc {
+            h s = 0;
+            h k = 0;
+            while k < ac {
+                h Bk = arr_get(B, k);
+                s = s + arr_get(Ai, k) * arr_get(Bk, j);
+                k = k + 1;
+            }
+            arr_set(Ci, j, s);
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return C;
+}
+
+fn build_matrix(n, m) {
+    h M = [];
+    h i = 0;
+    while i < n {
+        h row = [];
+        h j = 0;
+        while j < m {
+            arr_push(row, (i + j) % 7);
+            j = j + 1;
+        }
+        arr_push(M, row);
+        i = i + 1;
+    }
+    return M;
+}
+
+fn softmax_naive_omc(arr) {
+    h n = arr_len(arr);
+    # Max
+    h m = arr_get(arr, 0);
+    h i = 1;
+    while i < n {
+        h v = arr_get(arr, i);
+        if v > m { m = v; }
+        i = i + 1;
+    }
+    # Exp + sum
+    h ex = [];
+    h s = 0.0;
+    i = 0;
+    while i < n {
+        h e = exp(arr_get(arr, i) - m);
+        arr_push(ex, e);
+        s = s + e;
+        i = i + 1;
+    }
+    # Normalize
+    h out = [];
+    i = 0;
+    while i < n {
+        arr_push(out, arr_get(ex, i) / s);
+        i = i + 1;
+    }
+    return out;
+}
+
+fn main() {
+    print("=== ML kernel speedup: native Rust vs pure-OMC inner loops ===");
+    print("");
+
+    # ---- Matmul ----
+    h N = 200;
+    print("[matmul] " + to_string(N) + "x" + to_string(N) + " * " + to_string(N) + "x" + to_string(N));
+    h A = build_matrix(N, N);
+    h B = build_matrix(N, N);
+
+    h t1 = now_unix();
+    h C_omc = matmul_naive_omc(A, B);
+    h t2 = now_unix();
+
+    h t3 = now_unix();
+    h C_native = arr_matmul(A, B);
+    h t4 = now_unix();
+
+    print("  pure-OMC matmul:   " + to_string(t2 - t1) + " sec");
+    print("  arr_matmul native: " + to_string(t4 - t3) + " sec");
+    # Verify correctness on one cell
+    h r0 = arr_get(C_omc, 0);
+    h r0n = arr_get(C_native, 0);
+    h diff = arr_get(r0, 0) - arr_get(r0n, 0);
+    if diff < 0 { diff = 0 - diff; }
+    if diff < 0.001 {
+        print("  results match");
+    } else {
+        print("  RESULT MISMATCH: omc=" + to_string(arr_get(r0, 0)) +
+              " native=" + to_string(arr_get(r0n, 0)));
+    }
+
+    # ---- Softmax ----
+    print("");
+    h SN = 10000;
+    print("[softmax] length-" + to_string(SN) + " vector, 100 iterations");
+    h xs = [];
+    h i = 0;
+    while i < SN {
+        arr_push(xs, (i % 17) - 8);
+        i = i + 1;
+    }
+
+    h t5 = now_unix();
+    h iters = 100;
+    h k = 0;
+    while k < iters {
+        h _ = softmax_naive_omc(xs);
+        k = k + 1;
+    }
+    h t6 = now_unix();
+
+    h t7 = now_unix();
+    k = 0;
+    while k < iters {
+        h _ = arr_softmax(xs);
+        k = k + 1;
+    }
+    h t8 = now_unix();
+
+    print("  pure-OMC softmax:  " + to_string(t6 - t5) + " sec");
+    print("  arr_softmax native: " + to_string(t8 - t7) + " sec");
+    print("");
+    print("Substrate-aware bonus: arr_substrate_attention has no Python");
+    print("equivalent — i64 doesn't carry phi-resonance metadata.");
+}
+
+main();

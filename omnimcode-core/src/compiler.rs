@@ -266,6 +266,13 @@ impl Compiler {
                         // 2D array primitives (Track 2 — 2026-05-16)
                         | "arr_matmul" | "arr_transpose"
                         | "arr_eye" | "arr_zeros_2d"
+                        // Native ML primitives (Track 3 — 2026-05-16)
+                        | "arr_softmax" | "arr_layer_norm"
+                        | "arr_relu_vec" | "arr_sigmoid_vec"
+                        | "arr_conv1d" | "arr_outer"
+                        // Substrate-native acceleration (OMC-unique)
+                        | "arr_substrate_attention"
+                        | "arr_substrate_score_rows"
                         // Lazy generator collector: returns array
                         | "gen_take"
                         // Forward-mode autograd duals (Track 2 — 2026-05-16)

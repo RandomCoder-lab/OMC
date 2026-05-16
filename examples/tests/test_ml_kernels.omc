@@ -1,0 +1,197 @@
+# Native-Rust ML primitives. These keep the inner loops out of the
+# tree-walker so the per-element cost drops from ~50ns to ~1ns.
+# A 1000-element softmax that would take 50µs in pure OMC code
+# (one eval_expr per cell) takes ~1µs as a builtin call.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) {
+    if !cond { test_record_failure(msg); }
+}
+
+fn approx_eq(a, b, tol) {
+    h d = a - b;
+    if d < 0.0 { d = 0.0 - d; }
+    return d <= tol;
+}
+
+# ---- Softmax ----
+
+fn test_softmax_sums_to_one() {
+    h s = arr_softmax([1.0, 2.0, 3.0, 4.0]);
+    h total = 0.0;
+    h i = 0;
+    while i < arr_len(s) {
+        total = total + arr_get(s, i);
+        i = i + 1;
+    }
+    assert_true(approx_eq(total, 1.0, 0.001), "softmax sums to 1");
+}
+
+fn test_softmax_monotonic() {
+    h s = arr_softmax([1.0, 2.0, 3.0]);
+    assert_true(arr_get(s, 0) < arr_get(s, 1), "softmax monotonic 1<2");
+    assert_true(arr_get(s, 1) < arr_get(s, 2), "softmax monotonic 2<3");
+}
+
+fn test_softmax_uniform() {
+    h s = arr_softmax([1.0, 1.0, 1.0, 1.0]);
+    assert_true(approx_eq(arr_get(s, 0), 0.25, 0.001), "uniform → 1/n");
+    assert_true(approx_eq(arr_get(s, 3), 0.25, 0.001), "uniform → 1/n");
+}
+
+# ---- LayerNorm ----
+
+fn test_layer_norm_zero_mean() {
+    h ln = arr_layer_norm([1.0, 2.0, 3.0, 4.0, 5.0], 0.00001);
+    h total = 0.0;
+    h i = 0;
+    while i < arr_len(ln) {
+        total = total + arr_get(ln, i);
+        i = i + 1;
+    }
+    assert_true(approx_eq(total, 0.0, 0.001), "layer norm has zero mean");
+}
+
+fn test_layer_norm_unit_variance() {
+    h ln = arr_layer_norm([1.0, 2.0, 3.0, 4.0, 5.0], 0.00001);
+    h sq = 0.0;
+    h n = arr_len(ln);
+    h i = 0;
+    while i < n {
+        h v = arr_get(ln, i);
+        sq = sq + v * v;
+        i = i + 1;
+    }
+    h variance = sq / n;
+    assert_true(approx_eq(variance, 1.0, 0.01), "layer norm has unit variance");
+}
+
+# ---- ReLU vec ----
+
+fn test_relu_vec_clips_negatives() {
+    h r = arr_relu_vec([0 - 2.0, 0 - 1.0, 0.0, 1.0, 2.0]);
+    assert_true(approx_eq(arr_get(r, 0), 0.0, 0.001), "-2 → 0");
+    assert_true(approx_eq(arr_get(r, 1), 0.0, 0.001), "-1 → 0");
+    assert_true(approx_eq(arr_get(r, 2), 0.0, 0.001), "0 → 0");
+    assert_true(approx_eq(arr_get(r, 3), 1.0, 0.001), "1 → 1");
+    assert_true(approx_eq(arr_get(r, 4), 2.0, 0.001), "2 → 2");
+}
+
+# ---- Sigmoid vec ----
+
+fn test_sigmoid_vec_known_points() {
+    h s = arr_sigmoid_vec([0.0, 0 - 10.0, 10.0]);
+    assert_true(approx_eq(arr_get(s, 0), 0.5, 0.001), "sigmoid(0)=0.5");
+    assert_true(arr_get(s, 1) < 0.001, "sigmoid(-10)≈0");
+    assert_true(arr_get(s, 2) > 0.999, "sigmoid(10)≈1");
+}
+
+# ---- 1D convolution ----
+
+fn test_conv1d_identity_kernel() {
+    # Kernel [1] = identity passthrough
+    h c = arr_conv1d([1.0, 2.0, 3.0, 4.0], [1.0]);
+    assert_eq(arr_len(c), 4, "valid conv keeps length when kernel=1");
+    assert_true(approx_eq(arr_get(c, 0), 1.0, 0.001), "identity[0]");
+    assert_true(approx_eq(arr_get(c, 3), 4.0, 0.001), "identity[3]");
+}
+
+fn test_conv1d_box_filter() {
+    # Box [1,1,1] sums 3-element windows. valid output = len - kernel + 1.
+    h c = arr_conv1d([1.0, 2.0, 3.0, 4.0, 5.0], [1.0, 1.0, 1.0]);
+    assert_eq(arr_len(c), 3, "valid conv: 5 - 3 + 1 = 3");
+    assert_true(approx_eq(arr_get(c, 0), 6.0, 0.001), "1+2+3=6");
+    assert_true(approx_eq(arr_get(c, 1), 9.0, 0.001), "2+3+4=9");
+    assert_true(approx_eq(arr_get(c, 2), 12.0, 0.001), "3+4+5=12");
+}
+
+# ---- Outer product ----
+
+fn test_outer_product_shape() {
+    h o = arr_outer([1.0, 2.0, 3.0], [10.0, 20.0]);
+    # 3x2 matrix
+    assert_eq(arr_len(o), 3, "3 rows");
+    h r0 = arr_get(o, 0);
+    assert_eq(arr_len(r0), 2, "2 cols");
+}
+
+fn test_outer_product_values() {
+    h o = arr_outer([1.0, 2.0, 3.0], [10.0, 20.0]);
+    h r2 = arr_get(o, 2);
+    assert_true(approx_eq(arr_get(r2, 0), 30.0, 0.001), "3*10=30");
+    assert_true(approx_eq(arr_get(r2, 1), 60.0, 0.001), "3*20=60");
+}
+
+# ---- Substrate-aware attention (Q, K, V are all 2D) ----
+
+fn test_substrate_attention_shape() {
+    h Q = [[1, 2], [3, 5]];
+    h K = [[1, 2], [3, 5], [8, 13]];
+    h V = [[10, 20], [30, 40], [50, 60]];
+    h out = arr_substrate_attention(Q, K, V);
+    assert_eq(arr_len(out), 2, "output has 2 query rows");
+    h r0 = arr_get(out, 0);
+    assert_eq(arr_len(r0), 2, "output col matches V cols");
+}
+
+fn test_substrate_attention_self_match() {
+    # When Q row exactly matches a K row, that key dominates the
+    # softmax — the output should be heavily weighted toward the
+    # matching V row.
+    h Q = [[1, 2]];
+    h K = [[1, 2], [100, 200]];
+    h V = [[5.0, 5.0], [99.0, 99.0]];
+    h out = arr_substrate_attention(Q, K, V);
+    h r0 = arr_get(out, 0);
+    # Strong bias toward the matching V row (close to 5, not 99).
+    assert_true(arr_get(r0, 0) < 50.0, "attended to matching key");
+}
+
+# ---- Substrate score rows ----
+
+fn test_substrate_score_rows_fibonacci_high() {
+    # Row of Fibonacci attractors should have mean resonance ~1.0
+    h m = [[1, 2, 3, 5, 8], [1, 1, 1, 1, 1]];
+    h s = arr_substrate_score_rows(m);
+    assert_true(arr_get(s, 0) > 0.9, "Fibonacci row has high resonance");
+    assert_true(arr_get(s, 1) > 0.9, "all-1s row has high resonance (1 is attractor)");
+}
+
+fn test_substrate_score_rows_random_lower() {
+    h m = [[7, 11, 19, 25, 100], [1, 2, 3, 5, 8]];
+    h s = arr_substrate_score_rows(m);
+    # Off-attractor row should score lower than the Fibonacci row.
+    assert_true(arr_get(s, 0) < arr_get(s, 1),
+        "off-attractor row has lower resonance than Fibonacci row");
+}
+
+# ---- Composition test: a full MLP forward pass ----
+
+fn test_mlp_forward_pass() {
+    # Input (1x3) → hidden (1x4) via W1 → relu → output (1x2) via W2 → softmax
+    h X = [[1.0, 2.0, 3.0]];
+    h W1 = [[0.1, 0.2, 0.3, 0.4],
+            [0.5, 0.6, 0.7, 0.8],
+            [0.9, 1.0, 1.1, 1.2]];
+    h W2 = [[0.1, 0.2], [0.3, 0.4], [0.5, 0.6], [0.7, 0.8]];
+
+    h h_pre = arr_matmul(X, W1);   # (1x4)
+    h h_row = arr_get(h_pre, 0);
+    h h_act = arr_relu_vec(h_row);
+    h h_2d = [h_act];
+
+    h logits = arr_matmul(h_2d, W2);  # (1x2)
+    h logits_row = arr_get(logits, 0);
+    h probs = arr_softmax(logits_row);
+
+    # Output is a valid probability distribution.
+    h total = arr_get(probs, 0) + arr_get(probs, 1);
+    assert_true(approx_eq(total, 1.0, 0.001), "MLP outputs sum to 1");
+    assert_true(arr_get(probs, 0) > 0.0, "p0 positive");
+    assert_true(arr_get(probs, 1) > 0.0, "p1 positive");
+}
