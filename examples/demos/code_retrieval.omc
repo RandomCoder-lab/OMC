@@ -1,0 +1,79 @@
+# Content-addressed code lookup — the dedup primitive Python's
+# hash() can't power.
+#
+# IMPORTANT: distance == 0 means "alpha-equivalent" (exact match
+# modulo cosmetic edits). Distance > 0 means "not equivalent" —
+# the magnitude is essentially noise. For true fuzzy similarity
+# (where you want ordering on non-equal entries), use
+# omc_code_similarity (Jaccard over canonical tokens) instead.
+
+fn show(label, v) { print(concat_many(label, " = ", to_string(v))); }
+fn section(name) { print(""); print(concat_many("=== ", name, " ===")); }
+
+fn main() {
+    print("=== Substrate-distance code retrieval ===");
+    print("Python's hash() is formatting-sensitive — it can't power semantic");
+    print("code search. OMC's canonical hash + omc_find_similar can.");
+
+    h corpus = [
+        "fn loss(pred, target) { return (pred - target) * (pred - target); }",
+        "fn sum_array(xs) { h s = 0; h i = 0; while i < arr_len(xs) { s = s + arr_get(xs, i); i = i + 1; } return s; }",
+        "fn min_max_normalize(xs) { h mn = arr_min_int(xs); h mx = arr_max_int(xs); h rng = mx - mn; return arr_map(xs, fn(v) { return (v - mn) / rng; }); }",
+        "fn dot_product(a, b) { h s = 0; h i = 0; while i < arr_len(a) { s = s + arr_get(a, i) * arr_get(b, i); i = i + 1; } return s; }",
+        "fn relu_arr(xs) { return arr_map(xs, fn(v) { if v > 0 { return v; } return 0; }); }",
+        "fn sigmoid_arr(xs) { return arr_map(xs, fn(v) { return 1 / (1 + exp(0 - v)); }); }",
+        "fn fibonacci(n) { if n <= 1 { return n; } return fibonacci(n - 1) + fibonacci(n - 2); }",
+        "fn factorial(n) { if n <= 1 { return 1; } return n * factorial(n - 1); }",
+    ];
+
+    section("Query 1: loss function with renamed params");
+    h q1 = "fn loss(p, t) { return (p - t) * (p - t); }";  # alpha-equivalent to corpus[0]
+    h r1 = omc_find_similar(q1, corpus, 3);
+    h i = 0;
+    while i < arr_len(r1) {
+        h hit = arr_get(r1, i);
+        print(concat_many("  rank ", to_string(i),
+            "  index=", to_string(dict_get(hit, "index")),
+            "  distance=", to_string(dict_get(hit, "distance"))));
+        i = i + 1;
+    }
+    print("  → top hit at index 0 (loss with rename), distance 0");
+
+    section("Query 2: novel summing loop");
+    h q2 = "fn sum_xs(items) { h acc = 0; h i = 0; while i < arr_len(items) { acc = acc + arr_get(items, i); i = i + 1; } return acc; }";  # alpha-equiv to corpus[1]
+    h r2 = omc_find_similar(q2, corpus, 3);
+    i = 0;
+    while i < arr_len(r2) {
+        h hit = arr_get(r2, i);
+        print(concat_many("  rank ", to_string(i),
+            "  index=", to_string(dict_get(hit, "index")),
+            "  distance=", to_string(dict_get(hit, "distance"))));
+        i = i + 1;
+    }
+    print("  → top hit at index 1 (sum_array), distance 0");
+
+    section("Query 3: novel recursion that has no alpha-twin");
+    h q3 = "fn power_of_two(n) { if n == 0 { return 1; } return 2 * power_of_two(n - 1); }";
+    h r3 = omc_find_similar(q3, corpus, 3);
+    i = 0;
+    while i < arr_len(r3) {
+        h hit = arr_get(r3, i);
+        print(concat_many("  rank ", to_string(i),
+            "  index=", to_string(dict_get(hit, "index")),
+            "  distance=", to_string(dict_get(hit, "distance"))));
+        i = i + 1;
+    }
+    print("  → top hits are factorial / fibonacci (other recursive single-int fns)");
+
+    section("Bonus: fuzzy similarity via omc_code_similarity");
+    h s_loss = omc_code_similarity(q1, arr_get(corpus, 0));    # alpha-equiv → ~1.0
+    h s_unrelated = omc_code_similarity(q1, arr_get(corpus, 7));  # factorial
+    print(concat_many("  loss-vs-loss(renamed): ", to_string(s_loss)));
+    print(concat_many("  loss-vs-factorial    : ", to_string(s_unrelated)));
+    print("  → Jaccard ordering IS meaningful (unlike raw hash distance).");
+
+    print("");
+    print("=== End: dedup via find_similar (exact-match), ordering via code_similarity ===");
+}
+
+main();

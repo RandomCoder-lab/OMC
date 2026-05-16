@@ -1,0 +1,91 @@
+# Substrate-distance code retrieval — content-addressed code search.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+
+# Distance 0 for exact alpha-match
+fn test_alpha_equivalent_matches_first() {
+    h corpus = [
+        "fn unrelated() { return 99; }",
+        "fn f(a) { return a + 1; }",
+        "fn another() { return 42; }",
+    ];
+    h ranked = omc_find_similar("fn f(x) { return x + 1; }", corpus);
+    h first = arr_get(ranked, 0);
+    assert_eq(dict_get(first, "index"), 1, "alpha-equivalent at index 1");
+    assert_eq(dict_get(first, "distance"), 0, "distance 0");
+}
+
+# Top-k limit respected
+fn test_top_k_limit() {
+    h corpus = [
+        "fn a() { return 1; }",
+        "fn b() { return 2; }",
+        "fn c() { return 3; }",
+        "fn d() { return 4; }",
+        "fn e() { return 5; }",
+    ];
+    h ranked = omc_find_similar("fn a() { return 1; }", corpus, 3);
+    assert_eq(arr_len(ranked), 3, "top-3 respected");
+}
+
+# All results when no top_k
+fn test_full_ranking() {
+    h corpus = [
+        "fn a() { return 1; }",
+        "fn b() { return 2; }",
+        "fn c() { return 3; }",
+    ];
+    h ranked = omc_find_similar("fn a() { return 1; }", corpus);
+    assert_eq(arr_len(ranked), 3, "full ranking");
+}
+
+# Ranking is ascending distance
+fn test_ascending_distance() {
+    h corpus = [
+        "fn similar(x) { return x + 1; }",
+        "fn totally_different() { return arr_softmax(arr_neg([1.0, 2.0, 3.0])); }",
+        "fn close(y) { return y + 1; }",
+    ];
+    h ranked = omc_find_similar("fn similar(x) { return x + 1; }", corpus);
+    h r0 = arr_get(ranked, 0);
+    h r1 = arr_get(ranked, 1);
+    h r2 = arr_get(ranked, 2);
+    assert_true(dict_get(r0, "distance") <= dict_get(r1, "distance"), "0 ≤ 1");
+    assert_true(dict_get(r1, "distance") <= dict_get(r2, "distance"), "1 ≤ 2");
+}
+
+# Empty corpus is fine
+fn test_empty_corpus() {
+    h ranked = omc_find_similar("fn f() {}", []);
+    assert_eq(arr_len(ranked), 0, "empty");
+}
+
+# Singleton corpus
+fn test_singleton_corpus() {
+    h ranked = omc_find_similar("fn f() {}", ["fn g() { return 1; }"]);
+    assert_eq(arr_len(ranked), 1, "one entry");
+    h r = arr_get(ranked, 0);
+    assert_eq(dict_get(r, "index"), 0, "index 0");
+}
+
+# Self-match in corpus is distance 0
+fn test_self_match() {
+    h q = "fn loss(p, t) { return (p - t) * (p - t); }";
+    h ranked = omc_find_similar(q, [q]);
+    h r = arr_get(ranked, 0);
+    assert_eq(dict_get(r, "distance"), 0, "self → 0");
+}
+
+# Rename-only match in corpus → distance 0
+fn test_rename_match() {
+    h q = "fn loss(p, t) { return (p - t) * (p - t); }";
+    h renamed = "fn loss(pred, target) { return (pred - target) * (pred - target); }";
+    h ranked = omc_find_similar(q, [renamed]);
+    assert_eq(dict_get(arr_get(ranked, 0), "distance"), 0, "rename → 0");
+}

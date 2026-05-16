@@ -1073,6 +1073,13 @@ pub const BUILTINS: &[BuiltinDoc] = &[
         example: "omc_code_metrics(src)  // all stats at once",
         unique_to_omc: false,
     },
+    BuiltinDoc {
+        name: "omc_find_similar", category: "code_intel",
+        signature: "(query: string, corpus: string[], top_k?: int) -> dict[]",
+        description: "Content-addressed code lookup. Distance 0 = alpha-equivalent (exact match modulo cosmetic edits). Distance > 0 means 'not equivalent' but the magnitude isn't a true similarity metric (fnv1a hashes don't preserve nearness). Use as exact-match dedup, not as fuzzy ranking. Python's hash() can't even do the exact-match case because it's formatting-sensitive.",
+        example: "omc_find_similar(q, corpus)  // [{index, distance}] — index of any distance-0 hit is the alpha-equiv match",
+        unique_to_omc: true,
+    },
     // ---- LLM workflow bundles ----
     BuiltinDoc {
         name: "omc_cheatsheet", category: "llm_workflow",
@@ -1749,6 +1756,26 @@ pub fn render_full_reference() -> String {
         "**OMC-unique**: {} (no direct Python/NumPy equivalent — these are why you reach for OMC over numpy)\n\n",
         unique_count
     ));
+
+    // ---- LLM-onboarding section. Front-and-center so a fresh
+    //      LLM session sees the right "first 5 calls" before
+    //      reaching for grep.
+    out.push_str("---\n\n");
+    out.push_str("## 🤖 For LLMs reading this: first 5 calls to make\n\n");
+    out.push_str("This reference is grep-able, but OMC also exposes runtime\n");
+    out.push_str("introspection — usually faster than scanning the doc:\n\n");
+    out.push_str("1. **`omc_search_builtins(\"<topic>\")`** — substring search across name + description. \n");
+    out.push_str("   Best first call when you know *what* but not *which name*.\n\n");
+    out.push_str("2. **`omc_help(\"<name>\")`** — returns a dict with signature + description + example + category + unique_to_omc.\n");
+    out.push_str("   Use after `omc_search_builtins` narrows the field.\n\n");
+    out.push_str("3. **`omc_explain_error(\"<error message>\")`** — pattern-match against the 970+ curated catalog. Returns explanation + cause + one-line fix.\n");
+    out.push_str("   ALWAYS call this when an OMC program errors. Don't guess.\n\n");
+    out.push_str("4. **`omc_did_you_mean(\"<typo>\")`** — suggest the nearest known names by edit distance. Use when `omc_help` returns `found: 0`.\n\n");
+    out.push_str("5. **`omc_bootstrap_pack()`** — returns a ~20KB Markdown doc with categorized cheatsheets + Python → OMC translation table.\n");
+    out.push_str("   Load this once at session start instead of repeated grep.\n\n");
+    out.push_str("Other high-value calls: `omc_unique_builtins()` (the OMC-only surface), `omc_python_translation()` (Python↔OMC table),\n");
+    out.push_str("`omc_cheatsheet(\"<topic>\")` (markdown per category), `omc_canonical_hash(code)` / `omc_id(code)` (semantic memory keys for code regions).\n\n");
+    out.push_str("**Common gotcha**: don't re-define OMC builtins from scratch — `is_prime`, `arr_softmax`, `arr_resonance_vec`, etc. all ship. Always `omc_search_builtins` first.\n\n");
     out.push_str("---\n\n");
     out.push_str("## Categories\n\n");
     for cat in categories() {

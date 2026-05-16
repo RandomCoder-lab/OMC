@@ -2,9 +2,35 @@
 
 Auto-generated from `omnimcode-core/src/docs.rs`. Run `omc --gen-docs > OMC_REFERENCE.md` to regenerate.
 
-**Total documented builtins**: 628
+**Total documented builtins**: 629
 
-**OMC-unique**: 63 (no direct Python/NumPy equivalent — these are why you reach for OMC over numpy)
+**OMC-unique**: 64 (no direct Python/NumPy equivalent — these are why you reach for OMC over numpy)
+
+---
+
+## 🤖 For LLMs reading this: first 5 calls to make
+
+This reference is grep-able, but OMC also exposes runtime
+introspection — usually faster than scanning the doc:
+
+1. **`omc_search_builtins("<topic>")`** — substring search across name + description. 
+   Best first call when you know *what* but not *which name*.
+
+2. **`omc_help("<name>")`** — returns a dict with signature + description + example + category + unique_to_omc.
+   Use after `omc_search_builtins` narrows the field.
+
+3. **`omc_explain_error("<error message>")`** — pattern-match against the 970+ curated catalog. Returns explanation + cause + one-line fix.
+   ALWAYS call this when an OMC program errors. Don't guess.
+
+4. **`omc_did_you_mean("<typo>")`** — suggest the nearest known names by edit distance. Use when `omc_help` returns `found: 0`.
+
+5. **`omc_bootstrap_pack()`** — returns a ~20KB Markdown doc with categorized cheatsheets + Python → OMC translation table.
+   Load this once at session start instead of repeated grep.
+
+Other high-value calls: `omc_unique_builtins()` (the OMC-only surface), `omc_python_translation()` (Python↔OMC table),
+`omc_cheatsheet("<topic>")` (markdown per category), `omc_canonical_hash(code)` / `omc_id(code)` (semantic memory keys for code regions).
+
+**Common gotcha**: don't re-define OMC builtins from scratch — `is_prime`, `arr_softmax`, `arr_resonance_vec`, etc. all ship. Always `omc_search_builtins` first.
 
 ---
 
@@ -25,7 +51,7 @@ Auto-generated from `omnimcode-core/src/docs.rs`. Run `omc --gen-docs > OMC_REFE
 - [exceptions](#exceptions) (2 builtins)
 - [introspection](#introspection) (30 builtins)
 - [tokenizer](#tokenizer) (17 builtins)
-- [code_intel](#code_intel) (16 builtins)
+- [code_intel](#code_intel) (17 builtins)
 - [llm_workflow](#llm_workflow) (7 builtins)
 - [math](#math) (82 builtins)
 - [dicts](#dicts) (31 builtins)
@@ -4946,6 +4972,16 @@ Bulk metrics: {complexity, ast_size, ast_depth, source_bytes, token_count, compr
 
 ```omc
 omc_code_metrics(src)  // all stats at once
+```
+
+### `omc_find_similar` 🔱 *OMC-unique*
+
+**Signature**: `(query: string, corpus: string[], top_k?: int) -> dict[]`
+
+Content-addressed code lookup. Distance 0 = alpha-equivalent (exact match modulo cosmetic edits). Distance > 0 means 'not equivalent' but the magnitude isn't a true similarity metric (fnv1a hashes don't preserve nearness). Use as exact-match dedup, not as fuzzy ranking. Python's hash() can't even do the exact-match case because it's formatting-sensitive.
+
+```omc
+omc_find_similar(q, corpus)  // [{index, distance}] — index of any distance-0 hit is the alpha-equiv match
 ```
 
 ---

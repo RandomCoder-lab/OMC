@@ -7751,6 +7751,37 @@ impl Interpreter {
                     Err(e) => Err(format!("omc_id: {}", e)),
                 }
             }
+            "omc_find_similar" => {
+                // omc_find_similar(query, corpus[]) → [{index, distance}, ...]
+                // ranked closest-first by canonical-hash distance.
+                if args.len() < 2 {
+                    return Err("omc_find_similar requires (query, corpus[])".to_string());
+                }
+                let query = self.eval_expr(&args[0])?.to_display_string();
+                let corpus_v = self.eval_expr(&args[1])?;
+                let corpus: Vec<String> = if let Value::Array(arr) = corpus_v {
+                    arr.items.borrow().iter()
+                        .map(|x| x.to_display_string())
+                        .collect()
+                } else {
+                    return Err("omc_find_similar: corpus must be a string array".to_string());
+                };
+                let ranked = crate::code_intel::find_similar(&query, &corpus)
+                    .map_err(|e| format!("omc_find_similar: {}", e))?;
+                // Optional 3rd arg = top_k (default = full list).
+                let top_k = if args.len() >= 3 {
+                    self.eval_expr(&args[2])?.to_int().max(1) as usize
+                } else { ranked.len() };
+                let out: Vec<Value> = ranked.iter().take(top_k)
+                    .map(|(idx, dist)| {
+                        let mut map = std::collections::BTreeMap::new();
+                        map.insert("index".to_string(), Value::HInt(HInt::new(*idx as i64)));
+                        map.insert("distance".to_string(), Value::HInt(HInt::new(*dist)));
+                        Value::dict_from(map)
+                    })
+                    .collect();
+                Ok(Value::Array(HArray::from_vec(out)))
+            }
             "omc_code_diff" => {
                 // Structural diff: returns {added, removed, modified, unchanged}.
                 // Compared after canonicalization so renames don't show.

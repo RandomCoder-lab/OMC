@@ -298,6 +298,7 @@ impl Compiler {
                         | "omc_completion_hint"
                         | "omc_memory_keys" | "omc_help_all_category"
                         | "omc_search_builtins"
+                        | "omc_find_similar"
                         // Forward-mode autograd duals (Track 2 — 2026-05-16)
                         | "dual" | "dual_add" | "dual_sub"
                         | "dual_mul" | "dual_div" | "dual_neg"

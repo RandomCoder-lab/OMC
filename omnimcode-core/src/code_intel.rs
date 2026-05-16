@@ -433,6 +433,44 @@ pub fn diff(a: &str, b: &str) -> Result<CodeDiff, String> {
     Ok(diff)
 }
 
+/// Match against a corpus of code chunks. Returns
+/// Vec<(index_into_corpus, distance)> sorted by ascending distance.
+///
+/// **Honest framing**: distance == 0 means the corpus entry is
+/// alpha-equivalent to `query` (same canonical form). Distance > 0
+/// means "not equivalent" — but the *magnitude* of that distance is
+/// essentially noise, because fnv1a hashes don't preserve a "nearness"
+/// metric. Two programs that are structurally close can have wildly
+/// different hash diffs; two programs that are structurally far apart
+/// can have a small one. Treat as exact-match dedup, not as fuzzy
+/// similarity ranking.
+///
+/// What Python's hash() can't do that this can: the *exact-match*
+/// case is invariant under renames / whitespace / comments. Python's
+/// hash(source) is sensitive to all three. For true fuzzy similarity,
+/// use `omc_code_similarity` (Jaccard over canonical token IDs).
+pub fn find_similar(query: &str, corpus: &[String]) -> Result<Vec<(usize, i64)>, String> {
+    let canon_q = crate::canonical::canonicalize(query)
+        .map_err(|e| format!("find_similar: query canonicalize: {}", e))?;
+    let (_, raw_q, _) = crate::tokenizer::code_hash(&canon_q);
+    let mut scored: Vec<(usize, i64)> = Vec::with_capacity(corpus.len());
+    for (i, c) in corpus.iter().enumerate() {
+        match crate::canonical::canonicalize(c) {
+            Ok(canon_c) => {
+                let (_, raw_c, _) = crate::tokenizer::code_hash(&canon_c);
+                let d = (raw_q - raw_c).abs();
+                scored.push((i, d));
+            }
+            Err(_) => {
+                // Unparseable corpus entries get worst-case distance.
+                scored.push((i, i64::MAX));
+            }
+        }
+    }
+    scored.sort_by_key(|(_, d)| *d);
+    Ok(scored)
+}
+
 /// Quick metrics: substrate score + complexity + size all in one shot.
 /// Computed in one parse-and-canonicalize pass each.
 pub fn quick_metrics(source: &str) -> Result<std::collections::BTreeMap<String, f64>, String> {
@@ -506,5 +544,23 @@ mod tests {
         let a = "fn f(x) { return x; }";
         let b = "fn f(x) { return arr_softmax(arr_neg(x)); }";
         assert!(similarity(a, b).unwrap() < 1.0);
+    }
+
+    #[test]
+    fn find_similar_perfect_match_first() {
+        let q = "fn f(x) { return x + 1; }";
+        let corpus = vec![
+            "fn unrelated() { return 99; }".to_string(),
+            "fn f(a) { return a + 1; }".to_string(),
+        ];
+        let r = find_similar(q, &corpus).unwrap();
+        assert_eq!(r[0].0, 1);
+        assert_eq!(r[0].1, 0);
+    }
+
+    #[test]
+    fn find_similar_empty_corpus() {
+        let r = find_similar("fn f() {}", &[]).unwrap();
+        assert!(r.is_empty());
     }
 }
