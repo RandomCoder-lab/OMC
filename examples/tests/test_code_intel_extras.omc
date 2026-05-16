@@ -1,0 +1,118 @@
+# Additional code_intel coverage including diff + metrics.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+
+# omc_code_diff
+fn test_diff_identical() {
+    h d = omc_code_diff(
+        "fn f(x) { return x; }",
+        "fn f(x) { return x; }"
+    );
+    assert_eq(arr_len(dict_get(d, "added")), 0, "no additions");
+    assert_eq(arr_len(dict_get(d, "removed")), 0, "no removals");
+    assert_eq(arr_len(dict_get(d, "modified")), 0, "no mods");
+    assert_eq(arr_len(dict_get(d, "unchanged")), 1, "one unchanged");
+}
+
+fn test_diff_added() {
+    h d = omc_code_diff(
+        "fn f(x) { return x; }",
+        "fn f(x) { return x; } fn g(x) { return x; }"
+    );
+    assert_eq(arr_len(dict_get(d, "added")), 1, "g added");
+}
+
+fn test_diff_removed() {
+    h d = omc_code_diff(
+        "fn f(x) { return x; } fn g(x) { return x; }",
+        "fn f(x) { return x; }"
+    );
+    assert_eq(arr_len(dict_get(d, "removed")), 1, "g removed");
+}
+
+fn test_diff_modified() {
+    h d = omc_code_diff(
+        "fn f(x) { return x; }",
+        "fn f(x) { return x + 1; }"
+    );
+    assert_eq(arr_len(dict_get(d, "modified")), 1, "f modified");
+}
+
+fn test_diff_alpha_rename_unchanged() {
+    h d = omc_code_diff(
+        "fn f(x) { return x; }",
+        "fn f(a) { return a; }"
+    );
+    assert_eq(arr_len(dict_get(d, "unchanged")), 1, "alpha-rename is unchanged");
+    assert_eq(arr_len(dict_get(d, "modified")), 0, "no actual mods");
+}
+
+# omc_code_metrics
+fn test_metrics_has_all_fields() {
+    h m = omc_code_metrics("fn f(x) { return x; }");
+    assert_true(dict_has(m, "complexity"), "has complexity");
+    assert_true(dict_has(m, "ast_size"), "has ast_size");
+    assert_true(dict_has(m, "ast_depth"), "has ast_depth");
+    assert_true(dict_has(m, "source_bytes"), "has source_bytes");
+    assert_true(dict_has(m, "token_count"), "has token_count");
+    assert_true(dict_has(m, "compression_ratio"), "has compression_ratio");
+}
+
+fn test_metrics_complexity_grows() {
+    h simple = omc_code_metrics("fn f(x) { return x; }");
+    h branchy = omc_code_metrics("fn f(x) { if x > 0 { if x > 1 { return 1; } return 0; } return 0; }");
+    assert_true(dict_get(branchy, "complexity") > dict_get(simple, "complexity"),
+        "complexity orders");
+}
+
+fn test_metrics_token_count_positive() {
+    h m = omc_code_metrics("fn f(x) { return x; }");
+    assert_true(dict_get(m, "token_count") > 0, "non-zero tokens");
+}
+
+fn test_metrics_compression_ratio_positive() {
+    h m = omc_code_metrics("fn f(x) { return x; }");
+    assert_true(dict_get(m, "compression_ratio") > 0.0, "non-zero ratio");
+}
+
+# Composition tests
+fn test_diff_then_metrics() {
+    # The basic LLM workflow: diff to see what changed, then metrics
+    # on the new version.
+    h old = "fn f(x) { return x; }";
+    h new = "fn f(x) { return x + 1; } fn g(x) { return x * 2; }";
+    h d = omc_code_diff(old, new);
+    assert_eq(arr_len(dict_get(d, "added")), 1, "added g");
+    h m = omc_code_metrics(new);
+    assert_true(dict_get(m, "complexity") >= 1.0, "metrics on new");
+}
+
+# Larger summary integration test
+fn test_summary_has_classes() {
+    h s = omc_code_summary("class Foo { x; y; } fn f() {}");
+    assert_eq(arr_len(dict_get(s, "classes")), 1, "one class");
+    assert_eq(arr_get(dict_get(s, "classes"), 0), "Foo", "class name");
+}
+
+fn test_summary_imports() {
+    h s = omc_code_summary("import \"foo\"; fn main() {}");
+    assert_eq(arr_len(dict_get(s, "imports")), 1, "one import");
+}
+
+fn test_summary_stmt_count() {
+    h s = omc_code_summary("fn a() {} fn b() {} fn c() {}");
+    assert_eq(dict_get(s, "stmt_count"), 3, "three stmts");
+}
+
+# canonical hash invariance through rounds of canonical
+fn test_canonical_idempotent() {
+    h c1 = omc_code_canonical("fn f(x) { return x; }");
+    h c2 = omc_code_canonical(c1);
+    assert_eq(c1, c2, "canonical is idempotent");
+}

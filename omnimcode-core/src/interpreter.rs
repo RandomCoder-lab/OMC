@@ -7705,6 +7705,48 @@ impl Interpreter {
                     .collect();
                 Ok(Value::Array(HArray::from_vec(out)))
             }
+            "omc_code_diff" => {
+                // Structural diff: returns {added, removed, modified, unchanged}.
+                // Compared after canonicalization so renames don't show.
+                if args.len() < 2 {
+                    return Err("omc_code_diff requires (a, b)".to_string());
+                }
+                let a = self.eval_expr(&args[0])?.to_display_string();
+                let b = self.eval_expr(&args[1])?.to_display_string();
+                let d = crate::code_intel::diff(&a, &b)
+                    .map_err(|e| format!("omc_code_diff: {}", e))?;
+                let mut map = std::collections::BTreeMap::new();
+                map.insert("added".to_string(), Value::Array(HArray::from_vec(
+                    d.added.iter().map(|s| Value::String(s.clone())).collect()
+                )));
+                map.insert("removed".to_string(), Value::Array(HArray::from_vec(
+                    d.removed.iter().map(|s| Value::String(s.clone())).collect()
+                )));
+                map.insert("modified".to_string(), Value::Array(HArray::from_vec(
+                    d.modified.iter().map(|s| Value::String(s.clone())).collect()
+                )));
+                map.insert("unchanged".to_string(), Value::Array(HArray::from_vec(
+                    d.unchanged.iter().map(|s| Value::String(s.clone())).collect()
+                )));
+                Ok(Value::dict_from(map))
+            }
+            "omc_code_metrics" => {
+                // Bulk metrics in one call: complexity + ast_size +
+                // ast_depth + source_bytes + token_count +
+                // compression_ratio. Avoids N separate round-trips
+                // through the MCP server.
+                if args.is_empty() {
+                    return Err("omc_code_metrics requires (code)".to_string());
+                }
+                let code = self.eval_expr(&args[0])?.to_display_string();
+                let m = crate::code_intel::quick_metrics(&code)
+                    .map_err(|e| format!("omc_code_metrics: {}", e))?;
+                let mut map = std::collections::BTreeMap::new();
+                for (k, v) in m {
+                    map.insert(k, Value::HFloat(v));
+                }
+                Ok(Value::dict_from(map))
+            }
             "omc_search_builtins" => {
                 // Substring search across name + description. Returns
                 // matching names. Useful when you don't know what

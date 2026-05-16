@@ -391,6 +391,67 @@ pub fn substrate_fingerprint(source: &str) -> Result<i64, String> {
     tokenizer::crt_pack(&streams, &moduli)
 }
 
+/// Structural diff between two programs: which functions appear only
+/// in A, only in B, in both but with different bodies, or both with
+/// same body. Compared after canonicalization so renames don't show
+/// up as diffs.
+#[derive(Clone, Debug, Default)]
+pub struct CodeDiff {
+    pub added: Vec<String>,
+    pub removed: Vec<String>,
+    pub modified: Vec<String>,
+    pub unchanged: Vec<String>,
+}
+
+pub fn diff(a: &str, b: &str) -> Result<CodeDiff, String> {
+    let sa = summarise(a)?;
+    let sb = summarise(b)?;
+    use std::collections::HashMap;
+    let a_map: HashMap<&str, i64> = sa.functions.iter()
+        .map(|f| (f.name.as_str(), f.canonical_hash))
+        .collect();
+    let b_map: HashMap<&str, i64> = sb.functions.iter()
+        .map(|f| (f.name.as_str(), f.canonical_hash))
+        .collect();
+    let mut diff = CodeDiff::default();
+    for f in &sa.functions {
+        match b_map.get(f.name.as_str()) {
+            None => diff.removed.push(f.name.clone()),
+            Some(&bh) if bh == f.canonical_hash => diff.unchanged.push(f.name.clone()),
+            Some(_) => diff.modified.push(f.name.clone()),
+        }
+    }
+    for f in &sb.functions {
+        if !a_map.contains_key(f.name.as_str()) {
+            diff.added.push(f.name.clone());
+        }
+    }
+    diff.added.sort();
+    diff.removed.sort();
+    diff.modified.sort();
+    diff.unchanged.sort();
+    Ok(diff)
+}
+
+/// Quick metrics: substrate score + complexity + size all in one shot.
+/// Computed in one parse-and-canonicalize pass each.
+pub fn quick_metrics(source: &str) -> Result<std::collections::BTreeMap<String, f64>, String> {
+    let mut out = std::collections::BTreeMap::new();
+    let cpx = complexity(source)? as f64;
+    let size = ast_size(source)? as f64;
+    let depth = ast_depth(source)? as f64;
+    out.insert("complexity".to_string(), cpx);
+    out.insert("ast_size".to_string(), size);
+    out.insert("ast_depth".to_string(), depth);
+    out.insert("source_bytes".to_string(), source.len() as f64);
+    let ids = crate::tokenizer::encode(source).len() as f64;
+    out.insert("token_count".to_string(), ids);
+    if source.len() > 0 {
+        out.insert("compression_ratio".to_string(), source.len() as f64 / ids.max(1.0));
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

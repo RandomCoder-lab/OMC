@@ -2,9 +2,9 @@
 
 Auto-generated from `omnimcode-core/src/docs.rs`. Run `omc --gen-docs > OMC_REFERENCE.md` to regenerate.
 
-**Total documented builtins**: 538
+**Total documented builtins**: 540
 
-**OMC-unique**: 60 (no direct Python/NumPy equivalent — these are why you reach for OMC over numpy)
+**OMC-unique**: 61 (no direct Python/NumPy equivalent — these are why you reach for OMC over numpy)
 
 ---
 
@@ -25,7 +25,7 @@ Auto-generated from `omnimcode-core/src/docs.rs`. Run `omc --gen-docs > OMC_REFE
 - [exceptions](#exceptions) (2 builtins)
 - [introspection](#introspection) (22 builtins)
 - [tokenizer](#tokenizer) (16 builtins)
-- [code_intel](#code_intel) (14 builtins)
+- [code_intel](#code_intel) (16 builtins)
 - [math](#math) (58 builtins)
 - [dicts](#dicts) (26 builtins)
 - [test_runner](#test_runner) (8 builtins)
@@ -4553,6 +4553,26 @@ Hash blended with substrate-resonance of the hash itself — OMC-only dual-band 
 
 ```omc
 omc_hbit_hash("h x = 1;")  // substrate-weighted int
+```
+
+### `omc_code_diff` 🔱 *OMC-unique*
+
+**Signature**: `(a: string, b: string) -> dict`
+
+Structural diff between two programs (after canonicalization). {added, removed, modified, unchanged} as function-name arrays.
+
+```omc
+omc_code_diff(old, new)  // {modified: ["loss"], ...}
+```
+
+### `omc_code_metrics`
+
+**Signature**: `(code: string) -> dict`
+
+Bulk metrics: {complexity, ast_size, ast_depth, source_bytes, token_count, compression_ratio}. One call instead of N.
+
+```omc
+omc_code_metrics(src)  // all stats at once
 ```
 
 ---

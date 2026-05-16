@@ -1059,6 +1059,20 @@ pub const BUILTINS: &[BuiltinDoc] = &[
         example: "omc_search_builtins(\"softmax\")  // [\"arr_softmax\"]",
         unique_to_omc: false,
     },
+    BuiltinDoc {
+        name: "omc_code_diff", category: "code_intel",
+        signature: "(a: string, b: string) -> dict",
+        description: "Structural diff between two programs (after canonicalization). {added, removed, modified, unchanged} as function-name arrays.",
+        example: "omc_code_diff(old, new)  // {modified: [\"loss\"], ...}",
+        unique_to_omc: true,
+    },
+    BuiltinDoc {
+        name: "omc_code_metrics", category: "code_intel",
+        signature: "(code: string) -> dict",
+        description: "Bulk metrics: {complexity, ast_size, ast_depth, source_bytes, token_count, compression_ratio}. One call instead of N.",
+        example: "omc_code_metrics(src)  // all stats at once",
+        unique_to_omc: false,
+    },
     // ---- Auto-generated docs for previously-undocumented builtins ----
     // Each entry covers one runtime builtin that lacked introspection.
     // Stubs are conservative — refine as you learn the actual signatures.
