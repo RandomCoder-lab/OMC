@@ -2,9 +2,9 @@
 
 Auto-generated from `omnimcode-core/src/docs.rs`. Run `omc --gen-docs > OMC_REFERENCE.md` to regenerate.
 
-**Total documented builtins**: 612
+**Total documented builtins**: 619
 
-**OMC-unique**: 61 (no direct Python/NumPy equivalent — these are why you reach for OMC over numpy)
+**OMC-unique**: 63 (no direct Python/NumPy equivalent — these are why you reach for OMC over numpy)
 
 ---
 
@@ -26,6 +26,7 @@ Auto-generated from `omnimcode-core/src/docs.rs`. Run `omc --gen-docs > OMC_REFE
 - [introspection](#introspection) (22 builtins)
 - [tokenizer](#tokenizer) (16 builtins)
 - [code_intel](#code_intel) (16 builtins)
+- [llm_workflow](#llm_workflow) (7 builtins)
 - [math](#math) (82 builtins)
 - [dicts](#dicts) (31 builtins)
 - [test_runner](#test_runner) (8 builtins)
@@ -4855,6 +4856,80 @@ Bulk metrics: {complexity, ast_size, ast_depth, source_bytes, token_count, compr
 
 ```omc
 omc_code_metrics(src)  // all stats at once
+```
+
+---
+
+## llm_workflow
+
+### `omc_cheatsheet`
+
+**Signature**: `(topic: string) -> string`
+
+Markdown cheatsheet for a category (substrate, autograd, tokenizer, ml_kernels, ...). Bundles ~10 builtins with examples.
+
+```omc
+omc_cheatsheet("substrate")  // markdown
+```
+
+### `omc_unique_overview` 🔱 *OMC-unique*
+
+**Signature**: `() -> string`
+
+Markdown list of every OMC-unique builtin, grouped by category.
+
+```omc
+omc_unique_overview()
+```
+
+### `omc_python_translation`
+
+**Signature**: `() -> string`
+
+Markdown table: Python op → OMC equivalent. Bootstrap reference.
+
+```omc
+omc_python_translation()
+```
+
+### `omc_builtin_index_markdown`
+
+**Signature**: `() -> string`
+
+Categorized Markdown index of all documented builtins.
+
+```omc
+omc_builtin_index_markdown()
+```
+
+### `omc_bootstrap_pack`
+
+**Signature**: `() -> string`
+
+Index + unique-overview + python-translation + 4 cheatsheets. Single ~20KB doc for session-start LLM bootstrapping.
+
+```omc
+omc_bootstrap_pack()
+```
+
+### `omc_change_report`
+
+**Signature**: `(old, new) -> dict`
+
+Diff + metrics + suggested next-actions in one dict.
+
+```omc
+omc_change_report(old, new)
+```
+
+### `omc_id` 🔱 *OMC-unique*
+
+**Signature**: `(code: string) -> string`
+
+Canonical OMC ID: 'omcid-<fp>-<short>'. Stable under cosmetic edits. Session-memory key for code.
+
+```omc
+omc_id(src)  // "omcid-12345-abcd"
 ```
 
 ---

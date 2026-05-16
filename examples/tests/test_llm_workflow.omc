@@ -1,0 +1,98 @@
+# LLM workflow primitives.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+
+# Cheatsheets
+fn test_cheatsheet_substrate_has_entries() {
+    h s = omc_cheatsheet("substrate");
+    assert_true(str_len(s) > 100, "non-trivial cheatsheet");
+}
+
+fn test_cheatsheet_autograd() {
+    h s = omc_cheatsheet("autograd");
+    assert_true(str_len(s) > 100, "autograd cheatsheet non-empty");
+}
+
+fn test_cheatsheet_unknown_lists_topics() {
+    h s = omc_cheatsheet("nope_no_such_topic");
+    assert_true(re_match("Available topics", s) == 1, "lists topics on miss");
+}
+
+# Unique overview
+fn test_unique_overview_nonempty() {
+    h s = omc_unique_overview();
+    assert_true(str_len(s) > 100, "overview is substantive");
+}
+
+fn test_unique_overview_mentions_attractor() {
+    h s = omc_unique_overview();
+    assert_true(re_match("attractor", s) == 1, "mentions attractor");
+}
+
+# Python translation
+fn test_python_translation_mentions_arr_get() {
+    h s = omc_python_translation();
+    assert_true(re_match("arr_get", s) == 1, "has arr_get mapping");
+}
+
+fn test_python_translation_mentions_softmax() {
+    h s = omc_python_translation();
+    assert_true(re_match("softmax", s) == 1, "has softmax mapping");
+}
+
+# Builtin index
+fn test_builtin_index_lists_categories() {
+    h s = omc_builtin_index_markdown();
+    assert_true(re_match("## arrays", s) == 1, "has arrays section");
+    assert_true(re_match("## substrate", s) == 1, "has substrate section");
+}
+
+# Bootstrap pack — large composite
+fn test_bootstrap_pack_substantive() {
+    h s = omc_bootstrap_pack();
+    assert_true(str_len(s) > 5000, "bootstrap pack substantial");
+}
+
+# Change report
+fn test_change_report_keys() {
+    h r = omc_change_report(
+        "fn f(x) { return x; }",
+        "fn f(x) { return x + 1; } fn g() { return 0; }"
+    );
+    assert_true(dict_has(r, "added"), "has added");
+    assert_true(dict_has(r, "removed"), "has removed");
+    assert_true(dict_has(r, "modified"), "has modified");
+    assert_true(dict_has(r, "suggested_action"), "has suggested action");
+}
+
+fn test_change_report_detects_modification() {
+    h r = omc_change_report(
+        "fn f(x) { return x; }",
+        "fn f(x) { return x + 1; }"
+    );
+    assert_true(re_match("f", dict_get(r, "modified")) == 1, "f is in modified");
+}
+
+# omc_id stability
+fn test_omc_id_stable() {
+    h a = omc_id("fn f(x) { return x; }");
+    h b = omc_id("fn f(y) { return y; }");
+    assert_eq(a, b, "stable under alpha-rename");
+}
+
+fn test_omc_id_format() {
+    h a = omc_id("h x = 1;");
+    assert_true(re_match("^omcid-", a) == 1, "starts with omcid-");
+}
+
+fn test_omc_id_changes_on_real_diff() {
+    h a = omc_id("fn f(x) { return x; }");
+    h b = omc_id("fn f(x) { return x + 1; }");
+    assert_true(a != b, "different code → different id");
+}

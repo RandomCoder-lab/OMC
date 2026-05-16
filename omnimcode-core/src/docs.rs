@@ -1073,6 +1073,56 @@ pub const BUILTINS: &[BuiltinDoc] = &[
         example: "omc_code_metrics(src)  // all stats at once",
         unique_to_omc: false,
     },
+    // ---- LLM workflow bundles ----
+    BuiltinDoc {
+        name: "omc_cheatsheet", category: "llm_workflow",
+        signature: "(topic: string) -> string",
+        description: "Markdown cheatsheet for a category (substrate, autograd, tokenizer, ml_kernels, ...). Bundles ~10 builtins with examples.",
+        example: "omc_cheatsheet(\"substrate\")  // markdown",
+        unique_to_omc: false,
+    },
+    BuiltinDoc {
+        name: "omc_unique_overview", category: "llm_workflow",
+        signature: "() -> string",
+        description: "Markdown list of every OMC-unique builtin, grouped by category.",
+        example: "omc_unique_overview()",
+        unique_to_omc: true,
+    },
+    BuiltinDoc {
+        name: "omc_python_translation", category: "llm_workflow",
+        signature: "() -> string",
+        description: "Markdown table: Python op → OMC equivalent. Bootstrap reference.",
+        example: "omc_python_translation()",
+        unique_to_omc: false,
+    },
+    BuiltinDoc {
+        name: "omc_builtin_index_markdown", category: "llm_workflow",
+        signature: "() -> string",
+        description: "Categorized Markdown index of all documented builtins.",
+        example: "omc_builtin_index_markdown()",
+        unique_to_omc: false,
+    },
+    BuiltinDoc {
+        name: "omc_bootstrap_pack", category: "llm_workflow",
+        signature: "() -> string",
+        description: "Index + unique-overview + python-translation + 4 cheatsheets. Single ~20KB doc for session-start LLM bootstrapping.",
+        example: "omc_bootstrap_pack()",
+        unique_to_omc: false,
+    },
+    BuiltinDoc {
+        name: "omc_change_report", category: "llm_workflow",
+        signature: "(old, new) -> dict",
+        description: "Diff + metrics + suggested next-actions in one dict.",
+        example: "omc_change_report(old, new)",
+        unique_to_omc: false,
+    },
+    BuiltinDoc {
+        name: "omc_id", category: "llm_workflow",
+        signature: "(code: string) -> string",
+        description: "Canonical OMC ID: 'omcid-<fp>-<short>'. Stable under cosmetic edits. Session-memory key for code.",
+        example: "omc_id(src)  // \"omcid-12345-abcd\"",
+        unique_to_omc: true,
+    },
     // ---- Auto-generated docs for previously-undocumented builtins ----
     // Each entry covers one runtime builtin that lacked introspection.
     // Stubs are conservative — refine as you learn the actual signatures.

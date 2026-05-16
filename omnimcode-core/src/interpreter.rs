@@ -7705,6 +7705,52 @@ impl Interpreter {
                     .collect();
                 Ok(Value::Array(HArray::from_vec(out)))
             }
+            // ---- LLM workflow primitives (single-call bundles) ----
+            "omc_cheatsheet" => {
+                if args.is_empty() {
+                    return Err("omc_cheatsheet requires (topic: string)".to_string());
+                }
+                let topic = self.eval_expr(&args[0])?.to_display_string();
+                Ok(Value::String(crate::llm_workflow::cheatsheet(&topic)))
+            }
+            "omc_unique_overview" => {
+                Ok(Value::String(crate::llm_workflow::unique_overview()))
+            }
+            "omc_python_translation" => {
+                Ok(Value::String(crate::llm_workflow::python_translation()))
+            }
+            "omc_builtin_index_markdown" => {
+                Ok(Value::String(crate::llm_workflow::builtin_index_markdown()))
+            }
+            "omc_bootstrap_pack" => {
+                Ok(Value::String(crate::llm_workflow::bootstrap_pack()))
+            }
+            "omc_change_report" => {
+                if args.len() < 2 {
+                    return Err("omc_change_report requires (old, new)".to_string());
+                }
+                let a = self.eval_expr(&args[0])?.to_display_string();
+                let b = self.eval_expr(&args[1])?.to_display_string();
+                let r = crate::llm_workflow::change_report(&a, &b)
+                    .map_err(|e| format!("omc_change_report: {}", e))?;
+                let mut map = std::collections::BTreeMap::new();
+                for (k, v) in r {
+                    map.insert(k, Value::String(v));
+                }
+                Ok(Value::dict_from(map))
+            }
+            "omc_id" => {
+                // Canonical OMC ID: "omcid-<fp>-<short_hash>" — stable
+                // under cosmetic edits. The session-memory key for code.
+                if args.is_empty() {
+                    return Err("omc_id requires (code)".to_string());
+                }
+                let code = self.eval_expr(&args[0])?.to_display_string();
+                match crate::llm_workflow::omc_id(&code) {
+                    Ok(id) => Ok(Value::String(id)),
+                    Err(e) => Err(format!("omc_id: {}", e)),
+                }
+            }
             "omc_code_diff" => {
                 // Structural diff: returns {added, removed, modified, unchanged}.
                 // Compared after canonicalization so renames don't show.
