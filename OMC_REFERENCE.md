@@ -2,9 +2,9 @@
 
 Auto-generated from `omnimcode-core/src/docs.rs`. Run `omc --gen-docs > OMC_REFERENCE.md` to regenerate.
 
-**Total documented builtins**: 498
+**Total documented builtins**: 538
 
-**OMC-unique**: 45 (no direct Python/NumPy equivalent — these are why you reach for OMC over numpy)
+**OMC-unique**: 60 (no direct Python/NumPy equivalent — these are why you reach for OMC over numpy)
 
 ---
 
@@ -14,21 +14,21 @@ Auto-generated from `omnimcode-core/src/docs.rs`. Run `omc --gen-docs > OMC_REFE
 - [arrays](#arrays) (111 builtins)
 - [linalg](#linalg) (4 builtins)
 - [ml_kernels](#ml_kernels) (6 builtins)
-- [substrate](#substrate) (24 builtins)
-- [autograd](#autograd) (16 builtins)
-- [duals](#duals) (12 builtins)
+- [substrate](#substrate) (39 builtins)
+- [autograd](#autograd) (18 builtins)
+- [duals](#duals) (21 builtins)
 - [generators](#generators) (5 builtins)
 - [strings](#strings) (33 builtins)
 - [regex](#regex) (7 builtins)
 - [json](#json) (2 builtins)
-- [stdlib](#stdlib) (12 builtins)
+- [stdlib](#stdlib) (22 builtins)
 - [exceptions](#exceptions) (2 builtins)
 - [introspection](#introspection) (22 builtins)
 - [tokenizer](#tokenizer) (16 builtins)
 - [code_intel](#code_intel) (14 builtins)
 - [math](#math) (58 builtins)
 - [dicts](#dicts) (26 builtins)
-- [test_runner](#test_runner) (4 builtins)
+- [test_runner](#test_runner) (8 builtins)
 
 ---
 
@@ -2740,6 +2740,156 @@ largest_attractor_at_most(...)  // see omc_help
 phi_shadow(...)  // see omc_help
 ```
 
+### `attractor_bucket` 🔱 *OMC-unique*
+
+**Signature**: `(n: int, k: int) -> int`
+
+Bucket n into one of k Fibonacci-distance bands.
+
+```omc
+attractor_bucket(7, 5)  // 0..4
+```
+
+### `crt_residues` 🔱 *OMC-unique*
+
+**Signature**: `(n: int, moduli: int[]) -> int[]`
+
+Per-modulus remainders of n.
+
+```omc
+crt_residues(23, [5,7,3])  // [3,2,2]
+```
+
+### `harmonic_dedupe` 🔱 *OMC-unique*
+
+**Signature**: `(arr) -> array`
+
+Deduplicate by harmonic distance (close items merge).
+
+```omc
+harmonic_dedupe([1, 1, 100, 99])  // [1, 100]
+```
+
+### `harmonic_diff` 🔱 *OMC-unique*
+
+**Signature**: `(a, b) -> float`
+
+Difference in harmonic space.
+
+```omc
+harmonic_diff(8, 13)  // small
+```
+
+### `harmonic_hash` 🔱 *OMC-unique*
+
+**Signature**: `(s: string) -> int`
+
+Substrate-aware hash that maps to a Fibonacci attractor.
+
+```omc
+harmonic_hash("foo")  // attractor-aligned int
+```
+
+### `harmonic_partition` 🔱 *OMC-unique*
+
+**Signature**: `(arr) -> [groups]`
+
+Group elements by harmonic similarity.
+
+```omc
+harmonic_partition(xs)  // [[similar], [other]]
+```
+
+### `harmonic_read_file` 🔱 *OMC-unique*
+
+**Signature**: `(path: string) -> array`
+
+Read file, splitting on harmonic boundaries.
+
+```omc
+harmonic_read_file("log.txt")
+```
+
+### `harmonic_score` 🔱 *OMC-unique*
+
+**Signature**: `(value) -> float`
+
+Single-value harmonic coherence score.
+
+```omc
+harmonic_score(8)  // ~1.0
+```
+
+### `harmonic_sort` 🔱 *OMC-unique*
+
+**Signature**: `(arr) -> array`
+
+Sort by substrate-coherence rather than numeric value.
+
+```omc
+harmonic_sort([1, 7, 8, 100])
+```
+
+### `harmonic_split` 🔱 *OMC-unique*
+
+**Signature**: `(s: string, sep: string) -> array`
+
+Split with substrate-aware merging.
+
+```omc
+harmonic_split("x,y", ",")
+```
+
+### `is_singularity` 🔱 *OMC-unique*
+
+**Signature**: `(value) -> int`
+
+1 if value is the Singularity zero-division marker.
+
+```omc
+is_singularity(0/0)  // 1 in safe mode
+```
+
+### `largest_attractor_at_most` 🔱 *OMC-unique*
+
+**Signature**: `(n: int) -> int`
+
+Largest Fibonacci ≤ n.
+
+```omc
+largest_attractor_at_most(50)  // 34
+```
+
+### `phi_pi_fib_search` 🔱 *OMC-unique*
+
+**Signature**: `(arr: int[], target: int) -> int`
+
+O(log_phiπF |arr|) search.
+
+```omc
+phi_pi_fib_search([1,2,3,5,8,13], 5)  // 3
+```
+
+### `phi_shadow` 🔱 *OMC-unique*
+
+**Signature**: `(a: int, b: int) -> int`
+
+Divergent-band β computation.
+
+```omc
+phi_shadow(3, 5)
+```
+
+### `zeckendorf_weight` 🔱 *OMC-unique*
+
+**Signature**: `(n: int) -> int`
+
+Number of Fibonacci terms in n's Zeckendorf form.
+
+```omc
+zeckendorf_weight(10)  // 2
+```
+
 ---
 
 ## autograd
@@ -2904,6 +3054,26 @@ tape_neg(...)  // see omc_help
 tape_pow_int(...)  // see omc_help
 ```
 
+### `tape_neg`
+
+**Signature**: `(a_id) -> int`
+
+Record -a on the tape.
+
+```omc
+tape_neg(x)
+```
+
+### `tape_pow_int`
+
+**Signature**: `(a_id, n: int) -> int`
+
+Record a^n on the tape.
+
+```omc
+tape_pow_int(x, 3)
+```
+
 ---
 
 ## duals
@@ -3026,6 +3196,96 @@ dual_tanh(...)  // see omc_help
 
 ```omc
 dual_v(...)  // see omc_help
+```
+
+### `dual_cos`
+
+**Signature**: `(a) -> [v,d]`
+
+cos(a).
+
+```omc
+dual_cos(x)
+```
+
+### `dual_exp`
+
+**Signature**: `(a) -> [v,d]`
+
+exp(a).
+
+```omc
+dual_exp(x)
+```
+
+### `dual_neg`
+
+**Signature**: `(a) -> [v,d]`
+
+Negate.
+
+```omc
+dual_neg(x)
+```
+
+### `dual_pow_int`
+
+**Signature**: `(a, n: int) -> [v,d]`
+
+a^n.
+
+```omc
+dual_pow_int(x, 3)
+```
+
+### `dual_relu`
+
+**Signature**: `(a) -> [v,d]`
+
+max(a, 0).
+
+```omc
+dual_relu(x)
+```
+
+### `dual_sigmoid`
+
+**Signature**: `(a) -> [v,d]`
+
+sigmoid(a).
+
+```omc
+dual_sigmoid(x)
+```
+
+### `dual_sin`
+
+**Signature**: `(a) -> [v,d]`
+
+sin(a).
+
+```omc
+dual_sin(x)
+```
+
+### `dual_tanh`
+
+**Signature**: `(a) -> [v,d]`
+
+tanh(a).
+
+```omc
+dual_tanh(x)
+```
+
+### `dual_v`
+
+**Signature**: `(d) -> float`
+
+Read value of dual.
+
+```omc
+dual_v(x)
 ```
 
 ---
@@ -3636,6 +3896,107 @@ read_file(...)  // see omc_help
 
 ```omc
 write_file(...)  // see omc_help
+```
+
+### `cleanup_array`
+
+**Signature**: `(arr) -> null`
+
+Free internal slack capacity in an array.
+
+```omc
+cleanup_array(xs);
+```
+
+### `csv_parse`
+
+**Signature**: `(text: string) -> string[][]`
+
+Parse RFC-4180 CSV into rows of cells.
+
+```omc
+csv_parse("a,b
+c,d")  // [["a","b"],["c","d"]]
+```
+
+### `defined_functions`
+
+**Signature**: `() -> string[]`
+
+All user + builtin function names currently in scope.
+
+```omc
+defined_functions()
+```
+
+### `error`
+
+**Signature**: `(msg: string) -> null`
+
+Raise a catchable error.
+
+```omc
+error("bad input");
+```
+
+### `file_exists`
+
+**Signature**: `(path: string) -> int`
+
+1 if file exists at path.
+
+```omc
+file_exists("data.txt")  // 1 or 0
+```
+
+### `random_float`
+
+**Signature**: `() -> float`
+
+Uniform random float in [0, 1).
+
+```omc
+random_float()
+```
+
+### `random_int`
+
+**Signature**: `(lo, hi) -> int`
+
+Random int in [lo, hi).
+
+```omc
+random_int(0, 10)
+```
+
+### `random_seed`
+
+**Signature**: `(seed: int) -> null`
+
+Set RNG seed for deterministic runs.
+
+```omc
+random_seed(42);
+```
+
+### `read_file`
+
+**Signature**: `(path: string) -> string`
+
+Read entire file as string.
+
+```omc
+read_file("data.txt")
+```
+
+### `write_file`
+
+**Signature**: `(path: string, content: string) -> null`
+
+Write content to file (overwrite).
+
+```omc
+write_file("out.txt", "hello");
 ```
 
 ---
@@ -5084,6 +5445,46 @@ test_record_failure(...)  // see omc_help
 
 ```omc
 test_set_current(...)  // see omc_help
+```
+
+### `test_failure_count`
+
+**Signature**: `() -> int`
+
+Number of failures recorded.
+
+```omc
+test_failure_count()  // 0 if all pass
+```
+
+### `test_get_failures`
+
+**Signature**: `() -> string[]`
+
+All recorded failure messages.
+
+```omc
+test_get_failures()
+```
+
+### `test_record_failure`
+
+**Signature**: `(msg: string) -> null`
+
+Record a test failure with a message.
+
+```omc
+test_record_failure("fail");
+```
+
+### `test_set_current`
+
+**Signature**: `(name: string) -> null`
+
+Set the current test name for failure prefixing.
+
+```omc
+test_set_current("my_test");
 ```
 
 ---
