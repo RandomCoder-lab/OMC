@@ -191,7 +191,8 @@ impl Compiler {
                         // Bit/digit/modular int returns
                         | "mod_pow" | "bit_count" | "bit_length"
                         | "digit_sum" | "digit_count"
-                        | "arr_unique_count" | "arr_gcd" | "fnv1a_hash" => Some("int"),
+                        | "arr_unique_count" | "arr_gcd" | "fnv1a_hash"
+                        | "is_instance" => Some("int"),
                         "pow" | "sqrt" | "log" | "log2" | "log10"
                         | "exp" | "sin" | "cos" | "tan" | "asin" | "acos"
                         | "atan" | "atan2" | "hypot" | "lerp"

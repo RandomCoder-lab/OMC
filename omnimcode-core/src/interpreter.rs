@@ -27,6 +27,13 @@ pub struct Interpreter {
     /// returned as a Value::Array. Stack-of-vecs supports nested
     /// generator invocations.
     yield_stacks: Vec<Vec<Value>>,
+    /// Currently in-flight typed exception value. Set by `throw <expr>`
+    /// before the Err propagation begins; taken by the catching `try`
+    /// block to bind to the catch variable. Lets `catch e { ... }`
+    /// receive a structured dict/value, not just a string. None when
+    /// either no throw is in flight or the error originated from a
+    /// Rust-side builtin (then catch falls back to the string form).
+    pending_throw: Option<Value>,
     /// Optional JIT dispatch hook. When set, `invoke_user_function_at`
     /// consults this BEFORE running the tree-walk body. If the hook
     /// returns `Some(result)`, that result wins; otherwise tree-walk
@@ -113,6 +120,7 @@ impl Interpreter {
             host_builtins: HashMap::new(),
             class_parents: HashMap::new(),
             yield_stacks: Vec::new(),
+            pending_throw: None,
         }
     }
 
@@ -1568,23 +1576,23 @@ impl Interpreter {
             }
             Statement::Try { body, err_var, handler, finally } => {
                 // Run the body; if anything inside returns Err, jump to
-                // the handler with err_var bound to the message string.
-                // After the body+handler complete (success OR failure),
-                // run finally unconditionally — including when the
-                // handler itself raises. Matches Python try/except/finally.
+                // the handler. If the error came from a `throw <expr>`,
+                // pending_throw holds the typed value — bind that to
+                // err_var so the handler sees the original dict/object.
+                // Otherwise (error from a Rust builtin) fall back to the
+                // string form. After body+handler complete, run finally
+                // unconditionally — matches Python try/except/finally.
                 let body_result = self.execute_block(body);
                 let after_handler = match body_result {
                     Ok(()) => Ok(()),
                     Err(msg) => {
-                        self.set_var(err_var.clone(), Value::String(msg));
+                        let caught = self.pending_throw.take()
+                            .unwrap_or(Value::String(msg));
+                        self.set_var(err_var.clone(), caught);
                         self.execute_block(handler)
                     }
                 };
                 if let Some(finally_body) = finally {
-                    // Run finally regardless of after_handler's status.
-                    // If both finally and after_handler fail, finally's
-                    // error wins (Python's behavior — finally is the
-                    // "last word" that the surrounding scope sees).
                     let finally_result = self.execute_block(finally_body);
                     if finally_result.is_err() {
                         return finally_result;
@@ -1593,12 +1601,16 @@ impl Interpreter {
                 after_handler
             }
             Statement::Throw(expr) => {
-                // Evaluate the expression, raise its display-string as
-                // the current frame's error. Surrounding catch (if any)
-                // binds the string to err_var; uncaught throws propagate
-                // up to the top-level error handler.
+                // Evaluate the expression. Stash the value in
+                // pending_throw so a surrounding catch can bind it
+                // with its original type/shape, then return Err with
+                // the display string so existing Err-based propagation
+                // keeps working. Uncaught throws clear pending_throw
+                // on the way out (caller observes only the string).
                 let v = self.eval_expr(expr)?;
-                Err(v.to_display_string())
+                let display = v.to_display_string();
+                self.pending_throw = Some(v);
+                Err(display)
             }
             Statement::Yield(expr) => {
                 // Append the yielded value to the current generator
@@ -3853,6 +3865,41 @@ impl Interpreter {
             // matching Python's d.get(k) sans default.
             "dict_new" => {
                 Ok(Value::dict_empty())
+            }
+            // is_instance(value, "ClassName") — true when value is a
+            // class instance whose __class__ matches the given name OR
+            // any name in the parent chain. Lets typed-exception catch
+            // blocks dispatch by class hierarchy without manual chain
+            // walking. Returns 0 for non-instance values (numbers, etc.).
+            "is_instance" => {
+                if args.len() < 2 {
+                    return Err("is_instance requires (value, class_name)".to_string());
+                }
+                let v = self.eval_expr(&args[0])?;
+                let target = self.eval_expr(&args[1])?.to_display_string();
+                let cls = match &v {
+                    Value::Dict(d) => {
+                        d.borrow().get("__class__")
+                            .map(|c| c.to_display_string())
+                    }
+                    _ => None,
+                };
+                let Some(mut current) = cls else {
+                    return Ok(Value::HInt(HInt::new(0)));
+                };
+                // Walk the parent chain, capped at 64 hops to mirror the
+                // method-dispatch path. Match if any ancestor name equals
+                // the target.
+                for _ in 0..64 {
+                    if current == target {
+                        return Ok(Value::HInt(HInt::new(1)));
+                    }
+                    match self.class_parents.get(&current) {
+                        Some(parent) => current = parent.clone(),
+                        None => return Ok(Value::HInt(HInt::new(0))),
+                    }
+                }
+                Ok(Value::HInt(HInt::new(0)))
             }
             "dict_get" => {
                 if args.len() < 2 {

@@ -1,0 +1,157 @@
+# Typed exception hierarchies — Track 1.
+#
+# `throw <expr>` now preserves the thrown value's full structure
+# (was: stringified at the catch boundary). Catch variables receive
+# the original dict/array/instance unchanged. is_instance(v, "Name")
+# walks the class_parents chain for hierarchy-aware dispatch.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) {
+    if !cond { test_record_failure(msg); }
+}
+
+# ---- Dict-shaped exceptions preserve fields ----
+
+fn test_dict_exception_preserves_fields() {
+    h caught_kind = "";
+    h caught_msg = "";
+    try {
+        h err = dict_new();
+        dict_set(err, "kind", "IO");
+        dict_set(err, "message", "disk full");
+        throw err;
+    } catch e {
+        caught_kind = dict_get(e, "kind");
+        caught_msg = dict_get(e, "message");
+    }
+    assert_eq(caught_kind, "IO", "kind field preserved");
+    assert_eq(caught_msg, "disk full", "message field preserved");
+}
+
+# ---- Class-based exception ----
+
+class AppError {
+    message;
+}
+
+fn test_class_exception_caught() {
+    h caught_msg = "";
+    h caught_is_app_err = 0;
+    try {
+        throw AppError("boom");
+    } catch e {
+        caught_msg = dict_get(e, "message");
+        caught_is_app_err = is_instance(e, "AppError");
+    }
+    assert_eq(caught_msg, "boom", "class exception preserves message");
+    assert_eq(caught_is_app_err, 1, "is_instance recognises class");
+}
+
+# ---- Inheritance: catch by parent class ----
+
+class HttpError extends AppError {
+    message;
+    status;
+}
+
+fn test_is_instance_walks_parent_chain() {
+    h err = HttpError("404", 404);
+    assert_eq(is_instance(err, "HttpError"), 1, "matches own class");
+    assert_eq(is_instance(err, "AppError"), 1, "matches parent class");
+    assert_eq(is_instance(err, "Unrelated"), 0, "no match for unrelated");
+}
+
+fn test_catch_subclass_as_parent() {
+    h dispatched = "";
+    try {
+        throw HttpError("nope", 500);
+    } catch e {
+        if is_instance(e, "HttpError") {
+            dispatched = "http";
+        } else {
+            if is_instance(e, "AppError") {
+                dispatched = "app";
+            }
+        }
+    }
+    assert_eq(dispatched, "http", "most-specific class wins");
+}
+
+fn test_dispatch_by_parent_when_no_specific_handler() {
+    h dispatched = "";
+    try {
+        throw HttpError("nope", 500);
+    } catch e {
+        # Pretend caller only knows about AppError.
+        if is_instance(e, "AppError") {
+            dispatched = "handled-as-app";
+        }
+    }
+    assert_eq(dispatched, "handled-as-app", "subclass caught as parent");
+}
+
+# ---- is_instance on non-instances returns 0 (no crash) ----
+
+fn test_is_instance_on_non_instance() {
+    assert_eq(is_instance(42, "Anything"), 0, "int is not an instance");
+    assert_eq(is_instance("string", "Anything"), 0, "string is not an instance");
+    h arr = [1, 2, 3];
+    assert_eq(is_instance(arr, "Anything"), 0, "array is not an instance");
+}
+
+# ---- Typed throw + array payload ----
+
+fn test_array_payload() {
+    h caught = [];
+    try {
+        throw [10, 20, 30];
+    } catch e {
+        caught = e;
+    }
+    assert_eq(arr_len(caught), 3, "array length preserved");
+    assert_eq(arr_get(caught, 0), 10, "elements preserved");
+    assert_eq(arr_get(caught, 2), 30, "elements preserved");
+}
+
+# ---- Nested try: inner catches typed, outer untouched ----
+
+fn test_nested_typed_catch() {
+    h inner_kind = "";
+    h outer_ran = 0;
+    try {
+        try {
+            h err = dict_new();
+            dict_set(err, "kind", "InnerFail");
+            throw err;
+        } catch e {
+            inner_kind = dict_get(e, "kind");
+        }
+    } catch e {
+        outer_ran = 1;
+    }
+    assert_eq(inner_kind, "InnerFail", "inner caught typed");
+    assert_eq(outer_ran, 0, "outer did not run");
+}
+
+# ---- Rethrow preserves type ----
+
+fn test_rethrow_preserves_type() {
+    h outer_kind = "";
+    try {
+        try {
+            h err = dict_new();
+            dict_set(err, "kind", "Original");
+            throw err;
+        } catch e {
+            throw e;   # rethrow the same typed value
+        }
+    } catch e {
+        outer_kind = dict_get(e, "kind");
+    }
+    assert_eq(outer_kind, "Original", "rethrow preserves dict shape");
+}
