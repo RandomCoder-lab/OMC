@@ -28,6 +28,19 @@ The substrate-routed implementation uses a two-phase scan:
 
 Falls back to full `closest_name` if both phases miss — preserves correctness.
 
+### Empirical timings
+
+`cargo test --release -p omnimcode-core typo_bench -- --nocapture` runs 1000 typo queries at each symbol-table size:
+
+| N      | substrate_µs | full_µs  | speedup | bucketed_hit |
+|-------:|-------------:|---------:|--------:|-------------:|
+|     10 |        3.22  |    3.26  |  1.01×  |    0 / 1000  |
+|    100 |        3.06  |   34.07  | 11.14×  | 1000 / 1000  |
+|   1000 |       32.64  |  352.64  | 10.80×  | 1000 / 1000  |
+|  10000 |      313.22  | 3365.22  | 10.74×  | 1000 / 1000  |
+
+Neutral at N=10 (no benefit, no overhead — bucketed hit rate is 0 because the small table fits inside the fallback's working set). At N≥100 the bucketed phase finds the match 100% of the time without falling back, delivering the 10–11× speedup. The ratio holds essentially flat across 2 orders of magnitude in N because closest_name is linear in N while the substrate path stays bounded by bucket size (≤ N / 32 per probe, plus the prefer-set scan).
+
 ```rust
 // closest_name_substrate() in src/interpreter.rs
 //   Phase 1: full O(|prefer|) scan of user fns (correctness)

@@ -7854,6 +7854,81 @@ mod tests {
         // Basic tests would go here
     }
 
+    /// Empirical comparison: substrate-routed typo lookup vs full-scan
+    /// closest_name across symbol-table sizes 10/100/1000/10000. Each
+    /// size runs 1000 typo queries; we report mean lookup time and the
+    /// substrate/full ratio.
+    ///
+    /// Run with: cargo test --release -p omnimcode-core typo_bench -- --nocapture
+    #[test]
+    fn typo_bench_substrate_vs_full() {
+        use std::time::Instant;
+
+        let sizes = [10usize, 100, 1000, 10000];
+        let queries_per_size = 1000usize;
+
+        println!();
+        println!("# Typo lookup: substrate-bucketed vs full-scan");
+        println!("# {} queries per size, ed≤2", queries_per_size);
+        println!();
+        println!("{:>8}  {:>14}  {:>14}  {:>10}  {:>12}",
+                 "N", "substrate_µs", "full_µs", "ratio", "bucketed_hit");
+
+        for &n in &sizes {
+            // Synthesize N defined names of the shape "fn_NNNN" — enough
+            // structural diversity that the bucketed index distributes
+            // reasonably (substrate_hash_name is deterministic per str).
+            let names: Vec<String> = (0..n).map(|i| format!("fn_{:05}", i)).collect();
+            let defined: HashSet<String> = names.iter().cloned().collect();
+
+            // Queries: deterministic typos — drop the last char of every
+            // 7th name. Each is edit-distance 1 from a real name, so
+            // closest_name SHOULD find a match.
+            let queries: Vec<String> = (0..queries_per_size).map(|i| {
+                let target_idx = (i * 7919) % n;
+                let mut q = names[target_idx].clone();
+                q.pop();
+                q
+            }).collect();
+
+            // Populate the thread-local substrate index for the bucketed path.
+            let bucketed = build_substrate_name_index(&defined);
+            HEAL_SUBSTRATE_INDEX.with(|idx| *idx.borrow_mut() = bucketed);
+            HEAL_CLASS_COUNTS.with(|c| *c.borrow_mut() = HealClassCounts::new());
+
+            // Substrate path: bucketed pre-filter + fallback.
+            let t0 = Instant::now();
+            let mut sub_hits = 0;
+            for q in &queries {
+                if closest_name_substrate(q, &defined, 2, None).is_some() {
+                    sub_hits += 1;
+                }
+            }
+            let sub_elapsed = t0.elapsed();
+            let sub_us = sub_elapsed.as_micros() as f64 / queries_per_size as f64;
+
+            // Full path: pure closest_name (linear scan).
+            let t0 = Instant::now();
+            let mut full_hits = 0;
+            for q in &queries {
+                if closest_name(q, &defined, 2, None).is_some() {
+                    full_hits += 1;
+                }
+            }
+            let full_elapsed = t0.elapsed();
+            let full_us = full_elapsed.as_micros() as f64 / queries_per_size as f64;
+
+            assert_eq!(sub_hits, full_hits, "hit counts diverged at N={}", n);
+
+            let bucketed_hit = HEAL_CLASS_COUNTS.with(|c| c.borrow().typo_substrate_hit);
+            let ratio = full_us / sub_us.max(0.001);
+
+            println!("{:>8}  {:>14.3}  {:>14.3}  {:>9.2}x  {:>10}/{:<4}",
+                     n, sub_us, full_us, ratio, bucketed_hit, queries_per_size);
+        }
+        println!();
+    }
+
     fn run(source: &str) -> Result<Value, String> {
         use crate::parser::Parser;
         let mut parser = Parser::new(source);
