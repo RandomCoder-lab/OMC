@@ -7960,6 +7960,60 @@ impl Interpreter {
                 }).collect();
                 Ok(Value::Array(HArray::from_vec(out)))
             }
+            // omc_spawn_child_fold(seed: int, reason: string)
+            //   -> dict {fold_id, focus_numerator, focus_denominator,
+            //            spawn_reason, resonance_target, explored_value,
+            //            final_resonance}
+            //
+            // Ported from Sovereign_Lattice register_singularity_integration.
+            // A ChildFold is the "expand a single token into its
+            // computational subspace" primitive — given any HInt-shaped
+            // seed, deterministically produce the boundary exploration
+            // the parent register would have performed if its tension
+            // exceeded 1/φ.
+            "omc_spawn_child_fold" => {
+                if args.is_empty() {
+                    return Err("omc_spawn_child_fold requires (seed: int, reason?: string)".to_string());
+                }
+                let seed = self.eval_expr(&args[0])?.to_int();
+                let reason = if args.len() >= 2 {
+                    self.eval_expr(&args[1])?.to_display_string()
+                } else { "tension threshold exceeded".to_string() };
+                let cf = crate::onn::spawn_child_fold(seed, &reason);
+                let mut map = std::collections::BTreeMap::new();
+                map.insert("fold_id".to_string(), Value::HInt(HInt::new(cf.fold_id)));
+                map.insert("focus_numerator".to_string(), Value::HInt(HInt::new(cf.focus_numerator)));
+                map.insert("focus_denominator".to_string(), Value::HInt(HInt::new(cf.focus_denominator)));
+                map.insert("spawn_reason".to_string(), Value::String(cf.spawn_reason));
+                map.insert("resonance_target".to_string(), Value::HFloat(cf.resonance_target));
+                map.insert("explored_value".to_string(), Value::HInt(HInt::new(cf.explored_value)));
+                map.insert("final_resonance".to_string(), Value::HFloat(cf.final_resonance));
+                Ok(Value::dict_from(map))
+            }
+            // omc_geodesic_expand(seed: int, n_samples: int)
+            //   -> [[value, resonance], ...]
+            //
+            // "Replicate compressed data from a single token" formalized:
+            // walk the φ-field geodesic from `seed` toward its nearest
+            // Fibonacci attractor in n_samples equal steps. Each sample
+            // is a (value, resonance) pair. Deterministic per (seed, n).
+            //
+            // Useful for: stable substrate-anchored pseudo-random sequences,
+            // expanding a single recall-key into a memory trace, geometric
+            // (not semantic) reconstruction.
+            "omc_geodesic_expand" => {
+                if args.len() < 2 {
+                    return Err("omc_geodesic_expand requires (seed: int, n_samples: int)".to_string());
+                }
+                let seed = self.eval_expr(&args[0])?.to_int();
+                let n = self.eval_expr(&args[1])?.to_int().max(0) as usize;
+                let samples = crate::onn::geodesic_expand(seed, n);
+                let out: Vec<Value> = samples.iter().map(|(v, r)| {
+                    let pair = vec![Value::HInt(HInt::new(*v)), Value::HFloat(*r)];
+                    Value::Array(HArray::from_vec(pair))
+                }).collect();
+                Ok(Value::Array(HArray::from_vec(out)))
+            }
             // omc_llm_self_instantiate(context: string[], task: string,
             //                          base_dir: string, base_sender_id: int)
             //   -> dict[] manifest of {specialist_id, prompt_path,

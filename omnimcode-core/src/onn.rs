@@ -188,6 +188,103 @@ pub fn fold_back(
     out
 }
 
+/// A ChildFold — a specialized mini-computation that explores
+/// boundaries the parent couldn't handle. Ported from
+/// Sovereign_Lattice/.../register_singularity_integration.py.
+///
+/// In the original: spawned when an OmniRegister's tension exceeds
+/// 1/φ. Here: a deterministic structure exposing the
+/// (numerator, denominator) "focus region" and a substrate-fold
+/// resolution, runnable purely from a single HInt-shaped seed token.
+///
+/// This is what gives us "expand from a single substrate token back
+/// to a computational subspace" — the seed carries enough metadata
+/// to drive a fold_escape + harmony resolution.
+#[derive(Clone, Debug)]
+pub struct ChildFold {
+    pub fold_id: i64,           // derived from seed hash
+    pub focus_numerator: i64,
+    pub focus_denominator: i64,
+    pub spawn_reason: String,
+    pub resonance_target: f64,
+    pub explored_value: i64,    // result of fold-escape on the boundary
+    pub final_resonance: f64,
+}
+
+/// Spawn a ChildFold from a single seed HInt value. The seed's
+/// substrate metadata (value, resonance, attractor distance) drives
+/// the boundary exploration. Deterministic — same seed always
+/// produces the same ChildFold.
+///
+/// Strategy:
+///   - Treat seed as a (numerator, denominator) decomposition via
+///     attractor neighbors: numerator = nearest_attractor(seed),
+///     denominator = max(1, distance_to_attractor(seed)).
+///   - Resolution: fold seed's numerator to nearest Fibonacci
+///     (the "boundary fold" — what the parent register would do
+///     if tension exceeded 1/φ).
+///   - Final resonance = HInt::new(folded_value).resonance.
+pub fn spawn_child_fold(seed: i64, spawn_reason: &str) -> ChildFold {
+    let (attractor, dist) = crate::phi_pi_fib::nearest_attractor_with_dist(seed.abs());
+    let numerator = attractor;
+    let denominator = dist.max(1);
+    let explored = crate::phi_pi_fib::nearest_attractor_with_dist(numerator).0;
+    let resonance_target = 1.0 / (1.0 + (dist as f64));
+    let final_resonance = crate::value::HInt::compute_resonance(explored);
+    // fold_id derives from a stable hash of the seed value.
+    let mut h = seed as u64;
+    h = h.wrapping_mul(0x9E3779B97F4A7C15);
+    h ^= h >> 33;
+    let fold_id = (h & 0x7fff_ffff) as i64;
+    ChildFold {
+        fold_id,
+        focus_numerator: numerator,
+        focus_denominator: denominator,
+        spawn_reason: spawn_reason.to_string(),
+        resonance_target,
+        explored_value: explored,
+        final_resonance,
+    }
+}
+
+/// Geodesic expansion: given a single seed token, deterministically
+/// reconstruct an N-element sequence of HInt-valued substrate samples
+/// along the geodesic path from `seed` toward its nearest Fibonacci
+/// attractor.
+///
+/// This is what the user pointed at: "replicate entire forms of
+/// compressed data from singular tokens" — formalized as walking the
+/// φ-field geodesic from the seed to its attractor in N substrate-
+/// equal steps. Each step yields a value, its resonance, and its
+/// position along the path.
+///
+/// Honest framing: this is GEOMETRIC reconstruction, not semantic.
+/// The seed carries no information about the original payload; it
+/// just defines a φ-field geodesic. What this is useful for: stable
+/// pseudo-random sequences anchored at a substrate-meaningful start.
+pub fn geodesic_expand(seed: i64, n_samples: usize) -> Vec<(i64, f64)> {
+    if n_samples == 0 {
+        return Vec::new();
+    }
+    let (attractor, dist) = crate::phi_pi_fib::nearest_attractor_with_dist(seed.abs());
+    let mut out = Vec::with_capacity(n_samples);
+    // Walk from `seed` toward `attractor` in n_samples equal steps.
+    // If seed IS the attractor, the path is just `attractor` repeated
+    // with phase-shifted wave modulation so the expansion isn't trivial.
+    let target = if attractor > 0 { attractor } else { seed };
+    let span = target - seed;
+    for k in 0..n_samples {
+        let t = (k as f64 + 1.0) / (n_samples as f64);
+        // Linear interpolation along the geodesic, modulated by a
+        // wave-mode that's stable per-k.
+        let modulation = (wave_mode(k, k % 7) * (dist as f64).max(1.0)).round() as i64;
+        let val = seed + (span as f64 * t).round() as i64 + modulation;
+        let resonance = crate::value::HInt::compute_resonance(val);
+        out.push((val, resonance));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

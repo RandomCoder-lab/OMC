@@ -2,9 +2,9 @@
 
 Auto-generated from `omnimcode-core/src/docs.rs`. Run `omc --gen-docs > OMC_REFERENCE.md` to regenerate.
 
-**Total documented builtins**: 639
+**Total documented builtins**: 641
 
-**OMC-unique**: 72 (no direct Python/NumPy equivalent — these are why you reach for OMC over numpy)
+**OMC-unique**: 74 (no direct Python/NumPy equivalent — these are why you reach for OMC over numpy)
 
 ---
 
@@ -53,7 +53,7 @@ Other high-value calls: `omc_unique_builtins()` (the OMC-only surface), `omc_pyt
 - [tokenizer](#tokenizer) (17 builtins)
 - [code_intel](#code_intel) (17 builtins)
 - [messaging](#messaging) (5 builtins)
-- [onn](#onn) (5 builtins)
+- [onn](#onn) (7 builtins)
 - [llm_workflow](#llm_workflow) (7 builtins)
 - [math](#math) (82 builtins)
 - [dicts](#dicts) (31 builtins)
@@ -5092,6 +5092,26 @@ Orchestration primitive: compress context to M3(N) specialists, write each as a 
 
 ```omc
 omc_llm_self_instantiate(history, "refactor X", "/tmp/spawn", 18173)  // [{prompt_path, mu, sigma, ...}]
+```
+
+### `omc_spawn_child_fold` 🔱 *OMC-unique*
+
+**Signature**: `(seed: int, reason?: string) -> dict`
+
+Ported from Sovereign_Lattice register_singularity_integration. Given any HInt seed, deterministically produce a ChildFold = the boundary exploration a parent register would have performed at tension > 1/φ. Returns {fold_id, focus_numerator, focus_denominator, spawn_reason, resonance_target, explored_value, final_resonance}.
+
+```omc
+omc_spawn_child_fold(7, "tension exceeded")  // explores 7→8 boundary
+```
+
+### `omc_geodesic_expand` 🔱 *OMC-unique*
+
+**Signature**: `(seed: int, n_samples: int) -> [[value, resonance], ...]`
+
+Walk the φ-field geodesic from `seed` toward its nearest Fibonacci attractor in n equal steps. Each sample is a (value, resonance) pair. Deterministic. Geometric (not semantic) reconstruction from a single substrate-anchored seed.
+
+```omc
+omc_geodesic_expand(7, 5)  // 5 samples along path 7 → 8
 ```
 
 ---

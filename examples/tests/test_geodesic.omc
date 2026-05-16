@@ -1,0 +1,92 @@
+# ChildFold / geodesic-expand tests (Sovereign Lattice port).
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+
+# ChildFold deterministic per seed
+fn test_child_fold_deterministic() {
+    h a = omc_spawn_child_fold(7, "test");
+    h b = omc_spawn_child_fold(7, "test");
+    assert_eq(dict_get(a, "fold_id"), dict_get(b, "fold_id"), "same seed → same id");
+    assert_eq(dict_get(a, "explored_value"), dict_get(b, "explored_value"), "same exploration");
+}
+
+# Different seeds → different folds
+fn test_child_fold_different_seeds() {
+    h a = omc_spawn_child_fold(7, "x");
+    h b = omc_spawn_child_fold(100, "x");
+    assert_true(dict_get(a, "fold_id") != dict_get(b, "fold_id"), "differ");
+}
+
+# focus_numerator is a Fibonacci attractor
+fn test_child_fold_numerator_is_attractor() {
+    h cf = omc_spawn_child_fold(7, "x");
+    h num = dict_get(cf, "focus_numerator");
+    assert_eq(is_attractor(num), 1, "numerator on attractor");
+}
+
+# 7 folds to 8 (nearest Fib)
+fn test_child_fold_7_to_8() {
+    h cf = omc_spawn_child_fold(7, "x");
+    assert_eq(dict_get(cf, "focus_numerator"), 8, "7 → 8");
+    assert_eq(dict_get(cf, "focus_denominator"), 1, "distance 1");
+}
+
+# final_resonance ~ 1.0 since we land on an attractor
+fn test_child_fold_final_resonance_high() {
+    h cf = omc_spawn_child_fold(7, "x");
+    h r = dict_get(cf, "final_resonance");
+    h diff = r - 1.0;
+    if diff < 0.0 { diff = 0.0 - diff; }
+    assert_true(diff < 0.01, "lands on attractor");
+}
+
+# Geodesic expand basic
+fn test_geodesic_basic_length() {
+    h samples = omc_geodesic_expand(7, 5);
+    assert_eq(arr_len(samples), 5, "5 samples");
+}
+
+# Geodesic returns pairs
+fn test_geodesic_returns_pairs() {
+    h samples = omc_geodesic_expand(7, 3);
+    h first = arr_get(samples, 0);
+    assert_eq(arr_len(first), 2, "[value, resonance]");
+}
+
+# Zero samples returns empty
+fn test_geodesic_zero() {
+    h samples = omc_geodesic_expand(7, 0);
+    assert_eq(arr_len(samples), 0, "n=0 → empty");
+}
+
+# Geodesic deterministic
+fn test_geodesic_deterministic() {
+    h a = omc_geodesic_expand(42, 4);
+    h b = omc_geodesic_expand(42, 4);
+    h i = 0;
+    while i < arr_len(a) {
+        h pa = arr_get(a, i);
+        h pb = arr_get(b, i);
+        assert_eq(arr_get(pa, 0), arr_get(pb, 0), concat_many("val ", to_string(i)));
+        i = i + 1;
+    }
+}
+
+# Each sample is HInt — resonance in [0, 1]
+fn test_geodesic_resonance_in_range() {
+    h samples = omc_geodesic_expand(50, 10);
+    h i = 0;
+    while i < arr_len(samples) {
+        h s = arr_get(samples, i);
+        h r = arr_get(s, 1);
+        assert_true(r >= 0.0, concat_many("r ", to_string(i), " >= 0"));
+        assert_true(r <= 1.0, concat_many("r ", to_string(i), " <= 1"));
+        i = i + 1;
+    }
+}

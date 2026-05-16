@@ -1152,6 +1152,20 @@ pub const BUILTINS: &[BuiltinDoc] = &[
         example: "omc_llm_self_instantiate(history, \"refactor X\", \"/tmp/spawn\", 18173)  // [{prompt_path, mu, sigma, ...}]",
         unique_to_omc: true,
     },
+    BuiltinDoc {
+        name: "omc_spawn_child_fold", category: "onn",
+        signature: "(seed: int, reason?: string) -> dict",
+        description: "Ported from Sovereign_Lattice register_singularity_integration. Given any HInt seed, deterministically produce a ChildFold = the boundary exploration a parent register would have performed at tension > 1/φ. Returns {fold_id, focus_numerator, focus_denominator, spawn_reason, resonance_target, explored_value, final_resonance}.",
+        example: "omc_spawn_child_fold(7, \"tension exceeded\")  // explores 7→8 boundary",
+        unique_to_omc: true,
+    },
+    BuiltinDoc {
+        name: "omc_geodesic_expand", category: "onn",
+        signature: "(seed: int, n_samples: int) -> [[value, resonance], ...]",
+        description: "Walk the φ-field geodesic from `seed` toward its nearest Fibonacci attractor in n equal steps. Each sample is a (value, resonance) pair. Deterministic. Geometric (not semantic) reconstruction from a single substrate-anchored seed.",
+        example: "omc_geodesic_expand(7, 5)  // 5 samples along path 7 → 8",
+        unique_to_omc: true,
+    },
     // ---- LLM workflow bundles ----
     BuiltinDoc {
         name: "omc_cheatsheet", category: "llm_workflow",
