@@ -1,0 +1,117 @@
+# Linalg / matmul / transpose coverage.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+
+fn approx_eq(a, b, tol) {
+    h d = a - b;
+    if d < 0.0 { d = 0.0 - d; }
+    return d <= tol;
+}
+
+# arr_matmul correctness
+fn test_matmul_2x2() {
+    h A = [[1, 2], [3, 4]];
+    h B = [[5, 6], [7, 8]];
+    h C = arr_matmul(A, B);
+    h r0 = arr_get(C, 0);
+    h r1 = arr_get(C, 1);
+    # [[19,22],[43,50]]
+    assert_true(approx_eq(arr_get(r0, 0), 19.0, 0.001), "C[0][0]");
+    assert_true(approx_eq(arr_get(r0, 1), 22.0, 0.001), "C[0][1]");
+    assert_true(approx_eq(arr_get(r1, 0), 43.0, 0.001), "C[1][0]");
+    assert_true(approx_eq(arr_get(r1, 1), 50.0, 0.001), "C[1][1]");
+}
+
+fn test_matmul_identity() {
+    h I = arr_eye(3);
+    h A = [[1, 2, 3], [4, 5, 6], [7, 8, 9]];
+    h C = arr_matmul(A, I);
+    h r0 = arr_get(C, 0);
+    assert_true(approx_eq(arr_get(r0, 0), 1.0, 0.001), "A * I = A");
+    assert_true(approx_eq(arr_get(r0, 2), 3.0, 0.001), "A * I = A");
+}
+
+fn test_matmul_zero() {
+    h Z = arr_zeros_2d(2, 2);
+    h A = [[1, 2], [3, 4]];
+    h C = arr_matmul(A, Z);
+    h r = arr_get(C, 0);
+    assert_true(approx_eq(arr_get(r, 0), 0.0, 0.001), "* zero → zero");
+}
+
+# arr_transpose
+fn test_transpose_2x3() {
+    h A = [[1, 2, 3], [4, 5, 6]];
+    h T = arr_transpose(A);
+    # 3x2
+    assert_eq(arr_len(T), 3, "3 rows after transpose");
+    h r0 = arr_get(T, 0);
+    assert_eq(arr_len(r0), 2, "2 cols");
+    assert_eq(arr_get(r0, 0), 1, "T[0][0]=1");
+    assert_eq(arr_get(r0, 1), 4, "T[0][1]=4");
+}
+
+fn test_transpose_twice_identity() {
+    h A = [[1, 2, 3], [4, 5, 6]];
+    h TT = arr_transpose(arr_transpose(A));
+    h r0 = arr_get(TT, 0);
+    assert_eq(arr_get(r0, 0), 1, "double transpose");
+    assert_eq(arr_get(r0, 2), 3, "double transpose");
+}
+
+# arr_eye
+fn test_eye_3() {
+    h I = arr_eye(3);
+    assert_eq(arr_len(I), 3, "3 rows");
+    h r0 = arr_get(I, 0);
+    assert_eq(arr_len(r0), 3, "3 cols");
+    assert_eq(arr_get(r0, 0), 1, "I[0][0]=1");
+    assert_eq(arr_get(r0, 1), 0, "I[0][1]=0");
+}
+
+fn test_eye_1() {
+    h I = arr_eye(1);
+    assert_eq(arr_len(I), 1, "1x1");
+}
+
+fn test_eye_zero() {
+    h I = arr_eye(0);
+    assert_eq(arr_len(I), 0, "0x0");
+}
+
+# arr_zeros_2d
+fn test_zeros_2d_basic() {
+    h Z = arr_zeros_2d(3, 4);
+    assert_eq(arr_len(Z), 3, "3 rows");
+    h r0 = arr_get(Z, 0);
+    assert_eq(arr_len(r0), 4, "4 cols");
+    assert_eq(arr_get(r0, 0), 0, "is zero");
+}
+
+# arr_outer composition with matmul
+fn test_outer_then_matmul() {
+    h u = [1.0, 2.0];
+    h v = [3.0, 4.0];
+    # outer(u, v) is rank-1 matrix [[3,4],[6,8]]
+    h M = arr_outer(u, v);
+    h r0 = arr_get(M, 0);
+    assert_true(approx_eq(arr_get(r0, 0), 3.0, 0.001), "1*3");
+    assert_true(approx_eq(arr_get(r0, 1), 4.0, 0.001), "1*4");
+}
+
+# Substrate-preserving matmul: integer inputs → integer outputs
+fn test_matmul_int_preserves_substrate() {
+    h A = [[1, 2], [3, 5]];
+    h B = [[1, 1], [2, 3]];
+    h C = arr_matmul(A, B);
+    h r0 = arr_get(C, 0);
+    # C[0][0] = 1*1 + 2*2 = 5 (Fibonacci attractor)
+    assert_eq(arr_get(r0, 0), 5, "preserves int + attractor");
+    assert_eq(is_attractor(arr_get(r0, 0)), 1, "5 is attractor");
+}

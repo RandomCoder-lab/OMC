@@ -1,0 +1,139 @@
+# Core language feature coverage — control flow, recursion, lambdas, etc.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+
+# If/else basic
+fn test_if_then() {
+    h x = 0;
+    if 1 == 1 { x = 1; }
+    assert_eq(x, 1, "then branch");
+}
+
+fn test_if_else() {
+    h x = 0;
+    if 1 == 0 { x = 1; } else { x = 2; }
+    assert_eq(x, 2, "else branch");
+}
+
+fn test_elif() {
+    h x = 0;
+    if 1 == 0 { x = 1; } elif 1 == 1 { x = 2; } else { x = 3; }
+    assert_eq(x, 2, "elif branch");
+}
+
+# While loop
+fn test_while_counts() {
+    h n = 0;
+    while n < 10 { n = n + 1; }
+    assert_eq(n, 10, "while counts to 10");
+}
+
+fn test_while_zero_iters() {
+    h n = 0;
+    while n < 0 { n = n + 1; }
+    assert_eq(n, 0, "no iterations");
+}
+
+# Break / continue
+fn test_break() {
+    h n = 0;
+    while n < 100 {
+        if n == 5 { break; }
+        n = n + 1;
+    }
+    assert_eq(n, 5, "broke at 5");
+}
+
+fn test_continue() {
+    h sum = 0;
+    h i = 0;
+    while i < 10 {
+        i = i + 1;
+        if i == 5 { continue; }
+        sum = sum + i;
+    }
+    # 1+2+3+4+6+7+8+9+10 = 50
+    assert_eq(sum, 50, "skipped 5");
+}
+
+# Recursion
+fn fact(n) {
+    if n <= 1 { return 1; }
+    return n * fact(n - 1);
+}
+
+fn test_recursion() {
+    assert_eq(fact(5), 120, "5! = 120");
+    assert_eq(fact(0), 1, "0! = 1");
+}
+
+# Mutual recursion
+fn is_even(n) {
+    if n == 0 { return 1; }
+    return is_odd(n - 1);
+}
+
+fn is_odd(n) {
+    if n == 0 { return 0; }
+    return is_even(n - 1);
+}
+
+fn test_mutual_recursion() {
+    assert_eq(is_even(4), 1, "4 is even");
+    assert_eq(is_odd(7), 1, "7 is odd");
+}
+
+# Closures
+fn make_counter() {
+    h count = 0;
+    return fn() {
+        count = count + 1;
+        return count;
+    };
+}
+
+fn test_closure_state() {
+    h c = make_counter();
+    assert_eq(c(), 1, "first");
+    assert_eq(c(), 2, "second");
+    assert_eq(c(), 3, "third");
+}
+
+# Lambda as arg
+fn apply(f, x) { return f(x); }
+
+fn test_apply_lambda() {
+    h r = apply(fn(x) { return x * 3; }, 5);
+    assert_eq(r, 15, "lambda applied");
+}
+
+# Return early
+fn first_positive(arr) {
+    h i = 0;
+    while i < arr_len(arr) {
+        if arr_get(arr, i) > 0 { return arr_get(arr, i); }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+fn test_early_return() {
+    assert_eq(first_positive([0 - 5, 0 - 2, 7, 9]), 7, "found 7");
+    assert_eq(first_positive([0 - 5, 0 - 2]), 0 - 1, "none found");
+}
+
+# (Boolean short-circuit tests omitted — && only inside `if` conditions.)
+
+# Comparison chain
+fn test_lt_gt_chain() {
+    assert_true(1 < 2, "1 < 2");
+    assert_true(2 > 1, "2 > 1");
+    assert_true(1 <= 1, "<= equal");
+    assert_true(1 >= 1, ">= equal");
+}
