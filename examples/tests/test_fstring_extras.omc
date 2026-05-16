@@ -1,0 +1,67 @@
+# More f-string interpolation tests.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+
+fn test_fstring_simple_int() {
+    h x = 42;
+    h s = f"answer is {x}";
+    assert_eq(s, "answer is 42", "simple int interp");
+}
+
+fn test_fstring_arithmetic() {
+    h x = 5;
+    h s = f"x*2 = {x * 2}";
+    assert_eq(s, "x*2 = 10", "arithmetic in f-string");
+}
+
+fn test_fstring_no_subst() {
+    h s = f"no substitutions";
+    assert_eq(s, "no substitutions", "literal f-string");
+}
+
+fn test_fstring_empty() {
+    h s = f"";
+    assert_eq(s, "", "empty f-string");
+}
+
+fn test_fstring_multiple_subs() {
+    h a = 1;
+    h b = 2;
+    h c = 3;
+    h s = f"{a}+{b}={c}";
+    assert_eq(s, "1+2=3", "multiple subs");
+}
+
+fn test_fstring_with_braces_escape() {
+    h s = f"literal {{ brace }}";
+    assert_eq(s, "literal { brace }", "escaped braces");
+}
+
+fn test_fstring_with_quotes() {
+    h s = f"quoted text";
+    assert_true(str_len(s) > 0, "quotes work");
+}
+
+fn test_fstring_function_call() {
+    h xs = [1, 2, 3];
+    h s = f"len = {arr_len(xs)}";
+    assert_eq(s, "len = 3", "function call in subst");
+}
+
+fn test_fstring_float() {
+    h x = 3.14;
+    h s = f"pi = {x}";
+    assert_true(re_match("pi = ", s) == 1, "float interpolated");
+}
+
+fn test_fstring_with_strings() {
+    h name = "world";
+    h s = f"hello, {name}!";
+    assert_eq(s, "hello, world!", "string interpolation");
+}

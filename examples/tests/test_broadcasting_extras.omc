@@ -1,0 +1,85 @@
+# More broadcasting + 2D array op coverage.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+
+# Scalar broadcast on arr_add
+fn test_arr_add_scalar_lhs() {
+    h r = arr_add(10, [1, 2, 3]);
+    assert_eq(arr_get(r, 0), 11, "10+1");
+    assert_eq(arr_get(r, 2), 13, "10+3");
+}
+
+fn test_arr_add_scalar_rhs() {
+    h r = arr_add([1, 2, 3], 10);
+    assert_eq(arr_get(r, 0), 11, "1+10");
+}
+
+# Elementwise 1D
+fn test_arr_sub_elementwise() {
+    h r = arr_sub([10, 20, 30], [1, 2, 3]);
+    assert_eq(arr_get(r, 0), 9, "10-1");
+    assert_eq(arr_get(r, 1), 18, "20-2");
+    assert_eq(arr_get(r, 2), 27, "30-3");
+}
+
+fn test_arr_mul_elementwise() {
+    h r = arr_mul([1, 2, 3], [4, 5, 6]);
+    assert_eq(arr_get(r, 0), 4, "1*4");
+    assert_eq(arr_get(r, 2), 18, "3*6");
+}
+
+# 2D add
+fn test_2d_add_same_shape() {
+    h A = [[1, 2], [3, 4]];
+    h B = [[10, 20], [30, 40]];
+    h C = arr_add(A, B);
+    h r0 = arr_get(C, 0);
+    h r1 = arr_get(C, 1);
+    assert_eq(arr_get(r0, 0), 11, "(0,0)");
+    assert_eq(arr_get(r1, 1), 44, "(1,1)");
+}
+
+# 2D broadcast 1D row
+fn test_2d_plus_row_broadcast() {
+    h A = [[1, 2, 3], [10, 20, 30]];
+    h bias = [100, 200, 300];
+    h C = arr_add(A, bias);
+    h r0 = arr_get(C, 0);
+    assert_eq(arr_get(r0, 0), 101, "broadcast row");
+}
+
+# arr_neg
+fn test_arr_neg() {
+    h r = arr_neg([1, 0 - 2, 3]);
+    assert_eq(arr_get(r, 0), 0 - 1, "neg 1");
+    assert_eq(arr_get(r, 1), 2, "neg -2");
+}
+
+# arr_scale
+fn test_arr_scale() {
+    h r = arr_scale([1, 2, 3], 10);
+    assert_eq(arr_get(r, 0), 10, "1*10");
+    assert_eq(arr_get(r, 2), 30, "3*10");
+}
+
+# arr_div_int with zero
+fn test_arr_div_int_with_zero() {
+    h r = arr_div_int([10, 20, 30], [2, 0, 3]);
+    assert_eq(arr_get(r, 0), 5, "10/2");
+    assert_eq(arr_get(r, 1), 0, "div by 0 = 0");
+    assert_eq(arr_get(r, 2), 10, "30/3");
+}
+
+# Composition: outer-product-then-sum
+fn test_outer_sum_composition() {
+    h o = arr_outer([1.0, 2.0], [3.0, 4.0]);
+    h r0 = arr_get(o, 0);  # [3, 4]
+    h sum0 = arr_sum_int([arr_get(r0, 0), arr_get(r0, 1)]);
+    assert_eq(sum0, 7, "row sum");
+}

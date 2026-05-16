@@ -1,0 +1,59 @@
+# More regex tests.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+
+fn test_re_match_anchored() {
+    assert_eq(re_match("^[0-9]+$", "123"), 1, "all digits");
+    assert_eq(re_match("^[0-9]+$", "12a"), 0, "with letter");
+}
+
+fn test_re_match_basic() {
+    assert_eq(re_match("abc", "xabcy"), 1, "substring match");
+    assert_eq(re_match("xyz", "abc"), 0, "no match");
+}
+
+fn test_re_find_all_digits() {
+    h all = re_find_all("[0-9]+", "a1 b22 c333");
+    assert_eq(arr_len(all), 3, "3 matches");
+    assert_eq(arr_get(all, 0), "1", "first");
+    assert_eq(arr_get(all, 2), "333", "third");
+}
+
+fn test_re_replace_basic() {
+    assert_eq(re_replace("[0-9]+", "abc123def", "X"), "abcXdef", "digits replaced");
+}
+
+fn test_re_replace_all_occurrences() {
+    assert_eq(re_replace("a", "banana", "Z"), "bZnZnZ", "all replaced");
+}
+
+fn test_re_find_first() {
+    h s = re_find("[a-z]+", "ABC def GHI");
+    assert_eq(s, "def", "first lowercase run");
+}
+
+fn test_re_split_csv() {
+    h parts = re_split(",", "a,b,c");
+    assert_eq(arr_len(parts), 3, "3 parts");
+}
+
+fn test_re_match_special_chars() {
+    assert_eq(re_match("\\.", "a.b"), 1, "literal dot");
+    assert_eq(re_match("\\d", "x5"), 1, "shorthand class");
+}
+
+fn test_re_match_optional() {
+    assert_eq(re_match("colou?r", "color"), 1, "optional u");
+    assert_eq(re_match("colou?r", "colour"), 1, "optional u present");
+}
+
+fn test_re_match_one_or_more() {
+    assert_eq(re_match("a+", "aaa"), 1, "1+");
+    assert_eq(re_match("a+", "b"), 0, "no a");
+}
