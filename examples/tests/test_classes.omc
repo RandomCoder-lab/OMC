@@ -1,0 +1,121 @@
+# Tests for the minimum-viable class system.
+#
+# `class Name { field1; field2; fn method(self, ...) {...} }` desugars
+# at registration time into:
+#   - A constructor fn `Name(field1, field2, ...)` building a Dict
+#     with __class__="Name" + each field positionally
+#   - One top-level fn per method, mangled as `Name__method`
+#
+# Method dispatch `obj.method(args)` checks if obj is a Dict with
+# __class__ key and routes to the mangled fn with obj injected as
+# the first argument (the `self` slot).
+#
+# Field access uses dict_get(obj, "field") — no `obj.field` (no-paren)
+# syntax yet. Field mutation uses dict_set(obj, "field", value).
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) {
+    if !cond { test_record_failure(msg); }
+}
+
+# ---- Construction ----
+
+class Point {
+    x;
+    y;
+    fn distance_to(self, other) {
+        h dx = dict_get(self, "x") - dict_get(other, "x");
+        h dy = dict_get(self, "y") - dict_get(other, "y");
+        return sqrt(to_float(dx*dx + dy*dy));
+    }
+    fn shifted(self, dx, dy) {
+        return Point(dict_get(self, "x") + dx, dict_get(self, "y") + dy);
+    }
+    fn manhattan(self, other) {
+        h dx = dict_get(self, "x") - dict_get(other, "x");
+        h dy = dict_get(self, "y") - dict_get(other, "y");
+        return abs(dx) + abs(dy);
+    }
+}
+
+fn test_construction() {
+    h p = Point(3, 4);
+    assert_eq(dict_get(p, "x"), 3, "x field set");
+    assert_eq(dict_get(p, "y"), 4, "y field set");
+    assert_eq(dict_get(p, "__class__"), "Point", "class marker set");
+}
+
+fn test_method_call() {
+    h p = Point(3, 4);
+    h q = Point(0, 0);
+    h d = p.distance_to(q);
+    assert_true(d > 4.99, "distance > 4.99");
+    assert_true(d < 5.01, "distance < 5.01");
+}
+
+fn test_method_returns_instance() {
+    h p = Point(3, 4);
+    h r = p.shifted(10, 10);
+    assert_eq(dict_get(r, "x"), 13, "shifted x");
+    assert_eq(dict_get(r, "y"), 14, "shifted y");
+    assert_eq(dict_get(r, "__class__"), "Point", "shifted is still a Point");
+}
+
+fn test_multiple_methods() {
+    h p = Point(3, 4);
+    h q = Point(0, 0);
+    assert_eq(p.manhattan(q), 7, "|3|+|4|=7");
+}
+
+# ---- Two classes coexisting ----
+
+class Vector {
+    dx;
+    dy;
+    fn magnitude(self) {
+        h dx = dict_get(self, "dx");
+        h dy = dict_get(self, "dy");
+        return sqrt(to_float(dx*dx + dy*dy));
+    }
+}
+
+fn test_independent_classes() {
+    h p = Point(3, 4);
+    h v = Vector(5, 12);
+    assert_eq(dict_get(p, "__class__"), "Point", "Point preserved");
+    assert_eq(dict_get(v, "__class__"), "Vector", "Vector preserved");
+    assert_true(v.magnitude() > 12.9, "vec magnitude > 12.9");
+    assert_true(v.magnitude() < 13.1, "vec magnitude < 13.1");
+}
+
+# ---- Field mutation via dict_set ----
+
+fn test_field_mutation() {
+    h p = Point(1, 2);
+    dict_set(p, "x", 99);
+    assert_eq(dict_get(p, "x"), 99, "x mutated");
+    assert_eq(dict_get(p, "y"), 2, "y unchanged");
+}
+
+# ---- Self-reference in methods ----
+
+class Counter {
+    value;
+    fn increment(self) {
+        dict_set(self, "value", dict_get(self, "value") + 1);
+        return self;
+    }
+}
+
+fn test_self_mutation() {
+    h c = Counter(0);
+    c.increment();
+    c.increment();
+    c.increment();
+    assert_eq(dict_get(c, "value"), 3, "increment chain");
+}

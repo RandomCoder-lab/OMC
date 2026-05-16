@@ -105,6 +105,21 @@ pub enum Statement {
     /// Future work: carry the thrown Value through Err(Value) instead
     /// of stringifying, enabling typed-catch hierarchies.
     Throw(Expression),
+    /// `class Name { field1; field2; fn method1(self, ...) { ... } }`
+    /// Minimum-viable class system: each ClassDef desugars at
+    /// register_user_functions time into:
+    ///   - A constructor fn `Name(field1, field2, ...)` that builds a
+    ///     dict with __class__="Name" plus each field as a key.
+    ///   - One top-level fn per method, name-mangled as `Name__method`.
+    /// Method dispatch `obj.method(args)` works because the
+    /// call-resolution path checks whether the receiver is a Dict
+    /// carrying __class__ and routes to the mangled fn name with
+    /// `obj` injected as the first argument (the `self` slot).
+    ClassDef {
+        name: String,
+        fields: Vec<String>,
+        methods: Vec<Statement>, // each is a FunctionDef
+    },
     /// `match expr { pat => stmts, ... }`. First arm whose pattern
     /// accepts the scrutinee runs; remaining arms are skipped.
     /// A wildcard or bare-identifier arm at the end is the default.

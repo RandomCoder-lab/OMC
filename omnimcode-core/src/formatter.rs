@@ -214,6 +214,21 @@ fn format_stmt(stmt: &Statement, level: usize, out: &mut String) {
             indent_to(level, out);
             out.push_str("}\n");
         }
+        Statement::ClassDef { name, fields, methods } => {
+            out.push_str("class ");
+            out.push_str(name);
+            out.push_str(" {\n");
+            for f in fields {
+                indent_to(level + 1, out);
+                out.push_str(f);
+                out.push_str(";\n");
+            }
+            for m in methods {
+                format_stmt(m, level + 1, out);
+            }
+            indent_to(level, out);
+            out.push_str("}\n");
+        }
     }
 }
 

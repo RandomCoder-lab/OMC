@@ -1452,6 +1452,53 @@ impl Interpreter {
                 self.functions.insert(name.clone(), (params.clone(), body.clone()));
                 Ok(())
             }
+            Statement::ClassDef { name, fields, methods } => {
+                // Desugar at execute time so the tree-walker doesn't
+                // need register_user_functions to have been called.
+                // Same logic as register_user_functions::visit:
+                // synthesize a constructor + mangled methods.
+                let mut ctor_body: Vec<Statement> = Vec::new();
+                ctor_body.push(Statement::VarDecl {
+                    name: "__obj".to_string(),
+                    value: Expression::Call {
+                        name: "dict_new".to_string(),
+                        args: vec![],
+                        pos: crate::ast::Pos::unknown(),
+                    },
+                    is_harmonic: true,
+                });
+                ctor_body.push(Statement::Expression(Expression::Call {
+                    name: "dict_set".to_string(),
+                    args: vec![
+                        Expression::Variable("__obj".to_string()),
+                        Expression::String("__class__".to_string()),
+                        Expression::String(name.clone()),
+                    ],
+                    pos: crate::ast::Pos::unknown(),
+                }));
+                for f in fields {
+                    ctor_body.push(Statement::Expression(Expression::Call {
+                        name: "dict_set".to_string(),
+                        args: vec![
+                            Expression::Variable("__obj".to_string()),
+                            Expression::String(f.clone()),
+                            Expression::Variable(f.clone()),
+                        ],
+                        pos: crate::ast::Pos::unknown(),
+                    }));
+                }
+                ctor_body.push(Statement::Return(Some(
+                    Expression::Variable("__obj".to_string()),
+                )));
+                self.functions.insert(name.clone(), (fields.clone(), ctor_body));
+                for m in methods {
+                    if let Statement::FunctionDef { name: mname, params, body, .. } = m {
+                        let mangled = format!("{}__{}", name, mname);
+                        self.functions.insert(mangled, (params.clone(), body.clone()));
+                    }
+                }
+                Ok(())
+            }
             Statement::Return(expr) => {
                 self.return_value = Some(
                     if let Some(e) = expr {
@@ -2093,6 +2140,37 @@ impl Interpreter {
             let r = handler(&argvals);
             INTERP_PTR.with(|p| p.set(prev));
             return r;
+        }
+        // Class instance method dispatch: `obj.method(args)` where
+        // `obj` is a local Dict carrying __class__ marker. Routes to
+        // the mangled `<ClassName>__<method>` fn registered at class-
+        // definition time, with `obj` injected as the first arg.
+        //
+        // This MUST be checked before module-qualified dispatch so
+        // that instance dicts aren't accidentally looked up as
+        // modules. Identified by: receiver-name is a local variable
+        // AND it resolves to a Dict AND that dict has __class__.
+        if let Some((recv_name, method_name)) = name.split_once('.') {
+            if let Some(Value::Dict(d)) = self.get_var(recv_name) {
+                let class_key = d.borrow().get("__class__").cloned();
+                if let Some(Value::String(class_name)) = class_key {
+                    let mangled = format!("{}__{}", class_name, method_name);
+                    if let Some((params, body)) = self.functions.get(&mangled).cloned() {
+                        // Build the call arg list: receiver first
+                        // (binding to `self` if that's the first param
+                        // name), then the rest. We pass the receiver
+                        // as a variable expression — the existing
+                        // `recv_name` resolves to the same dict.
+                        let mut full_args: Vec<Expression> =
+                            Vec::with_capacity(args.len() + 1);
+                        full_args.push(Expression::Variable(recv_name.to_string()));
+                        full_args.extend(args.iter().cloned());
+                        return self.invoke_user_function(
+                            &mangled, &params, &body, &full_args,
+                        );
+                    }
+                }
+            }
         }
         // Module-qualified calls (e.g., "phi.fold", "phi.res", "core.fib")
         if let Some((module, func)) = name.split_once('.') {
@@ -7043,6 +7121,64 @@ impl Interpreter {
                 Statement::FunctionDef { name, params, body, .. } => {
                     fns.insert(name.clone(), (params.clone(), body.clone()));
                     for s in body { visit(s, fns); }
+                }
+                Statement::ClassDef { name, fields, methods } => {
+                    // Desugar: build a constructor fn and one method fn
+                    // per declared method. The constructor is a body of
+                    // dict_set calls that populates a fresh dict with
+                    // __class__ = "Name" + each positional field.
+                    let mut ctor_body: Vec<Statement> = Vec::new();
+                    // `h __obj = dict_new();`
+                    ctor_body.push(Statement::VarDecl {
+                        name: "__obj".to_string(),
+                        value: Expression::Call {
+                            name: "dict_new".to_string(),
+                            args: vec![],
+                            pos: crate::ast::Pos::unknown(),
+                        },
+                        is_harmonic: true,
+                    });
+                    // `dict_set(__obj, "__class__", "<Name>");`
+                    ctor_body.push(Statement::Expression(Expression::Call {
+                        name: "dict_set".to_string(),
+                        args: vec![
+                            Expression::Variable("__obj".to_string()),
+                            Expression::String("__class__".to_string()),
+                            Expression::String(name.clone()),
+                        ],
+                        pos: crate::ast::Pos::unknown(),
+                    }));
+                    // One dict_set per field, copying the param value.
+                    for f in fields {
+                        ctor_body.push(Statement::Expression(Expression::Call {
+                            name: "dict_set".to_string(),
+                            args: vec![
+                                Expression::Variable("__obj".to_string()),
+                                Expression::String(f.clone()),
+                                Expression::Variable(f.clone()),
+                            ],
+                            pos: crate::ast::Pos::unknown(),
+                        }));
+                    }
+                    // `return __obj;`
+                    ctor_body.push(Statement::Return(Some(
+                        Expression::Variable("__obj".to_string()),
+                    )));
+                    fns.insert(name.clone(), (fields.clone(), ctor_body));
+
+                    // Each method becomes a top-level fn with the
+                    // mangled name `Name__method`. The first parameter
+                    // is `self`, populated by call_function's instance
+                    // dispatch path.
+                    for m in methods {
+                        if let Statement::FunctionDef { name: mname, params, body, .. } = m {
+                            let mangled = format!("{}__{}", name, mname);
+                            fns.insert(mangled, (params.clone(), body.clone()));
+                            // Recurse into the method body in case it
+                            // contains nested fn defs.
+                            for s in body { visit(s, fns); }
+                        }
+                    }
                 }
                 Statement::If { then_body, elif_parts, else_body, .. } => {
                     for s in then_body { visit(s, fns); }

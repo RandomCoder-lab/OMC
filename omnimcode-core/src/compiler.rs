@@ -999,6 +999,13 @@ impl Compiler {
                 // itself, fall back to the AST walker for try/catch/throw.
                 self.emit(Op::ExecStmt(Box::new(s.clone())));
             }
+            Statement::ClassDef { .. } => {
+                // ClassDef is consumed at fn-registration time
+                // (register_user_functions desugars it into a
+                // constructor + mangled methods). No code is emitted
+                // at the statement level — by the time we get here
+                // the class's fns are already in the user-fn table.
+            }
             Statement::Match { .. } => {
                 // Same fallback strategy as Try. A native lowering
                 // would compile each arm into a guarded Jump and

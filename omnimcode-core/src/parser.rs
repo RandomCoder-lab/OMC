@@ -41,6 +41,7 @@ pub enum Token {
     Finally,
     Throw,
     Match,
+    Class,
     /// f-string template — alternating literal and expression segments.
     /// Parser turns this into `concat_many(parts...)` at expression
     /// position.
@@ -473,6 +474,7 @@ impl Lexer {
                         "catch" => Token::Catch,
                         "finally" => Token::Finally,
                         "throw" => Token::Throw,
+                        "class" => Token::Class,
                         "match" => Token::Match,
                         "and" => Token::And,
                         "or" => Token::Or,
@@ -867,6 +869,7 @@ impl Parser {
             Token::While => self.parse_while_stmt(),
             Token::For => self.parse_for_stmt(),
             Token::Fn => self.parse_function_def(),
+            Token::Class => self.parse_class_def(),
             Token::Try => self.parse_try_stmt(),
             Token::Throw => {
                 // `throw expr;` — evaluate expr, raise its display string
@@ -1079,6 +1082,42 @@ impl Parser {
         let body = self.parse_block()?;
 
         Ok(Statement::While { condition, body })
+    }
+
+    /// `class Name { field1; field2; fn method1(self, args) { ... } ... }`
+    ///
+    /// Parser produces Statement::ClassDef. The interpreter's
+    /// `register_user_functions` later desugars this into:
+    ///   - A constructor fn `Name(field1, field2, ...)` building a Dict
+    ///     with __class__="Name" + each positional field.
+    ///   - One top-level fn per method, mangled as `Name__method`.
+    ///
+    /// Method dispatch happens at call time: `obj.method(args)` checks
+    /// whether the receiver is a Dict with __class__ field and routes
+    /// to the mangled fn name. No new Value variant required — the
+    /// instance is just a regular Dict with a marker key.
+    fn parse_class_def(&mut self) -> Result<Statement, String> {
+        self.expect(Token::Class)?;
+        let name = self.parse_ident()?;
+        self.expect(Token::LBrace)?;
+        let mut fields: Vec<String> = Vec::new();
+        let mut methods: Vec<Statement> = Vec::new();
+        while self.current() != Token::RBrace {
+            if self.current() == Token::Fn {
+                // Method definition — parse as a regular function.
+                let m = self.parse_function_def()?;
+                methods.push(m);
+            } else {
+                // Field declaration: just `field_name;` — implicit
+                // positional ordering matches the constructor's
+                // parameter list.
+                let f = self.parse_ident()?;
+                self.expect(Token::Semicolon)?;
+                fields.push(f);
+            }
+        }
+        self.expect(Token::RBrace)?;
+        Ok(Statement::ClassDef { name, fields, methods })
     }
 
     /// `try { ... } catch err { ... }` with optional trailing
