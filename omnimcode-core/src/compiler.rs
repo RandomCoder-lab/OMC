@@ -199,7 +199,11 @@ impl Compiler {
                         | "tape_neg" | "tape_pow_int"
                         | "tape_exp" | "tape_sin" | "tape_cos"
                         | "tape_relu" | "tape_sigmoid" | "tape_tanh"
-                        | "tape_matmul" | "tape_sum" | "tape_mean" => Some("int"),
+                        | "tape_matmul" | "tape_sum" | "tape_mean"
+                        // Lazy generators: gen_stream/gen_count/gen_sum
+                        // return int (success/count/accumulator).
+                        | "gen_stream" | "gen_count" | "gen_sum"
+                        | "gen_substrate_fib" => Some("int"),
                         "pow" | "sqrt" | "log" | "log2" | "log10"
                         | "exp" | "sin" | "cos" | "tan" | "asin" | "acos"
                         | "atan" | "atan2" | "hypot" | "lerp"
@@ -262,6 +266,8 @@ impl Compiler {
                         // 2D array primitives (Track 2 — 2026-05-16)
                         | "arr_matmul" | "arr_transpose"
                         | "arr_eye" | "arr_zeros_2d"
+                        // Lazy generator collector: returns array
+                        | "gen_take"
                         // Forward-mode autograd duals (Track 2 — 2026-05-16)
                         | "dual" | "dual_add" | "dual_sub"
                         | "dual_mul" | "dual_div" | "dual_neg"

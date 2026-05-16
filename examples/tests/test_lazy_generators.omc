@@ -1,0 +1,162 @@
+# Lazy generators — streaming yield via callback.
+#
+# Previous behaviour: every `yield` appended to a Vec, materializing
+# the entire sequence before returning. A generator of a billion
+# values consumed memory for a billion values.
+#
+# Now: gen_stream / gen_take / gen_sum / gen_count install a callback.
+# Each `yield v` invokes the callback with v; the callback returns 1
+# to continue or 0 to short-circuit. Memory is O(call-stack-depth),
+# not O(yield-count). The existing eager `for x in fib() { ... }`
+# still works (no callback installed → eager fallback).
+#
+# Substrate-aligned bonus: gen_substrate_fib is a native lazy
+# generator that streams Fibonacci attractors with substrate metadata
+# carried per value. Python can't do either property naturally.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) {
+    if !cond { test_record_failure(msg); }
+}
+
+# ---- A small generator that yields 1..n. Used by every test below. ----
+
+fn count_to(n) {
+    h i = 1;
+    while i <= n {
+        yield i;
+        i = i + 1;
+    }
+}
+
+# ---- gen_count: walk a generator without storing anything ----
+
+fn test_gen_count_basic() {
+    h n = gen_count(fn() { return count_to(100); });
+    assert_eq(n, 100, "count_to(100) yields 100 values");
+}
+
+fn test_gen_count_large() {
+    # 100_000 values — would be a 100k-entry Vec in eager mode.
+    # In streaming mode this is O(1) memory.
+    h n = gen_count(fn() { return count_to(100000); });
+    assert_eq(n, 100000, "100k yields counted, no materialisation");
+}
+
+# ---- gen_sum: accumulate without storing ----
+
+fn test_gen_sum_basic() {
+    h s = gen_sum(fn() { return count_to(10); });
+    # 1+2+...+10 = 55
+    assert_eq(s, 55, "sum 1..10 = 55");
+}
+
+fn test_gen_sum_large() {
+    h s = gen_sum(fn() { return count_to(1000); });
+    # 1+2+...+1000 = 500500
+    assert_eq(s, 500500, "sum 1..1000 = 500500");
+}
+
+# ---- gen_take: pull first n values ----
+
+fn test_gen_take_first_5() {
+    h xs = gen_take(fn() { return count_to(1000000); }, 5);
+    assert_eq(arr_len(xs), 5, "took 5 values");
+    assert_eq(arr_get(xs, 0), 1, "first = 1");
+    assert_eq(arr_get(xs, 4), 5, "fifth = 5");
+}
+
+fn test_gen_take_more_than_available() {
+    # Asking for 100 from a generator that yields 5 → returns what's there
+    h xs = gen_take(fn() { return count_to(5); }, 100);
+    assert_eq(arr_len(xs), 5, "got all 5 available");
+    assert_eq(arr_get(xs, 4), 5, "last = 5");
+}
+
+# ---- gen_stream: arbitrary user-provided callback ----
+
+fn test_gen_stream_with_inline_lambda() {
+    # Sum the first 7 squares: 1+4+9+16+25+36+49 = 140
+    h acc = [0];
+    h taken = [0];
+    gen_stream(
+        fn() { return count_to(1000); },
+        fn(v) {
+            if arr_get(taken, 0) >= 7 { return 0; }
+            arr_set(acc, 0, arr_get(acc, 0) + v * v);
+            arr_set(taken, 0, arr_get(taken, 0) + 1);
+            return 1;
+        }
+    );
+    assert_eq(arr_get(acc, 0), 140, "sum of first 7 squares = 140");
+}
+
+# ---- Eager fallback still works (regression) ----
+
+fn test_eager_generator_still_returns_array() {
+    # No gen_stream — pure yield should materialise as before.
+    h all = count_to(5);
+    assert_eq(arr_len(all), 5, "eager array length");
+    assert_eq(arr_get(all, 0), 1, "eager arr[0] = 1");
+    assert_eq(arr_get(all, 4), 5, "eager arr[4] = 5");
+}
+
+# ---- Substrate-native lazy Fibonacci generator ----
+
+fn test_substrate_fib_stream() {
+    # Stream Fibonacci values <= 100 ; should be [0,1,1,2,3,5,8,13,21,34,55,89] = 12 values
+    h collected = [];
+    gen_substrate_fib(
+        fn(v) {
+            arr_push(collected, v);
+            return 1;
+        },
+        100
+    );
+    assert_eq(arr_len(collected), 12, "12 Fibonacci ≤ 100");
+    assert_eq(arr_get(collected, 0), 0, "first = 0");
+    assert_eq(arr_get(collected, 11), 89, "last ≤ 100 = 89");
+}
+
+fn test_substrate_fib_each_is_attractor() {
+    # Every yielded value should be a Fibonacci attractor (substrate-
+    # aligned), so is_attractor(v) is 1 for all of them.
+    h all_attractors = [1];
+    gen_substrate_fib(
+        fn(v) {
+            if is_attractor(v) == 0 {
+                arr_set(all_attractors, 0, 0);
+            }
+            return 1;
+        },
+        1000
+    );
+    assert_eq(arr_get(all_attractors, 0), 1, "every yielded value is on-attractor");
+}
+
+fn test_substrate_fib_early_stop() {
+    # Stop after 5 yields even though max=1000.
+    h count = [0];
+    gen_substrate_fib(
+        fn(v) {
+            arr_set(count, 0, arr_get(count, 0) + 1);
+            if arr_get(count, 0) >= 5 { return 0; }
+            return 1;
+        },
+        1000
+    );
+    assert_eq(arr_get(count, 0), 5, "stopped at 5");
+}
+
+# ---- Memory pressure demo: gen_sum over 1M without OOM ----
+
+fn test_lazy_million() {
+    h s = gen_sum(fn() { return count_to(1000000); });
+    # Sum 1..1M = 500000500000
+    assert_eq(s, 500000500000, "lazily summed 1..1M");
+}

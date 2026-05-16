@@ -44,6 +44,16 @@ pub struct Interpreter {
     /// `tape_value(id)` to get the substrate-annotated forward value
     /// alongside `tape_grad(id)` for the derivative.
     autograd_tape: Vec<TapeNode>,
+    /// Stack of yield callbacks for LAZY generators. When set, the
+    /// active generator's yield statements invoke the topmost callback
+    /// with the yielded value rather than appending to a Vec. Memory
+    /// stays O(call-stack-depth) instead of O(yield-count), so a
+    /// generator can stream a billion values without OOM. Each callback
+    /// returns 1 to continue or 0 to short-circuit the generator —
+    /// the interpreter sets `gen_stop_requested` which propagates
+    /// through loops/blocks via return_value.
+    yield_callbacks: Vec<Value>,
+    gen_stop_requested: bool,
     /// Optional JIT dispatch hook. When set, `invoke_user_function_at`
     /// consults this BEFORE running the tree-walk body. If the hook
     /// returns `Some(result)`, that result wins; otherwise tree-walk
@@ -132,6 +142,8 @@ impl Interpreter {
             yield_stacks: Vec::new(),
             pending_throw: None,
             autograd_tape: Vec::new(),
+            yield_callbacks: Vec::new(),
+            gen_stop_requested: false,
         }
     }
 
@@ -1624,13 +1636,27 @@ impl Interpreter {
                 Err(display)
             }
             Statement::Yield(expr) => {
-                // Append the yielded value to the current generator
-                // frame's collector (top of yield_stacks). If we're
-                // not inside a generator (no collector pushed), it's
-                // a programming error — but rather than panic, we
-                // accept silently for ergonomics during dev.
+                // Two modes:
+                //   1. Streaming (gen_stream installed a callback):
+                //      invoke the callback with the yielded value.
+                //      O(1) memory regardless of how many yields.
+                //      A 0 return short-circuits — set gen_stop_requested
+                //      and a return_value sentinel so loops unwind.
+                //   2. Eager (legacy): append to the top collector.
+                //      Materializes the full sequence as Value::Array
+                //      when the generator returns.
                 let v = self.eval_expr(expr)?;
-                if let Some(top) = self.yield_stacks.last_mut() {
+                if let Some(cb) = self.yield_callbacks.last().cloned() {
+                    let r = self.call_first_class_function(&cb, vec![v])?;
+                    if r.to_int() == 0 {
+                        self.gen_stop_requested = true;
+                        // Trigger unwind: set return_value to Null so
+                        // outer block/loop sees "fn returned" and exits.
+                        if self.return_value.is_none() {
+                            self.return_value = Some(Value::Null);
+                        }
+                    }
+                } else if let Some(top) = self.yield_stacks.last_mut() {
                     top.push(v);
                 }
                 Ok(())
@@ -6417,6 +6443,223 @@ impl Interpreter {
                     val.data[k] -= lr * grad.data[k];
                 }
                 Ok(Value::Null)
+            }
+            // ---- Lazy generators (streaming via callback) -----------
+            //
+            // gen_stream(thunk, callback) runs `thunk` with a yield
+            // callback installed. Every `yield v` inside the generator
+            // invokes callback(v); a 0 return shorts the generator.
+            // Memory is O(call-stack-depth), not O(yield-count) —
+            // a generator can stream unbounded values.
+            //
+            // The thunk pattern (instead of accepting a "generator
+            // call expression") avoids eager evaluation: the generator
+            // doesn't start running until gen_stream installs the
+            // callback and invokes the thunk.
+            //
+            //   gen_stream(fn() { return fib(1000000); },
+            //              fn(v) { print(v); return 1; });
+            //
+            // Returns 1 if the generator ran to completion, 0 if the
+            // callback shorted it.
+            "gen_stream" => {
+                if args.len() < 2 {
+                    return Err("gen_stream requires (thunk, callback)".to_string());
+                }
+                let thunk = self.eval_expr(&args[0])?;
+                let cb = self.eval_expr(&args[1])?;
+                self.yield_callbacks.push(cb);
+                let prior_return = self.return_value.take();
+                let res = self.call_first_class_function(&thunk, vec![]);
+                self.yield_callbacks.pop();
+                let stopped = self.gen_stop_requested;
+                self.gen_stop_requested = false;
+                // The yield short-circuit set return_value to Null to
+                // unwind the body. Restore the caller's return state
+                // so we don't leak the sentinel up the call stack.
+                self.return_value = prior_return;
+                res?;
+                Ok(Value::HInt(HInt::new(if stopped { 0 } else { 1 })))
+            }
+            // gen_take(thunk, n) — pull the first n values from a lazy
+            // generator into a list. Lazy because the generator stops
+            // after n yields rather than producing the full sequence.
+            "gen_take" => {
+                if args.len() < 2 {
+                    return Err("gen_take requires (thunk, n)".to_string());
+                }
+                let thunk = self.eval_expr(&args[0])?;
+                let n = self.eval_expr(&args[1])?.to_int().max(0) as usize;
+                // Use a Rust-side accumulator via RefCell so we don't
+                // need to round-trip through an OMC variable.
+                let collected: std::rc::Rc<std::cell::RefCell<Vec<Value>>>
+                    = std::rc::Rc::new(std::cell::RefCell::new(Vec::with_capacity(n)));
+                let acc = collected.clone();
+                // Stash the accumulator in a host_builtin so the
+                // callback (an OMC lambda) can push through a name.
+                self.host_builtins.insert(
+                    "__gen_take_push".to_string(),
+                    std::rc::Rc::new(move |args: &[Value]| {
+                        if !args.is_empty() {
+                            acc.borrow_mut().push(args[0].clone());
+                        }
+                        Ok(Value::HInt(HInt::new(1)))
+                    }),
+                );
+                // Build a callback that pushes via the host builtin
+                // and returns 0 when we've collected n values.
+                let cb_name = format!("__gen_take_cb_{}", self.lambda_counter);
+                self.lambda_counter += 1;
+                let limit = n;
+                let counter = std::rc::Rc::new(std::cell::Cell::new(0usize));
+                let counter_ref = counter.clone();
+                self.host_builtins.insert(
+                    cb_name.clone(),
+                    std::rc::Rc::new(move |args: &[Value]| {
+                        if counter_ref.get() < limit {
+                            if !args.is_empty() {
+                                // direct push, no second hop
+                            }
+                            counter_ref.set(counter_ref.get() + 1);
+                            if counter_ref.get() >= limit {
+                                Ok(Value::HInt(HInt::new(0)))  // stop
+                            } else {
+                                Ok(Value::HInt(HInt::new(1)))  // continue
+                            }
+                        } else {
+                            Ok(Value::HInt(HInt::new(0)))
+                        }
+                    }),
+                );
+                // Compose: the actual callback first pushes via
+                // __gen_take_push, then asks the limit cb whether to stop.
+                let acc2 = collected.clone();
+                let counter2 = counter.clone();
+                let limit2 = n;
+                let combined = format!("__gen_take_combined_{}", self.lambda_counter);
+                self.lambda_counter += 1;
+                self.host_builtins.insert(
+                    combined.clone(),
+                    std::rc::Rc::new(move |args: &[Value]| {
+                        if counter2.get() < limit2 && !args.is_empty() {
+                            acc2.borrow_mut().push(args[0].clone());
+                            counter2.set(counter2.get() + 1);
+                            if counter2.get() >= limit2 {
+                                return Ok(Value::HInt(HInt::new(0)));
+                            }
+                            return Ok(Value::HInt(HInt::new(1)));
+                        }
+                        Ok(Value::HInt(HInt::new(0)))
+                    }),
+                );
+                let cb_value = Value::Function {
+                    name: combined.clone(),
+                    captured: None,
+                };
+                self.yield_callbacks.push(cb_value);
+                let prior_return = self.return_value.take();
+                let res = self.call_first_class_function(&thunk, vec![]);
+                self.yield_callbacks.pop();
+                self.gen_stop_requested = false;
+                self.return_value = prior_return;
+                self.host_builtins.remove(&combined);
+                self.host_builtins.remove(&cb_name);
+                self.host_builtins.remove("__gen_take_push");
+                res?;
+                let out = collected.borrow().clone();
+                Ok(Value::Array(HArray::from_vec(out)))
+            }
+            // gen_count(thunk) — count how many values the generator
+            // would yield without storing any of them. O(1) memory.
+            "gen_count" => {
+                if args.is_empty() {
+                    return Err("gen_count requires (thunk)".to_string());
+                }
+                let thunk = self.eval_expr(&args[0])?;
+                let counter = std::rc::Rc::new(std::cell::Cell::new(0i64));
+                let counter_ref = counter.clone();
+                let cb_name = format!("__gen_count_cb_{}", self.lambda_counter);
+                self.lambda_counter += 1;
+                self.host_builtins.insert(
+                    cb_name.clone(),
+                    std::rc::Rc::new(move |_args: &[Value]| {
+                        counter_ref.set(counter_ref.get() + 1);
+                        Ok(Value::HInt(HInt::new(1)))
+                    }),
+                );
+                let cb_value = Value::Function { name: cb_name.clone(), captured: None };
+                self.yield_callbacks.push(cb_value);
+                let prior_return = self.return_value.take();
+                let res = self.call_first_class_function(&thunk, vec![]);
+                self.yield_callbacks.pop();
+                self.gen_stop_requested = false;
+                self.return_value = prior_return;
+                self.host_builtins.remove(&cb_name);
+                res?;
+                Ok(Value::HInt(HInt::new(counter.get())))
+            }
+            // gen_sum(thunk) — reduce a lazy generator to a sum.
+            // Demonstrates the laziness benefit: streams unbounded
+            // sequences without allocation.
+            "gen_sum" => {
+                if args.is_empty() {
+                    return Err("gen_sum requires (thunk)".to_string());
+                }
+                let thunk = self.eval_expr(&args[0])?;
+                let acc = std::rc::Rc::new(std::cell::Cell::new(0i64));
+                let acc_ref = acc.clone();
+                let cb_name = format!("__gen_sum_cb_{}", self.lambda_counter);
+                self.lambda_counter += 1;
+                self.host_builtins.insert(
+                    cb_name.clone(),
+                    std::rc::Rc::new(move |args: &[Value]| {
+                        if !args.is_empty() {
+                            acc_ref.set(acc_ref.get().wrapping_add(args[0].to_int()));
+                        }
+                        Ok(Value::HInt(HInt::new(1)))
+                    }),
+                );
+                let cb_value = Value::Function { name: cb_name.clone(), captured: None };
+                self.yield_callbacks.push(cb_value);
+                let prior_return = self.return_value.take();
+                let res = self.call_first_class_function(&thunk, vec![]);
+                self.yield_callbacks.pop();
+                self.gen_stop_requested = false;
+                self.return_value = prior_return;
+                self.host_builtins.remove(&cb_name);
+                res?;
+                Ok(Value::HInt(HInt::new(acc.get())))
+            }
+            // gen_substrate_fib(callback, max) — substrate-native lazy
+            // generator. Produces Fibonacci numbers as HInt (each one
+            // already carries resonance=1.0 because Fibonacci values
+            // ARE Fibonacci attractors). Streams until `max` reached or
+            // callback returns 0. The recurrence IS the state — O(1)
+            // memory for ANY length. Python can't do this lazily
+            // without a generator object and definitely can't carry
+            // substrate metadata on the i64 outputs.
+            "gen_substrate_fib" => {
+                if args.len() < 2 {
+                    return Err("gen_substrate_fib requires (callback, max)".to_string());
+                }
+                let cb = self.eval_expr(&args[0])?;
+                let max = self.eval_expr(&args[1])?.to_int();
+                let mut a: i64 = 0;
+                let mut b: i64 = 1;
+                let mut count: i64 = 0;
+                loop {
+                    if a > max { break; }
+                    let r = self.call_first_class_function(
+                        &cb,
+                        vec![Value::HInt(HInt::new(a))],
+                    )?;
+                    count += 1;
+                    if r.to_int() == 0 { break; }
+                    let next = a.wrapping_add(b);
+                    a = b;
+                    b = next;
+                }
+                Ok(Value::HInt(HInt::new(count)))
             }
             // arr_fold_all(arr) -> new array with every element snapped
             // to its nearest Fibonacci attractor. Vectorized fold.
