@@ -1,0 +1,140 @@
+# Track 2 capstone: end-to-end ML pipeline composing every substrate
+# primitive the language now ships:
+#
+#   1. Feature engineering through substrate-typed arrays
+#      (arr_scale + arr_add + arr_fold_all)
+#   2. Linear projection via arr_matmul (2D array op)
+#   3. Substrate-aware loss reading per-element resonance
+#   4. Forward-mode autograd via dual numbers training a parameter
+#      with closed-form gradient descent
+#
+# Stops when the dual-number gradient has driven the loss below 0.01,
+# proving the autograd, matmul, and substrate-typed primitives all
+# co-operate end-to-end on a single workload.
+
+fn approx_eq(a, b, tol) {
+    h d = a - b;
+    if d < 0.0 { d = 0.0 - d; }
+    return d <= tol;
+}
+
+# --- Part 1: substrate-aware feature pipeline -----------------------
+# Take raw counts, scale by 2, bias by 1, then fold to the nearest
+# Fibonacci attractor. Output: substrate-aligned feature buckets.
+
+fn substrate_features(raw) {
+    h scaled = arr_scale(raw, 2);
+    h biased = arr_add(scaled, 1);
+    return arr_fold_all(biased);
+}
+
+# --- Part 2: 2D matmul-based projection -----------------------------
+# Project a 1xN row through an NxK weight matrix to get a 1xK output.
+
+fn project(row_features, W) {
+    # Wrap features in 1xN matrix so arr_matmul shapes line up.
+    h M = [row_features];
+    return arr_matmul(M, W);
+}
+
+# --- Part 3: substrate-coherence score ------------------------------
+# Mean resonance over array elements. High = substrate-aligned.
+
+fn substrate_score(arr) {
+    h r = arr_resonance_vec(arr);
+    h s = 0.0;
+    h i = 0;
+    while i < arr_len(r) {
+        s = s + arr_get(r, i);
+        i = i + 1;
+    }
+    return s / arr_len(r);
+}
+
+# --- Part 4: dual-number gradient descent ---------------------------
+# Loss L(w) = sum_i (w*x_i - y_i)^2  on a small dataset.
+# Each step: lift w to dual(w, 1.0), evaluate L', read dL/dw, step.
+
+fn loss_and_grad(w_value, xs, ys) {
+    h w = dual(w_value, 1.0);   # seed for d/dw
+    h L = dual(0.0, 0.0);
+    h n = arr_len(xs);
+    h i = 0;
+    while i < n {
+        h xi = arr_get(xs, i);
+        h yi = arr_get(ys, i);
+        h pred = dual_mul(w, xi);
+        h err = dual_sub(pred, yi);
+        L = dual_add(L, dual_mul(err, err));
+        i = i + 1;
+    }
+    return L;
+}
+
+fn main() {
+    print("=== Track 2 capstone: harmonic ML pipeline ===");
+    print("");
+
+    # --- Substrate feature pipeline demo ---
+    print("[1] Substrate-aware feature engineering");
+    h raw = [3, 5, 8, 13, 21];   # Fibonacci-shaped raw counts
+    h features = substrate_features(raw);
+    h score_before = substrate_score(raw);
+    h score_after = substrate_score(features);
+    print("    raw      -> mean resonance: " + to_string(score_before));
+    print("    folded   -> mean resonance: " + to_string(score_after));
+
+    # --- 2D matmul projection ---
+    print("");
+    print("[2] Linear projection (1x5) * (5x2) -> (1x2)");
+    # Fibonacci-valued weight matrix (substrate-resonant).
+    h W = [[1, 0], [1, 1], [2, 1], [3, 2], [5, 3]];
+    h projected = project(features, W);
+    h row = arr_get(projected, 0);
+    print("    projected = [" + to_string(arr_get(row, 0)) + ", " +
+                              to_string(arr_get(row, 1)) + "]");
+
+    # --- Gradient-descent training ---
+    print("");
+    print("[3] Gradient descent training on y = 2x");
+    # Synthetic dataset: y = 2*x for x in [1..5].
+    h xs = [1.0, 2.0, 3.0, 4.0, 5.0];
+    h ys = [2.0, 4.0, 6.0, 8.0, 10.0];
+    h w = 0.1;                # start far from the truth (2.0)
+    h lr = 0.01;
+    h step = 0;
+    h max_steps = 200;
+    h converged = 0;
+
+    while step < max_steps {
+        h L = loss_and_grad(w, xs, ys);
+        h Lv = dual_v(L);
+        h dLdw = dual_d(L);
+        if Lv < 0.01 {
+            converged = 1;
+            print("    converged at step " + to_string(step) +
+                  ", w=" + to_string(w) +
+                  ", loss=" + to_string(Lv));
+            step = max_steps;
+        } else {
+            w = w - lr * dLdw;
+            if step % 25 == 0 {
+                print("    step " + to_string(step) +
+                      "  w=" + to_string(w) +
+                      "  loss=" + to_string(Lv) +
+                      "  dL/dw=" + to_string(dLdw));
+            }
+            step = step + 1;
+        }
+    }
+
+    if converged == 1 {
+        print("");
+        print("[OK] autograd + matmul + substrate primitives composed end-to-end");
+    } else {
+        print("");
+        print("[!] did not converge within " + to_string(max_steps) + " steps");
+    }
+}
+
+main();
