@@ -2003,6 +2003,9 @@ impl Interpreter {
             | "arr_argmax" | "arr_argmin" | "arr_cumsum" | "arr_diff" | "arr_range"
             | "arr_unique_count" | "arr_partition_by"
             | "arr_min_float" | "arr_max_float" | "arr_gcd" | "fnv1a_hash"
+            // Substrate-typed array library
+            | "arr_add" | "arr_sub" | "arr_mul" | "arr_div_int" | "arr_neg"
+            | "arr_scale" | "arr_resonance_vec" | "arr_him_vec" | "arr_fold_all"
             | "arr_mean" | "arr_variance" | "arr_stddev" | "arr_median"
             | "arr_harmonic_mean" | "arr_geometric_mean"
             | "arr_sum_sq" | "arr_norm" | "arr_dot"
@@ -5385,6 +5388,143 @@ impl Interpreter {
                     Err("arr_dot: requires two arrays".to_string())
                 }
             }
+            // ---- Substrate-typed array library (Track 2 MVP) -------
+            //
+            // Vectorized arithmetic + substrate-aware reductions on
+            // arrays of HInt. The dispatch boundary marshals int
+            // arrays through the L1.6 buffer; these handlers produce
+            // new arrays element-wise (so the substrate-resonance
+            // metadata on each output HInt is recomputed from the
+            // arithmetic result — no special tagging needed).
+            //
+            // Broadcasting: if the 2nd arg is a scalar (HInt / HFloat),
+            // it's repeated for every element of the 1st arg's array.
+            // Two arrays must match length (no implicit shape-1 broadcast).
+            "arr_add" => {
+                if args.len() < 2 {
+                    return Err("arr_add requires (a, b)".to_string());
+                }
+                let a = self.eval_expr(&args[0])?;
+                let b = self.eval_expr(&args[1])?;
+                Ok(elementwise_op(&a, &b, "arr_add", |x, y| x.wrapping_add(y))?)
+            }
+            "arr_sub" => {
+                if args.len() < 2 {
+                    return Err("arr_sub requires (a, b)".to_string());
+                }
+                let a = self.eval_expr(&args[0])?;
+                let b = self.eval_expr(&args[1])?;
+                Ok(elementwise_op(&a, &b, "arr_sub", |x, y| x.wrapping_sub(y))?)
+            }
+            "arr_mul" => {
+                if args.len() < 2 {
+                    return Err("arr_mul requires (a, b)".to_string());
+                }
+                let a = self.eval_expr(&args[0])?;
+                let b = self.eval_expr(&args[1])?;
+                Ok(elementwise_op(&a, &b, "arr_mul", |x, y| x.wrapping_mul(y))?)
+            }
+            "arr_div_int" => {
+                // Integer division. Zero divisor produces 0 in that
+                // slot (matches harmonic_anomaly-style "no propagation
+                // of NaN through arrays" — Singularity is at the value
+                // level, not the array level).
+                if args.len() < 2 {
+                    return Err("arr_div_int requires (a, b)".to_string());
+                }
+                let a = self.eval_expr(&args[0])?;
+                let b = self.eval_expr(&args[1])?;
+                Ok(elementwise_op(&a, &b, "arr_div_int",
+                    |x, y| if y == 0 { 0 } else { x / y })?)
+            }
+            "arr_neg" => {
+                // Unary element-wise negation.
+                if args.is_empty() {
+                    return Err("arr_neg requires (array)".to_string());
+                }
+                let a = self.eval_expr(&args[0])?;
+                if let Value::Array(arr) = a {
+                    let out: Vec<Value> = arr.items.borrow().iter()
+                        .map(|v| Value::HInt(HInt::new(v.to_int().wrapping_neg())))
+                        .collect();
+                    Ok(Value::Array(HArray::from_vec(out)))
+                } else {
+                    Err("arr_neg: requires an array".to_string())
+                }
+            }
+            "arr_scale" => {
+                // arr_scale(arr, k) — explicit scalar multiply. Same as
+                // arr_mul(arr, k) when k is a scalar; provided as a
+                // named alias so callers can opt into the broadcast
+                // shape without it being inferred.
+                if args.len() < 2 {
+                    return Err("arr_scale requires (array, scalar)".to_string());
+                }
+                let a = self.eval_expr(&args[0])?;
+                let k = self.eval_expr(&args[1])?;
+                Ok(elementwise_op(&a, &k, "arr_scale", |x, y| x.wrapping_mul(y))?)
+            }
+            // arr_resonance_vec(arr) -> array of f64 per-element
+            // resonance scores. The substrate-typed dtype's defining
+            // operation: each output element is HInt::compute_resonance
+            // of the corresponding input. Python literally can't do
+            // this — there's no φ-resonance attached to an i64.
+            "arr_resonance_vec" => {
+                if args.is_empty() {
+                    return Err("arr_resonance_vec requires (array)".to_string());
+                }
+                let a = self.eval_expr(&args[0])?;
+                if let Value::Array(arr) = a {
+                    let out: Vec<Value> = arr.items.borrow().iter()
+                        .map(|v| Value::HFloat(HInt::compute_resonance(v.to_int())))
+                        .collect();
+                    Ok(Value::Array(HArray::from_vec(out)))
+                } else {
+                    Err("arr_resonance_vec: requires an array".to_string())
+                }
+            }
+            // arr_him_vec(arr) -> array of f64 per-element HIM scores.
+            // Complement to arr_resonance_vec: HIM is the
+            // Harmonic-Interference-Metric — how off-attractor each
+            // value is. Together with resonance, these are the two
+            // substrate-typed metadata channels carried per-element.
+            "arr_him_vec" => {
+                if args.is_empty() {
+                    return Err("arr_him_vec requires (array)".to_string());
+                }
+                let a = self.eval_expr(&args[0])?;
+                if let Value::Array(arr) = a {
+                    let out: Vec<Value> = arr.items.borrow().iter()
+                        .map(|v| {
+                            let h = HInt::new(v.to_int());
+                            Value::HFloat(h.him_score)
+                        })
+                        .collect();
+                    Ok(Value::Array(HArray::from_vec(out)))
+                } else {
+                    Err("arr_him_vec: requires an array".to_string())
+                }
+            }
+            // arr_fold_all(arr) -> new array with every element snapped
+            // to its nearest Fibonacci attractor. Vectorized fold.
+            // Substrate-canonical denoising / quantization primitive.
+            "arr_fold_all" => {
+                if args.is_empty() {
+                    return Err("arr_fold_all requires (array)".to_string());
+                }
+                let a = self.eval_expr(&args[0])?;
+                if let Value::Array(arr) = a {
+                    let out: Vec<Value> = arr.items.borrow().iter()
+                        .map(|v| {
+                            let folded = crate::phi_pi_fib::fold_to_nearest_attractor(v.to_int());
+                            Value::HInt(HInt::new(folded))
+                        })
+                        .collect();
+                    Ok(Value::Array(HArray::from_vec(out)))
+                } else {
+                    Err("arr_fold_all: requires an array".to_string())
+                }
+            }
             "arr_concat" => {
                 if args.len() < 2 {
                     return Err("arr_concat requires (array_a, array_b)".to_string());
@@ -7739,6 +7879,51 @@ fn values_equal(a: &Value, b: &Value) -> bool {
 
 // Free function reused by quantize / quantization_ratio / mean_omni_weight.
 // Snap |n| to the nearest Fibonacci attractor, preserving sign.
+/// Track-2 substrate-typed-array helper: element-wise binary op
+/// over (array, array) or (array, scalar). Scalar broadcasts to
+/// every position of the array. Two-array length mismatch is an
+/// error (no implicit shape-1 expansion — keeps behavior obvious).
+/// `op` takes (i64, i64) and returns i64; the helper wraps the
+/// result in HInt so per-element substrate resonance gets recomputed
+/// from the arithmetic output.
+pub(crate) fn elementwise_op<F: Fn(i64, i64) -> i64>(
+    a: &Value,
+    b: &Value,
+    name: &str,
+    op: F,
+) -> Result<Value, String> {
+    match (a, b) {
+        (Value::Array(arr_a), Value::Array(arr_b)) => {
+            let ai = arr_a.items.borrow();
+            let bi = arr_b.items.borrow();
+            if ai.len() != bi.len() {
+                return Err(format!(
+                    "{}: length mismatch ({} vs {})", name, ai.len(), bi.len()
+                ));
+            }
+            let out: Vec<Value> = ai.iter().zip(bi.iter())
+                .map(|(x, y)| Value::HInt(HInt::new(op(x.to_int(), y.to_int()))))
+                .collect();
+            Ok(Value::Array(HArray::from_vec(out)))
+        }
+        (Value::Array(arr_a), scalar) => {
+            let sv = scalar.to_int();
+            let out: Vec<Value> = arr_a.items.borrow().iter()
+                .map(|x| Value::HInt(HInt::new(op(x.to_int(), sv))))
+                .collect();
+            Ok(Value::Array(HArray::from_vec(out)))
+        }
+        (scalar, Value::Array(arr_b)) => {
+            let sv = scalar.to_int();
+            let out: Vec<Value> = arr_b.items.borrow().iter()
+                .map(|y| Value::HInt(HInt::new(op(sv, y.to_int()))))
+                .collect();
+            Ok(Value::Array(HArray::from_vec(out)))
+        }
+        _ => Err(format!("{}: requires at least one array argument", name)),
+    }
+}
+
 /// Convert a `serde_json::Value` into an OMC `Value`. JSON object →
 /// `Value::Dict`, JSON array → `Value::Array`, numbers split into
 /// `HInt` (when representable as i64) vs `HFloat` (everything else).
@@ -8194,6 +8379,8 @@ pub(crate) const HEAL_BUILTIN_NAMES: &[&str] = &[
     "arr_argmax", "arr_argmin", "arr_cumsum", "arr_diff", "arr_range",
     "arr_unique_count", "arr_partition_by",
     "arr_min_float", "arr_max_float", "arr_gcd", "fnv1a_hash",
+    "arr_add", "arr_sub", "arr_mul", "arr_div_int", "arr_neg",
+    "arr_scale", "arr_resonance_vec", "arr_him_vec", "arr_fold_all",
     "arr_mean", "arr_variance", "arr_stddev", "arr_median",
     "arr_harmonic_mean", "arr_geometric_mean",
     "arr_sum_sq", "arr_norm", "arr_dot",
