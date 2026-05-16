@@ -1,0 +1,145 @@
+# Empirical investigation: do primes cluster in substrate (φ-resonance) space
+# more than random integers or composites in the same range?
+#
+# Method:
+#   For each N in {50, 100, 500, 1000, 2000}:
+#     - Collect the first N primes
+#     - Collect the first N composites (4, 6, 8, 9, 10, 12, ...)
+#     - Collect N "random-ish" integers in the prime range (xorshift)
+#   For each set: mean φ-resonance via res(n).
+#
+# Hypothesis (from Hermes's accidental observation at N=50: ~0.875):
+#   If primes cluster, the mean stays high and roughly stable.
+#   If it's noise, it'll wander toward the bulk integer average.
+#   Compositess in the same range are the control: do they cluster too?
+#
+# Output: a table the LLM can paste into a writeup.
+
+fn show(label, v) { print(concat_many(label, " = ", to_string(v))); }
+
+# Naive prime test. OMC ships `is_prime` but we re-implement to be
+# explicit and to avoid any caching surprises.
+fn is_prime_local(n) {
+    if n < 2 { return 0; }
+    if n == 2 { return 1; }
+    if n % 2 == 0 { return 0; }
+    h i = 3;
+    while i * i <= n {
+        if n % i == 0 { return 0; }
+        i = i + 2;
+    }
+    return 1;
+}
+
+# Mean φ-resonance over the first N primes.
+fn mean_res_primes(n) {
+    h count = 0;
+    h candidate = 2;
+    h total = 0.0;
+    h last = 0;
+    while count < n {
+        if is_prime_local(candidate) == 1 {
+            total = total + res(candidate);
+            count = count + 1;
+            last = candidate;
+        }
+        candidate = candidate + 1;
+    }
+    h d = dict_new();
+    dict_set(d, "mean", total / count);
+    dict_set(d, "count", count);
+    dict_set(d, "last_value", last);
+    return d;
+}
+
+# Mean φ-resonance over the first N composites.
+fn mean_res_composites(n) {
+    h count = 0;
+    h candidate = 4;
+    h total = 0.0;
+    h last = 0;
+    while count < n {
+        if is_prime_local(candidate) == 0 {
+            if candidate >= 2 {
+                total = total + res(candidate);
+                count = count + 1;
+                last = candidate;
+            }
+        }
+        candidate = candidate + 1;
+    }
+    h d = dict_new();
+    dict_set(d, "mean", total / count);
+    dict_set(d, "count", count);
+    dict_set(d, "last_value", last);
+    return d;
+}
+
+# Mean φ-resonance over N "random" integers in the range [2, max_val].
+# Uses xorshift via random_int so the sample is reproducible.
+fn mean_res_random_in_range(n, max_val) {
+    random_seed(42);
+    h total = 0.0;
+    h count = 0;
+    while count < n {
+        h v = random_int(2, max_val);
+        total = total + res(v);
+        count = count + 1;
+    }
+    h d = dict_new();
+    dict_set(d, "mean", total / count);
+    dict_set(d, "count", count);
+    return d;
+}
+
+# Mean φ-resonance over EVERY integer in [2, max_val] — the population.
+fn mean_res_all_in_range(max_val) {
+    h total = 0.0;
+    h count = 0;
+    h i = 2;
+    while i <= max_val {
+        total = total + res(i);
+        count = count + 1;
+        i = i + 1;
+    }
+    h d = dict_new();
+    dict_set(d, "mean", total / count);
+    dict_set(d, "count", count);
+    return d;
+}
+
+fn report_row(label, d) {
+    print(concat_many("  ", label,
+        "  mean=", to_string(dict_get(d, "mean")),
+        "  count=", to_string(dict_get(d, "count"))));
+}
+
+fn study(n) {
+    print("");
+    print(concat_many("=== N = ", to_string(n), " ==="));
+    h p = mean_res_primes(n);
+    h c = mean_res_composites(n);
+    # Use the largest prime seen as the upper bound for random / all.
+    h max_val = dict_get(p, "last_value");
+    h r = mean_res_random_in_range(n, max_val);
+    h a = mean_res_all_in_range(max_val);
+    report_row("primes      ", p);
+    report_row("composites  ", c);
+    report_row("random      ", r);
+    report_row("all integers", a);
+    # Substrate-coherence margin: how much do primes beat the bulk?
+    h margin = dict_get(p, "mean") - dict_get(a, "mean");
+    show("  prime-over-bulk margin", margin);
+}
+
+fn main() {
+    print("=== Prime φ-resonance study ===");
+    print("Population: first N primes, composites, random ints, and all ints,");
+    print("all in the same numeric range. φ-resonance = closeness to a Fibonacci attractor.");
+    study(50);
+    study(100);
+    study(500);
+    study(1000);
+}
+
+main();
