@@ -302,6 +302,7 @@ impl Compiler {
                         | "omc_search_builtins"
                         | "omc_find_similar"
                         | "omc_self_instantiate" | "omc_context_compress"
+                        | "omc_llm_self_instantiate"
                         // Forward-mode autograd duals (Track 2 — 2026-05-16)
                         | "dual" | "dual_add" | "dual_sub"
                         | "dual_mul" | "dual_div" | "dual_neg"

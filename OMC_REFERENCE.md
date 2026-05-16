@@ -2,9 +2,9 @@
 
 Auto-generated from `omnimcode-core/src/docs.rs`. Run `omc --gen-docs > OMC_REFERENCE.md` to regenerate.
 
-**Total documented builtins**: 638
+**Total documented builtins**: 639
 
-**OMC-unique**: 71 (no direct Python/NumPy equivalent — these are why you reach for OMC over numpy)
+**OMC-unique**: 72 (no direct Python/NumPy equivalent — these are why you reach for OMC over numpy)
 
 ---
 
@@ -53,7 +53,7 @@ Other high-value calls: `omc_unique_builtins()` (the OMC-only surface), `omc_pyt
 - [tokenizer](#tokenizer) (17 builtins)
 - [code_intel](#code_intel) (17 builtins)
 - [messaging](#messaging) (5 builtins)
-- [onn](#onn) (4 builtins)
+- [onn](#onn) (5 builtins)
 - [llm_workflow](#llm_workflow) (7 builtins)
 - [math](#math) (82 builtins)
 - [dicts](#dicts) (31 builtins)
@@ -5082,6 +5082,16 @@ Compress N context messages to ~M3(N) specialist summaries. The substrate-native
 
 ```omc
 omc_context_compress(conversation_history)  // ~log_log(N) specialists
+```
+
+### `omc_llm_self_instantiate` 🔱 *OMC-unique*
+
+**Signature**: `(context: string[], task: string, base_dir: string, base_sender_id: int) -> dict[]`
+
+Orchestration primitive: compress context to M3(N) specialists, write each as a signed prompt file in base_dir, return manifest. An orchestrator spawns N LLM sessions, each seeded with its specialist's inherited geometric state.
+
+```omc
+omc_llm_self_instantiate(history, "refactor X", "/tmp/spawn", 18173)  // [{prompt_path, mu, sigma, ...}]
 ```
 
 ---

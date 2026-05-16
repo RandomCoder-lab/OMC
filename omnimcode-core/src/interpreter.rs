@@ -7960,6 +7960,104 @@ impl Interpreter {
                 }).collect();
                 Ok(Value::Array(HArray::from_vec(out)))
             }
+            // omc_llm_self_instantiate(context: string[], task: string,
+            //                          base_dir: string, base_sender_id: int)
+            //   -> dict[] manifest of {specialist_id, prompt_path,
+            //                          specialist_dict}.
+            //   Compresses N context messages to M3(N) specialists,
+            //   writes each as a signed prompt-file in base_dir, and
+            //   returns the manifest. An orchestrator (human or
+            //   automated) can spawn N LLM sessions, one per file.
+            //   Each spawned session starts with its specialist's
+            //   inherited geometric state as the seed.
+            //
+            //   This is the "self-instantiation primitive for LLMs":
+            //   structural fan-out with substrate-derived state
+            //   inheritance. Actual LLM-process spawning is out of
+            //   scope (OMC doesn't fork LLMs), but the manifest gives
+            //   the orchestrator everything it needs.
+            "omc_llm_self_instantiate" => {
+                if args.len() < 4 {
+                    return Err("omc_llm_self_instantiate requires (context: string[], task: string, base_dir: string, base_sender_id: int)".to_string());
+                }
+                let ctx_v = self.eval_expr(&args[0])?;
+                let task = self.eval_expr(&args[1])?.to_display_string();
+                let base_dir = self.eval_expr(&args[2])?.to_display_string();
+                let base_sender = self.eval_expr(&args[3])?.to_int();
+                let messages: Vec<String> = if let Value::Array(arr) = ctx_v {
+                    arr.items.borrow().iter().map(|v| v.to_display_string()).collect()
+                } else {
+                    return Err("omc_llm_self_instantiate: context must be a string array".to_string());
+                };
+                let specs = crate::onn::self_instantiate(&messages, &task);
+                std::fs::create_dir_all(&base_dir).map_err(|e|
+                    format!("omc_llm_self_instantiate: mkdir {}: {}", base_dir, e))?;
+                let mut manifest: Vec<Value> = Vec::with_capacity(specs.len());
+                for s in &specs {
+                    // Each specialist gets a derived sender_id so the
+                    // orchestrator can tell them apart.
+                    let specialist_id = base_sender.wrapping_add(s.fold_index as i64);
+                    // The prompt embeds the specialist's state + the
+                    // task hint so the spawned LLM has context.
+                    let prompt = format!(
+                        "[Self-instantiated specialist {}/{}]\n\
+                         Task: {}\n\
+                         Inherited geometric state:\n\
+                         - mu (mean φ-resonance): {:.6}\n\
+                         - sigma: {:.6}\n\
+                         - dominant_attractor: {}\n\
+                         - wave_amplitude: {:.6}\n\
+                         - items_in_slice: {}\n\n\
+                         Your slice of input:\n{}\n",
+                        s.fold_index + 1, specs.len(), task,
+                        s.mu, s.sigma, s.dominant_attractor,
+                        s.wave_amplitude, s.item_count, s.summary
+                    );
+                    let canon = crate::canonical::canonicalize(&prompt)
+                        .unwrap_or_else(|_| prompt.clone());
+                    let hash = crate::tokenizer::fnv1a_64(canon.as_bytes());
+                    let h = HInt::new(hash);
+                    let (attractor, _) = crate::phi_pi_fib::nearest_attractor_with_dist(hash);
+                    let moduli = crate::tokenizer::CRT_MODULI;
+                    let streams = [
+                        base_sender.rem_euclid(moduli[0]),
+                        1i64.rem_euclid(moduli[1]),  // kind=1 (request)
+                        hash.rem_euclid(moduli[2]),
+                    ];
+                    let packed = crate::tokenizer::crt_pack(&streams, moduli).unwrap_or(0);
+                    let mut msg = std::collections::BTreeMap::new();
+                    msg.insert("content".to_string(), Value::String(prompt));
+                    msg.insert("sender_id".to_string(), Value::HInt(HInt::new(base_sender)));
+                    msg.insert("target_id".to_string(), Value::HInt(HInt::new(specialist_id)));
+                    msg.insert("kind".to_string(), Value::HInt(HInt::new(1)));
+                    msg.insert("content_hash".to_string(), Value::HInt(HInt::new(hash)));
+                    msg.insert("resonance".to_string(), Value::HFloat(h.resonance));
+                    msg.insert("him_score".to_string(), Value::HFloat(h.him_score));
+                    msg.insert("attractor".to_string(), Value::HInt(HInt::new(attractor)));
+                    msg.insert("packed".to_string(), Value::HInt(HInt::new(packed)));
+                    let msg_value = Value::dict_from(msg);
+                    let wire = serde_json::to_string(&crate::interpreter::value_to_json(&msg_value))
+                        .unwrap_or_default();
+                    let path = format!("{}/specialist_{:02}.json", base_dir, s.fold_index);
+                    std::fs::write(&path, wire).map_err(|e|
+                        format!("omc_llm_self_instantiate: write {}: {}", path, e))?;
+                    // Manifest entry.
+                    let mut manifest_entry = std::collections::BTreeMap::new();
+                    manifest_entry.insert("specialist_id".to_string(),
+                        Value::HInt(HInt::new(specialist_id)));
+                    manifest_entry.insert("prompt_path".to_string(), Value::String(path));
+                    manifest_entry.insert("fold_index".to_string(),
+                        Value::HInt(HInt::new(s.fold_index as i64)));
+                    manifest_entry.insert("mu".to_string(), Value::HFloat(s.mu));
+                    manifest_entry.insert("sigma".to_string(), Value::HFloat(s.sigma));
+                    manifest_entry.insert("dominant_attractor".to_string(),
+                        Value::HInt(HInt::new(s.dominant_attractor)));
+                    manifest_entry.insert("item_count".to_string(),
+                        Value::HInt(HInt::new(s.item_count as i64)));
+                    manifest.push(Value::dict_from(manifest_entry));
+                }
+                Ok(Value::Array(HArray::from_vec(manifest)))
+            }
             // omc_prompt_agent(target_id, prompt, sender_id, channel_dir?)
             //   — write a signed message to target_id's inbox file.
             //     Returns the packed message ID. Caller polls for response

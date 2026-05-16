@@ -1145,6 +1145,13 @@ pub const BUILTINS: &[BuiltinDoc] = &[
         example: "omc_context_compress(conversation_history)  // ~log_log(N) specialists",
         unique_to_omc: true,
     },
+    BuiltinDoc {
+        name: "omc_llm_self_instantiate", category: "onn",
+        signature: "(context: string[], task: string, base_dir: string, base_sender_id: int) -> dict[]",
+        description: "Orchestration primitive: compress context to M3(N) specialists, write each as a signed prompt file in base_dir, return manifest. An orchestrator spawns N LLM sessions, each seeded with its specialist's inherited geometric state.",
+        example: "omc_llm_self_instantiate(history, \"refactor X\", \"/tmp/spawn\", 18173)  // [{prompt_path, mu, sigma, ...}]",
+        unique_to_omc: true,
+    },
     // ---- LLM workflow bundles ----
     BuiltinDoc {
         name: "omc_cheatsheet", category: "llm_workflow",

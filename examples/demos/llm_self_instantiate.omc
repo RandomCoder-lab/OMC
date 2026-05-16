@@ -1,0 +1,69 @@
+# LLM self-instantiation orchestration manifest.
+#
+# Compress a long context to M3(N) specialists, write each as a
+# signed prompt-file. An orchestrator (human or scripted) then
+# spawns N LLM sessions, one per file, each seeded with the
+# specialist's inherited geometric state.
+
+fn show(label, v) { print(concat_many(label, " = ", to_string(v))); }
+fn section(name) { print(""); print(concat_many("=== ", name, " ===")); }
+
+fn make_long_history(n) {
+    h hist = [];
+    h i = 0;
+    while i < n {
+        arr_push(hist, concat_many("turn ", to_string(i),
+            ": user discusses topic ", to_string(i % 5),
+            " with assistant; result was outcome ", to_string(i % 3)));
+        i = i + 1;
+    }
+    return hist;
+}
+
+fn main() {
+    print("=== LLM self-instantiation orchestration ===");
+    print("");
+    print("Take a long conversation, fold to M3(N) specialists,");
+    print("write a signed prompt-file per specialist that an");
+    print("orchestrator can use to spawn N independent LLM sessions.");
+
+    h CLAUDE_ID = 18173;
+    h history = make_long_history(200);
+    show("input history length", arr_len(history));
+
+    section("Self-instantiate");
+    h manifest = omc_llm_self_instantiate(
+        history,
+        "Process this slice of conversation history and report findings.",
+        "/tmp/omc_spawn",
+        CLAUDE_ID
+    );
+    show("specialists spawned", arr_len(manifest));
+
+    section("Manifest preview");
+    h i = 0;
+    while i < arr_len(manifest) {
+        h m = arr_get(manifest, i);
+        print(concat_many("  Specialist ", to_string(i + 1), "/", to_string(arr_len(manifest)),
+            "  id=", to_string(dict_get(m, "specialist_id")),
+            "  items=", to_string(dict_get(m, "item_count")),
+            "  attractor=", to_string(dict_get(m, "dominant_attractor")),
+            "  → ", dict_get(m, "prompt_path")));
+        i = i + 1;
+    }
+
+    section("What an orchestrator does next");
+    print("  for each entry in manifest:");
+    print("    spawn an LLM process with read_file(entry.prompt_path)");
+    print("       as its initial prompt;");
+    print("    collect responses into /tmp/omc_spawn/response_<id>.json;");
+    print("  call omc_fold_back(parent_mu, parent_sigma, parent_turn,");
+    print("                     responses) to merge results.");
+    print("");
+    print("OMC handles the structural + substrate-signed parts.");
+    print("Process-spawning is left to the orchestrator (Python, shell,");
+    print("Claude Code Bash tool, etc.) — OMC is honest about not");
+    print("forking LLMs on its own.");
+}
+
+main();
