@@ -1,0 +1,133 @@
+# More reverse-mode autograd tests.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+
+fn approx_eq(a, b, tol) {
+    h d = a - b;
+    if d < 0.0 { d = 0.0 - d; }
+    return d <= tol;
+}
+
+# Scalar chain: y = sin(x^2)
+fn test_chain_sin_square() {
+    tape_reset();
+    h x = tape_var(1.0);
+    h x2 = tape_mul(x, x);
+    h y = tape_sin(x2);
+    tape_backward(y);
+    # d/dx sin(x^2) = 2x * cos(x^2). At x=1: 2 * cos(1) ≈ 1.0806
+    assert_true(approx_eq(tape_grad(x), 1.0806, 0.001), "chain sin(x^2)");
+}
+
+# Mixed ops
+fn test_polynomial_grad() {
+    tape_reset();
+    h x = tape_var(2.0);
+    # y = x^3 + 2*x + 1
+    h x3 = tape_pow_int(x, 3);
+    h two = tape_const(2.0);
+    h two_x = tape_mul(two, x);
+    h sum_1 = tape_add(x3, two_x);
+    h one = tape_const(1.0);
+    h y = tape_add(sum_1, one);
+    tape_backward(y);
+    # dy/dx = 3x^2 + 2 = 14 at x=2
+    assert_true(approx_eq(tape_grad(x), 14.0, 0.001), "3x^2 + 2 at 2");
+}
+
+# Negation
+fn test_neg_in_chain() {
+    tape_reset();
+    h x = tape_var(5.0);
+    h n = tape_neg(x);  # = -5
+    h y = tape_mul(n, n);  # = 25
+    tape_backward(y);
+    # d(-x*-x)/dx = d(x^2)/dx = 2x = 10
+    assert_true(approx_eq(tape_grad(x), 10.0, 0.001), "(-x)^2 grad");
+}
+
+# Exp chain
+fn test_exp_squared() {
+    tape_reset();
+    h x = tape_var(1.0);
+    h ex = tape_exp(x);
+    h y = tape_mul(ex, ex);  # = exp(2x)
+    tape_backward(y);
+    # d/dx exp(2x) = 2*exp(2x) at x=1 = 2 * e^2 ≈ 14.778
+    assert_true(approx_eq(tape_grad(x), 14.778, 0.01), "d/dx exp(2x)");
+}
+
+# Multi-variable: gradient of distance squared
+fn test_distance_squared_grad() {
+    tape_reset();
+    h x = tape_var(3.0);
+    h y = tape_var(4.0);
+    h x2 = tape_mul(x, x);
+    h y2 = tape_mul(y, y);
+    h d2 = tape_add(x2, y2);
+    tape_backward(d2);
+    # d/dx (x^2 + y^2) = 2x = 6
+    # d/dy = 8
+    assert_true(approx_eq(tape_grad(x), 6.0, 0.001), "dx");
+    assert_true(approx_eq(tape_grad(y), 8.0, 0.001), "dy");
+}
+
+# Sigmoid through addition
+fn test_sigmoid_of_sum() {
+    tape_reset();
+    h a = tape_var(1.0);
+    h b = tape_var(0.0);
+    h s = tape_add(a, b);
+    h y = tape_sigmoid(s);
+    tape_backward(y);
+    # sigmoid(1)*(1-sigmoid(1)) ≈ 0.196
+    assert_true(approx_eq(tape_grad(a), 0.196, 0.01), "dy/da");
+    assert_true(approx_eq(tape_grad(b), 0.196, 0.01), "dy/db");
+}
+
+# Tanh
+fn test_tanh_grad_at_one() {
+    tape_reset();
+    h x = tape_var(1.0);
+    h y = tape_tanh(x);
+    tape_backward(y);
+    # d/dx tanh(x) = 1 - tanh^2(x). tanh(1) ≈ 0.7616, so 1 - 0.5801 ≈ 0.42
+    assert_true(approx_eq(tape_grad(x), 0.42, 0.01), "tanh' at 1");
+}
+
+# tape_sum reduces a vector
+fn test_tape_sum_grad() {
+    tape_reset();
+    h X = tape_var([1.0, 2.0, 3.0]);
+    h s = tape_sum(X);
+    tape_backward(s);
+    h gX = tape_grad(X);
+    # d(sum)/dx_i = 1 for each i
+    assert_true(approx_eq(arr_get(gX, 0), 1.0, 0.001), "g[0]=1");
+    assert_true(approx_eq(arr_get(gX, 2), 1.0, 0.001), "g[2]=1");
+}
+
+# Substrate metadata visible on forward values
+fn test_substrate_visible_forward() {
+    tape_reset();
+    h x = tape_var(8);  # Fibonacci attractor
+    h v = tape_value(x);
+    # Value comes back as substrate-annotated HInt for integers.
+    # We can't introspect HInt fields directly, but is_attractor works.
+    assert_eq(is_attractor(v), 1, "8 attractor preserved");
+}
+
+fn test_substrate_visible_after_op() {
+    tape_reset();
+    h x = tape_var(3);
+    h y = tape_var(5);
+    h s = tape_add(x, y);  # = 8
+    h v = tape_value(s);
+    assert_eq(is_attractor(v), 1, "8 attractor after sum");
+}

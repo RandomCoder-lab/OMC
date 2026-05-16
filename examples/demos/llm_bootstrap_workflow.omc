@@ -1,0 +1,95 @@
+# Demonstrates the canonical LLM bootstrap + iteration workflow.
+#
+# This is what an LLM driving OMC via MCP would do at the start of a
+# session: pull the bootstrap pack, learn the surface, then start
+# writing + iterating with introspection + memory.
+
+fn show(label, v) {
+    print(concat_many(label, " = ", to_string(v)));
+}
+
+fn main() {
+    print("=== LLM bootstrap workflow ===");
+    print("");
+
+    # Step 1: How big is the surface?
+    print("[1] Surface overview");
+    show("  documented builtins  ", omc_builtin_count());
+    show("  OMC-unique           ", omc_unique_count());
+    show("  categories           ", omc_categories_count());
+    show("  error patterns       ", omc_error_count());
+    print("");
+
+    # Step 2: What's available?
+    print("[2] Category sample");
+    h cats = omc_categories();
+    h i = 0;
+    while i < arr_len(cats) {
+        h c = arr_get(cats, i);
+        h items = omc_list_builtins(c);
+        print(concat_many("  ", c, ": ", to_string(arr_len(items)), " builtins"));
+        i = i + 1;
+        if i >= 8 { i = arr_len(cats); }  # limit output
+    }
+    print("");
+
+    # Step 3: What's the canonical OMC-only surface?
+    print("[3] OMC-unique sample (Python has no equivalent)");
+    h unique = omc_unique_builtins();
+    h k = 0;
+    while k < arr_len(unique) {
+        if k < 8 {
+            print(concat_many("  - ", arr_get(unique, k)));
+        }
+        k = k + 1;
+    }
+    if k > 8 { print(concat_many("  ... +", to_string(k - 8), " more")); }
+    print("");
+
+    # Step 4: Help on a specific builtin (the "look it up" loop)
+    print("[4] Looking up arr_softmax");
+    h help = omc_help("arr_softmax");
+    show("  signature  ", dict_get(help, "signature"));
+    show("  description", dict_get(help, "description"));
+    show("  example    ", dict_get(help, "example"));
+    print("");
+
+    # Step 5: Write some code, hash it, remember
+    print("[5] Code memory: remember, then recall");
+    omc_memory_clear();
+    h code_v1 = "fn loss(p, t) { return (p - t) * (p - t); }";
+    h id = omc_id(code_v1);
+    show("  v1 omc_id  ", id);
+    omc_remember("loss", code_v1);
+    h code_v2 = "fn loss(pred, target) { return (pred - target) * (pred - target); }";
+    show("  v2 omc_id  ", omc_id(code_v2));
+    show("  matches?   ", omc_recall_matches("loss", code_v2));  # 1 (alpha-eq)
+    h code_v3 = "fn loss(p, t) { return (p - t) * (p - t) + 0.01; }";
+    show("  v3 omc_id  ", omc_id(code_v3));
+    show("  matches?   ", omc_recall_matches("loss", code_v3));  # 0 (changed)
+    print("");
+
+    # Step 6: Change report
+    print("[6] What changed?");
+    h r = omc_change_report(code_v1, code_v3);
+    show("  modified  ", dict_get(r, "modified"));
+    show("  suggestion", dict_get(r, "suggested_action"));
+    print("");
+
+    # Step 7: If error, explain it
+    print("[7] Catching + explaining a typo");
+    h err_msg = "";
+    try {
+        h _ = arr_softmx([1.0, 2.0]);  # typo
+    } catch e {
+        err_msg = e;
+    }
+    h ex = omc_explain_error(err_msg);
+    show("  matched   ", dict_get(ex, "matched"));
+    show("  fix       ", dict_get(ex, "fix"));
+    print("");
+
+    print("=== End: this is the workflow LLMs run via MCP ===");
+}
+
+main();
