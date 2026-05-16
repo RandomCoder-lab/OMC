@@ -130,8 +130,38 @@ Synthetic microbench (sum over arr_range(0, 1000), 1000 iterations):
 
 `omnimcode-codegen/tests/jit_array_bridge.rs` — 6 tests covering sum, max, mixed-args, empty array, large array (1000 elements), and non-int-array rejection (falls through to tree-walk correctly). All pass; the existing 41 codegen tests still pass (48 total).
 
-### Honest limits remaining
+### Output-side bridge (also shipped)
 
-- **Read-only contract**: the bridge doesn't write back to the original `HArray` even if the JIT'd fn mutated the buffer. Common case (sum, score, count) is read-only; mutating-array fns return `i64` today so output-side bridging is a future extension.
-- **Int-only arrays**: `Value::Array` whose elements aren't all `HInt` (or `Bool`) falls through to tree-walk. String / float arrays are next-session work.
-- **Return-side bridge: infrastructure in place, codegen path disabled.** The wiring went in for an `@jit_returns_array_int` pragma that would call `omc_arr_heapify` before `Op::Return` (copying the frame-array buffer to heap so it outlives the JIT'd fn frame). The Rust extern + global-mapping + JittedFn flag + dispatch materializer + `omc_arr_free` are all present and pass their unit-test paths. But in end-to-end testing the JIT'd fn segfaults on its `ret` instruction AFTER `omc_arr_heapify` successfully runs and returns a valid heap pointer. The trip back through the extern-"C" boundary corrupts something (stack alignment? calling convention? alloca lifetime?). The codegen path is left disabled in `dual_band.rs` so the infrastructure can be re-enabled atomically once the segfault is understood. None of the current harmonic libraries' hot paths return arrays, so this gap costs no measurable performance today — `ha.top_k` / `ha.score_all` / `ha.new` are called O(1) times per fit, not per-row.
+The companion to the input bridge: a JIT'd fn marked with `@jit_returns_array_int` can return an array as its result. The codegen emits `omc_arr_heapify(frame_ptr)` before `Op::Return`, which copies the length-prefixed frame-array buffer to heap. The dispatch boundary in main.rs detects the `returns_array_int` flag on the JittedFn and materializes a `Value::Array` of `HInt`s from the heap pointer, then calls `omc_arr_free`.
+
+```omc
+@jit_returns_array_int
+fn build_arr(n) {
+    h arr = [0, 0, 0, 0, 0];
+    h i = 0;
+    while i < 5 {
+        arr[i] = i * n;
+        i = i + 1;
+    }
+    return arr;
+}
+```
+
+JIT and tree-walk produce byte-identical `[0, 3, 6, 9, 12]`.
+
+### Bug found while wiring the output bridge
+
+The first end-to-end attempt segfaulted on programs that use `arr[i] = val` syntax. Cause: the dual-band lowerer's `Op::ArrayIndexAssign` handler had `idx` and `val` swapped versus what the bytecode compiler actually emits. The OMC `compiler.rs` emits `IndexAssignment { name, index, value }` as: `compile_expr(value)`, `compile_expr(index)`, `ArrayIndexAssign(name)` — so after the op the operand stack is `[..., value, index]`. The dual-band lowerer was popping top as "value" and below as "index", but per the compiler's emit-order the top is the INDEX and below is the VALUE.
+
+The bytecode VM (`vm.rs:Op::ArrayIndexAssign`) pops in the correct order; only the dual-band JIT lowerer was wrong. Programs using `arr_set(arr, idx, val)` (the builtin form, lowered as `ArrSetNamed` with a different push order) were unaffected, which is why none of the existing JIT tests caught it — the input-bridge tests all use array READS, and the harmonic libraries use `arr_set` not `arr[i] = val`. Fixed by swapping the pop labels in `dual_band.rs:Op::ArrayIndexAssign`.
+
+### Tests
+
+`omnimcode-codegen/tests/jit_array_return_bridge.rs` — 5 tests:
+- singleton return `[42]`
+- loop-built array with `arr[i] = i*n` (the previously-segfaulting case)
+- zeros initializer `[0; 8]`
+- size-dependent fn called twice with different args
+- non-pragma fn returns scalar unchanged (negative control)
+
+All pass. Codegen test total: **53** (was 48 + 5 new). 161 OMC tests still green. The input-bridge speedups (115× synthetic, 1.9× harmonic_anomaly) are unchanged — the `ArrayIndexAssign` fix doesn't affect read-only paths.

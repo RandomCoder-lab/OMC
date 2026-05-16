@@ -438,14 +438,15 @@ impl<'ctx, 'a> DualBandLowerer<'ctx, 'a> {
                     stack.push(self.splat(i64_type.const_int(0, false), "asn_ret")?);
                 }
                 // ArrayIndexAssign(name): the compiler's emit for
-                // `name[idx] = val` syntax. Same semantics as
-                // ArrSetNamed but the bytecode form is value-then-
-                // index-then-op (different stack discipline).
+                // `name[idx] = val` syntax. The compiler pushes VALUE
+                // first then INDEX (see Statement::IndexAssignment in
+                // compiler.rs), so after this op the stack is
+                // [..., value, index]. Pop top → index, pop next → value.
                 // Doesn't push a placeholder (the AST form is a
                 // statement, not an expression).
                 Op::ArrayIndexAssign(name) => {
-                    let val_v = self.pop(&mut stack, i, "ArrayIndexAssign value")?;
                     let idx_v = self.pop(&mut stack, i, "ArrayIndexAssign idx")?;
+                    let val_v = self.pop(&mut stack, i, "ArrayIndexAssign value")?;
                     self.emit_array_set_named(name, idx_v, val_v, i)?;
                 }
 
@@ -557,26 +558,31 @@ impl<'ctx, 'a> DualBandLowerer<'ctx, 'a> {
                         BasicValueEnum::IntValue(iv) => iv,
                         _ => return Err(format!("hbit ret alpha not int at op{}", i)),
                     };
-                    // L1.6 output-side bridge (DISABLED — see below):
-                    // The intent was to call omc_arr_heapify on the
-                    // top-of-stack frame pointer when the fn has
-                    // `@jit_returns_array_int`, so the buffer outlives
-                    // the JIT'd fn frame. The wiring went in cleanly
-                    // (extern helper declared + global-mapped, dispatch
-                    // materializer ready), but in end-to-end testing
-                    // the JIT'd fn segfaults on its `ret` instruction
-                    // AFTER omc_arr_heapify successfully runs and
-                    // returns. heapify completes, the heap ptr is
-                    // valid, but the trip back into Rust through the
-                    // extern "C" boundary corrupts something. Needs
-                    // proper debugging (stack alignment? LLVM CC
-                    // mismatch? alloca lifetime?) so left disabled
-                    // here. The infrastructure (JittedFn.returns_array_int,
-                    // omc_arr_heapify + omc_arr_free, dispatch
-                    // materializer) is in place for the future session
-                    // that fixes the actual segfault.
+                    // L1.6 output-side bridge: call omc_arr_heapify on
+                    // the frame-array pointer at Op::Return so the
+                    // buffer outlives the JIT'd fn frame.
+                    let returns_array = self.f.pragmas
+                        .iter().any(|p| p == "jit_returns_array_int");
+                    let to_return = if returns_array {
+                        let heapify_fn = self.module
+                            .get_function("omc_arr_heapify")
+                            .ok_or_else(|| format!(
+                                "omc_arr_heapify not declared at op{}", i
+                            ))?;
+                        let call = self.builder
+                            .build_call(heapify_fn, &[alpha_iv.into()], "heapify_ret")
+                            .map_err(|e| format!("hbit ret heapify at op{}: {}", i, e))?;
+                        let ret = call.try_as_basic_value().left()
+                            .ok_or_else(|| format!("heapify call no value at op{}", i))?;
+                        match ret {
+                            BasicValueEnum::IntValue(iv) => iv,
+                            _ => return Err(format!("heapify call ret not int at op{}", i)),
+                        }
+                    } else {
+                        alpha_iv
+                    };
                     self.builder
-                        .build_return(Some(&alpha_iv))
+                        .build_return(Some(&to_return))
                         .map_err(|e| format!("hbit ret at op{}: {}", i, e))?;
                     block_terminated = true;
                 }

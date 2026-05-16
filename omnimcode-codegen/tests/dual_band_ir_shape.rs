@@ -27,6 +27,7 @@ fn dual_band_ir_shape_for_double() {
         param_types: vec![None],
         return_type: None,
         op_positions: vec![Pos::unknown(); n],
+        pragmas: Vec::new(),
         call_cache: (0..n).map(|_| std::cell::Cell::new(0)).collect(),
         ops,
         constants: vec![],

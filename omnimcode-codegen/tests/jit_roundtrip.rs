@@ -28,6 +28,7 @@ fn skeleton(name: &str, params: Vec<&str>, ops: Vec<Op>, constants: Vec<Const>) 
         param_types,
         return_type: None,
         op_positions: vec![Pos::unknown(); n],
+        pragmas: Vec::new(),
         call_cache: (0..n).map(|_| std::cell::Cell::new(0)).collect(),
         ops,
         constants,
