@@ -1,0 +1,1 @@
+{"attractor":63245986,"content":"fn compute_mean(xs) { h n = arr_len(xs); h s = 0.0; h i = 0; while i < n { s = s + arr_get(xs, i); i = i + 1; } return s / n; }","content_hash":3551785709911115688,"him_score":0.0,"kind":2,"packed":201535644,"resonance":1.7806756069660423e-11,"sender_id":28765}
