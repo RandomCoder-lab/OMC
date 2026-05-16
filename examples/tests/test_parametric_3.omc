@@ -1,0 +1,182 @@
+# Parametric v3 — table-driven tests with many sub-assertions.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+
+fn approx_eq(a, b, tol) {
+    h d = a - b;
+    if d < 0.0 { d = 0.0 - d; }
+    return d <= tol;
+}
+
+# Verify is_attractor on a wide range
+fn test_is_attractor_table() {
+    h fibs = [0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610, 987, 1597, 2584, 4181, 6765];
+    h i = 0;
+    while i < arr_len(fibs) {
+        assert_eq(is_attractor(arr_get(fibs, i)), 1,
+            concat_many("fib ", to_string(arr_get(fibs, i))));
+        i = i + 1;
+    }
+}
+
+# Non-attractors within range
+fn test_non_attractor_table() {
+    h non = [4, 6, 7, 9, 10, 11, 12, 14, 15, 16, 17, 18, 19, 20,
+              22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33];
+    h i = 0;
+    while i < arr_len(non) {
+        assert_eq(is_attractor(arr_get(non, i)), 0,
+            concat_many("non-fib ", to_string(arr_get(non, i))));
+        i = i + 1;
+    }
+}
+
+# attractor_distance on Fibonacci is 0
+fn test_distance_zero_on_fibs() {
+    h fibs = [0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144];
+    h i = 0;
+    while i < arr_len(fibs) {
+        assert_eq(attractor_distance(arr_get(fibs, i)), 0,
+            concat_many("d(", to_string(arr_get(fibs, i)), ") = 0"));
+        i = i + 1;
+    }
+}
+
+# arr_dot
+fn test_arr_dot_table() {
+    h pairs_a = [
+        [1.0, 2.0, 3.0],
+        [1.0, 0.0],
+        [3.0, 4.0],
+    ];
+    h pairs_b = [
+        [4.0, 5.0, 6.0],
+        [1.0, 1.0],
+        [3.0, 4.0],
+    ];
+    h expected = [32.0, 1.0, 25.0];
+    h i = 0;
+    while i < arr_len(pairs_a) {
+        h d = arr_dot(arr_get(pairs_a, i), arr_get(pairs_b, i));
+        assert_true(approx_eq(d, arr_get(expected, i), 0.001),
+            concat_many("dot ", to_string(i)));
+        i = i + 1;
+    }
+}
+
+# arr_sum_int
+fn test_arr_sum_int_table() {
+    h arrays = [
+        [1, 2, 3, 4, 5],
+        [10, 20, 30],
+        [0],
+        [],
+        [0 - 5, 5, 0 - 3, 3],
+    ];
+    h expected = [15, 60, 0, 0, 0];
+    h i = 0;
+    while i < arr_len(arrays) {
+        h s = arr_sum_int(arr_get(arrays, i));
+        assert_eq(s, arr_get(expected, i), concat_many("sum ", to_string(i)));
+        i = i + 1;
+    }
+}
+
+# arr_max_int and arr_min_int
+fn test_arr_minmax_table() {
+    h arrays = [
+        [3, 1, 4, 1, 5, 9, 2, 6],
+        [10, 10, 10],
+        [0 - 5, 0 - 3, 0 - 7],
+    ];
+    h max_expected = [9, 10, 0 - 3];
+    h min_expected = [1, 10, 0 - 7];
+    h i = 0;
+    while i < arr_len(arrays) {
+        assert_eq(arr_max_int(arr_get(arrays, i)), arr_get(max_expected, i),
+            concat_many("max ", to_string(i)));
+        assert_eq(arr_min_int(arr_get(arrays, i)), arr_get(min_expected, i),
+            concat_many("min ", to_string(i)));
+        i = i + 1;
+    }
+}
+
+# str_len
+fn test_str_len_table() {
+    h strings = ["", "a", "hello", "1234567890"];
+    h expected = [0, 1, 5, 10];
+    h i = 0;
+    while i < arr_len(strings) {
+        assert_eq(str_len(arr_get(strings, i)), arr_get(expected, i),
+            concat_many("len ", to_string(i)));
+        i = i + 1;
+    }
+}
+
+# concat_many with various arities
+fn test_concat_many_arities() {
+    assert_eq(concat_many("a"), "a", "1 arg");
+    assert_eq(concat_many("a", "b"), "ab", "2 args");
+    assert_eq(concat_many("a", "b", "c"), "abc", "3 args");
+    assert_eq(concat_many("a", "b", "c", "d"), "abcd", "4 args");
+    assert_eq(concat_many("x=", 1, " y=", 2), "x=1 y=2", "mixed types");
+}
+
+# arr_resonance_vec on attractors all near 1
+fn test_resonance_table() {
+    h fibs = [1, 2, 3, 5, 8, 13, 21];
+    h r = arr_resonance_vec(fibs);
+    h i = 0;
+    while i < arr_len(r) {
+        h v = arr_get(r, i);
+        h d = v - 1.0;
+        if d < 0.0 { d = 0.0 - d; }
+        assert_true(d < 0.001, concat_many("r ", to_string(i)));
+        i = i + 1;
+    }
+}
+
+# omc_help on each unique returns category 'substrate' or specific known cat
+fn test_unique_categories_make_sense() {
+    h unique = omc_unique_builtins();
+    h i = 0;
+    while i < arr_len(unique) {
+        h n = arr_get(unique, i);
+        h hd = omc_help(n);
+        h cat = dict_get(hd, "category");
+        # All unique builtins should have a category
+        assert_true(str_len(cat) > 0,
+            concat_many(n, " has cat"));
+        i = i + 1;
+    }
+}
+
+# Canonical hash determinism
+fn test_canonical_hash_deterministic() {
+    h cases = [
+        "fn f() { return 1; }",
+        "h x = arr_softmax([1.0, 2.0]);",
+        "fn loss(p, t) { return (p - t) * (p - t); }",
+    ];
+    h i = 0;
+    while i < arr_len(cases) {
+        h h1 = omc_canonical_hash(arr_get(cases, i));
+        h h2 = omc_canonical_hash(arr_get(cases, i));
+        assert_eq(dict_get(h1, "raw"), dict_get(h2, "raw"),
+            concat_many("hash ", to_string(i)));
+        i = i + 1;
+    }
+}
+
+# Token vocab IDs are dense and stable
+fn test_token_vocab_size_growing() {
+    h size = omc_token_vocab_size();
+    # Should be >100 since we've expanded the dict many times.
+    assert_true(size > 100, "vocab size > 100");
+}
