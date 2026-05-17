@@ -425,6 +425,206 @@ fn cmd_verify() -> ExitCode {
     }
 }
 
+/// .omcs save-file format (v1)
+///
+/// A self-contained substrate-keyed bundle. Each entry is canonical-
+/// hash-addressed; the whole bundle carries a substrate-signed
+/// envelope so the receiver can verify integrity without a shared
+/// key. Designed to compose with the kernel: `omc-kernel unpack`
+/// ingests every entry into the local store.
+///
+/// Format (JSON):
+/// {
+///   "omcs_version": 1,
+///   "created_at": "<iso8601>",
+///   "entry_count": N,
+///   "envelope_hash": <int>,           // hash of entries[]
+///   "envelope_attractor": <int>,
+///   "entries": [
+///     {
+///       "canonical_hash": "<hex>",
+///       "kind": "omc_fn" | "json" | "prose" | "blob",
+///       "attractor": <int>,
+///       "size_bytes": N,
+///       "content": "<raw>"
+///     }, ...
+///   ]
+/// }
+
+fn cmd_pack(out_path: &str) -> ExitCode {
+    let dir = store_dir();
+    if !dir.is_dir() {
+        eprintln!("pack: store is empty: {}", dir.display());
+        return ExitCode::from(1);
+    }
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        eprintln!("pack: cannot read {}", dir.display());
+        return ExitCode::from(1);
+    };
+    let mut entries: Vec<serde_json::Value> = Vec::new();
+    let mut hash_concat = String::new();
+    for ent in rd.flatten() {
+        let p = ent.path();
+        if p.extension().and_then(|s| s.to_str()) != Some("omc") {
+            continue;
+        }
+        let stem = match p.file_stem().and_then(|s| s.to_str()) {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
+        let Ok(content) = std::fs::read_to_string(&p) else { continue };
+        // Read sidecar metadata.
+        let meta_p = p.with_extension("json");
+        let meta: serde_json::Value = std::fs::read_to_string(&meta_p)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or(serde_json::json!({}));
+        let kind = meta.get("kind").and_then(|v| v.as_str()).unwrap_or("omc_fn").to_string();
+        let attractor = meta
+            .get("attractor")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(0);
+        hash_concat.push_str(&stem);
+        entries.push(serde_json::json!({
+            "canonical_hash": stem,
+            "kind": kind,
+            "attractor": attractor.to_string(),
+            "size_bytes": content.len(),
+            "content": content,
+        }));
+    }
+    let envelope_hash = tokenizer::fnv1a_64(hash_concat.as_bytes());
+    let (env_attractor, _) = phi_pi_fib::nearest_attractor_with_dist(envelope_hash);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let bundle = serde_json::json!({
+        "omcs_version": 1,
+        "created_at_unix": now,
+        "entry_count": entries.len(),
+        "envelope_hash": envelope_hash.to_string(),
+        "envelope_attractor": env_attractor.to_string(),
+        "entries": entries,
+    });
+    let json = serde_json::to_string(&bundle).unwrap_or_default();
+    if let Err(e) = std::fs::write(out_path, &json) {
+        eprintln!("pack: write failed: {}", e);
+        return ExitCode::from(1);
+    }
+    println!(
+        "packed {} entries into {} ({} bytes); envelope_hash={:016x}",
+        bundle["entry_count"], out_path, json.len(), envelope_hash as u64
+    );
+    ExitCode::SUCCESS
+}
+
+fn cmd_unpack(in_path: &str) -> ExitCode {
+    let Ok(wire) = std::fs::read_to_string(in_path) else {
+        eprintln!("unpack: cannot read: {}", in_path);
+        return ExitCode::from(1);
+    };
+    let bundle: serde_json::Value = match serde_json::from_str(&wire) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("unpack: not valid JSON: {}", e);
+            return ExitCode::from(1);
+        }
+    };
+    let version = bundle.get("omcs_version").and_then(|v| v.as_u64()).unwrap_or(0);
+    if version != 1 {
+        eprintln!("unpack: unsupported omcs_version {} (this binary speaks v1)", version);
+        return ExitCode::from(1);
+    }
+    let entries = match bundle.get("entries").and_then(|v| v.as_array()) {
+        Some(a) => a.clone(),
+        None => {
+            eprintln!("unpack: bundle has no entries array");
+            return ExitCode::from(1);
+        }
+    };
+    // Verify envelope: re-concat stored hashes, recompute envelope_hash.
+    let mut hash_concat = String::new();
+    for e in &entries {
+        if let Some(h) = e.get("canonical_hash").and_then(|v| v.as_str()) {
+            hash_concat.push_str(h);
+        }
+    }
+    let recomputed = tokenizer::fnv1a_64(hash_concat.as_bytes());
+    let claimed: i64 = bundle
+        .get("envelope_hash")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    if recomputed != claimed {
+        eprintln!(
+            "unpack: ENVELOPE TAMPERED — recomputed {:016x} != claimed {:016x}",
+            recomputed as u64, claimed as u64,
+        );
+        return ExitCode::from(1);
+    }
+    eprintln!("unpack: envelope verified ({} entries)", entries.len());
+    if let Err(e) = ensure_store() {
+        eprintln!("unpack: cannot create store: {}", e);
+        return ExitCode::from(1);
+    }
+    let mut new_count = 0usize;
+    let mut existing_count = 0usize;
+    let mut tampered = 0usize;
+    for e in &entries {
+        let h_str = e.get("canonical_hash").and_then(|v| v.as_str()).unwrap_or("");
+        let kind = e.get("kind").and_then(|v| v.as_str()).unwrap_or("omc_fn");
+        let content = e.get("content").and_then(|v| v.as_str()).unwrap_or("");
+        let Some(claimed_hash) = u64::from_str_radix(h_str, 16).ok() else { continue };
+        // Per-entry integrity: recompute canonical hash and compare.
+        let canonical_form = match kind {
+            "omc_fn" => canonical::canonicalize(content).unwrap_or_else(|_| content.to_string()),
+            "json" => canonicalize_json(content).unwrap_or_else(|| content.to_string()),
+            _ => content.to_string(),
+        };
+        let recomp = tokenizer::fnv1a_64(canonical_form.as_bytes());
+        if (recomp as u64) != claimed_hash {
+            tampered += 1;
+            continue;
+        }
+        let path = store_path_for(recomp);
+        if path.exists() {
+            existing_count += 1;
+            continue;
+        }
+        if std::fs::write(&path, content).is_err() {
+            continue;
+        }
+        let (attractor, dist) = phi_pi_fib::nearest_attractor_with_dist(recomp);
+        let meta = serde_json::json!({
+            "canonical_hash": recomp.to_string(),
+            "attractor": attractor.to_string(),
+            "attractor_distance": dist.to_string(),
+            "source_bytes": content.len(),
+            "canonical_bytes": canonical_form.len(),
+            "kind": kind,
+            "addressing": match kind {
+                "omc_fn" => "alpha-rename-invariant OMC canonical form",
+                "json" => "key-sorted JSON canonical form",
+                _ => "raw bytes (no canonicalization)",
+            },
+            "origin_file": format!("<.omcs unpack: {}>", in_path),
+        });
+        let _ = std::fs::write(meta_path_for(recomp), meta.to_string());
+        new_count += 1;
+    }
+    println!(
+        "unpacked {} entries: {} new, {} already in store, {} tampered (skipped)",
+        entries.len(), new_count, existing_count, tampered
+    );
+    if tampered > 0 {
+        return ExitCode::from(2);
+    }
+    ExitCode::SUCCESS
+}
+
 fn cmd_demo() -> ExitCode {
     // End-to-end: ingest examples/lib/, sign a known fn body, verify it back.
     let lib_dir = std::env::current_dir()
@@ -482,6 +682,9 @@ fn print_usage() {
     eprintln!("  omc-kernel ls                     list stored hashes + first-line summary");
     eprintln!("  omc-kernel sign FILE              sign OMC source to a substrate-signed wire msg");
     eprintln!("  omc-kernel verify                 verify a wire msg from stdin, recover via store");
+    eprintln!("  omc-kernel pack OUT.omcs          bundle entire store into a .omcs save file");
+    eprintln!("                                    (substrate-keyed, integrity-verified envelope)");
+    eprintln!("  omc-kernel unpack IN.omcs         verify + ingest a .omcs bundle into the store");
     eprintln!("  omc-kernel demo                   ingest examples/lib/, alpha-rename recovery demo");
     eprintln!();
     eprintln!("Env:");
@@ -547,6 +750,22 @@ fn main() -> ExitCode {
             cmd_sign(&args[2])
         }
         "verify" => cmd_verify(),
+        "pack" => {
+            // omc-kernel pack OUT.omcs
+            if args.len() < 3 {
+                eprintln!("pack: missing OUT path");
+                return ExitCode::from(2);
+            }
+            cmd_pack(&args[2])
+        }
+        "unpack" => {
+            // omc-kernel unpack IN.omcs
+            if args.len() < 3 {
+                eprintln!("unpack: missing IN path");
+                return ExitCode::from(2);
+            }
+            cmd_unpack(&args[2])
+        }
         "demo" => cmd_demo(),
         "-h" | "--help" => {
             print_usage();
