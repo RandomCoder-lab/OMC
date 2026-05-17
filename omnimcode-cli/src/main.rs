@@ -1079,7 +1079,12 @@ fn execute_program(source: &str) -> Result<(), String> {
             }
         }
     }
-    interpreter.execute(statements)?;
+    // Decorate runtime errors with the call-stack trace so users see
+    // WHERE the error happened, not just what. format_error_with_trace
+    // is a no-op when the message already has trace lines.
+    interpreter.execute(statements).map_err(|e| {
+        interpreter.format_error_with_trace(&e)
+    })?;
 
     Ok(())
 }
@@ -1229,7 +1234,7 @@ fn repl_execute(
     }
 
     if let Err(e) = interp.execute(statements) {
-        eprintln!("Error: {}", e);
+        eprintln!("Error: {}", interp.format_error_with_trace(&e));
     }
 }
 
