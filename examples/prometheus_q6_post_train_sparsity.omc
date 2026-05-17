@@ -1,0 +1,245 @@
+# Post-training Q6 sparsity test (v0.8.7 #8 reformulation).
+#
+# v0.8.7 first-look measured attention concentration at random init:
+# 8.36% of softmax mass in 6.84% of substrate-close cells — essentially
+# uniform, hypothesis "sparse via substrate distance" FALSIFIED at init.
+#
+# Reformulation: train a Q6-fused model for N steps, then measure the
+# SAME concentration ratio on the trained q's attention scores. The Q6
+# modulation explicitly pushes q toward substrate magnitudes; does it
+# also push q toward substrate-aligned POSITIONS?
+#
+# If post-training mass ratio > pre-training (8.36%), substrate sparsity
+# is viable after training. If equal/lower, falsification holds at scale.
+
+import "examples/lib/prometheus.omc";
+
+fn build_vocab(text) {
+    h seen = dict_new();
+    h chars = [];
+    h i = 0;
+    while i < str_len(text) {
+        h ch = str_slice(text, i, i + 1);
+        if !dict_has(seen, ch) { dict_set(seen, ch, arr_len(chars)); arr_push(chars, ch); }
+        i = i + 1;
+    }
+    h v = dict_new();
+    dict_set(v, "chars", chars);
+    dict_set(v, "lookup", seen);
+    return v;
+}
+
+fn encode(text, vocab) {
+    h lookup = dict_get(vocab, "lookup");
+    h ids = [];
+    h i = 0;
+    while i < str_len(text) {
+        h ch = str_slice(text, i, i + 1);
+        arr_push(ids, dict_get(lookup, ch));
+        i = i + 1;
+    }
+    return ids;
+}
+
+fn substrate_dist(i, j) {
+    h moduli = [5, 8, 13, 21];
+    h s = 0;
+    h k = 0;
+    while k < arr_len(moduli) {
+        h m = arr_get(moduli, k);
+        h di = i - (i / m) * m;
+        h dj = j - (j / m) * m;
+        h d = di - dj;
+        if d < 0 { d = 0 - d; }
+        s = s + d;
+        k = k + 1;
+    }
+    return s;
+}
+
+fn measure_concentration(attn_val, seq_len, threshold) {
+    h mass_near = 0.0;
+    h mass_total = 0.0;
+    h n_near = 0;
+    h i = 0;
+    while i < seq_len {
+        h row = arr_get(attn_val, i);
+        h j = 0;
+        while j < seq_len {
+            h p = arr_get(row, j);
+            mass_total = mass_total + p;
+            if substrate_dist(i, j) <= threshold {
+                mass_near = mass_near + p;
+                n_near = n_near + 1;
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    h result = dict_new();
+    dict_set(result, "mass_frac", mass_near / mass_total);
+    dict_set(result, "cell_frac", n_near * 1.0 / (seq_len * seq_len));
+    return result;
+}
+
+fn build_model(q6_on, vocab_size, d_model, ff_dim, seq_len, seed) {
+    h emb = prom_embedding_new(vocab_size, d_model, seed);
+    h s1 = dict_get(emb, "rng_state");
+    h attn = prom_attention_substrate_k_new(d_model, seq_len, s1 + 11);
+    if q6_on { dict_set(attn, "q6_mode", "fused"); }
+    h s2 = dict_get(attn, "rng_state");
+    h ln1 = prom_layernorm_new(d_model, s2);
+    h ff_up = prom_linear_new(d_model, ff_dim, s2 + 13);
+    h s3 = dict_get(ff_up, "rng_state");
+    h ff_down = prom_linear_new(ff_dim, d_model, s3);
+    h s4 = dict_get(ff_down, "rng_state");
+    h ln2 = prom_layernorm_new(d_model, s4);
+    h head = prom_linear_new(d_model, vocab_size, s4 + 17);
+    h m = dict_new();
+    dict_set(m, "emb", emb);
+    dict_set(m, "attn", attn);
+    dict_set(m, "ln1", ln1);
+    dict_set(m, "ff_up", ff_up);
+    dict_set(m, "ff_down", ff_down);
+    dict_set(m, "ln2", ln2);
+    dict_set(m, "head", head);
+    return m;
+}
+
+fn forward_window(model, token_ids, pe_table) {
+    h x = prom_embedding_batch(dict_get(model, "emb"), token_ids);
+    h pe_rows = [];
+    h i = 0;
+    while i < arr_len(token_ids) { arr_push(pe_rows, arr_get(pe_table, i)); i = i + 1; }
+    x = tape_add(x, tape_const(pe_rows));
+    h attn_out = prom_attention_substrate_k_forward(dict_get(model, "attn"), x);
+    h x_post = tape_add(x, attn_out);
+    h n1 = prom_layernorm_forward(dict_get(model, "ln1"), x_post);
+    h up = prom_linear_forward(dict_get(model, "ff_up"), n1);
+    h down = prom_linear_forward(dict_get(model, "ff_down"), prom_relu(up));
+    h x_ff = tape_add(x_post, down);
+    h n2 = prom_layernorm_forward(dict_get(model, "ln2"), x_ff);
+    return prom_linear_forward(dict_get(model, "head"), n2);
+}
+
+fn collect_all(model) {
+    h attn_p = prom_attention_substrate_k_params(dict_get(model, "attn"));
+    h other = prom_collect_params_v2([
+        dict_get(model, "emb"),
+        dict_get(model, "ln1"),
+        dict_get(model, "ff_up"),
+        dict_get(model, "ff_down"),
+        dict_get(model, "ln2"),
+        dict_get(model, "head"),
+    ]);
+    h out = [];
+    h i = 0;
+    while i < arr_len(attn_p) { arr_push(out, arr_get(attn_p, i)); i = i + 1; }
+    i = 0;
+    while i < arr_len(other) { arr_push(out, arr_get(other, i)); i = i + 1; }
+    return out;
+}
+
+# Extract the post-softmax attn matrix for one window using the trained model.
+fn attn_concentration_for(model, ids, seq_len, pe_table, threshold) {
+    h window = [];
+    h k = 0;
+    while k < seq_len {
+        arr_push(window, arr_get(ids, k));
+        k = k + 1;
+    }
+    h x = prom_embedding_batch(dict_get(model, "emb"), window);
+    h pe_rows = [];
+    h i = 0;
+    while i < arr_len(window) { arr_push(pe_rows, arr_get(pe_table, i)); i = i + 1; }
+    x = tape_add(x, tape_const(pe_rows));
+    # Recreate the same forward as prom_attention_substrate_k_forward to
+    # get the attn (post-softmax) matrix specifically, not the final
+    # weighted-V output.
+    h attn = dict_get(model, "attn");
+    h Q_w = dict_get(attn, "Q");
+    h K_const = dict_get(attn, "K_const");
+    h q = tape_matmul(x, Q_w);
+    h q_mod = prom_q6_modulate(q, dict_get(attn, "q6_scale"),
+                                dict_get(attn, "q6_gamma"),
+                                dict_get(attn, "q6_mode"));
+    h k_t = tape_transpose(tape_const(K_const));
+    h scores = tape_matmul(q_mod, k_t);
+    h attn_node = prom_substrate_softmax(scores, dict_get(attn, "smod_alpha"));
+    h attn_val = tape_value(attn_node);
+    return measure_concentration(attn_val, seq_len, threshold);
+}
+
+fn train_and_measure(q6_on, vocab_size, ids, seq_len, d_model, ff_dim, lr, steps, seed) {
+    tape_reset();
+    h model = build_model(q6_on, vocab_size, d_model, ff_dim, seq_len, seed);
+    h params = collect_all(model);
+    h opt = prom_adamw_new(params, lr, 0.9, 0.999, 1e-8, 0.0);
+    h pe_table = prom_crt_pe_matrix(seq_len, d_model);
+    h n_windows = arr_len(ids) - seq_len - 1;
+    h step = 0;
+    while step < steps {
+        h start = step - (step / n_windows) * n_windows;
+        h window = [];
+        h targets = [];
+        h k = 0;
+        while k < seq_len {
+            arr_push(window, arr_get(ids, start + k));
+            arr_push(targets, arr_get(ids, start + k + 1));
+            k = k + 1;
+        }
+        h logits = forward_window(model, window, pe_table);
+        h loss = prom_cross_entropy_batch(logits, targets, vocab_size);
+        tape_backward(loss);
+        prom_adamw_step(opt);
+        step = step + 1;
+    }
+    return attn_concentration_for(model, ids, seq_len, pe_table, 5);
+}
+
+fn main() {
+    print("=== post-training Q6 sparsity test (#8 reformulation) ===");
+    h text = "the rain in spain falls mainly on the plain and the sun rises in the east while the moon hides behind the mountain peaks of distant lands";
+    h vocab = build_vocab(text);
+    h vocab_size = arr_len(dict_get(vocab, "chars"));
+    h ids = encode(text, vocab);
+    h seq_len = 32;
+    h d_model = 32;
+    h ff_dim = 64;
+    h lr = 0.005;
+    h steps = 1000;
+
+    # Three measurements:
+    #   pre-training (0 steps), Q6-trained, baseline-trained
+    print("Random q (untrained) reference: ~8.36% mass in 6.84% cells (v0.8.7)");
+    print(concat_many("Training ", to_string(steps), " steps each, seq_len=",
+        to_string(seq_len), " (", to_string(seq_len * seq_len), " cells)"));
+    print("");
+
+    h q6_result = train_and_measure(true, vocab_size, ids, seq_len, d_model, ff_dim, lr, steps, 42);
+    h base_result = train_and_measure(false, vocab_size, ids, seq_len, d_model, ff_dim, lr, steps, 42);
+
+    h q6_mass = dict_get(q6_result, "mass_frac");
+    h q6_cells = dict_get(q6_result, "cell_frac");
+    h base_mass = dict_get(base_result, "mass_frac");
+    h base_cells = dict_get(base_result, "cell_frac");
+
+    print(concat_many("baseline (no Q6) post-train:  ",
+        to_string(base_mass * 100.0), "% mass in ",
+        to_string(base_cells * 100.0), "% cells (ratio ",
+        to_string(base_mass / base_cells), ")"));
+    print(concat_many("Q6 fused          post-train:  ",
+        to_string(q6_mass * 100.0), "% mass in ",
+        to_string(q6_cells * 100.0), "% cells (ratio ",
+        to_string(q6_mass / q6_cells), ")"));
+
+    if q6_mass / q6_cells > 1.5 {
+        print("→ Q6 IS pushing attention toward substrate positions; sparse kernel viable after training");
+    } else if q6_mass / q6_cells > 1.1 {
+        print("→ mild substrate alignment after Q6 training; sparse kernel marginal");
+    } else {
+        print("→ no substrate position alignment even after Q6 training; reformulation falsified");
+    }
+}
+
+main();

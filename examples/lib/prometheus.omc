@@ -67,6 +67,26 @@ fn _prom_random_matrix(rows, cols, bound, state) {
     return out;
 }
 
+# v0.8.8 substrate-init variant. After random init, snap each cell to
+# the nearest Fibonacci attractor at the given scale. The hypothesis:
+# substrate-aligned starting weights may give different (potentially
+# better-regularized) training trajectories than uniform random init.
+# Pairs with the substrate_snap_matrix Rust builtin.
+#
+# Usage:
+#   h W = _prom_substrate_random_matrix(rows, cols, bound, state, 1024.0);
+# scale=0 returns the same node unchanged (no snapping).
+fn _prom_substrate_random_matrix(rows, cols, bound, state, init_scale) {
+    h out = _prom_random_matrix(rows, cols, bound, state);
+    if init_scale > 0.0 {
+        h node = dict_get(out, "node");
+        h v = tape_value(node);
+        h snapped = substrate_snap_matrix(v, init_scale);
+        tape_set_value(node, snapped);
+    }
+    return out;
+}
+
 # Same as above but produces a zero-initialized bias row vector.
 fn _prom_zeros_row(cols) {
     h row = [];

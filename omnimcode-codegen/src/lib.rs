@@ -797,6 +797,28 @@ impl<'ctx> JitContext<'ctx> {
         let mut failed: std::collections::HashSet<String> =
             std::collections::HashSet::new();
         for (name, cf) in &module.functions {
+            // v0.8.8 eligibility audit: refuse to JIT any fn whose body
+            // touches arrays / dicts / strings. The dual-band lowerer
+            // returns i64 from JIT'd fns, which silently lies about the
+            // OMC type when a tree-walk caller does `arr_len(...)` on a
+            // fn that's supposed to return an array. Pre-check the
+            // bytecode and skip eligibility for collection-typed fns —
+            // the tree-walk path runs them and tree-walk semantics are
+            // preserved.
+            if fn_uses_collections(cf) {
+                failed.insert(name.clone());
+                let suffixed = format!("{}_hbit", name);
+                if let Some(partial) = self.module.get_function(&suffixed) {
+                    for bb in partial.get_basic_blocks() {
+                        unsafe { bb.delete().ok() };
+                    }
+                    let entry = self.context.append_basic_block(partial, "noop_entry");
+                    let builder = self.context.create_builder();
+                    builder.position_at_end(entry);
+                    let _ = builder.build_unreachable();
+                }
+                continue;
+            }
             match dual_band::DualBandLowerer::lower_existing(self.context, &self.module, cf) {
                 Ok(_) => {
                     succeeded.insert(name.clone());
@@ -1689,4 +1711,44 @@ fn pop<'ctx>(
     stack
         .pop()
         .ok_or_else(|| format!("stack underflow at op{} ({})", op_idx, context))
+}
+
+/// v0.8.8 JIT eligibility audit. Scan a CompiledFunction's bytecode for
+/// any op that creates or operates on collections (arrays / dicts /
+/// strings). If found, the fn is NOT JIT-eligible — its tree-walk
+/// semantics must be preserved because the dual-band lowerer returns
+/// an i64, which silently lies about the runtime type when a caller
+/// later does `arr_len(...)` or `dict_get(...)` on the return value.
+///
+/// This filter is intentionally conservative: any collection-touching
+/// op disqualifies the fn even if collections are only used internally
+/// and the return is a pure number. Refining the analysis (return-value
+/// type inference) is a future chapter.
+fn fn_uses_collections(cf: &CompiledFunction) -> bool {
+    for op in &cf.ops {
+        match op {
+            Op::NewArray(_)
+            | Op::NewDict(_)
+            | Op::DictSetNamed(_)
+            | Op::DictDelNamed(_)
+            | Op::ArrayIndex
+            | Op::ArrayIndexAssign(_)
+            | Op::ArrayLen => return true,
+            // String/array-returning builtins via Op::CallBuiltin would
+            // also disqualify. Check the constant pool for string
+            // constants — if a fn loads a string, it's likely doing
+            // collection / hashmap / display work.
+            _ => {}
+        }
+    }
+    // Also disqualify if the constant pool has any string literal —
+    // the JIT lowers everything as i64, so a string in the const pool
+    // means the fn returns or threads collection-typed data somewhere
+    // (e.g. as a dict key for substrate identifiers).
+    for k in &cf.constants {
+        if matches!(k, Const::Str(_)) {
+            return true;
+        }
+    }
+    false
 }

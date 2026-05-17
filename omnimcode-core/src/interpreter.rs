@@ -5329,6 +5329,54 @@ impl Interpreter {
                                        lr, b1, b2, eps, wd, step)
                     .map_err(|e| format!("substrate_adamw_update: {}", e))
             }
+            // substrate_snap_matrix(arr, scale) — per-cell snap to nearest
+            // Fibonacci attractor at the given scale. v0.8.8 substrate-init
+            // experiment: use this at parameter-initialization time to seed
+            // weights at substrate-aligned positions, then let training
+            // diverge from there. Tests whether substrate-aligned init
+            // gives different (better?) training trajectories than uniform
+            // random init. Accepts 1D or 2D OMC arrays; returns same shape.
+            "substrate_snap_matrix" => {
+                if args.len() < 2 {
+                    return Err("substrate_snap_matrix requires (arr, scale)".to_string());
+                }
+                let arr_val = self.eval_expr(&args[0])?;
+                let scale = self.eval_expr(&args[1])?.to_float();
+                if scale == 0.0 {
+                    return Err("substrate_snap_matrix: scale must be != 0".to_string());
+                }
+                let snap = |x: f64| -> f64 {
+                    let n = (x * scale).round() as i64;
+                    let (a, _) = crate::phi_pi_fib::nearest_attractor_with_dist(n);
+                    (a as f64) / scale
+                };
+                let arr = match &arr_val {
+                    Value::Array(a) => a,
+                    _ => return Err("substrate_snap_matrix: expected 1D or 2D array".to_string()),
+                };
+                let rows = arr.items.borrow();
+                if rows.is_empty() {
+                    return Ok(Value::Array(HArray::from_vec(vec![])));
+                }
+                if !matches!(&rows[0], Value::Array(_)) {
+                    let out: Vec<Value> = rows.iter()
+                        .map(|c| Value::HFloat(snap(c.to_float())))
+                        .collect();
+                    return Ok(Value::Array(HArray::from_vec(out)));
+                }
+                let mut out_rows: Vec<Value> = Vec::with_capacity(rows.len());
+                for row in rows.iter() {
+                    let row_arr = match row {
+                        Value::Array(a) => a,
+                        _ => return Err("substrate_snap_matrix: ragged input".to_string()),
+                    };
+                    let new_row: Vec<Value> = row_arr.items.borrow().iter()
+                        .map(|c| Value::HFloat(snap(c.to_float())))
+                        .collect();
+                    out_rows.push(Value::Array(HArray::from_vec(new_row)));
+                }
+                Ok(Value::Array(HArray::from_vec(out_rows)))
+            }
             // substrate_smod_matrix(scores, alpha) — Rust-native S-MOD
             // modulator. Per cell: 1 / (1 + alpha · attractor_distance(int(s))).
             // Lifted from `_prom_smod_matrix` in prometheus.omc; the OMC
