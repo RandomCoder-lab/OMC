@@ -1,44 +1,44 @@
 # OMC Roadmap
 
-Current chapter: **v0.4-substrate-context** (shipped 2026-05-17).
-Next chapter: **v0.5-substrate-memory** candidate — substrate-keyed conversation memory via fibtier, the path to the 10× context-budget claim that v0.4 fell short of.
+Current chapter: **v0.5-substrate-memory** (shipped 2026-05-17).
+Next chapter: open — candidates listed below. The five-chapter symbolic-context arc (v0.3 → v0.3.1 → v0.4 → v0.5) has landed with the 10× target hit (10.61× measured).
 
 See [CHANGELOG.md](CHANGELOG.md) and [GitHub Releases](https://github.com/RandomCoder-lab/OMC/releases) for the chapter-by-chapter history of how OMC got here. This file describes what's on the path going forward.
 
 ---
 
-## v0.5-substrate-memory (candidate)
+## Post-v0.5 candidates (none committed yet)
 
-**Substrate-keyed conversation memory: agent history becomes a stream of canonical hashes that resolve into full content only when reasoning needs it.**
+### v0.6 candidate A — fibtier-bounded memory
 
-v0.4 hit 2.81× context compression on the predict + fetch flow. The structural ceiling for that pattern alone is ~3×; v0.5 targets the 10× regime by making **conversation transcripts themselves substrate-typed**:
+v0.5 ships substrate-keyed memory but the store grows unbounded. Long-running agents need pruning. Wire fibtier's tier-bounded eviction into `MemoryStore`:
 
-- Wire `fibtier` (Fibonacci-tier memory) as an MCP-exposed conversation store
-- Each turn is content-addressed; prior turns recovered via `omc_fetch_by_hash` only when the agent needs to "remember" them
-- Combined with v0.4's predict + compress + decompress, the total context budget for a multi-turn agent task drops to ~10% of baseline
+- Each namespace gets a tier-state file alongside the index
+- Stores cascade into higher tiers via the fibtier fold mechanism
+- Old entries get summarized/aggregated as they fold upward
+- Bounded total entries across all tiers (default ~4180 = Fib(18))
 
-### Win condition
+### v0.6 candidate B — Prometheus rerank pass
 
-An LLM agent in a 20-turn conversation solves a non-trivial OMC authoring task with ~10× less context budget than a naive baseline that keeps the full transcript in the window.
+The substrate-ranked predict candidates can be reranked by a learned probability overlay. Train a small Prometheus model on the corpus, score top-k candidates' next-token probabilities, blend with the substrate distance.
 
-### Tracks
+### v0.6 candidate C — substrate-attention follow-ups
 
-- `omc_memory_store(key, text)` / `omc_memory_recall(key)` MCP tools backed by content-addressed kernel storage
-- Conversation-aware predict: `omc_predict(..., context_hash=H)` where H references prior reasoning state, biasing the ranking
-- Benchmark on a realistic multi-turn workflow
+- Substrate-modulated Q projection. Q hasn't been swapped yet; the V resample recipe (post-projection modulation) may generalize.
+- Substrate FF: dampen off-attractor activations in the feed-forward residual.
+- Substrate LayerNorm: substrate-distance-weighted variance computation.
+- Larger-scale validation: every substrate-attention claim was made at TinyShakespeare scale (1.1MB). Need to verify the stack holds at 10-100MB corpora.
 
----
+### Other deferred items
 
-## Deferred from v0.3 / v0.4
-
-- **Prometheus rerank pass** — train a small Prometheus model on the corpus and rerank top-k by token-stream probability.
-- **Stateful corpus API** — `omc_corpus_build` returns a handle, `omc_predict_from(handle, prefix, top_k)` reuses it.
+- **Stateful corpus API** — `omc_corpus_build` returns a handle, `omc_predict_from(handle, prefix, top_k)` reuses it. Saves the corpus-rebuild cost on repeated queries.
 - **Streaming queries** — incremental updates as the prefix grows token-by-token.
 - **Cross-corpus weighted blending** — give different paths different priority in the ranking.
+- **Conversation-aware predict** — `omc_predict(..., context_hash=H)` where H references prior reasoning state, biasing the ranking by which fns the agent has already touched.
 
 ---
 
-## v0.6+ candidates
+## v0.7+ candidates
 
 ### Substrate-attention follow-ups
 
@@ -71,6 +71,7 @@ The substrate-attention components stack to −8.94% inside one block. The path 
 
 | Chapter | Key shipped items |
 |---|---|
+| [v0.5-substrate-memory](https://github.com/RandomCoder-lab/OMC/releases/tag/v0.5-substrate-memory) | `omc_memory_store/recall/list/stats` + filesystem persistence + **10.61× LLM context-budget reduction** measured on a 20-turn agent task |
 | [v0.4-substrate-context](https://github.com/RandomCoder-lab/OMC/releases/tag/v0.4-substrate-context) | `omc_compress_context` / `omc_decompress` tools + `format=codec` thumbnails + directory ingest + measured 1.85×-2.81× LLM context-budget reduction |
 | [v0.3.1-symbolic-compression](https://github.com/RandomCoder-lab/OMC/releases/tag/v0.3.1-symbolic-compression) | `omc_predict` gains `format=hash`/`signature`/`full` (3.8× compression default) + `omc_fetch_by_hash` for on-demand recovery |
 | [v0.3-symbolic-prediction](https://github.com/RandomCoder-lab/OMC/releases/tag/v0.3-symbolic-prediction) | `omc_predict_files(paths, prefix, top_k)` returns ranked provenance-tracked continuations from a content-addressed corpus |

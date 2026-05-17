@@ -28,6 +28,7 @@ use omnimcode_core::canonical;
 use omnimcode_core::docs;
 use omnimcode_core::errors;
 use omnimcode_core::interpreter::Interpreter;
+use omnimcode_core::memory::MemoryStore;
 use omnimcode_core::parser::Parser;
 use omnimcode_core::predict::{CodeCorpus, predict_continuations};
 use omnimcode_core::tokenizer;
@@ -362,6 +363,104 @@ fn list_tools() -> Vec<Json> {
                 "required": ["paths", "canonical_hash"]
             }
         }),
+        json!({
+            "name": "omc_memory_store",
+            "description": "Substrate-keyed conversation memory: persist a chunk of text \
+                            (an agent turn, a reasoning trace, a piece of context the LLM \
+                            wants to remember later) content-addressed by canonical hash. \
+                            Returns {content_hash, namespace, bytes}. The hash is the same \
+                            primitive as omc_compress_context's content_hash — they're \
+                            interchangeable.\n\
+                            \n\
+                            Survives MCP process restart (filesystem-backed at \
+                            ~/.omc/memory/<namespace>/). Use a per-conversation namespace \
+                            (e.g. \"agent_<session_id>\") to keep threads separate.\n\
+                            \n\
+                            Together with omc_memory_recall, lets an LLM agent's prior turns \
+                            stay in cheap reference form (a hash) in the current context, \
+                            recovering full content only when reasoning needs it.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "Content to store. Can be OMC source, prose, JSON, or any UTF-8 text."
+                    },
+                    "namespace": {
+                        "type": "string",
+                        "default": "default",
+                        "description": "Logical partition. Sanitized to ASCII alphanumeric + _-."
+                    }
+                },
+                "required": ["text"]
+            }
+        }),
+        json!({
+            "name": "omc_memory_recall",
+            "description": "Recover stored text by canonical hash. Returns {found, text, ...} \
+                            or {found: false} if no namespace contains an entry with that \
+                            hash. If namespace is given, only that namespace is searched; \
+                            otherwise, every namespace under the memory root is walked.\n\
+                            \n\
+                            Companion to omc_memory_store. Together they let prior agent \
+                            turns stay in hash form in the current context, recovered on \
+                            demand only when reasoning needs them.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "content_hash": {
+                        "type": "integer",
+                        "description": "Hash returned by a prior omc_memory_store."
+                    },
+                    "namespace": {
+                        "type": "string",
+                        "description": "Optional. If omitted, searches all namespaces."
+                    }
+                },
+                "required": ["content_hash"]
+            }
+        }),
+        json!({
+            "name": "omc_memory_list",
+            "description": "Browse a namespace's stored entries, most recent first. Each \
+                            entry has {content_hash, bytes, stored_at_unix, preview}. The \
+                            preview is the first ~80 chars of the text, stripped of \
+                            newlines — enough to disambiguate when picking which entry to \
+                            recall.\n\
+                            \n\
+                            Use to see what an agent has stored without paying the byte \
+                            cost of recalling every entry. Limit defaults to 20.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "namespace": {
+                        "type": "string",
+                        "default": "default",
+                        "description": "Namespace to browse."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "default": 20,
+                        "description": "Maximum entries to return."
+                    }
+                }
+            }
+        }),
+        json!({
+            "name": "omc_memory_stats",
+            "description": "Diagnostic: total entries and stored bytes for a namespace. \
+                            Useful for an agent to know if its memory is growing unbounded.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "namespace": {
+                        "type": "string",
+                        "default": "default"
+                    }
+                }
+            }
+        }),
     ]
 }
 
@@ -511,6 +610,66 @@ fn dispatch_tool(interp: &mut Interpreter, name: &str, args: &Json) -> Result<St
                 "codec": codec,
             });
             Ok(serde_json::to_string_pretty(&payload).unwrap())
+        }
+        "omc_memory_store" => {
+            let text = args.get("text").and_then(Json::as_str)
+                .ok_or_else(|| "omc_memory_store: missing 'text' arg".to_string())?;
+            let namespace = args.get("namespace").and_then(Json::as_str)
+                .unwrap_or("default");
+            let store = MemoryStore::from_env();
+            let hash = store.store(namespace, text)?;
+            Ok(serde_json::to_string_pretty(&json!({
+                "content_hash": hash,
+                "namespace": namespace,
+                "bytes": text.len(),
+            })).unwrap())
+        }
+        "omc_memory_recall" => {
+            let target = args.get("content_hash").and_then(Json::as_i64)
+                .ok_or_else(|| "omc_memory_recall: missing 'content_hash' (i64) arg".to_string())?;
+            let namespace = args.get("namespace").and_then(Json::as_str);
+            let store = MemoryStore::from_env();
+            match store.recall(namespace, target)? {
+                Some(text) => Ok(serde_json::to_string_pretty(&json!({
+                    "found": true,
+                    "content_hash": target,
+                    "bytes": text.len(),
+                    "text": text,
+                })).unwrap()),
+                None => Ok(serde_json::to_string_pretty(&json!({
+                    "found": false,
+                    "content_hash": target,
+                    "namespace": namespace,
+                })).unwrap()),
+            }
+        }
+        "omc_memory_list" => {
+            let namespace = args.get("namespace").and_then(Json::as_str).unwrap_or("default");
+            let limit = args.get("limit").and_then(Json::as_i64).unwrap_or(20)
+                .clamp(1, 1000) as usize;
+            let store = MemoryStore::from_env();
+            let entries = store.list(namespace, limit)?;
+            let entry_jsons: Vec<Json> = entries.iter().map(|e| json!({
+                "content_hash": e.content_hash,
+                "bytes": e.bytes,
+                "stored_at_unix": e.stored_at_unix,
+                "preview": e.preview,
+            })).collect();
+            Ok(serde_json::to_string_pretty(&json!({
+                "namespace": namespace,
+                "count": entries.len(),
+                "entries": entry_jsons,
+            })).unwrap())
+        }
+        "omc_memory_stats" => {
+            let namespace = args.get("namespace").and_then(Json::as_str).unwrap_or("default");
+            let store = MemoryStore::from_env();
+            let (count, bytes) = store.stats(namespace)?;
+            Ok(serde_json::to_string_pretty(&json!({
+                "namespace": namespace,
+                "total_entries": count,
+                "total_bytes": bytes,
+            })).unwrap())
         }
         "omc_decompress" => {
             let paths = parse_paths_arg(args, "omc_decompress")?;

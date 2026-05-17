@@ -13,6 +13,7 @@ Read top-to-bottom for the arc; jump to any chapter for the detail.
 
 | Tag | Date | One-line |
 |---|---|---|
+| [v0.5-substrate-memory](#v05-substrate-memory--2026-05-17) | 2026-05-17 | Substrate-keyed conversation memory: `omc_memory_store` / `recall` / `list` / `stats` MCP tools + filesystem-backed persistence. **Hits the 10× target** — measured 10.61× LLM context-budget reduction on a 20-turn agent task. |
 | [v0.4-substrate-context](#v04-substrate-context--2026-05-17) | 2026-05-17 | Symbolic compression end-to-end: `omc_compress_context` / `omc_decompress` tools + `format=codec` thumbnails + directory ingest. Measured 1.85×–2.81× LLM context budget reduction. |
 | [v0.3.1-symbolic-compression](#v031-symbolic-compression--2026-05-17) | 2026-05-17 | `omc_predict` gains `format=hash`/`signature`/`full` (default = compressed hash form, 3.8× smaller context cost) + `omc_fetch_by_hash` companion for on-demand recovery |
 | [v0.3-symbolic-prediction](#v03-symbolic-prediction--2026-05-17) | 2026-05-17 | Substrate-indexed code completion: `omc_predict_files(paths, prefix, top_k)` returns ranked provenance-tracked continuations from a content-addressed corpus |
@@ -24,6 +25,79 @@ Read top-to-bottom for the arc; jump to any chapter for the detail.
 | [v0.0.3-substrate-and-stdlib](#v003-substrate-and-stdlib--2026-05-08) | 2026-05-08 | Self-healing heal pass (typo/arity/div-zero), substrate-routed search family, stdlib expansion, closures, `--check`/`--fmt` CLI |
 | [v0.0.2-language-core](#v002-language-core--2026-04-25) | 2026-04-25 | The language exists: parser, tree-walk interpreter, HInt + φ-resonance, bytecode VM, self-hosting compiler (gen2 == gen3 byte-identical) |
 | [V0.0.1](#v001---2026-05-02) | 2025-Sep | Genesis: circuit evolution engine, FFI, Python/Unity/Unreal bindings (pre-language) |
+
+---
+
+## [v0.5-substrate-memory] - 2026-05-17
+
+**Substrate-keyed conversation memory: an LLM agent's prior turns stay in cheap-reference form (canonical hash), recovered only when reasoning needs them. Measured 10.61× LLM context-budget reduction on a 20-turn agent task — hitting the original target.**
+
+v0.4 capped at 2.81× compression because the LLM still had to carry the full transcript inline turn-after-turn. v0.5 wires the substrate into the transcript itself: each turn's content is stored content-addressed, and the prompt at turn N references prior turns by hash instead of inlining them.
+
+### What changed
+
+#### New module `omnimcode-core/src/memory.rs`
+
+- `MemoryStore { root }` — filesystem-backed substrate-keyed store at `~/.omc/memory/<namespace>/<hex_hash>.txt` (override via `OMC_MEMORY_ROOT`)
+- `store(namespace, text)` — content-address by `tokenizer::fnv1a_64`, write body + append to per-namespace `_index.jsonl`
+- `recall(namespace?, hash)` — read body by hash; with no namespace hint, walks all namespaces
+- `list(namespace, limit)` — recent entries first, each with `{hash, bytes, stored_at, preview}` (NO body)
+- `stats(namespace)` — diagnostics
+- Namespace sanitization (alphanumeric + `_-` only) prevents path traversal
+- ~370 lines, 10 unit tests
+
+#### Four new MCP tools
+
+- `omc_memory_store(text, namespace?)` → `{content_hash, namespace, bytes}`
+- `omc_memory_recall(content_hash, namespace?)` → `{found, text, bytes}` or `{found: false}`
+- `omc_memory_list(namespace?, limit?)` → list of `{content_hash, bytes, stored_at_unix, preview}`
+- `omc_memory_stats(namespace?)` → `{total_entries, total_bytes}`
+
+### Measured compression (20-turn agent task, top_k=10, examples/lib corpus)
+
+| Strategy | Cumulative bytes | vs baseline |
+|---|---:|---:|
+| Baseline (full transcript inline) | 869,761 | 100% |
+| v0.4 only (compressed predict, full transcript) | 423,030 | 48.6% (2.06×) |
+| **v0.5 full (memory hashes + compressed predict)** | **82,008** | **9.4% (10.61×)** |
+
+The growth-pattern story:
+- **Baseline grows quadratically** — turn N's prompt carries turns 1..N-1 inline
+- **v0.5 grows linearly** — turn N's prompt = current content + N cheap hash refs + 1 recalled body
+- **Crossover at turn ~5**, by turn 20 v0.5 is **10.61×** smaller
+
+### Why it composes
+
+The substrate's identity primitive composes across all chapters:
+- v0.3 `omc_predict` returns `canonical_hash`
+- v0.3.1 `omc_fetch_by_hash` recovers by canonical_hash
+- v0.4 `omc_compress_context` produces `content_hash`
+- v0.4 `omc_decompress` accepts either
+- v0.5 `omc_memory_store` produces `content_hash` (fnv1a of UTF-8 bytes — matches the codec for the same bytes)
+- v0.5 `omc_memory_recall` accepts any hash
+
+An LLM agent mixes tools freely; no tool needs to know which other tool produced a hash. That's what makes the 10× win COMPOSE across chapters instead of being an isolated effect.
+
+### Honest framing
+
+- The 10× is the **combined v0.4 + v0.5** stack. v0.4 alone tops at 2-3×; v0.5 alone (memory but full predict bodies) would top at 3-4×; together they multiply because they target different cost components (per-call browse vs per-turn transcript).
+- The win **scales with conversation length**. At 5 turns v0.5 is at parity with baseline; the 10× kicks in around turn 15+. For short conversations the overhead of memory tools costs slightly more than it saves.
+- Benchmark uses synthetic ~400-byte reasoning per turn. Real LLM traces are typically 1-5 KB per turn, which would make baseline grow even faster and amplify v0.5's advantage further.
+- Memory grows **unbounded** — long-running agents should add a pruning policy. v0.5.1 candidate: wire fibtier's tier-bounded eviction into the store.
+
+### Tests
+
+27/27 MCP integration tests pass (was 20 + 7 new memory tools), 10/10 memory module unit tests pass.
+
+### Files / commits
+
+- `omnimcode-core/src/memory.rs` — new module
+- `omnimcode-core/src/lib.rs` — `pub mod memory`
+- `omnimcode-mcp/src/main.rs` — 4 new tool schemas + handlers
+- `omnimcode-mcp/tests/integration.rs` — 7 new tests
+- `experiments/substrate_context/bench_multi_turn_memory.py` — reproducible benchmark
+- `experiments/substrate_context/results_multi_turn_memory.json` — raw data
+- `experiments/substrate_context/FINDING_v05.md` — chapter writeup
 
 ---
 
