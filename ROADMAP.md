@@ -1,7 +1,7 @@
 # OMC Roadmap
 
-Current chapter: **v0.5-substrate-memory** (shipped 2026-05-17).
-Next chapter: open — candidates listed below. The five-chapter symbolic-context arc (v0.3 → v0.3.1 → v0.4 → v0.5) has landed with the 10× target hit (10.61× measured).
+Current chapter: **v0.6-fibtier-memory** (shipped 2026-05-17).
+Next chapter: GPU Prometheus scaffold (in flight). The six-chapter symbolic-context arc (v0.3 → v0.6) has landed.
 
 See [CHANGELOG.md](CHANGELOG.md) and [GitHub Releases](https://github.com/RandomCoder-lab/OMC/releases) for the chapter-by-chapter history of how OMC got here. This file describes what's on the path going forward.
 

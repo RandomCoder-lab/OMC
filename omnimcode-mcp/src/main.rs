@@ -449,8 +449,9 @@ fn list_tools() -> Vec<Json> {
         }),
         json!({
             "name": "omc_memory_stats",
-            "description": "Diagnostic: total entries and stored bytes for a namespace. \
-                            Useful for an agent to know if its memory is growing unbounded.",
+            "description": "Diagnostic: total entries and stored bytes for a namespace, plus \
+                            the configured fibtier cap. Useful for an agent to know how \
+                            much of its memory budget is in use.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -459,6 +460,34 @@ fn list_tools() -> Vec<Json> {
                         "default": "default"
                     }
                 }
+            }
+        }),
+        json!({
+            "name": "omc_memory_evict",
+            "description": "Manually prune a namespace's index down to the most recent \
+                            `keep` entries. Body files on disk are NOT removed — an LLM \
+                            with the hash can still recall. Use to force-bound memory \
+                            growth, or to compact a long-running agent's state at a \
+                            session boundary.\n\
+                            \n\
+                            Returns {dropped, kept}. The default fibtier behavior runs \
+                            this automatically after each store using OMC_MEMORY_MAX_ENTRIES \
+                            (default 232 = sum of first 10 Fibonacci tier sizes); this \
+                            tool exposes manual control.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "namespace": {
+                        "type": "string",
+                        "default": "default"
+                    },
+                    "keep": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Number of most-recent entries to retain. 0 clears the index entirely."
+                    }
+                },
+                "required": ["keep"]
             }
         }),
     ]
@@ -669,6 +698,20 @@ fn dispatch_tool(interp: &mut Interpreter, name: &str, args: &Json) -> Result<St
                 "namespace": namespace,
                 "total_entries": count,
                 "total_bytes": bytes,
+                "fibtier_cap": store.max_entries_per_namespace,
+            })).unwrap())
+        }
+        "omc_memory_evict" => {
+            let namespace = args.get("namespace").and_then(Json::as_str).unwrap_or("default");
+            let keep = args.get("keep").and_then(Json::as_i64)
+                .ok_or_else(|| "omc_memory_evict: missing 'keep' (i64) arg".to_string())?
+                .max(0) as usize;
+            let store = MemoryStore::from_env();
+            let dropped = store.evict_to_cap(namespace, keep)?;
+            Ok(serde_json::to_string_pretty(&json!({
+                "namespace": namespace,
+                "dropped": dropped,
+                "kept": keep,
             })).unwrap())
         }
         "omc_decompress" => {

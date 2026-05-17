@@ -13,6 +13,7 @@ Read top-to-bottom for the arc; jump to any chapter for the detail.
 
 | Tag | Date | One-line |
 |---|---|---|
+| [v0.6-fibtier-memory](#v06-fibtier-memory--2026-05-17) | 2026-05-17 | Fibtier-bounded eviction for memory: cap the index at fibonacci-tier capacity (default 232), evicted entries still recoverable by hash. Memory now safe for arbitrarily long agent sessions. |
 | [v0.5-substrate-memory](#v05-substrate-memory--2026-05-17) | 2026-05-17 | Substrate-keyed conversation memory: `omc_memory_store` / `recall` / `list` / `stats` MCP tools + filesystem-backed persistence. **Hits the 10× target** — measured 10.61× LLM context-budget reduction on a 20-turn agent task. |
 | [v0.4-substrate-context](#v04-substrate-context--2026-05-17) | 2026-05-17 | Symbolic compression end-to-end: `omc_compress_context` / `omc_decompress` tools + `format=codec` thumbnails + directory ingest. Measured 1.85×–2.81× LLM context budget reduction. |
 | [v0.3.1-symbolic-compression](#v031-symbolic-compression--2026-05-17) | 2026-05-17 | `omc_predict` gains `format=hash`/`signature`/`full` (default = compressed hash form, 3.8× smaller context cost) + `omc_fetch_by_hash` companion for on-demand recovery |
@@ -25,6 +26,49 @@ Read top-to-bottom for the arc; jump to any chapter for the detail.
 | [v0.0.3-substrate-and-stdlib](#v003-substrate-and-stdlib--2026-05-08) | 2026-05-08 | Self-healing heal pass (typo/arity/div-zero), substrate-routed search family, stdlib expansion, closures, `--check`/`--fmt` CLI |
 | [v0.0.2-language-core](#v002-language-core--2026-04-25) | 2026-04-25 | The language exists: parser, tree-walk interpreter, HInt + φ-resonance, bytecode VM, self-hosting compiler (gen2 == gen3 byte-identical) |
 | [V0.0.1](#v001---2026-05-02) | 2025-Sep | Genesis: circuit evolution engine, FFI, Python/Unity/Unreal bindings (pre-language) |
+
+---
+
+## [v0.6-fibtier-memory] - 2026-05-17
+
+**Fibtier-bounded eviction for `MemoryStore`: memory growth is now safe for arbitrarily long agent sessions, and evicted entries remain recoverable by hash.**
+
+v0.5 shipped substrate-keyed memory with an honest limit ("memory grows unbounded"). v0.6 closes that gap by mirroring the existing `fibtier.omc` Fibonacci-tier semantics in the Rust `MemoryStore`.
+
+### What changed
+
+- `MemoryStore::max_entries_per_namespace: Option<usize>` — when set, the index is bounded after each store
+- `FIBTIER_DEFAULT_SIZES = [1,2,3,5,8,13,21,34,55,89,144,233,377,610,987,1597]` mirrors fibtier.omc
+- `FIBTIER_DEFAULT_MAX_ENTRIES = 232` = sum of first 10 tier sizes
+- `OMC_MEMORY_MAX_ENTRIES` env var to override (0 = unbounded)
+- `MemoryStore::with_max_entries(n)` builder for explicit caps
+- `MemoryStore::evict_to_cap(namespace, keep)` — manual prune helper, returns count dropped
+- **Eviction is index-only**: body files stay on disk so `recall(hash)` still works for entries that fell out of the chronological list (matches fibtier's "bounded active capacity, unbounded historical recall" semantics)
+
+### New MCP tool
+
+- `omc_memory_evict(namespace, keep)` → `{namespace, dropped, kept}`. Manual control for session boundaries or aggressive pruning.
+- `omc_memory_stats` now includes `fibtier_cap` so an agent can see its budget.
+
+### Tests
+
+32/32 MCP integration tests pass (was 27 + 5 new): auto-eviction at cap, manual evict tool, evicted entries recoverable by hash, stats includes cap, tools/list now shows omc_memory_evict.
+
+15/15 memory module unit tests pass (was 10 + 5 new): eviction bounds the index, evicted entries still recoverable, evict_to_cap returns drop count, unbounded mode keeps everything, default cap matches first-10-tier sum.
+
+### Why it matters
+
+An agent running for hours or days will hit memory bounds. v0.6 makes that case safe by default — the agent's MOST RECENT 232 turns stay in the chronological list (easy browse via `omc_memory_list`), while older turns remain recoverable by hash but don't bloat the index. Combined with v0.5's compression, a 100-turn agent session uses bounded memory rather than the 10MB+ it would otherwise accumulate.
+
+### Honest framing
+
+This is index-only eviction, not full deletion — body files on disk grow with every store. A long-running agent would still benefit from an external cleanup pass for the files (cron / GC tool). A future v0.6.1 candidate: physical eviction with optional cold-storage archival.
+
+### Files
+
+- `omnimcode-core/src/memory.rs` — `FIBTIER_DEFAULT_*` constants, `max_entries_per_namespace`, `evict_to_cap`, auto-eviction in `store`
+- `omnimcode-mcp/src/main.rs` — `omc_memory_evict` tool, `fibtier_cap` in stats
+- `omnimcode-mcp/tests/integration.rs` — 5 new tests
 
 ---
 

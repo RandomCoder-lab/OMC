@@ -770,6 +770,199 @@ fn memory_hash_matches_compress_context_hash() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+// ---------------------------------------------------------------------------
+// v0.6 fibtier-bounded memory
+// ---------------------------------------------------------------------------
+
+fn rpc_exchange_with_env(env: Vec<(&str, String)>, requests: &[Value]) -> Vec<Value> {
+    let bin = find_binary();
+    let mut cmd = Command::new(bin);
+    cmd.current_dir(repo_root());
+    for (k, v) in &env { cmd.env(k, v); }
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn");
+    let mut stdin = child.stdin.take().expect("stdin");
+    let stdout = child.stdout.take().expect("stdout");
+    for r in requests { writeln!(stdin, "{}", r).expect("write"); }
+    drop(stdin);
+    let reader = BufReader::new(stdout);
+    let mut responses = Vec::new();
+    for line in reader.lines() {
+        let line = line.expect("read");
+        if line.trim().is_empty() { continue; }
+        responses.push(serde_json::from_str(&line).expect("parse"));
+    }
+    let _ = child.wait();
+    responses
+}
+
+#[test]
+fn memory_store_evicts_under_fibtier_cap() {
+    let root = fresh_memory_root();
+    // Set cap to 3 via OMC_MEMORY_MAX_ENTRIES — store 7, expect 3 in list.
+    let mut requests = vec![
+        json!({"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}),
+    ];
+    for i in 0..7 {
+        requests.push(json!({"jsonrpc":"2.0","id":i+1,"method":"tools/call","params":{
+            "name":"omc_memory_store",
+            "arguments":{"text": format!("entry-{}", i), "namespace":"capped"}
+        }}));
+    }
+    requests.push(json!({"jsonrpc":"2.0","id":100,"method":"tools/call","params":{
+        "name":"omc_memory_list",
+        "arguments":{"namespace":"capped","limit":10}
+    }}));
+    let responses = rpc_exchange_with_env(
+        vec![("OMC_MEMORY_ROOT", root.to_string_lossy().into_owned()),
+             ("OMC_MEMORY_MAX_ENTRIES", "3".to_string())],
+        &requests,
+    );
+    let list_text = responses.last().unwrap()["result"]["content"][0]["text"].as_str().unwrap();
+    let payload: Value = serde_json::from_str(list_text).unwrap();
+    let entries = payload["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 3, "index bounded to fibtier cap");
+    // Most recent first.
+    assert_eq!(entries[0]["preview"], "entry-6");
+    assert_eq!(entries[2]["preview"], "entry-4");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn memory_evict_tool_drops_to_keep_n() {
+    let root = fresh_memory_root();
+    let mut requests = vec![
+        json!({"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}),
+    ];
+    for i in 0..10 {
+        requests.push(json!({"jsonrpc":"2.0","id":i+1,"method":"tools/call","params":{
+            "name":"omc_memory_store",
+            "arguments":{"text": format!("e{}", i), "namespace":"manual"}
+        }}));
+    }
+    requests.push(json!({"jsonrpc":"2.0","id":100,"method":"tools/call","params":{
+        "name":"omc_memory_evict",
+        "arguments":{"namespace":"manual","keep":4}
+    }}));
+    requests.push(json!({"jsonrpc":"2.0","id":101,"method":"tools/call","params":{
+        "name":"omc_memory_list",
+        "arguments":{"namespace":"manual","limit":20}
+    }}));
+    let responses = rpc_exchange_with_env(
+        vec![("OMC_MEMORY_ROOT", root.to_string_lossy().into_owned()),
+             // Disable auto-eviction to test the explicit tool.
+             ("OMC_MEMORY_MAX_ENTRIES", "0".to_string())],
+        &requests,
+    );
+    let evict_text = responses[responses.len() - 2]["result"]["content"][0]["text"].as_str().unwrap();
+    let evict_payload: Value = serde_json::from_str(evict_text).unwrap();
+    assert_eq!(evict_payload["dropped"], 6);
+    assert_eq!(evict_payload["kept"], 4);
+    let list_text = responses.last().unwrap()["result"]["content"][0]["text"].as_str().unwrap();
+    let list_payload: Value = serde_json::from_str(list_text).unwrap();
+    assert_eq!(list_payload["entries"].as_array().unwrap().len(), 4);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn memory_evicted_entries_still_recoverable_by_hash() {
+    let root = fresh_memory_root();
+    // Store with cap=2, push 5 entries → first 3 fall out of index.
+    let mut requests = vec![
+        json!({"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}),
+    ];
+    for i in 0..5 {
+        requests.push(json!({"jsonrpc":"2.0","id":i+1,"method":"tools/call","params":{
+            "name":"omc_memory_store",
+            "arguments":{"text": format!("evictable-{}", i), "namespace":"recover"}
+        }}));
+    }
+    let responses = rpc_exchange_with_env(
+        vec![("OMC_MEMORY_ROOT", root.to_string_lossy().into_owned()),
+             ("OMC_MEMORY_MAX_ENTRIES", "2".to_string())],
+        &requests,
+    );
+    // Grab the hash of the first (oldest) entry.
+    let first_store: Value = serde_json::from_str(
+        responses[1]["result"]["content"][0]["text"].as_str().unwrap()
+    ).unwrap();
+    let oldest_hash = first_store["content_hash"].as_i64().unwrap();
+
+    // Verify it's no longer in the index list.
+    let list_resp = rpc_exchange_with_env(
+        vec![("OMC_MEMORY_ROOT", root.to_string_lossy().into_owned()),
+             ("OMC_MEMORY_MAX_ENTRIES", "2".to_string())],
+        &[
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+                "name":"omc_memory_list","arguments":{"namespace":"recover","limit":20}
+            }}),
+        ],
+    );
+    let list_payload: Value = serde_json::from_str(
+        list_resp[1]["result"]["content"][0]["text"].as_str().unwrap()
+    ).unwrap();
+    let entries = list_payload["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 2);
+    let listed_hashes: Vec<i64> = entries.iter()
+        .map(|e| e["content_hash"].as_i64().unwrap()).collect();
+    assert!(!listed_hashes.contains(&oldest_hash));
+
+    // But recall by hash still works (body file persists).
+    let recall_resp = rpc_exchange_with_env(
+        vec![("OMC_MEMORY_ROOT", root.to_string_lossy().into_owned()),
+             ("OMC_MEMORY_MAX_ENTRIES", "2".to_string())],
+        &[
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+                "name":"omc_memory_recall",
+                "arguments":{"content_hash": oldest_hash, "namespace":"recover"}
+            }}),
+        ],
+    );
+    let recall_payload: Value = serde_json::from_str(
+        recall_resp[1]["result"]["content"][0]["text"].as_str().unwrap()
+    ).unwrap();
+    assert_eq!(recall_payload["found"], true);
+    assert_eq!(recall_payload["text"], "evictable-0");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn memory_stats_includes_fibtier_cap() {
+    let root = fresh_memory_root();
+    let resp = rpc_exchange_with_env(
+        vec![("OMC_MEMORY_ROOT", root.to_string_lossy().into_owned()),
+             ("OMC_MEMORY_MAX_ENTRIES", "50".to_string())],
+        &[
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+                "name":"omc_memory_stats","arguments":{"namespace":"x"}
+            }}),
+        ],
+    );
+    let stats: Value = serde_json::from_str(resp[1]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(stats["fibtier_cap"], 50);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn tools_list_now_includes_v06_evict_tool() {
+    let responses = rpc_exchange(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}),
+    ]);
+    let names: Vec<&str> = responses[1]["result"]["tools"].as_array().unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"omc_memory_evict"));
+}
+
 #[test]
 fn tools_list_now_includes_v05_memory_tools() {
     let responses = rpc_exchange(&[
