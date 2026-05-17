@@ -1,6 +1,6 @@
 # Test suite index
 
-**65 test files, 997 `fn test_*` functions, all green under `omnimcode-standalone --test FILE`.**
+**66 test files, 1000 `fn test_*` functions, all green under `omnimcode-standalone --test FILE`.**
 
 This is a map of what's covered, organized by surface area — not an
 exhaustive doc. Run any file with `--test FILE` to see the actual
@@ -33,6 +33,7 @@ exercise many sub-assertions inside one `test_*` body, so the
 |---|--:|---|
 | `test_codec.omc` | 7 | `omc_codec_encode/decode_lookup` — alpha-rename invariant library recovery + inline error-hint UX check |
 | `test_compressed_messaging.omc` | 6 | `omc_msg_sign_compressed/recover` — substrate-signed wire payloads carrying codec output, JSON round-trip |
+| `test_codec_registry.omc` | 3 | `omc_registry_codec_library` / `omc_msg_recover_from_registry` — graceful no-op when omc_modules/ absent |
 | `test_substrate_messaging.omc` | 10 | The base substrate-signed messaging protocol (pre-codec) — `omc_msg_sign / verify / serialize` |
 | `test_canonical.omc` | 15 | AST canonicalization — the LLM-reach-for semantic-equivalence layer |
 | `test_canonical_extras.omc` | 11 | More canonical / structural-equivalence cases |

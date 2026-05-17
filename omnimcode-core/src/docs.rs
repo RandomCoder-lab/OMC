@@ -1138,6 +1138,20 @@ pub const BUILTINS: &[BuiltinDoc] = &[
         unique_to_omc: true,
     },
     BuiltinDoc {
+        name: "omc_registry_codec_library", category: "messaging",
+        signature: "() -> string[]",
+        description: "Scan omc_modules/ for installed registry packages and return every top-level fn definition as a separate string. Suitable as the library arg to omc_codec_decode_lookup / omc_msg_recover_compressed. Empty array if omc_modules/ doesn't exist.",
+        example: "omc_registry_codec_library()  // [\"fn mean(xs) {...}\", ...]",
+        unique_to_omc: true,
+    },
+    BuiltinDoc {
+        name: "omc_msg_recover_from_registry", category: "messaging",
+        signature: "(msg: dict) -> string|null",
+        description: "Convenience for omc_msg_recover_compressed(msg, omc_registry_codec_library()). Returns the matching registry-package fn source, or null if no installed package contains it.",
+        example: "omc_msg_recover_from_registry(msg)  // recovered registry-fn source or null",
+        unique_to_omc: true,
+    },
+    BuiltinDoc {
         name: "omc_prompt_agent", category: "messaging",
         signature: "(target_id: int, prompt: string, sender_id: int, channel?: string) -> int",
         description: "Write a substrate-signed request (kind=1) to target_id's inbox file at `channel/prompt_to_<target_id>.json`. Returns packed message ID. Caller polls for response via read_file + omc_msg_verify. The 'secondary brain' primitive.",

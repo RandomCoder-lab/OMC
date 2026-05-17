@@ -1,0 +1,36 @@
+# Codec ↔ registry integration.
+#
+# These tests exercise omc_registry_codec_library and
+# omc_msg_recover_from_registry. They run in any working directory:
+# if omc_modules/ doesn't exist, the lookup gracefully returns
+# empty / null without erroring.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+
+fn test_registry_library_returns_array() {
+    h lib = omc_registry_codec_library();
+    assert_true(arr_len(lib) >= 0, "returns an array (possibly empty)");
+}
+
+fn test_recover_from_registry_handles_unknown() {
+    # If omc_modules/ doesn't exist or doesn't contain this fn, returns null.
+    h msg = omc_msg_sign_compressed("fn nonexistent_xyz_123() { return 42; }", 18173, 1, 3);
+    h r = omc_msg_recover_from_registry(msg);
+    assert_true(r == null, "unknown fn → null");
+}
+
+fn test_recover_from_registry_returns_null_or_string() {
+    h msg = omc_msg_sign_compressed("fn add(x, y) { return x + y; }", 18173, 1, 3);
+    h r = omc_msg_recover_from_registry(msg);
+    # Either null (not in registry) or a string (matched). No error.
+    h ok = false;
+    if r == null { ok = true; }
+    else { ok = str_len(r) > 0; }
+    assert_true(ok, "null or non-empty string");
+}

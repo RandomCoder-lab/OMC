@@ -250,6 +250,8 @@ fn coherent_loop(n) {
 | [`examples/tests/test_heal_pass.omc`](examples/tests/test_heal_pass.omc) | 16 tests for the self-healing compiler's heal classes + per-class pragmas |
 | [`examples/tests/test_codec.omc`](examples/tests/test_codec.omc) | 7 tests for `omc_codec_encode/decode_lookup` — alpha-rename invariant library recovery + inline error-hint UX check |
 | [`examples/tests/test_compressed_messaging.omc`](examples/tests/test_compressed_messaging.omc) | 6 tests: substrate-signed wire payloads carrying codec output, alpha-equivalent recovery, JSON round-trip |
+| [`examples/tests/test_codec_registry.omc`](examples/tests/test_codec_registry.omc) | 3 tests: `omc_registry_codec_library` + `omc_msg_recover_from_registry` graceful no-op when omc_modules/ doesn't exist |
+| [`examples/demos/llm_tandem_registry.omc`](examples/demos/llm_tandem_registry.omc) | End-to-end: synthetic package in omc_modules/, signs renamed copy, recovers via registry — alpha-rename invariant |
 | [`experiments/seed_expansion/FINDINGS.md`](experiments/seed_expansion/FINDINGS.md) | Empirical writeup: substrate-keyed codec works (lossless on in-library content); open-set ML stays data-budget bound at 40 samples — honest |
 
 ---
@@ -269,7 +271,7 @@ fn coherent_loop(n) {
 | `experiments/substrate_primitives/` | Empirical comparison of substrate vs native vs OMC search |
 | `examples/lib/` | `substrate.omc`, `harmonic_anomaly`, `harmonic_clustering`, `harmonic_recommend`, np/pd/sklearn/torch/requests/sqlite |
 | `examples/datascience/` | Real-data demos with honest numbers |
-| `examples/tests/` | `test_substrate_primitives.omc` (57), `test_new_builtins.omc` (70), `test_harmonic_libs.omc` (18), `test_heal_pass.omc` (16), `test_codec.omc` (7), `test_compressed_messaging.omc` (6) — **174 total** |
+| `examples/tests/` | `test_substrate_primitives.omc` (57), `test_new_builtins.omc` (70), `test_harmonic_libs.omc` (18), `test_heal_pass.omc` (16), `test_codec.omc` (7), `test_compressed_messaging.omc` (6), `test_codec_registry.omc` (3) — **177 total** |
 | `docs/` | Substrate audit, JIT benchmarks, anomaly-detection comparisons |
 | `registry/` | Central package registry (sha256-verified) |
 

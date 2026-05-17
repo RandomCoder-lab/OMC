@@ -8332,6 +8332,69 @@ impl Interpreter {
                 }
                 Ok(Value::Null)
             }
+            // omc_registry_codec_library() -> string[]
+            //   Scan omc_modules/ for installed registry packages, extract
+            //   each top-level fn definition as a separate string entry.
+            //   The returned array is suitable as the library argument to
+            //   omc_codec_decode_lookup / omc_msg_recover_compressed.
+            "omc_registry_codec_library" => {
+                let dir = std::path::Path::new("omc_modules");
+                if !dir.is_dir() {
+                    return Ok(Value::Array(HArray::from_vec(vec![])));
+                }
+                let mut entries: Vec<Value> = Vec::new();
+                if let Ok(rd) = std::fs::read_dir(dir) {
+                    for ent in rd.flatten() {
+                        let p = ent.path();
+                        if p.extension().and_then(|s| s.to_str()) != Some("omc") {
+                            continue;
+                        }
+                        if let Ok(src) = std::fs::read_to_string(&p) {
+                            for fn_src in extract_top_level_fns(&src) {
+                                entries.push(Value::String(fn_src));
+                            }
+                        }
+                    }
+                }
+                Ok(Value::Array(HArray::from_vec(entries)))
+            }
+            // omc_msg_recover_from_registry(msg) -> string|null
+            //   Convenience: omc_msg_recover_compressed(msg,
+            //   omc_registry_codec_library()). Returns the matching
+            //   library entry's canonical source, or null on miss.
+            "omc_msg_recover_from_registry" => {
+                if args.is_empty() {
+                    return Err("omc_msg_recover_from_registry requires (msg: dict)".to_string());
+                }
+                let v = self.eval_expr(&args[0])?;
+                let target_hash = if let Value::Dict(d) = v {
+                    d.borrow().get("content_hash").map(|x| x.to_int()).unwrap_or(0)
+                } else {
+                    return Err("omc_msg_recover_from_registry: msg must be a dict".to_string());
+                };
+                let dir = std::path::Path::new("omc_modules");
+                if !dir.is_dir() {
+                    return Ok(Value::Null);
+                }
+                if let Ok(rd) = std::fs::read_dir(dir) {
+                    for ent in rd.flatten() {
+                        let p = ent.path();
+                        if p.extension().and_then(|s| s.to_str()) != Some("omc") {
+                            continue;
+                        }
+                        if let Ok(src) = std::fs::read_to_string(&p) {
+                            for fn_src in extract_top_level_fns(&src) {
+                                let canon = crate::canonical::canonicalize(&fn_src)
+                                    .unwrap_or_else(|_| fn_src.clone());
+                                if crate::tokenizer::fnv1a_64(canon.as_bytes()) == target_hash {
+                                    return Ok(Value::String(fn_src));
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(Value::Null)
+            }
             "omc_find_similar" => {
                 // omc_find_similar(query, corpus[]) → [{index, distance}, ...]
                 // ranked closest-first by canonical-hash distance.
@@ -10607,6 +10670,74 @@ impl Interpreter {
 /// (arr_push, arr_set, dict_set, dict_del) is already handled by
 /// dedicated opcodes in the compiler, so it never reaches
 /// vm_call_builtin in the first place.
+/// Walk `src` and return every top-level `fn NAME(...) { ... }` as a
+/// separate string. Skips nested fns and `#`-prefixed line comments;
+/// tracks `"..."` and `'...'` so braces inside string literals don't
+/// throw off depth counting. Used by omc_registry_codec_library and
+/// omc_msg_recover_from_registry.
+fn extract_top_level_fns(src: &str) -> Vec<String> {
+    let bytes = src.as_bytes();
+    let n = bytes.len();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < n {
+        // Skip line comments.
+        if bytes[i] == b'#' {
+            while i < n && bytes[i] != b'\n' { i += 1; }
+            continue;
+        }
+        // Skip string literals at top level.
+        if bytes[i] == b'"' || bytes[i] == b'\'' {
+            let q = bytes[i]; i += 1;
+            while i < n && bytes[i] != q {
+                if bytes[i] == b'\\' && i + 1 < n { i += 2; } else { i += 1; }
+            }
+            if i < n { i += 1; }
+            continue;
+        }
+        // Recognize `fn ` only at start-of-line or after whitespace.
+        let at_boundary = i == 0 || bytes[i - 1].is_ascii_whitespace();
+        if at_boundary && i + 3 < n && &bytes[i..i + 3] == b"fn " {
+            let fn_start = i;
+            // Find the opening `{` of the body.
+            let mut j = i;
+            while j < n && bytes[j] != b'{' { j += 1; }
+            if j >= n { break; }
+            // Track depth, respecting strings + line comments.
+            let mut depth = 0i32;
+            let mut k = j;
+            while k < n {
+                let c = bytes[k];
+                if c == b'#' {
+                    while k < n && bytes[k] != b'\n' { k += 1; }
+                    continue;
+                }
+                if c == b'"' || c == b'\'' {
+                    let q = c; k += 1;
+                    while k < n && bytes[k] != q {
+                        if bytes[k] == b'\\' && k + 1 < n { k += 2; } else { k += 1; }
+                    }
+                    if k < n { k += 1; }
+                    continue;
+                }
+                if c == b'{' { depth += 1; }
+                else if c == b'}' {
+                    depth -= 1;
+                    if depth == 0 { k += 1; break; }
+                }
+                k += 1;
+            }
+            if depth == 0 && k > fn_start {
+                out.push(src[fn_start..k].to_string());
+            }
+            i = k;
+            continue;
+        }
+        i += 1;
+    }
+    out
+}
+
 fn vm_fast_dispatch(name: &str, args: &[Value]) -> Option<Result<Value, String>> {
     match (name, args.len()) {
         // ---- string ops ----
