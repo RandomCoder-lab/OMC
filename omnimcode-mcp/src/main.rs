@@ -28,6 +28,7 @@ use omnimcode_core::docs;
 use omnimcode_core::errors;
 use omnimcode_core::interpreter::Interpreter;
 use omnimcode_core::parser::Parser;
+use omnimcode_core::predict::{CodeCorpus, predict_continuations};
 use omnimcode_core::value::Value;
 
 #[derive(Debug, Deserialize)]
@@ -212,6 +213,55 @@ fn list_tools() -> Vec<Json> {
                 "required": ["name"]
             }
         }),
+        json!({
+            "name": "omc_predict",
+            "description": "Substrate-indexed code completion. Given a partial OMC code prefix \
+                            (e.g. `fn prom_linear_`), return the top-k ranked continuations from \
+                            a content-addressed corpus of OMC files. Each result is a viable \
+                            branch: it carries the full source of the matching fn, its file \
+                            path, canonical hash, prefix-match depth, and substrate distance. \
+                            Use to find similar fns when authoring code, to navigate a corpus \
+                            without grepping, or to surface stable callable shapes that an LLM \
+                            can adapt rather than invent from scratch.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "paths": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Source file paths to ingest. Top-level fns from each file are added to the corpus."
+                    },
+                    "prefix": {
+                        "type": "string",
+                        "description": "Partial OMC source (e.g. `fn prom_linear_`). May be incomplete."
+                    },
+                    "top_k": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "default": 5,
+                        "description": "Number of ranked continuations to return."
+                    }
+                },
+                "required": ["paths", "prefix"]
+            }
+        }),
+        json!({
+            "name": "omc_corpus_size",
+            "description": "Diagnostic: report how many top-level fns are ingested across a list \
+                            of OMC source paths. Useful for verifying paths resolve before \
+                            building a larger predict query.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "paths": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Source file paths to ingest."
+                    }
+                },
+                "required": ["paths"]
+            }
+        }),
     ]
 }
 
@@ -284,8 +334,72 @@ fn dispatch_tool(interp: &mut Interpreter, name: &str, args: &Json) -> Result<St
             let suggestions = docs::did_you_mean(name, 5);
             Ok(serde_json::to_string_pretty(&json!(suggestions)).unwrap())
         }
+        "omc_predict" => {
+            let paths = parse_paths_arg(args, "omc_predict")?;
+            let prefix = args.get("prefix").and_then(Json::as_str)
+                .ok_or_else(|| "omc_predict: missing 'prefix' arg".to_string())?;
+            // top_k optional, defaults to 5. Clamp to [1, 50] so a
+            // misconfigured client can't ask for the entire corpus.
+            let top_k = args.get("top_k").and_then(Json::as_i64)
+                .unwrap_or(5)
+                .clamp(1, 50) as usize;
+            let corpus = build_corpus(&paths)?;
+            let suggestions = predict_continuations(&corpus, prefix, top_k);
+            let payload = json!({
+                "prefix": prefix,
+                "corpus_size": corpus.len(),
+                "top_k": top_k,
+                "suggestions": suggestions.iter().map(|s| json!({
+                    "fn_name": s.fn_name,
+                    "source": s.source,
+                    "file": s.file,
+                    "canonical_hash": s.canonical_hash,
+                    "attractor": s.attractor,
+                    "prefix_match_len": s.prefix_match_len,
+                    "substrate_distance": s.substrate_distance,
+                    "query_attractor": s.query_attractor,
+                })).collect::<Vec<_>>(),
+            });
+            Ok(serde_json::to_string_pretty(&payload).unwrap())
+        }
+        "omc_corpus_size" => {
+            let paths = parse_paths_arg(args, "omc_corpus_size")?;
+            let corpus = build_corpus(&paths)?;
+            let payload = json!({
+                "paths": paths,
+                "fn_count": corpus.len(),
+            });
+            Ok(serde_json::to_string_pretty(&payload).unwrap())
+        }
         _ => Err(format!("Unknown tool: {}", name)),
     }
+}
+
+/// Extract a `paths` array argument from a tool's JSON args. Used by
+/// both omc_predict and omc_corpus_size — same shape, same validation.
+fn parse_paths_arg(args: &Json, tool: &str) -> Result<Vec<String>, String> {
+    let paths_val = args.get("paths")
+        .ok_or_else(|| format!("{}: missing 'paths' arg", tool))?;
+    let arr = paths_val.as_array()
+        .ok_or_else(|| format!("{}: 'paths' must be an array of strings", tool))?;
+    arr.iter()
+        .map(|v| v.as_str()
+            .ok_or_else(|| format!("{}: every 'paths' entry must be a string", tool))
+            .map(|s| s.to_string()))
+        .collect()
+}
+
+/// Build a CodeCorpus by reading + ingesting every file in `paths`.
+/// Surface I/O errors as MCP-style strings so the client sees a clean
+/// `isError: true` text instead of a panic.
+fn build_corpus(paths: &[String]) -> Result<CodeCorpus, String> {
+    let mut corpus = CodeCorpus::new();
+    for path in paths {
+        let src = std::fs::read_to_string(path)
+            .map_err(|e| format!("omc_predict: read {}: {}", path, e))?;
+        corpus.ingest_file(path, &src);
+    }
+    Ok(corpus)
 }
 
 /// Evaluate an OMC program. Errors come back as structured strings

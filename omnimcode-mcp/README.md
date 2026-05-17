@@ -16,8 +16,18 @@ needs to discover the language at runtime.
 - `omc_categories()` — list builtin categories
 - `omc_unique_builtins()` — OMC-only primitives (no NumPy equivalent)
 - `omc_explain_error(message)` — pattern-match an error against the
-  259-entry knowledge base; returns explanation + cause + fix
+  curated knowledge base; returns explanation + cause + fix
 - `omc_did_you_mean(name)` — typo suggestions over the known surface
+- **`omc_predict(paths, prefix, top_k?)`** — substrate-indexed code
+  completion ([v0.3 chapter](https://github.com/RandomCoder-lab/OMC/releases/tag/v0.3-symbolic-prediction)).
+  Given a partial OMC prefix (e.g. `fn prom_linear_`), returns the
+  top-k ranked continuations from a content-addressed corpus. Each
+  suggestion carries the full source, file path, canonical hash,
+  prefix-match depth, and substrate distance — branching is
+  first-class.
+- **`omc_corpus_size(paths)`** — diagnostic: how many top-level fns
+  resolve across a list of OMC files. Use to verify paths before a
+  predict call.
 
 ## Build
 
