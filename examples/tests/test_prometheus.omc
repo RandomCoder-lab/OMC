@@ -282,6 +282,62 @@ fn test_substrate_softmax_alpha_zero_matches_standard() {
     assert_eq(arr_get(pv, 2), arr_get(sv, 2), "alpha=0 element 2 matches");
 }
 
+fn test_substrate_k_default_has_v_resample_scale() {
+    h attn = prom_attention_substrate_k_new(4, 3, 0);
+    assert_true(dict_get(attn, "v_resample_scale") > 0.0,
+                "substrate-K default has V resample active (scale>0)");
+}
+
+fn test_substrate_resample_scale_zero_returns_node_unchanged() {
+    tape_reset();
+    h v = tape_var([[1.0, 2.0], [3.0, 4.0]]);
+    h out = prom_substrate_resample(v, 0.0);
+    # scale=0.0 is the identity (returns the same tape id).
+    assert_eq(out, v, "scale=0 returns same node");
+}
+
+fn test_substrate_resample_modulates_off_attractor_components() {
+    tape_reset();
+    # Use a 2x2 input — tape_value auto-unwraps a single-row matrix to
+    # a 1D array which the matrix builder doesn't handle; 2x2 matches
+    # real-world attention shapes [T, D] with T >= 2 anyway.
+    # Cells inspected:
+    # (0,0) = 0.7  * 10 = 7  → distance(7)=1  → mod = 1/(1 + 1/10) ≈ 0.909
+    # (0,1) = 0.2  * 10 = 2  → distance(2)=0  → mod = 1            (identity)
+    h v = tape_var([[0.7, 0.2], [0.0, 0.0]]);
+    h out = prom_substrate_resample(v, 10.0);
+    h vout = tape_value(out);
+    h row0 = arr_get(vout, 0);
+    h expected_off = 0.7 * (1.0 / (1.0 + 1.0 / 10.0));
+    h expected_on  = 0.2;
+    assert_true(approx_eq(arr_get(row0, 0), expected_off, 1e-9),
+                "off-attractor scalar gets modulated as predicted");
+    assert_true(approx_eq(arr_get(row0, 1), expected_on, 1e-9),
+                "on-attractor scalar passes through identity");
+}
+
+fn test_substrate_resample_backward_flows_to_v() {
+    tape_reset();
+    h v = tape_var([[0.5, 1.5], [2.5, 3.5]]);
+    h out = prom_substrate_resample(v, 10.0);
+    h loss = tape_sum(out);
+    tape_backward(loss);
+    h vg = tape_grad(v);
+    # Backward must produce non-zero gradients on every cell — modulation
+    # rides as a const so dv = modulation * dy where dy=1 for sum loss.
+    h i = 0;
+    while i < 2 {
+        h row = arr_get(vg, i);
+        h j = 0;
+        while j < 2 {
+            assert_true(arr_get(row, j) > 0.0,
+                "v gradient cell [" + to_string(i) + "][" + to_string(j) + "] non-zero");
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+}
+
 fn test_substrate_softmax_alpha_positive_still_sums_to_one() {
     tape_reset();
     h scores = tape_const([[1.0, 2.0, 3.0], [-1.0, 0.5, 2.5]]);

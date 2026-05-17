@@ -720,6 +720,45 @@ fn _prom_smod_matrix(scores_val, alpha) {
     return out;
 }
 
+# Per-cell substrate-resample modulation matrix from a [N, D] value
+# snapshot. Each cell: 1 / (1 + attractor_distance(cell * scale) / scale).
+# Pulls each component toward its nearest Fibonacci attractor; identity
+# when already on-attractor. Used as a non-differentiable const inside
+# the tape graph, same pattern as _prom_smod_matrix. Won -2.52% val on
+# top of L1-MH + S-MOD α=1.0 when applied to V (3/3 seeds).
+fn _prom_substrate_resample_matrix(v_val, scale) {
+    h rows = arr_len(v_val);
+    h out = [];
+    h i = 0;
+    while i < rows {
+        h row = arr_get(v_val, i);
+        h new_row = [];
+        h j = 0;
+        while j < arr_len(row) {
+            h x = arr_get(row, j);
+            h scaled = x * scale;
+            h d = attractor_distance(scaled);
+            arr_push(new_row, 1.0 / (1.0 + d / scale));
+            j = j + 1;
+        }
+        arr_push(out, new_row);
+        i = i + 1;
+    }
+    return out;
+}
+
+# Apply post-projection substrate resampling to a tape node. Returns
+# a new tape node whose value is `v * modulation(v)` and whose backward
+# flows through v unchanged (modulation rides as a const). scale=0.0
+# disables (returns v unchanged).
+fn prom_substrate_resample(v_id, scale) {
+    if scale == 0.0 { return v_id; }
+    h v_val = tape_value(v_id);
+    h mod_mat = _prom_substrate_resample_matrix(v_val, scale);
+    h mod_const = tape_const(mod_mat);
+    return tape_mul(v_id, mod_const);
+}
+
 # Substrate-modulated softmax. alpha=0.0 returns standard softmax.
 # alpha>0.0 applies the S-MOD post-softmax modulation + renormalize,
 # the variant that won -4.27% val on TinyShakespeare multi-head.
@@ -758,6 +797,10 @@ fn prom_attention_substrate_k_new(d_model, seq_len, rng_state) {
     # TinyShakespeare L1-MH (val 3.084 vs 3.301 at α=0, -6.57%).
     # Sweep details: experiments/prometheus_parity/results_torch_smod_alpha_sweep.json
     dict_set(layer, "smod_alpha", 1.0);
+    # Post-projection substrate-V resample scale. scale=10.0 won 3/3
+    # seeds (-2.52% val on top of S-MOD α=1.0) on TinyShakespeare L1-MH.
+    # scale=0.0 disables. Sweep candidate; not yet tuned.
+    dict_set(layer, "v_resample_scale", 10.0);
     dict_set(layer, "rng_state", dict_get(V, "state"));
     return layer;
 }
@@ -767,9 +810,15 @@ fn prom_attention_substrate_k_forward(layer, x_id) {
     h V_w = dict_get(layer, "V");
     h K_const = dict_get(layer, "K_const");
     h smod_alpha = dict_get(layer, "smod_alpha");
+    # Default to 0.0 (off) when the field is absent — older layers
+    # loaded from checkpoints predating substrate-V won't have it.
+    h v_scale = dict_get(layer, "v_resample_scale");
+    if v_scale == null { v_scale = 0.0; }
 
     h q = tape_matmul(x_id, Q_w);
-    h v = tape_matmul(x_id, V_w);
+    h v_raw = tape_matmul(x_id, V_w);
+    # Substrate-resample post-projection (v_scale=0.0 → identity).
+    h v = prom_substrate_resample(v_raw, v_scale);
 
     # K is the substrate (CRT-PE table). No learnable params on K side.
     h k = tape_const(K_const);
