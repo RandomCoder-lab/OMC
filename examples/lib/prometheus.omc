@@ -892,6 +892,61 @@ fn prom_embedding_params(layer) {
     return [dict_get(layer, "table")];
 }
 
+# Batched embedding lookup: token_ids[] → [N, d_model] matrix.
+# Implemented via an [N, vocab] one-hot batch then matmul with the
+# embedding table. Differentiable end-to-end.
+fn prom_embedding_batch(layer, token_ids) {
+    h vocab = dict_get(layer, "vocab");
+    h table = dict_get(layer, "table");
+    h n = arr_len(token_ids);
+    h onehot = [];
+    h i = 0;
+    while i < n {
+        h row = [];
+        h idx = arr_get(token_ids, i);
+        h j = 0;
+        while j < vocab {
+            if j == idx { arr_push(row, 1.0); }
+            else { arr_push(row, 0.0); }
+            j = j + 1;
+        }
+        arr_push(onehot, row);
+        i = i + 1;
+    }
+    h onehot_const = tape_const(onehot);
+    return tape_matmul(onehot_const, table);
+}
+
+# Batched cross-entropy: logits is [N, vocab], targets is array of N
+# integer indices. Returns scalar mean loss (averaged over positions).
+fn prom_cross_entropy_batch(logits_id, targets, vocab) {
+    h n = arr_len(targets);
+    h probs = tape_softmax(logits_id);
+    h log_probs = tape_log(probs);
+    # Build [N, vocab] mask: -1.0 at (i, targets[i]), 0 elsewhere.
+    h mask_rows = [];
+    h i = 0;
+    while i < n {
+        h row = [];
+        h tgt = arr_get(targets, i);
+        h c = 0;
+        while c < vocab {
+            if c == tgt { arr_push(row, -1.0); }
+            else { arr_push(row, 0.0); }
+            c = c + 1;
+        }
+        arr_push(mask_rows, row);
+        i = i + 1;
+    }
+    h mask = tape_const(mask_rows);
+    h selected = tape_mul(log_probs, mask);
+    # Mean over all cells = (sum of -log p_target) / (N * vocab).
+    # We want per-token mean = sum / N. Use sum + divide.
+    h s = tape_sum(selected);
+    h scale = tape_const(1.0 / n);
+    return tape_mul(s, scale);
+}
+
 # ---------------------------------------------------------------------------
 # LayerNorm — normalize each row to zero mean / unit variance, then
 # scale + shift by learned gamma/beta.
@@ -923,35 +978,14 @@ fn prom_layernorm_new(d_model, rng_state) {
     return layer;
 }
 
-# Forward: x is [1, d_model] (single row); subtract mean, divide by
-# stable std, scale + shift. The Mean op already gives us per-tensor
-# mean; for per-row mean we use the same op since our inputs here are
-# single-row.
+# Forward: x is [N, d_model]; per-row layer norm via the fused
+# tape_layernorm Rust op. Works for both single-row [1, d] and
+# multi-token [seq, d] shapes — same code path.
 fn prom_layernorm_forward(layer, x_id) {
     h gamma = dict_get(layer, "gamma");
     h beta = dict_get(layer, "beta");
     h eps = dict_get(layer, "eps");
-
-    h mean_id = tape_mean(x_id);
-    # Broadcast mean as a const shaped like x; OMC's tape mul handles
-    # scalar broadcast.
-    h centered = tape_sub(x_id, mean_id);
-    h sq = tape_mul(centered, centered);
-    h variance = tape_mean(sq);
-    h std_const = tape_const(eps);
-    h denom_sq = tape_add(variance, std_const);
-    # We need sqrt(variance); use tape_pow_int(denom_sq, ...) — but
-    # pow_int can only do integer powers. Approximate sqrt via the
-    # identity sqrt(x) = x^0.5: not directly available; use exp(0.5*log(x)).
-    h log_v = tape_log(denom_sq);
-    h half = tape_const(0.5);
-    h half_log = tape_mul(log_v, half);
-    h std_inv_log = tape_neg(half_log);
-    h std_inv = tape_exp(std_inv_log);   # = 1 / sqrt(variance + eps)
-
-    h normed = tape_mul(centered, std_inv);
-    h scaled = tape_mul(normed, gamma);
-    return tape_add(scaled, beta);
+    return tape_layernorm(x_id, gamma, beta, eps);
 }
 
 fn prom_layernorm_params(layer) {

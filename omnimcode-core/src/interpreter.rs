@@ -6422,17 +6422,30 @@ impl Interpreter {
                 }
                 let av = self.autograd_tape[a].value.clone();
                 let bv = self.autograd_tape[b].value.clone();
-                // Elementwise — broadcast scalar↔matrix as needed.
+                // Elementwise with broadcast support for:
+                //   scalar ↔ matrix
+                //   [1, C]  → broadcast across rows of [N, C]
+                //   [N, 1]  → broadcast across cols of [N, C]
                 let (rows, cols) = if av.rows * av.cols >= bv.rows * bv.cols {
                     (av.rows, av.cols)
                 } else { (bv.rows, bv.cols) };
                 let mut out = TapeMat::zeros(rows, cols);
                 let scalar_a = av.rows * av.cols == 1;
                 let scalar_b = bv.rows * bv.cols == 1;
+                let row_bcast_a = av.rows == 1 && av.cols == cols && !scalar_a;
+                let row_bcast_b = bv.rows == 1 && bv.cols == cols && !scalar_b;
+                let col_bcast_a = av.cols == 1 && av.rows == rows && !scalar_a;
+                let col_bcast_b = bv.cols == 1 && bv.rows == rows && !scalar_b;
                 for i in 0..rows {
                     for j in 0..cols {
-                        let xa = if scalar_a { av.data[0] } else { av.at(i, j) };
-                        let xb = if scalar_b { bv.data[0] } else { bv.at(i, j) };
+                        let xa = if scalar_a { av.data[0] }
+                                 else if row_bcast_a { av.data[j] }
+                                 else if col_bcast_a { av.data[i] }
+                                 else { av.at(i, j) };
+                        let xb = if scalar_b { bv.data[0] }
+                                 else if row_bcast_b { bv.data[j] }
+                                 else if col_bcast_b { bv.data[i] }
+                                 else { bv.at(i, j) };
                         let v = match name {
                             "tape_add" => xa + xb,
                             "tape_sub" => xa - xb,
@@ -6580,6 +6593,79 @@ impl Interpreter {
                 self.autograd_tape.push(TapeNode { op: TapeOp::Sum(a), value: out, grad });
                 Ok(Value::HInt(HInt::new(id as i64)))
             }
+            "tape_layernorm" => {
+                // tape_layernorm(x, gamma, beta, eps?) -> per-row layer-normed output
+                // x: [N, D], gamma: [1, D], beta: [1, D]
+                if args.len() < 3 {
+                    return Err("tape_layernorm requires (x_id, gamma_id, beta_id, eps?)".to_string());
+                }
+                let x_id = self.eval_expr(&args[0])?.to_int() as usize;
+                let g_id = self.eval_expr(&args[1])?.to_int() as usize;
+                let b_id = self.eval_expr(&args[2])?.to_int() as usize;
+                let eps = if args.len() >= 4 {
+                    self.eval_expr(&args[3])?.to_float()
+                } else { 1e-5 };
+                let xv = self.autograd_tape[x_id].value.clone();
+                let gv = self.autograd_tape[g_id].value.clone();
+                let bv = self.autograd_tape[b_id].value.clone();
+                if gv.cols != xv.cols || bv.cols != xv.cols {
+                    return Err(format!(
+                        "tape_layernorm: gamma/beta cols ({}/{}) must match x cols ({})",
+                        gv.cols, bv.cols, xv.cols
+                    ));
+                }
+                let mut out = TapeMat::zeros(xv.rows, xv.cols);
+                let dcols = xv.cols as f64;
+                for r in 0..xv.rows {
+                    let mut mean = 0.0;
+                    for c in 0..xv.cols { mean += xv.data[r * xv.cols + c]; }
+                    mean /= dcols;
+                    let mut var = 0.0;
+                    for c in 0..xv.cols {
+                        let d = xv.data[r * xv.cols + c] - mean;
+                        var += d * d;
+                    }
+                    var /= dcols;
+                    let inv_std = 1.0 / (var + eps).sqrt();
+                    for c in 0..xv.cols {
+                        let centered = xv.data[r * xv.cols + c] - mean;
+                        let normed = centered * inv_std;
+                        out.data[r * xv.cols + c] =
+                            normed * gv.data[c] + bv.data[c];
+                    }
+                }
+                let grad = TapeMat::zeros(xv.rows, xv.cols);
+                let id = self.autograd_tape.len();
+                self.autograd_tape.push(TapeNode {
+                    op: TapeOp::LayerNormRow(x_id, g_id, b_id, eps),
+                    value: out, grad,
+                });
+                Ok(Value::HInt(HInt::new(id as i64)))
+            }
+            "tape_row_mean" | "tape_row_sum" => {
+                // Per-row reduction: [rows, cols] → [rows, 1]
+                if args.is_empty() {
+                    return Err(format!("{} requires (a_id)", name));
+                }
+                let a = self.eval_expr(&args[0])?.to_int() as usize;
+                let av = self.autograd_tape[a].value.clone();
+                let mut out = TapeMat::zeros(av.rows, 1);
+                let cols_f = av.cols.max(1) as f64;
+                for r in 0..av.rows {
+                    let mut s = 0.0;
+                    for c in 0..av.cols { s += av.data[r * av.cols + c]; }
+                    out.data[r] = if name == "tape_row_mean" { s / cols_f } else { s };
+                }
+                let op = if name == "tape_row_mean" {
+                    TapeOp::RowMean(a)
+                } else {
+                    TapeOp::RowSum(a)
+                };
+                let grad = TapeMat::zeros(av.rows, 1);
+                let id = self.autograd_tape.len();
+                self.autograd_tape.push(TapeNode { op, value: out, grad });
+                Ok(Value::HInt(HInt::new(id as i64)))
+            }
             "tape_mean" => {
                 if args.is_empty() {
                     return Err("tape_mean requires (a_id)".to_string());
@@ -6624,14 +6710,34 @@ impl Interpreter {
                     match op {
                         TapeOp::Var | TapeOp::Const => {}
                         TapeOp::Add(a, b) => {
-                            self.autograd_tape[a].grad.add(&dy);
-                            self.autograd_tape[b].grad.add(&dy);
+                            let a_shape = (
+                                self.autograd_tape[a].value.rows,
+                                self.autograd_tape[a].value.cols,
+                            );
+                            let b_shape = (
+                                self.autograd_tape[b].value.rows,
+                                self.autograd_tape[b].value.cols,
+                            );
+                            let da = reduce_to_shape(&dy, a_shape);
+                            let db = reduce_to_shape(&dy, b_shape);
+                            self.autograd_tape[a].grad.add(&da);
+                            self.autograd_tape[b].grad.add(&db);
                         }
                         TapeOp::Sub(a, b) => {
-                            self.autograd_tape[a].grad.add(&dy);
+                            let a_shape = (
+                                self.autograd_tape[a].value.rows,
+                                self.autograd_tape[a].value.cols,
+                            );
+                            let b_shape = (
+                                self.autograd_tape[b].value.rows,
+                                self.autograd_tape[b].value.cols,
+                            );
+                            let da = reduce_to_shape(&dy, a_shape);
                             let mut neg = TapeMat::zeros(dy.rows, dy.cols);
                             for k in 0..dy.data.len() { neg.data[k] = -dy.data[k]; }
-                            self.autograd_tape[b].grad.add(&neg);
+                            let db = reduce_to_shape(&neg, b_shape);
+                            self.autograd_tape[a].grad.add(&da);
+                            self.autograd_tape[b].grad.add(&db);
                         }
                         TapeOp::Mul(a, b) => {
                             let av = self.autograd_tape[a].value.clone();
@@ -6798,6 +6904,101 @@ impl Interpreter {
                             let mut da = TapeMat::zeros(av_shape.0, av_shape.1);
                             let s = dy.data[0];
                             for v in da.data.iter_mut() { *v = s; }
+                            self.autograd_tape[a].grad.add(&da);
+                        }
+                        TapeOp::LayerNormRow(xid, gid, bid, eps) => {
+                            // Per-row LN backward:
+                            // x_hat[r,c] = (x[r,c] - mu_r) / std_r
+                            // y[r,c] = gamma[c] * x_hat[r,c] + beta[c]
+                            // Three grads: dx, dgamma, dbeta.
+                            let xv = self.autograd_tape[xid].value.clone();
+                            let gv = self.autograd_tape[gid].value.clone();
+                            let n = xv.cols as f64;
+                            let mut dx = TapeMat::zeros(xv.rows, xv.cols);
+                            let mut dgamma = TapeMat::zeros(1, xv.cols);
+                            let mut dbeta = TapeMat::zeros(1, xv.cols);
+                            for r in 0..xv.rows {
+                                // Recompute per-row mean / std / x_hat from xv.
+                                let mut mean = 0.0;
+                                for c in 0..xv.cols { mean += xv.data[r * xv.cols + c]; }
+                                mean /= n;
+                                let mut var = 0.0;
+                                for c in 0..xv.cols {
+                                    let d = xv.data[r * xv.cols + c] - mean;
+                                    var += d * d;
+                                }
+                                var /= n;
+                                let std = (var + eps).sqrt();
+                                let inv_std = 1.0 / std;
+                                // x_hat per cell.
+                                let mut xhat = vec![0.0; xv.cols];
+                                for c in 0..xv.cols {
+                                    xhat[c] = (xv.data[r * xv.cols + c] - mean) * inv_std;
+                                }
+                                // Accumulate dgamma, dbeta from THIS row.
+                                for c in 0..xv.cols {
+                                    let dy_rc = dy.data[r * xv.cols + c];
+                                    dgamma.data[c] += dy_rc * xhat[c];
+                                    dbeta.data[c] += dy_rc;
+                                }
+                                // dx_hat = dy * gamma  ; then propagate through
+                                // (x_hat = (x - mean)/std) to get dx.
+                                let mut dxhat = vec![0.0; xv.cols];
+                                for c in 0..xv.cols {
+                                    dxhat[c] = dy.data[r * xv.cols + c] * gv.data[c];
+                                }
+                                // dx[r, c] = (1/std) * (
+                                //   dxhat[c] - mean_dxhat - xhat[c] * mean(dxhat * xhat)
+                                // )
+                                let mut sum_dxhat = 0.0;
+                                let mut sum_dxhat_xhat = 0.0;
+                                for c in 0..xv.cols {
+                                    sum_dxhat += dxhat[c];
+                                    sum_dxhat_xhat += dxhat[c] * xhat[c];
+                                }
+                                let mean_dxhat = sum_dxhat / n;
+                                let mean_dxhat_xhat = sum_dxhat_xhat / n;
+                                for c in 0..xv.cols {
+                                    let g = inv_std * (
+                                        dxhat[c] - mean_dxhat
+                                            - xhat[c] * mean_dxhat_xhat
+                                    );
+                                    dx.data[r * xv.cols + c] = g;
+                                }
+                            }
+                            self.autograd_tape[xid].grad.add(&dx);
+                            self.autograd_tape[gid].grad.add(&dgamma);
+                            self.autograd_tape[bid].grad.add(&dbeta);
+                        }
+                        TapeOp::RowMean(a) => {
+                            // dL/dA[r, c] = dy[r, 0] / cols
+                            let av_shape = (
+                                self.autograd_tape[a].value.rows,
+                                self.autograd_tape[a].value.cols,
+                            );
+                            let cols_f = av_shape.1.max(1) as f64;
+                            let mut da = TapeMat::zeros(av_shape.0, av_shape.1);
+                            for r in 0..av_shape.0 {
+                                let s = dy.data[r] / cols_f;
+                                for c in 0..av_shape.1 {
+                                    da.data[r * av_shape.1 + c] = s;
+                                }
+                            }
+                            self.autograd_tape[a].grad.add(&da);
+                        }
+                        TapeOp::RowSum(a) => {
+                            // dL/dA[r, c] = dy[r, 0]
+                            let av_shape = (
+                                self.autograd_tape[a].value.rows,
+                                self.autograd_tape[a].value.cols,
+                            );
+                            let mut da = TapeMat::zeros(av_shape.0, av_shape.1);
+                            for r in 0..av_shape.0 {
+                                let s = dy.data[r];
+                                for c in 0..av_shape.1 {
+                                    da.data[r * av_shape.1 + c] = s;
+                                }
+                            }
                             self.autograd_tape[a].grad.add(&da);
                         }
                         TapeOp::Mean(a) => {
@@ -11175,6 +11376,16 @@ pub(crate) enum TapeOp {
     Sum(usize),
     /// Mean of every cell — same role as Sum but normalized.
     Mean(usize),
+    /// Per-row mean: collapses [rows, cols] to [rows, 1]. Needed for
+    /// proper LayerNorm on multi-token sequences.
+    RowMean(usize),
+    /// Per-row sum.
+    RowSum(usize),
+    /// Per-row LayerNorm: ((x - row_mean) / sqrt(row_var + eps)) * gamma + beta
+    /// Stores eps inside the op. Output shape matches input. Single fused
+    /// op because composing it from primitives needs broadcasted sub/div
+    /// that aren't yet in the tape.
+    LayerNormRow(usize, usize, usize, f64),  // (x, gamma, beta, eps)
 }
 
 pub(crate) struct TapeNode {
@@ -11250,6 +11461,51 @@ fn tape_to_value(m: &TapeMat, as_hint: bool) -> Value {
         out.push(Value::Array(HArray::from_vec(row)));
     }
     Value::Array(HArray::from_vec(out))
+}
+
+/// Reduce an upstream gradient back to a broadcasted operand's
+/// original shape. Sums over dimensions where the operand was
+/// broadcast (size 1 in that dim). Used by Add/Sub backward when
+/// the operand was a row/col vector broadcasted across a matrix.
+fn reduce_to_shape(g: &TapeMat, target: (usize, usize)) -> TapeMat {
+    let (tr, tc) = target;
+    if g.rows == tr && g.cols == tc { return g.clone(); }
+    let mut out = TapeMat::zeros(tr, tc);
+    // Scalar target.
+    if tr == 1 && tc == 1 {
+        let mut s = 0.0;
+        for v in &g.data { s += v; }
+        out.data[0] = s;
+        return out;
+    }
+    // Row-vector target [1, C]: sum across rows.
+    if tr == 1 && tc == g.cols {
+        for j in 0..g.cols {
+            let mut s = 0.0;
+            for i in 0..g.rows { s += g.at(i, j); }
+            out.data[j] = s;
+        }
+        return out;
+    }
+    // Col-vector target [R, 1]: sum across cols.
+    if tc == 1 && tr == g.rows {
+        for i in 0..g.rows {
+            let mut s = 0.0;
+            for j in 0..g.cols { s += g.at(i, j); }
+            out.data[i] = s;
+        }
+        return out;
+    }
+    // Fallback: shape doesn't match a known broadcast pattern — copy
+    // what we can without panicking.
+    let cp_r = g.rows.min(tr);
+    let cp_c = g.cols.min(tc);
+    for i in 0..cp_r {
+        for j in 0..cp_c {
+            out.set(i, j, g.at(i, j));
+        }
+    }
+    out
 }
 
 /// Transpose helper for matmul backward.
