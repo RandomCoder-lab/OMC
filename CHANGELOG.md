@@ -13,6 +13,7 @@ Read top-to-bottom for the arc; jump to any chapter for the detail.
 
 | Tag | Date | One-line |
 |---|---|---|
+| [v0.8.2-gpu-prometheus](#v082-gpu-prometheus--2026-05-17) | 2026-05-17 | **GPU wired into Prometheus** via a MatmulAccelerator hook. **13× speedup on synthetic chained matmul** (512², CPU 3.47s → GPU 0.27s). End-to-end Prometheus training at d_model=256: wall-clock unchanged — OMC tree-walk overhead in substrate-shaping helpers (smod, resample, Q6) is the next bottleneck, not matmul. Integration is load-bearing for the substrate-native GPU kernels coming next. |
 | [v0.8.1-tape-primitives](#v081-tape-primitives--2026-05-17) | 2026-05-17 | **Substrate-native tape primitive precedent**: `tape_phi_log` fuses Q6's log-distance into one tape node, with `tape_abs` as the boring companion. Composed vs fused trains to within ~1e-7 — fused abstraction is free. **Pre-existing tape_div/tape_mul broadcast-backward bug fixed**, which unblocks OMC-side cross-validation of S-MOD + substrate-K. First Q6 OMC replication: −0.63% 2/3 seeds at small scale, directionally matching PyTorch's −12.15%. |
 | [v0.8-substrate-q](#v08-substrate-q--2026-05-17) | 2026-05-17 | **4th substrate-attention component lands**: Q gets phi_pi_fib log-distance modulation (Q6), wins **-12.15% val 6/6 seeds**. Cumulative stack now -16.7% vs vanilla baseline. |
 | [v0.7-gpu-scaffold](#v07-gpu-scaffold--2026-05-17) | 2026-05-17 | GPU compute scaffold: `omnimcode-gpu` crate with wgpu (Vulkan) backend, ROCm/CUDA stubs. **4.04× speedup verified on the user's AMD RX 580** via Vulkan (no ROCm pain). |
@@ -29,6 +30,65 @@ Read top-to-bottom for the arc; jump to any chapter for the detail.
 | [v0.0.3-substrate-and-stdlib](#v003-substrate-and-stdlib--2026-05-08) | 2026-05-08 | Self-healing heal pass (typo/arity/div-zero), substrate-routed search family, stdlib expansion, closures, `--check`/`--fmt` CLI |
 | [v0.0.2-language-core](#v002-language-core--2026-04-25) | 2026-04-25 | The language exists: parser, tree-walk interpreter, HInt + φ-resonance, bytecode VM, self-hosting compiler (gen2 == gen3 byte-identical) |
 | [V0.0.1](#v001---2026-05-02) | 2025-Sep | Genesis: circuit evolution engine, FFI, Python/Unity/Unreal bindings (pre-language) |
+
+---
+
+## [v0.8.2-gpu-prometheus] - 2026-05-17
+
+**GPU wired into Prometheus via a pluggable MatmulAccelerator hook. Kernel-level 13× speedup confirmed; end-to-end Prometheus training is now bottlenecked by OMC tree-walk overhead in the substrate-shaping helpers, not by matmul. The integration is load-bearing for v0.8.3+ substrate-native GPU kernels.**
+
+### What's new
+
+- **`omnimcode_core::accel::register_matmul_accelerator(f)`** — outer binaries (CLI, MCP server) install a matmul implementation at startup. `omnimcode-core` doesn't depend on `omnimcode-gpu` (which would be a cycle); the hook keeps the layering clean.
+- **`tape_matmul` checks the hook first**, falls through to the in-core triple-loop when unregistered or when the hook declines (e.g. below threshold).
+- **`omnimcode-cli --features gpu`** wires the wgpu Vulkan backend in. Tunables:
+  - `OMC_GPU_BACKEND=cpu|wgpu` — force a backend (or none).
+  - `OMC_GPU_MATMUL_MIN_FLOPS=<N>` — crossover threshold (default 1,000,000).
+  - `OMC_GPU_VERBOSE=1` — log backend + threshold at startup.
+
+### Kernel-level result: 13× on a chained matmul
+
+5 sequential 512² matmuls inside an OMC tape:
+
+| backend | wall-clock | speedup |
+|---|--:|--:|
+| `cpu` | 3.47 s | 1.00× |
+| `wgpu` (RX 580, Vulkan) | 0.27 s | **12.85×** |
+
+Parity: f64 → f32 → f64 round-trip differs at the 9th significant digit — fine for any Prometheus-scale workload.
+
+### End-to-end Prometheus result: unchanged at d_model=256
+
+`examples/bench_prometheus_gpu.omc`, substrate-K transformer, seq_len=64, d_model=256, ff_dim=512, 5 AdamW steps:
+
+| | wall-clock | per step | loss |
+|---|--:|--:|--:|
+| CPU  | 129.05 s | 25.81 s | 6.95930 |
+| wgpu | 129.39 s | 25.88 s | 6.95932 |
+
+GPU and CPU are dead even (+0.3% slower on GPU due to f64↔f32 conversion overhead). **The matmul wall-clock is single-digit milliseconds per step; the surrounding OMC-side iteration in `_prom_smod_matrix`, `_prom_substrate_resample_matrix`, and Q6 modulation is tens of seconds**. GPU saves ~50ms; OMC burns ~25s. The ratio explains the 0% wall-clock movement.
+
+### What this opens up
+
+The integration is load-bearing for:
+- **v0.8.3 substrate-native GPU kernels**: Fibonacci-tile workgroups (13×13, 21×21, 34×34 vs 16×16), substrate-quantized weights, CRT-PE-keyed sparse matmul. Same composed-vs-fused protocol as `tape_phi_log` in v0.8.1, applied at the GPU layer. The substrate-native question at the kernel level.
+- **Bigger d_model**: at d_model=1024+ the matmul time grows ~64× while the OMC-side substrate ops grow ~4× — the ratio inverts and GPU starts to win end-to-end.
+- **Substrate ops as Rust builtins** (separate work): moving `_prom_smod_matrix` / `_prom_substrate_resample_matrix` into Rust would dissolve the current bottleneck and let the GPU win show through at today's scales.
+
+### Honest framing
+
+This chapter ships the **integration**, not an end-to-end speedup. The 13× kernel-level win is real and reproducible; the end-to-end null result is also real and points cleanly at the next bottleneck. Naming the wall is the chapter — the integration unlocks every direction that needs more matmul work in the time budget without paying re-integration cost later.
+
+### Files
+
+- `omnimcode-core/src/accel.rs` — new module: `MatmulAccelerator`, `register_matmul_accelerator`, `try_accelerated_matmul`
+- `omnimcode-core/src/interpreter.rs` — `tape_matmul` consults the hook first
+- `omnimcode-cli/Cargo.toml` — `gpu` feature pulls in `omnimcode-gpu` with `wgpu`
+- `omnimcode-cli/src/main.rs` — `install_gpu_matmul_accelerator()` at startup
+- `examples/bench_prometheus_gpu.omc` — wall-clock harness
+- `experiments/prometheus_parity/GPU_INTEGRATION.md` — full writeup
+
+Test suite: **1103/1103 OMC tests pass** (small tests stay below GPU threshold and run on CPU as before; broadcast-backward fix from v0.8.1 still holds).
 
 ---
 

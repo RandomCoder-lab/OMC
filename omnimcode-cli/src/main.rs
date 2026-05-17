@@ -9,6 +9,12 @@ use std::io::{self, Write};
 
 
 fn main() {
+    // GPU matmul accelerator registration. Behind the `gpu` feature so
+    // CPU-only builds stay dep-light. At runtime, OMC_GPU_BACKEND=cpu
+    // disables routing entirely.
+    #[cfg(feature = "gpu")]
+    install_gpu_matmul_accelerator();
+
     let args: Vec<String> = env::args().collect();
 
     // Parse simple flag-style args. Anything else is the input file
@@ -1285,6 +1291,61 @@ fn is_balanced(s: &str) -> bool {
         prev = c;
     }
     depth <= 0 && !in_str
+}
+
+/// Wire `omnimcode-gpu` (wgpu/Vulkan) as the matmul accelerator inside
+/// omnimcode-core's tape autograd. Crossover threshold (in FLOPS,
+/// approximated as `m·k·n`) is read from `OMC_GPU_MATMUL_MIN_FLOPS`,
+/// defaulting to 1_000_000 — roughly the 100×100 boundary where the
+/// v0.7 wgpu bench showed GPU starting to win on the user's RX 580.
+/// Below that, the accelerator declines and the in-core CPU triple-loop
+/// runs. `OMC_GPU_BACKEND=cpu` skips registration entirely.
+#[cfg(feature = "gpu")]
+fn install_gpu_matmul_accelerator() {
+    if std::env::var("OMC_GPU_BACKEND").as_deref() == Ok("cpu") {
+        return;
+    }
+    let threshold: usize = std::env::var("OMC_GPU_MATMUL_MIN_FLOPS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1_000_000);
+
+    // Eagerly init the wgpu backend so adapter probing + shader compile
+    // happen once at startup, not on the first matmul (where they'd
+    // pollute the first-iter wall-clock reading).
+    let backend: Box<dyn omnimcode_gpu::ComputeBackend> = omnimcode_gpu::pick_backend();
+    let verbose = std::env::var("OMC_GPU_VERBOSE").as_deref() == Ok("1");
+    if verbose {
+        eprintln!("[OMC_GPU] backend={} matmul-min-flops={}",
+                  backend.name(), threshold);
+    }
+
+    let _ = omnimcode_core::accel::register_matmul_accelerator(Box::new(
+        move |m: usize, k: usize, n: usize, a: &[f64], b: &[f64]|
+              -> Option<Result<Vec<f64>, String>> {
+            // Skip tiny matmuls — round-trip + f32 conversion costs more
+            // than the in-core triple-loop would. CPU backend is itself
+            // a triple-loop on f32; the GPU path is the one we want here.
+            if m * k * n < threshold {
+                return None;
+            }
+            if backend.name() == "cpu" {
+                // Registered backend is CPU — no point converting f64↔f32.
+                return None;
+            }
+            let af: Vec<f32> = a.iter().map(|&x| x as f32).collect();
+            let bf: Vec<f32> = b.iter().map(|&x| x as f32).collect();
+            let am = omnimcode_gpu::Matrix::new(m, k, af);
+            let bm = omnimcode_gpu::Matrix::new(k, n, bf);
+            match backend.matmul(&am, &bm) {
+                Ok(out) => {
+                    let data: Vec<f64> = out.data.into_iter().map(|x| x as f64).collect();
+                    Some(Ok(data))
+                }
+                Err(e) => Some(Err(format!("gpu matmul: {}", e))),
+            }
+        },
+    ));
 }
 
 #[cfg(test)]

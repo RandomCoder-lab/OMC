@@ -12060,12 +12060,20 @@ fn tape_transpose(m: &TapeMat) -> TapeMat {
 }
 
 /// Standard matmul on TapeMat. Used both in forward Matmul and in the
-/// backward pass (dA = dC @ B^T, dB = A^T @ dC).
+/// backward pass (dA = dC @ B^T, dB = A^T @ dC). Routes through the
+/// registered accelerator (e.g. omnimcode-gpu's wgpu backend) when one
+/// is installed AND it elects to handle this shape; otherwise falls
+/// back to the in-core triple-loop. See `crate::accel`.
 fn tape_matmul(a: &TapeMat, b: &TapeMat) -> Result<TapeMat, String> {
     if a.cols != b.rows {
         return Err(format!(
             "tape_matmul: shape mismatch {}x{} @ {}x{}", a.rows, a.cols, b.rows, b.cols
         ));
+    }
+    if let Some(result) = crate::accel::try_accelerated_matmul(
+        a.rows, a.cols, b.cols, &a.data, &b.data
+    ) {
+        return result.map(|data| TapeMat { rows: a.rows, cols: b.cols, data });
     }
     let mut out = TapeMat::zeros(a.rows, b.cols);
     for i in 0..a.rows {

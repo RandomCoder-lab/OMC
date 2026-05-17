@@ -29,6 +29,7 @@ pub mod formatter;     // AST -> canonical OMC source (for --fmt)
 pub mod prometheus;    // Substrate-native ML framework (MVP shipped in OMC; Rust extensions documented)
 pub mod predict;       // Substrate-indexed code completion (v0.3 chapter)
 pub mod memory;        // Substrate-keyed conversation memory (v0.5 chapter)
+pub mod accel;         // Pluggable accelerator hooks for hot tape ops (v0.8.2)
 
 // Embedded CPython: py_* builtins (numpy, pandas, ...). Default-on
 // for desktop builds; downstream WASM / no_std crates can disable

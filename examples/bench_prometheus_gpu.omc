@@ -1,0 +1,144 @@
+# Wall-clock bench: pure-OMC Prometheus training, CPU vs GPU.
+#
+# Trains the substrate-K transformer for N steps on a synthetic corpus,
+# measures total time, prints loss for parity. The matmul accelerator
+# (omnimcode-gpu wgpu backend) is registered by the CLI when built with
+# --features gpu; OMC_GPU_BACKEND=cpu forces the in-core CPU path so
+# we can compare wall-clock.
+#
+# Pick d_model big enough that the QKV/FF matmuls cross the
+# OMC_GPU_MATMUL_MIN_FLOPS threshold (default 1M). With d_model=128
+# and seq_len=32, x@Q is 32*128*128 = 524k FLOPS (below); FF up at
+# (32×128)·(128×512) = 2M (above). With d_model=256: 32*256*256 = 2M
+# (above on QKV too).
+
+import "examples/lib/prometheus.omc";
+
+fn build_random_corpus(n_tokens, vocab_size) {
+    h ids = [];
+    h s = 17;
+    h i = 0;
+    while i < n_tokens {
+        s = (s * 1103515245 + 12345) - ((s * 1103515245 + 12345) / 2147483648) * 2147483648;
+        arr_push(ids, s - (s / vocab_size) * vocab_size);
+        i = i + 1;
+    }
+    return ids;
+}
+
+fn build_model(vocab_size, d_model, ff_dim, seq_len, seed) {
+    h emb = prom_embedding_new(vocab_size, d_model, seed);
+    h attn = prom_attention_substrate_k_new(d_model, seq_len, seed + 11);
+    h ln1 = prom_layernorm_new(d_model, seed + 23);
+    h ff_up = prom_linear_new(d_model, ff_dim, seed + 31);
+    h ff_down = prom_linear_new(ff_dim, d_model, seed + 41);
+    h ln2 = prom_layernorm_new(d_model, seed + 53);
+    h head = prom_linear_new(d_model, vocab_size, seed + 61);
+    h m = dict_new();
+    dict_set(m, "emb", emb);
+    dict_set(m, "attn", attn);
+    dict_set(m, "ln1", ln1);
+    dict_set(m, "ff_up", ff_up);
+    dict_set(m, "ff_down", ff_down);
+    dict_set(m, "ln2", ln2);
+    dict_set(m, "head", head);
+    return m;
+}
+
+fn forward_window(model, token_ids, pe_table) {
+    h x = prom_embedding_batch(dict_get(model, "emb"), token_ids);
+    h pe_rows = [];
+    h i = 0;
+    while i < arr_len(token_ids) {
+        arr_push(pe_rows, arr_get(pe_table, i));
+        i = i + 1;
+    }
+    x = tape_add(x, tape_const(pe_rows));
+    h attn_out = prom_attention_substrate_k_forward(dict_get(model, "attn"), x);
+    h x_post_attn = tape_add(x, attn_out);
+    h n1 = prom_layernorm_forward(dict_get(model, "ln1"), x_post_attn);
+    h up = prom_linear_forward(dict_get(model, "ff_up"), n1);
+    h down = prom_linear_forward(dict_get(model, "ff_down"), prom_relu(up));
+    h x_post_ff = tape_add(x_post_attn, down);
+    h n2 = prom_layernorm_forward(dict_get(model, "ln2"), x_post_ff);
+    return prom_linear_forward(dict_get(model, "head"), n2);
+}
+
+fn collect_params(model) {
+    h attn_p = prom_attention_substrate_k_params(dict_get(model, "attn"));
+    h other = prom_collect_params_v2([
+        dict_get(model, "emb"),
+        dict_get(model, "ln1"),
+        dict_get(model, "ff_up"),
+        dict_get(model, "ff_down"),
+        dict_get(model, "ln2"),
+        dict_get(model, "head"),
+    ]);
+    h out = [];
+    h i = 0;
+    while i < arr_len(attn_p) { arr_push(out, arr_get(attn_p, i)); i = i + 1; }
+    i = 0;
+    while i < arr_len(other) { arr_push(out, arr_get(other, i)); i = i + 1; }
+    return out;
+}
+
+fn main() {
+    h vocab_size = 32;
+    h seq_len = 64;
+    h d_model = 256;
+    h ff_dim = 512;
+    h n_tokens = 200;
+    h steps = 5;
+    h lr = 0.005;
+    h seed = 42;
+
+    print(concat_many("== bench_prometheus_gpu =="));
+    print(concat_many("vocab=", to_string(vocab_size),
+        "  seq_len=", to_string(seq_len),
+        "  d_model=", to_string(d_model),
+        "  ff_dim=", to_string(ff_dim),
+        "  steps=", to_string(steps)));
+    print(concat_many("Per-step matmul shapes:"));
+    print(concat_many("  x @ Q  : ", to_string(seq_len), "x", to_string(d_model),
+                      " · ", to_string(d_model), "x", to_string(d_model),
+                      "  = ", to_string(seq_len * d_model * d_model), " flops"));
+    print(concat_many("  ff_up  : ", to_string(seq_len), "x", to_string(d_model),
+                      " · ", to_string(d_model), "x", to_string(ff_dim),
+                      "  = ", to_string(seq_len * d_model * ff_dim), " flops"));
+
+    h ids = build_random_corpus(n_tokens, vocab_size);
+    tape_reset();
+    h model = build_model(vocab_size, d_model, ff_dim, seq_len, seed);
+    h params = collect_params(model);
+    h opt = prom_adamw_new(params, lr, 0.9, 0.999, 1e-8, 0.0);
+    h pe_table = prom_crt_pe_matrix(seq_len, d_model);
+
+    h t0 = py_eval("__import__('time').time()");
+    h step = 0;
+    h last_loss = 0.0;
+    while step < steps {
+        h start = step - (step / (n_tokens - seq_len - 1)) * (n_tokens - seq_len - 1);
+        h window = [];
+        h targets = [];
+        h k = 0;
+        while k < seq_len {
+            arr_push(window, arr_get(ids, start + k));
+            arr_push(targets, arr_get(ids, start + k + 1));
+            k = k + 1;
+        }
+        h logits = forward_window(model, window, pe_table);
+        h loss = prom_cross_entropy_batch(logits, targets, vocab_size);
+        tape_backward(loss);
+        prom_adamw_step(opt);
+        last_loss = tape_value(loss);
+        step = step + 1;
+    }
+    h t1 = py_eval("__import__('time').time()");
+    h elapsed = t1 - t0;
+
+    print(concat_many("final_loss=", to_string(last_loss)));
+    print(concat_many("elapsed=",    to_string(elapsed), " s"));
+    print(concat_many("per_step=",   to_string(elapsed / steps), " s"));
+}
+
+main();
