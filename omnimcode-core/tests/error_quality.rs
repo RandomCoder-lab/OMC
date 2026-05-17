@@ -136,6 +136,47 @@ fn to_hex_and_from_hex_round_trip() {
     run(src).unwrap();
 }
 
+// ---------- Wrong-container hints ------------------------------------------
+
+#[test]
+fn arr_get_called_on_dict_suggests_dict_get() {
+    let src = "fn main() {
+        h d = dict_new();
+        dict_set(d, \"k\", 1);
+        h v = arr_get(d, 0);
+    }";
+    let err = run(src).unwrap_err();
+    assert!(err.contains("arr_get"), "names builtin: {}", err);
+    assert!(err.contains("dict_get"), "suggests dict_get: {}", err);
+    assert!(err.contains("got dict"), "reports received type: {}", err);
+}
+
+#[test]
+fn dict_get_called_on_array_suggests_arr_get() {
+    let src = "fn main() {
+        h xs = [1, 2, 3];
+        h v = dict_get(xs, \"k\");
+    }";
+    let err = run(src).unwrap_err();
+    assert!(err.contains("dict_get"), "names builtin: {}", err);
+    assert!(err.contains("arr_get"), "suggests arr_get: {}", err);
+    assert!(err.contains("got array"), "reports received type: {}", err);
+}
+
+// ---------- Calling non-function -------------------------------------------
+
+#[test]
+fn calling_an_int_as_function_is_friendlier() {
+    // `call(value, args)` routes through the first-class callable path.
+    let src = "fn main() {
+        h x = 42;
+        call(x, []);
+    }";
+    let err = run(src).unwrap_err();
+    assert!(err.contains("Cannot call") && err.contains("int"),
+            "should name the type, got: {}", err);
+}
+
 #[test]
 fn getenv_with_default_returns_default_when_unset() {
     let src = "fn main() {

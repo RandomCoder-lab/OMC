@@ -137,3 +137,31 @@ fn test_getenv_path_is_set() {
     assert_true(p != null, "PATH is set");
     assert_true(len(p) > 0, "PATH is non-empty");
 }
+
+# ---- for-loop iterates dicts (keys) and strings (chars) ----
+
+fn test_for_in_dict_yields_keys() {
+    h d = dict_new();
+    dict_set(d, "alpha", 1);
+    dict_set(d, "beta", 2);
+    dict_set(d, "gamma", 3);
+    h collected = [];
+    for k in d {
+        arr_push(collected, k);
+    }
+    assert_eq(arr_len(collected), 3, "saw 3 keys");
+    # Order isn't guaranteed but we should see all keys.
+    assert_true(arr_contains(collected, "alpha"), "alpha present");
+    assert_true(arr_contains(collected, "beta"), "beta present");
+    assert_true(arr_contains(collected, "gamma"), "gamma present");
+}
+
+fn test_for_in_string_yields_chars() {
+    h chars = [];
+    for c in "abc" {
+        arr_push(chars, c);
+    }
+    assert_eq(arr_len(chars), 3, "3 chars");
+    assert_eq(arr_get(chars, 0), "a", "[0]=a");
+    assert_eq(arr_get(chars, 2), "c", "[2]=c");
+}

@@ -1588,25 +1588,39 @@ impl Interpreter {
                         }
                     }
                     ForIterable::Expr(expr) => {
-                        if let Value::Array(arr) = self.eval_expr(expr)? {
-                            // Snapshot items so the loop body can mutate
-                            // the underlying Rc<RefCell<Vec>> without
-                            // tripping a borrow conflict.
-                            let items = arr.items.borrow().clone();
-                            for item in items {
-                                self.set_var(var.clone(), item);
-                                self.execute_block(body)?;
-                                if self.break_flag {
-                                    self.break_flag = false;
-                                    break;
-                                }
-                                if self.continue_flag {
-                                    self.continue_flag = false;
-                                    continue;
-                                }
-                                if self.return_value.is_some() {
-                                    break;
-                                }
+                        let val = self.eval_expr(expr)?;
+                        // Snapshot items so the loop body can mutate
+                        // the underlying Rc<RefCell<Vec>> without
+                        // tripping a borrow conflict. Materialize once
+                        // per iterable type — Array iterates elements,
+                        // Dict iterates keys (Python convention), String
+                        // iterates characters. Anything else errors —
+                        // silent skips used to hide typos.
+                        let items: Vec<Value> = match &val {
+                            Value::Array(arr) => arr.items.borrow().clone(),
+                            Value::Dict(d) => d.borrow().keys()
+                                .map(|k| Value::String(k.clone())).collect(),
+                            Value::String(s) => s.chars()
+                                .map(|c| Value::String(c.to_string())).collect(),
+                            other => return Err(format!(
+                                "for-loop: cannot iterate over {} \
+                                 (expected array, dict, or string)",
+                                type_name_of(other)
+                            )),
+                        };
+                        for item in items {
+                            self.set_var(var.clone(), item);
+                            self.execute_block(body)?;
+                            if self.break_flag {
+                                self.break_flag = false;
+                                break;
+                            }
+                            if self.continue_flag {
+                                self.continue_flag = false;
+                                continue;
+                            }
+                            if self.return_value.is_some() {
+                                break;
                             }
                         }
                     }
@@ -2299,7 +2313,11 @@ impl Interpreter {
             Value::Function { name, captured } => (name.clone(), captured.clone()),
             Value::String(name) => (name.clone(), None),  // accept string form too
             other => return Err(format!(
-                "call_first_class_function: not a callable ({:?})", other
+                "Cannot call this value as a function — it's a {}. \
+                 Only fn references and string-named callables are \
+                 callable; check that the variable holds a function \
+                 (use `type_of(x)` to inspect).",
+                type_name_of(other)
             )),
         };
         // Push the captured env as a frame FIRST (so it sits underneath
@@ -3899,10 +3917,12 @@ impl Interpreter {
                     }
                     Ok(items[resolved as usize].clone())
                 } else {
-                    Err(format!(
-                        "arr_get: first argument must be an array, got {}",
-                        type_name_of(&arr_v)
-                    ))
+                    let hint = if matches!(&arr_v, Value::Dict(_)) {
+                        wrong_container_hint(&arr_v, "dict_get(d, key)")
+                    } else {
+                        format!(" (got {})", type_name_of(&arr_v))
+                    };
+                    Err(format!("arr_get: first argument must be an array{}", hint))
                 }
             }
             "arr_set" => {
@@ -4218,7 +4238,12 @@ impl Interpreter {
                     } else { None };
                     Ok(d.borrow().get(&k).cloned().unwrap_or_else(|| default.unwrap_or(Value::Null)))
                 } else {
-                    Err("dict_get: first argument must be a dict".to_string())
+                    let hint = if matches!(&d_v, Value::Array(_)) {
+                        wrong_container_hint(&d_v, "arr_get(arr, idx)")
+                    } else {
+                        format!(" (got {})", type_name_of(&d_v))
+                    };
+                    Err(format!("dict_get: first argument must be a dict{}", hint))
                 }
             }
             "dict_set" => {
@@ -11698,6 +11723,18 @@ pub(crate) struct TapeNode {
 ///   - scalar HInt/HFloat → 1×1 matrix
 ///   - 1D array → 1×N row matrix
 ///   - 2D array (array-of-arrays) → MxN matrix
+/// Produce a wrong-container hint suffix when an array builtin was
+/// called with a dict (or vice versa). Returns an empty string when no
+/// hint applies. The suffix is pre-formatted as " (did you mean X?)"
+/// so it can be concatenated directly into an error message.
+pub(crate) fn wrong_container_hint(received: &Value, suggested: &str) -> String {
+    let recv_type = type_name_of(received);
+    format!(
+        " (got {}; did you mean `{}`?)",
+        recv_type, suggested
+    )
+}
+
 /// Human-readable type tag for error messages. Mirrors the `type_of`
 /// builtin's tag set so user-facing strings match what they'd see from
 /// inspecting at runtime.
