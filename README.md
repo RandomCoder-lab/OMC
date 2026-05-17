@@ -34,6 +34,8 @@ These are concrete, present-in-the-code features, not aspirations:
 
 - **Substrate-routed harmonic libraries.** `harmonic_anomaly` beats scikit-learn's IsolationForest **10/10 vs 7/10** on multi-dim credential-stuffing detection (the structural-anomaly regime).
 
+- **Substrate-keyed code codec + compressed substrate-signed messaging.** `omc_codec_encode` produces a sampled-token payload addressed by the canonical AST hash (invariant under whitespace, comments, alpha-rename). `omc_codec_decode_lookup` returns the exact library entry on hash match. `omc_msg_sign_compressed` / `omc_msg_recover_compressed` carry the codec payload inside the substrate-signed wire format — ~5–7× smaller payloads with lossless library recovery and full signature integrity. 13 tests pass ([`test_codec.omc`](examples/tests/test_codec.omc), [`test_compressed_messaging.omc`](examples/tests/test_compressed_messaging.omc)). See [`experiments/seed_expansion/FINDINGS.md`](experiments/seed_expansion/FINDINGS.md) for the full extrapolation including what the open-set ML side does *not* yet deliver.
+
 ---
 
 ## 30-second hello
@@ -246,6 +248,9 @@ fn coherent_loop(n) {
 | [`examples/datascience/titanic.omc`](examples/datascience/titanic.omc) | Kaggle Titanic via embedded Python pipeline |
 | [`examples/lib/substrate.omc`](examples/lib/substrate.omc) | High-level wrappers around the substrate primitives |
 | [`examples/tests/test_heal_pass.omc`](examples/tests/test_heal_pass.omc) | 16 tests for the self-healing compiler's heal classes + per-class pragmas |
+| [`examples/tests/test_codec.omc`](examples/tests/test_codec.omc) | 7 tests for `omc_codec_encode/decode_lookup` — alpha-rename invariant library recovery + inline error-hint UX check |
+| [`examples/tests/test_compressed_messaging.omc`](examples/tests/test_compressed_messaging.omc) | 6 tests: substrate-signed wire payloads carrying codec output, alpha-equivalent recovery, JSON round-trip |
+| [`experiments/seed_expansion/FINDINGS.md`](experiments/seed_expansion/FINDINGS.md) | Empirical writeup: substrate-keyed codec works (lossless on in-library content); open-set ML stays data-budget bound at 40 samples — honest |
 
 ---
 
@@ -264,7 +269,7 @@ fn coherent_loop(n) {
 | `experiments/substrate_primitives/` | Empirical comparison of substrate vs native vs OMC search |
 | `examples/lib/` | `substrate.omc`, `harmonic_anomaly`, `harmonic_clustering`, `harmonic_recommend`, np/pd/sklearn/torch/requests/sqlite |
 | `examples/datascience/` | Real-data demos with honest numbers |
-| `examples/tests/` | `test_substrate_primitives.omc` (57), `test_new_builtins.omc` (70), `test_harmonic_libs.omc` (18), `test_heal_pass.omc` (16) — **161 total** |
+| `examples/tests/` | `test_substrate_primitives.omc` (57), `test_new_builtins.omc` (70), `test_harmonic_libs.omc` (18), `test_heal_pass.omc` (16), `test_codec.omc` (7), `test_compressed_messaging.omc` (6) — **174 total** |
 | `docs/` | Substrate audit, JIT benchmarks, anomaly-detection comparisons |
 | `registry/` | Central package registry (sha256-verified) |
 
@@ -342,6 +347,8 @@ Submit a package: PR an entry to [`registry/index.json`](registry/index.json).
 | Hybrid HBit-gate distractor-mix test | **falsified at current gate formulation (0/3 wins)**, score-level / learned-threshold reformulations documented |
 | Self-hosting compiler V.9b | shipped, gen2 == gen3 byte-identical |
 | **Self-healing pass (7 classes, substrate-routed typo)** | shipped, `OMC_HEAL=1`, **10× typo lookup**, 16 tests, per-class pragmas |
+| **Substrate-keyed code codec + compressed messaging** | **shipped**, `omc_codec_encode/decode_lookup` + `omc_msg_sign_compressed/recover`, alpha-rename invariant, ~5–7× wire payload reduction, 13 tests, lossless on in-library content |
+| **Inline error-fix hints** | **shipped**, `Undefined function` errors now carry the suggested fn's signature inline (eliminates a separate `omc_help` round-trip after a typo) |
 | Two-engine parity (tree-walk + VM) | shipped, 44/45 byte-identical |
 | Embedded CPython + callbacks | shipped, 6 wrapper libs |
 | WASM + LSP + GDExtension targets | shipped |
