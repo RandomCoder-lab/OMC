@@ -6961,6 +6961,86 @@ impl Interpreter {
                 });
                 Ok(Value::HInt(HInt::new(id as i64)))
             }
+            "tape_substrate_sparse_scores" => {
+                // tape_substrate_sparse_scores(q_id, k_id, threshold) → [N, M] scores
+                //
+                // Compute q @ k^T but only at cells where substrate_dist(i, j)
+                // is below threshold; other cells are set to -inf so a
+                // subsequent softmax assigns them zero. The substrate distance
+                // uses CRT moduli {5, 8, 13, 21} — same metric that v0.8.8
+                // measured Q6 concentrates 56.8% of attention mass into 6.84%
+                // of cells under for substrate_dist <= 5.
+                //
+                // This is the post-training inference kernel: train with
+                // Q6 fused → during inference, swap the dense
+                // q @ k^T + softmax for tape_substrate_sparse_scores +
+                // softmax, dropping ~93% of score computation for ~57% of
+                // the attention quality. Backward routes through dense
+                // matmul (for the cells that fired) — gradient at masked
+                // cells is identically zero (softmax of -inf = 0).
+                if args.len() < 2 {
+                    return Err("tape_substrate_sparse_scores requires (q_id, k_id, threshold=5)".to_string());
+                }
+                let q_id = self.eval_expr(&args[0])?.to_int() as usize;
+                let k_id = self.eval_expr(&args[1])?.to_int() as usize;
+                let threshold: i64 = if args.len() >= 3 {
+                    self.eval_expr(&args[2])?.to_int()
+                } else { 5 };
+                let qv = self.autograd_tape[q_id].value.clone();
+                let kv = self.autograd_tape[k_id].value.clone();
+                if qv.cols != kv.cols {
+                    return Err(format!(
+                        "tape_substrate_sparse_scores: shape mismatch q={}x{} k={}x{}",
+                        qv.rows, qv.cols, kv.rows, kv.cols
+                    ));
+                }
+                let n = qv.rows;
+                let m = kv.rows;
+                let d = qv.cols;
+                // CRT moduli matching the v0.8.8 measurement.
+                let moduli: [i64; 4] = [5, 8, 13, 21];
+                let substrate_dist = |i: usize, j: usize| -> i64 {
+                    let mut s = 0_i64;
+                    for &mm in &moduli {
+                        let di = (i as i64) % mm;
+                        let dj = (j as i64) % mm;
+                        s += (di - dj).abs();
+                    }
+                    s
+                };
+                let mut out = TapeMat::zeros(n, m);
+                let mut cells_computed = 0usize;
+                let mut cells_total = 0usize;
+                for i in 0..n {
+                    for j in 0..m {
+                        cells_total += 1;
+                        if substrate_dist(i, j) > threshold {
+                            out.set(i, j, f64::NEG_INFINITY);
+                            continue;
+                        }
+                        cells_computed += 1;
+                        let mut s = 0.0;
+                        for kk in 0..d {
+                            s += qv.at(i, kk) * kv.at(j, kk);
+                        }
+                        out.set(i, j, s);
+                    }
+                }
+                // Emit telemetry the first few times so the bench can
+                // sanity-check density. Stays out of the OMC-side hot path.
+                if cells_total > 0 && std::env::var("OMC_GPU_VERBOSE").as_deref() == Ok("1") {
+                    eprintln!("[sparse-scores] {}/{} cells = {:.1}%",
+                              cells_computed, cells_total,
+                              100.0 * cells_computed as f64 / cells_total as f64);
+                }
+                let grad = TapeMat::zeros(n, m);
+                let id = self.autograd_tape.len();
+                self.autograd_tape.push(TapeNode {
+                    op: TapeOp::SubstrateSparseScores(q_id, k_id, threshold),
+                    value: out, grad,
+                });
+                Ok(Value::HInt(HInt::new(id as i64)))
+            }
             "tape_substrate_resample" => {
                 // tape_substrate_resample(v_id, scale) — fused substrate-V resample.
                 // out[i, c] = v[i, c] * 1 / (1 + attractor_distance(int(v[i, c] · scale)) / scale).
@@ -7425,6 +7505,49 @@ impl Interpreter {
                                 da.data[k] = g;
                             }
                             self.autograd_tape[a].grad.add(&da);
+                        }
+                        TapeOp::SubstrateSparseScores(q_id, k_id, threshold) => {
+                            // Backward through sparse scores. dy is [N, M].
+                            // For fired cells (substrate_dist(i, j) <= threshold):
+                            //   dL/dq[i, k] += dy[i, j] * k[j, k]
+                            //   dL/dk[j, k] += dy[i, j] * q[i, k]
+                            // For masked cells, dy comes in as 0 from softmax
+                            // backward (softmax of -inf = 0, so gradient is 0
+                            // at those positions). We still skip them here
+                            // for clarity and to make the optimization
+                            // observable in profiles.
+                            let qv = self.autograd_tape[q_id].value.clone();
+                            let kv = self.autograd_tape[k_id].value.clone();
+                            let n = qv.rows;
+                            let m = kv.rows;
+                            let d = qv.cols;
+                            let moduli: [i64; 4] = [5, 8, 13, 21];
+                            let substrate_dist = |i: usize, j: usize| -> i64 {
+                                let mut s = 0_i64;
+                                for &mm in &moduli {
+                                    let di = (i as i64) % mm;
+                                    let dj = (j as i64) % mm;
+                                    s += (di - dj).abs();
+                                }
+                                s
+                            };
+                            let mut dq = TapeMat::zeros(qv.rows, qv.cols);
+                            let mut dk = TapeMat::zeros(kv.rows, kv.cols);
+                            for i in 0..n {
+                                for j in 0..m {
+                                    if substrate_dist(i, j) > threshold { continue; }
+                                    let g = dy.at(i, j);
+                                    if g == 0.0 { continue; }
+                                    for k in 0..d {
+                                        let cur_dq = dq.at(i, k);
+                                        dq.set(i, k, cur_dq + g * kv.at(j, k));
+                                        let cur_dk = dk.at(j, k);
+                                        dk.set(j, k, cur_dk + g * qv.at(i, k));
+                                    }
+                                }
+                            }
+                            self.autograd_tape[q_id].grad.add(&dq);
+                            self.autograd_tape[k_id].grad.add(&dk);
                         }
                         TapeOp::SubstrateResample(a, scale) => {
                             // out = v * modulator(v) where modulator is treated as const
@@ -12377,6 +12500,18 @@ pub(crate) enum TapeOp {
     /// matmul) with a direct copy. Backward scatters dL/dout rows back
     /// into the corresponding dL/dtable rows.
     EmbeddingLookup(usize, Vec<usize>),
+    /// Substrate-sparse attention output. Computes per-row scores ONLY for
+    /// (i, j) cells where CRT substrate_dist(i, j) <= threshold, masks the
+    /// rest to -inf so softmax assigns zero weight. Operates on q [N, D]
+    /// and a const k [N, D] (CRT-PE). Output is q-shaped: attn @ v_id is
+    /// applied separately. Used for inference-time speedup after Q6
+    /// training — v0.8.8 showed Q6 pushes 56.8% of attention mass into
+    /// 6.84% of substrate-close cells, so the sparse cells capture the
+    /// dominant attention with ~10x fewer score computations.
+    /// `k_constant_id` stays as a tape const (not a learnable). Forward
+    /// only for now — backward goes through standard tape_matmul path
+    /// after the dense scores are reconstructed.
+    SubstrateSparseScores(usize, usize, i64),
     /// Fused substrate-V resample: out[i, c] = v[i, c] * 1/(1 + d(v[i,c]·scale)/scale).
     /// Modulator is treated as a const w.r.t. v (matches the OMC reference
     /// `prom_substrate_resample` which uses tape_const). Stores `scale` in

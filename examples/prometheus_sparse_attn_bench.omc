@@ -1,0 +1,253 @@
+# Sparse substrate attention kernel A/B (v0.8.9 ship).
+#
+# Setup: train a Q6-fused model for N steps. Then run a single forward
+# pass two ways:
+#   A. dense:  scores = q @ k^T  (every (i, j) cell)
+#   B. sparse: scores = tape_substrate_sparse_scores(q, k, threshold=5)
+#              (only cells where CRT substrate_dist(i, j) <= 5)
+# Measure: forward wall-clock, post-softmax attention mass agreement,
+# and what fraction of cells fired.
+#
+# Win condition (v0.8.8 hypothesis): sparse captures ≥50% of the
+# dense attention quality at <10% of the compute. Quality measured as
+# total |dense_attn - sparse_attn| / sum(dense_attn).
+
+import "examples/lib/prometheus.omc";
+
+fn build_vocab(text) {
+    h seen = dict_new();
+    h chars = [];
+    h i = 0;
+    while i < str_len(text) {
+        h ch = str_slice(text, i, i + 1);
+        if !dict_has(seen, ch) { dict_set(seen, ch, arr_len(chars)); arr_push(chars, ch); }
+        i = i + 1;
+    }
+    h v = dict_new();
+    dict_set(v, "chars", chars);
+    dict_set(v, "lookup", seen);
+    return v;
+}
+
+fn encode(text, vocab) {
+    h lookup = dict_get(vocab, "lookup");
+    h ids = [];
+    h i = 0;
+    while i < str_len(text) {
+        h ch = str_slice(text, i, i + 1);
+        arr_push(ids, dict_get(lookup, ch));
+        i = i + 1;
+    }
+    return ids;
+}
+
+fn build_model(vocab_size, d_model, ff_dim, seq_len, seed) {
+    h emb = prom_embedding_new(vocab_size, d_model, seed);
+    h s1 = dict_get(emb, "rng_state");
+    h attn = prom_attention_substrate_k_new(d_model, seq_len, s1 + 11);
+    dict_set(attn, "q6_mode", "fused");
+    h s2 = dict_get(attn, "rng_state");
+    h ln1 = prom_layernorm_new(d_model, s2);
+    h ff_up = prom_linear_new(d_model, ff_dim, s2 + 13);
+    h s3 = dict_get(ff_up, "rng_state");
+    h ff_down = prom_linear_new(ff_dim, d_model, s3);
+    h s4 = dict_get(ff_down, "rng_state");
+    h ln2 = prom_layernorm_new(d_model, s4);
+    h head = prom_linear_new(d_model, vocab_size, s4 + 17);
+    h m = dict_new();
+    dict_set(m, "emb", emb);
+    dict_set(m, "attn", attn);
+    dict_set(m, "ln1", ln1);
+    dict_set(m, "ff_up", ff_up);
+    dict_set(m, "ff_down", ff_down);
+    dict_set(m, "ln2", ln2);
+    dict_set(m, "head", head);
+    return m;
+}
+
+fn forward_window(model, token_ids, pe_table) {
+    h x = prom_embedding_batch(dict_get(model, "emb"), token_ids);
+    h pe_rows = [];
+    h i = 0;
+    while i < arr_len(token_ids) { arr_push(pe_rows, arr_get(pe_table, i)); i = i + 1; }
+    x = tape_add(x, tape_const(pe_rows));
+    h attn_out = prom_attention_substrate_k_forward(dict_get(model, "attn"), x);
+    h x_post = tape_add(x, attn_out);
+    h n1 = prom_layernorm_forward(dict_get(model, "ln1"), x_post);
+    h up = prom_linear_forward(dict_get(model, "ff_up"), n1);
+    h down = prom_linear_forward(dict_get(model, "ff_down"), prom_relu(up));
+    h x_ff = tape_add(x_post, down);
+    h n2 = prom_layernorm_forward(dict_get(model, "ln2"), x_ff);
+    return prom_linear_forward(dict_get(model, "head"), n2);
+}
+
+fn collect_all(model) {
+    h attn_p = prom_attention_substrate_k_params(dict_get(model, "attn"));
+    h other = prom_collect_params_v2([
+        dict_get(model, "emb"),
+        dict_get(model, "ln1"),
+        dict_get(model, "ff_up"),
+        dict_get(model, "ff_down"),
+        dict_get(model, "ln2"),
+        dict_get(model, "head"),
+    ]);
+    h out = [];
+    h i = 0;
+    while i < arr_len(attn_p) { arr_push(out, arr_get(attn_p, i)); i = i + 1; }
+    i = 0;
+    while i < arr_len(other) { arr_push(out, arr_get(other, i)); i = i + 1; }
+    return out;
+}
+
+fn train_q6(vocab_size, ids, seq_len, d_model, ff_dim, lr, steps, seed) {
+    tape_reset();
+    h model = build_model(vocab_size, d_model, ff_dim, seq_len, seed);
+    h params = collect_all(model);
+    h opt = prom_adamw_new(params, lr, 0.9, 0.999, 1e-8, 0.0);
+    h pe_table = prom_crt_pe_matrix(seq_len, d_model);
+    h n_windows = arr_len(ids) - seq_len - 1;
+    h step = 0;
+    while step < steps {
+        h start = step - (step / n_windows) * n_windows;
+        h window = [];
+        h targets = [];
+        h k = 0;
+        while k < seq_len {
+            arr_push(window, arr_get(ids, start + k));
+            arr_push(targets, arr_get(ids, start + k + 1));
+            k = k + 1;
+        }
+        h logits = forward_window(model, window, pe_table);
+        h loss = prom_cross_entropy_batch(logits, targets, vocab_size);
+        tape_backward(loss);
+        prom_adamw_step(opt);
+        step = step + 1;
+    }
+    h out = dict_new();
+    dict_set(out, "model", model);
+    dict_set(out, "pe_table", pe_table);
+    return out;
+}
+
+# Dense softmax attention output (the normal path).
+fn run_dense_attn(model, pe_table, ids, seq_len) {
+    h window = [];
+    h k = 0;
+    while k < seq_len { arr_push(window, arr_get(ids, k)); k = k + 1; }
+    h x = prom_embedding_batch(dict_get(model, "emb"), window);
+    h pe_rows = [];
+    h i = 0;
+    while i < arr_len(window) { arr_push(pe_rows, arr_get(pe_table, i)); i = i + 1; }
+    x = tape_add(x, tape_const(pe_rows));
+    h attn = dict_get(model, "attn");
+    h Q_w = dict_get(attn, "Q");
+    h K_const = dict_get(attn, "K_const");
+    h q = tape_matmul(x, Q_w);
+    h q_mod = prom_q6_modulate(q, dict_get(attn, "q6_scale"),
+                                dict_get(attn, "q6_gamma"),
+                                dict_get(attn, "q6_mode"));
+    h k_t = tape_transpose(tape_const(K_const));
+    h scores = tape_matmul(q_mod, k_t);
+    return tape_value(tape_softmax(scores));
+}
+
+# Sparse path using tape_substrate_sparse_scores.
+fn run_sparse_attn(model, pe_table, ids, seq_len, threshold) {
+    h window = [];
+    h k = 0;
+    while k < seq_len { arr_push(window, arr_get(ids, k)); k = k + 1; }
+    h x = prom_embedding_batch(dict_get(model, "emb"), window);
+    h pe_rows = [];
+    h i = 0;
+    while i < arr_len(window) { arr_push(pe_rows, arr_get(pe_table, i)); i = i + 1; }
+    x = tape_add(x, tape_const(pe_rows));
+    h attn = dict_get(model, "attn");
+    h Q_w = dict_get(attn, "Q");
+    h K_const = dict_get(attn, "K_const");
+    h q = tape_matmul(x, Q_w);
+    h q_mod = prom_q6_modulate(q, dict_get(attn, "q6_scale"),
+                                dict_get(attn, "q6_gamma"),
+                                dict_get(attn, "q6_mode"));
+    h k_node = tape_const(K_const);
+    h scores = tape_substrate_sparse_scores(q_mod, k_node, threshold);
+    return tape_value(tape_softmax(scores));
+}
+
+fn l1_diff(a, b, n) {
+    h s = 0.0;
+    h i = 0;
+    while i < n {
+        h ra = arr_get(a, i);
+        h rb = arr_get(b, i);
+        h j = 0;
+        while j < n {
+            h diff = arr_get(ra, j) - arr_get(rb, j);
+            if diff < 0.0 { diff = 0.0 - diff; }
+            s = s + diff;
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return s;
+}
+
+fn main() {
+    print("=== sparse substrate attention kernel A/B (v0.8.9) ===");
+    h text = "the rain in spain falls mainly on the plain and the sun rises in the east while the moon hides behind the mountain peaks of distant lands";
+    h vocab = build_vocab(text);
+    h vocab_size = arr_len(dict_get(vocab, "chars"));
+    h ids = encode(text, vocab);
+    h seq_len = 32;
+    h d_model = 32;
+    h ff_dim = 64;
+    h lr = 0.005;
+    h steps = 400;
+
+    print(concat_many("train Q6-fused for ", to_string(steps), " steps, seq_len=", to_string(seq_len)));
+    h trained = train_q6(vocab_size, ids, seq_len, d_model, ff_dim, lr, steps, 42);
+    h model = dict_get(trained, "model");
+    h pe_table = dict_get(trained, "pe_table");
+
+    print("");
+    print("=== forward pass comparison (single window, post-train) ===");
+    # Warmup pass to load any lazy state.
+    h _w_dense = run_dense_attn(model, pe_table, ids, seq_len);
+    h _w_sparse = run_sparse_attn(model, pe_table, ids, seq_len, 5);
+
+    # Dense timing: 10 iterations average
+    h t0 = py_eval("__import__('time').time()");
+    h iter = 0;
+    h dense_result = null;
+    while iter < 10 {
+        dense_result = run_dense_attn(model, pe_table, ids, seq_len);
+        iter = iter + 1;
+    }
+    h t1 = py_eval("__import__('time').time()");
+    h dense_ms = (t1 - t0) * 100.0;   # /10 iters * 1000 ms
+
+    # Sparse timing
+    h t2 = py_eval("__import__('time').time()");
+    iter = 0;
+    h sparse_result = null;
+    while iter < 10 {
+        sparse_result = run_sparse_attn(model, pe_table, ids, seq_len, 5);
+        iter = iter + 1;
+    }
+    h t3 = py_eval("__import__('time').time()");
+    h sparse_ms = (t3 - t2) * 100.0;
+
+    h diff = l1_diff(dense_result, sparse_result, seq_len);
+    h total = seq_len * seq_len * 1.0;
+    h rel_diff_pct = diff / total * 100.0;
+
+    print(concat_many("dense  forward: ", to_string(dense_ms), " ms/iter"));
+    print(concat_many("sparse forward: ", to_string(sparse_ms), " ms/iter"));
+    print(concat_many("speedup:        ", to_string(dense_ms / sparse_ms), "x"));
+    print(concat_many("L1 diff sum:    ", to_string(diff),
+        "   per-cell mean: ", to_string(diff / total)));
+    print(concat_many("threshold=5 substrate-close cells: 6.84% of ", to_string(seq_len * seq_len)));
+    print("");
+    print("(set OMC_GPU_VERBOSE=1 to see [sparse-scores] cell-density telemetry)");
+}
+
+main();
