@@ -1,0 +1,195 @@
+# Q6-at-scale test in OMC. Single-head, d_model=16 / 6-seed run showed
+# L1+SMOD+V wins -2.47% but adding Q6 fused LOSES some ground vs the
+# base stack. PyTorch saw Q6 win -12.15% at L1-MH on TinyShakespeare.
+# Question: does Q6 need more capacity to fire?
+#
+# Test: increase d_model and steps, hold the rest fixed. Just B vs C
+# (substrate stack +/- Q6 fused) — 3 seeds each.
+
+import "examples/lib/prometheus.omc";
+
+fn build_vocab(text) {
+    h seen = dict_new();
+    h chars = [];
+    h i = 0;
+    while i < str_len(text) {
+        h ch = str_slice(text, i, i + 1);
+        if !dict_has(seen, ch) {
+            dict_set(seen, ch, arr_len(chars));
+            arr_push(chars, ch);
+        }
+        i = i + 1;
+    }
+    h v = dict_new();
+    dict_set(v, "chars", chars);
+    dict_set(v, "lookup", seen);
+    return v;
+}
+
+fn encode(text, vocab) {
+    h lookup = dict_get(vocab, "lookup");
+    h ids = [];
+    h i = 0;
+    while i < str_len(text) {
+        h ch = str_slice(text, i, i + 1);
+        arr_push(ids, dict_get(lookup, ch));
+        i = i + 1;
+    }
+    return ids;
+}
+
+fn build_model(q6_on, vocab_size, d_model, ff_dim, seq_len, seed) {
+    h emb = prom_embedding_new(vocab_size, d_model, seed);
+    h s1 = dict_get(emb, "rng_state");
+    h attn = prom_attention_substrate_k_new(d_model, seq_len, s1 + 11);
+    if q6_on { dict_set(attn, "q6_mode", "fused"); }
+    h s2 = dict_get(attn, "rng_state");
+    h ln1 = prom_layernorm_new(d_model, s2);
+    h ff_up = prom_linear_new(d_model, ff_dim, s2 + 13);
+    h s3 = dict_get(ff_up, "rng_state");
+    h ff_down = prom_linear_new(ff_dim, d_model, s3);
+    h s4 = dict_get(ff_down, "rng_state");
+    h ln2 = prom_layernorm_new(d_model, s4);
+    h head = prom_linear_new(d_model, vocab_size, s4 + 17);
+    h m = dict_new();
+    dict_set(m, "emb", emb);
+    dict_set(m, "attn", attn);
+    dict_set(m, "ln1", ln1);
+    dict_set(m, "ff_up", ff_up);
+    dict_set(m, "ff_down", ff_down);
+    dict_set(m, "ln2", ln2);
+    dict_set(m, "head", head);
+    return m;
+}
+
+fn forward_window(model, token_ids, pe_table) {
+    h x = prom_embedding_batch(dict_get(model, "emb"), token_ids);
+    h pe_rows = [];
+    h i = 0;
+    while i < arr_len(token_ids) {
+        arr_push(pe_rows, arr_get(pe_table, i));
+        i = i + 1;
+    }
+    x = tape_add(x, tape_const(pe_rows));
+    h attn_out = prom_attention_substrate_k_forward(dict_get(model, "attn"), x);
+    h x_post_attn = tape_add(x, attn_out);
+    h n1 = prom_layernorm_forward(dict_get(model, "ln1"), x_post_attn);
+    h up = prom_linear_forward(dict_get(model, "ff_up"), n1);
+    h down = prom_linear_forward(dict_get(model, "ff_down"), prom_relu(up));
+    h x_post_ff = tape_add(x_post_attn, down);
+    h n2 = prom_layernorm_forward(dict_get(model, "ln2"), x_post_ff);
+    return prom_linear_forward(dict_get(model, "head"), n2);
+}
+
+fn collect_all(model) {
+    h attn_p = prom_attention_substrate_k_params(dict_get(model, "attn"));
+    h other = prom_collect_params_v2([
+        dict_get(model, "emb"),
+        dict_get(model, "ln1"),
+        dict_get(model, "ff_up"),
+        dict_get(model, "ff_down"),
+        dict_get(model, "ln2"),
+        dict_get(model, "head"),
+    ]);
+    h out = [];
+    h i = 0;
+    while i < arr_len(attn_p) { arr_push(out, arr_get(attn_p, i)); i = i + 1; }
+    i = 0;
+    while i < arr_len(other) { arr_push(out, arr_get(other, i)); i = i + 1; }
+    return out;
+}
+
+fn train(q6_on, vocab_size, ids, seq_len, d_model, ff_dim, lr, steps, seed) {
+    tape_reset();
+    h model = build_model(q6_on, vocab_size, d_model, ff_dim, seq_len, seed);
+    h params = collect_all(model);
+    h opt = prom_adamw_new(params, lr, 0.9, 0.999, 1e-8, 0.0);
+    h pe_table = prom_crt_pe_matrix(seq_len, d_model);
+    h n_windows = arr_len(ids) - seq_len - 1;
+    h tail = [];
+    h step = 0;
+    while step < steps {
+        h start = step - (step / n_windows) * n_windows;
+        h window = [];
+        h targets = [];
+        h k = 0;
+        while k < seq_len {
+            arr_push(window, arr_get(ids, start + k));
+            arr_push(targets, arr_get(ids, start + k + 1));
+            k = k + 1;
+        }
+        h logits = forward_window(model, window, pe_table);
+        h loss = prom_cross_entropy_batch(logits, targets, vocab_size);
+        tape_backward(loss);
+        prom_adamw_step(opt);
+        if step >= steps - 30 { arr_push(tail, tape_value(loss)); }
+        step = step + 1;
+    }
+    h s = 0.0;
+    h i = 0;
+    while i < arr_len(tail) { s = s + arr_get(tail, i); i = i + 1; }
+    return s / arr_len(tail);
+}
+
+fn mean_arr(xs) {
+    h s = 0.0;
+    h i = 0;
+    while i < arr_len(xs) { s = s + arr_get(xs, i); i = i + 1; }
+    return s / arr_len(xs);
+}
+
+fn main() {
+    print("=== Q6 scale test: does d_model help? ===");
+    h text = "the rain in spain falls mainly on the plain and the sun rises in the east while the moon hides behind the mountain peaks of distant lands where ancient creatures sleep in caves of silver beneath the stars while waves crash against rocky shores carrying secrets older than time itself across the deep blue ocean toward the horizon where dreams meet reality";
+    h vocab = build_vocab(text);
+    h vocab_size = arr_len(dict_get(vocab, "chars"));
+    h ids = encode(text, vocab);
+    h seq_len = 16;
+    h d_model = 32;
+    h ff_dim = 64;
+    h lr = 0.005;
+    h steps = 600;
+    h seeds = [42, 7, 123];
+
+    print(concat_many("corpus=", to_string(str_len(text)),
+        "  vocab=", to_string(vocab_size),
+        "  seq_len=", to_string(seq_len),
+        "  d_model=", to_string(d_model),
+        "  steps=", to_string(steps)));
+    print("");
+
+    h base_losses = [];
+    h q6_losses = [];
+    h si = 0;
+    while si < arr_len(seeds) {
+        h seed = arr_get(seeds, si);
+        h B = train(false, vocab_size, ids, seq_len, d_model, ff_dim, lr, steps, seed);
+        h C = train(true,  vocab_size, ids, seq_len, d_model, ff_dim, lr, steps, seed);
+        arr_push(base_losses, B);
+        arr_push(q6_losses, C);
+        h marker = "base wins";
+        if C < B { marker = "Q6 wins"; }
+        print(concat_many("seed=", to_string(seed),
+            "  base=", to_string(B),
+            "  +Q6=", to_string(C),
+            "  Δ=", to_string(C - B), "  ", marker));
+        si = si + 1;
+    }
+    print("");
+    h B_mean = mean_arr(base_losses);
+    h C_mean = mean_arr(q6_losses);
+    h delta = C_mean - B_mean;
+    h pct = (delta / B_mean) * 100.0;
+    h wins = 0;
+    si = 0;
+    while si < arr_len(seeds) {
+        if arr_get(q6_losses, si) < arr_get(base_losses, si) { wins = wins + 1; }
+        si = si + 1;
+    }
+    print(concat_many("base (L1+SMOD+V)  mean=", to_string(B_mean)));
+    print(concat_many("+ Q6 fused         mean=", to_string(C_mean),
+        "  Δ=", to_string(delta), "  (", to_string(pct), "%)",
+        "  wins ", to_string(wins), "/", to_string(arr_len(seeds))));
+}
+
+main();
