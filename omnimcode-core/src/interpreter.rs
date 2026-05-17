@@ -1084,11 +1084,19 @@ impl Interpreter {
                     };
                 }
                 // Augment the defined set with the fn's params so the
-                // body's typo check doesn't flag them.
+                // body's typo check doesn't flag them. Also collect every
+                // VarDecl name declared anywhere in the body (including
+                // inside if/while/for) so the new Variable-arm typo heal
+                // doesn't false-positive on locals. We hoist the entire
+                // body's scope — OMC has no shadowing semantics that the
+                // heal pass needs to respect, so over-collecting names
+                // is safe (worst case: a true typo of a name only declared
+                // later in the body slips through, which is rare).
                 let mut inner = defined.clone();
                 for p in &params {
                     inner.insert(p.clone());
                 }
+                collect_local_decls(&body, &mut inner);
                 // Per-class pragmas: each can opt this fn out of one
                 // heal class without disabling the others. Useful for
                 // a fn that wants typo/arity correction but NOT
@@ -1246,11 +1254,46 @@ impl Interpreter {
                 // still point at the user's code.
                 Expression::Call { name: healed_name, args: healed_args, pos }
             }
-            // Recursive walk for the rest of the structural expressions.
-            Expression::Add(l, r) => Expression::Add(
-                Box::new(Self::heal_expr(*l, defined, arities, diags)),
-                Box::new(Self::heal_expr(*r, defined, arities, diags)),
-            ),
+            // String-concat heal. `"foo" + 5` is a runtime-typed error in
+            // OMC (Add only defined for matching types). When one side is
+            // a string LITERAL and the other is a number/float LITERAL,
+            // rewrite to `concat_many(string, to_string(num))`. Literal-
+            // only so we never false-positive on `vec + 1.0` where both
+            // sides are numeric arrays.
+            Expression::Add(l, r) => {
+                let l = Self::heal_expr(*l, defined, arities, diags);
+                let r = Self::heal_expr(*r, defined, arities, diags);
+                let l_is_str = matches!(&l, Expression::String(_));
+                let r_is_str = matches!(&r, Expression::String(_));
+                let l_is_num = matches!(&l, Expression::Number(_) | Expression::Float(_));
+                let r_is_num = matches!(&r, Expression::Number(_) | Expression::Float(_));
+                if (l_is_str && r_is_num) || (r_is_str && l_is_num) {
+                    if try_consume_heal_budget() {
+                        diags.push(
+                            "str-concat: 'str + num' rewritten to concat_many(str, to_string(num))"
+                                .to_string(),
+                        );
+                        HEAL_CLASS_COUNTS.with(|c| c.borrow_mut().str_concat += 1);
+                        let wrap = |e: Expression| -> Expression {
+                            if matches!(&e, Expression::String(_)) {
+                                e
+                            } else {
+                                Expression::Call {
+                                    name: "to_string".to_string(),
+                                    args: vec![e],
+                                    pos: crate::ast::Pos::unknown(),
+                                }
+                            }
+                        };
+                        return Expression::Call {
+                            name: "concat_many".to_string(),
+                            args: vec![wrap(l), wrap(r)],
+                            pos: crate::ast::Pos::unknown(),
+                        };
+                    }
+                }
+                Expression::Add(Box::new(l), Box::new(r))
+            }
             Expression::Sub(l, r) => Expression::Sub(
                 Box::new(Self::heal_expr(*l, defined, arities, diags)),
                 Box::new(Self::heal_expr(*r, defined, arities, diags)),
@@ -1344,6 +1387,32 @@ impl Interpreter {
                 Expression::Index {
                     name,
                     index: Box::new(healed_index),
+                }
+            }
+            // Variable-position typo. Mirrors the call-site typo logic
+            // (substrate-bucketed close-name lookup), but fires when a
+            // bare identifier is referenced rather than called. Only
+            // active because we now seed `defined` with locally-declared
+            // VarDecls + params before recursing into a fn body — without
+            // that seeding, every local would false-positive here.
+            Expression::Variable(name) => {
+                if defined.contains(&name) {
+                    Expression::Variable(name)
+                } else {
+                    let typo_disabled = HEAL_PER_CLASS_DISABLED.with(|d| d.borrow().typo);
+                    if typo_disabled {
+                        Expression::Variable(name)
+                    } else {
+                        let user_fns: HashSet<String> = arities.keys().cloned().collect();
+                        if let Some(close) = closest_name_substrate(&name, defined, 2, Some(&user_fns)) {
+                            if try_consume_heal_budget() {
+                                diags.push(format!("var: '{}' unknown → '{}'", name, close));
+                                HEAL_CLASS_COUNTS.with(|c| c.borrow_mut().var_typo += 1);
+                                return Expression::Variable(close);
+                            }
+                        }
+                        Expression::Variable(name)
+                    }
                 }
             }
             // Pass-through for leaves and forms that have no expression
@@ -12093,6 +12162,8 @@ pub struct HealClassCounts {
     pub empty_index_safe: u32,
     pub reserved_var: u32,
     pub if_numeric: u32,
+    pub str_concat: u32,           // "foo" + 5 → concat_many("foo", to_string(5))
+    pub var_typo: u32,             // bare-variable typo (vs the call-site typo above)
 }
 
 impl HealClassCounts {
@@ -12103,6 +12174,7 @@ impl HealClassCounts {
             div_zero: 0, mod_zero: 0, harmonic_index: 0,
             missing_return: 0, empty_index_safe: 0,
             reserved_var: 0, if_numeric: 0,
+            str_concat: 0, var_typo: 0,
         }
     }
     pub fn total(&self) -> u32 {
@@ -12110,6 +12182,7 @@ impl HealClassCounts {
             + self.div_zero + self.mod_zero + self.harmonic_index
             + self.missing_return + self.empty_index_safe
             + self.reserved_var + self.if_numeric
+            + self.str_concat + self.var_typo
     }
 }
 
@@ -12231,6 +12304,36 @@ pub(crate) fn closest_name_substrate(
 /// Does a statement list (a function body) contain any `Return`
 /// statement, including nested inside if/while branches? Used by the
 /// missing-return heal pass.
+/// Walk a statement list and insert every VarDecl name (and For-loop
+/// iteration variable, and Parameter declaration) into `acc`. Used by
+/// the heal pass to hoist locally-declared names into scope so the
+/// Variable-typo heal doesn't false-positive on legitimate locals.
+pub(crate) fn collect_local_decls(stmts: &[Statement], acc: &mut HashSet<String>) {
+    for s in stmts {
+        match s {
+            Statement::VarDecl { name, .. } => { acc.insert(name.clone()); }
+            Statement::Parameter { name, .. } => { acc.insert(name.clone()); }
+            Statement::If { then_body, elif_parts, else_body, .. } => {
+                collect_local_decls(then_body, acc);
+                for (_, b) in elif_parts { collect_local_decls(b, acc); }
+                if let Some(b) = else_body { collect_local_decls(b, acc); }
+            }
+            Statement::While { body, .. } => collect_local_decls(body, acc),
+            Statement::For { var, body, .. } => {
+                acc.insert(var.clone());
+                collect_local_decls(body, acc);
+            }
+            Statement::Try { body, err_var, handler, finally } => {
+                collect_local_decls(body, acc);
+                acc.insert(err_var.clone());
+                collect_local_decls(handler, acc);
+                if let Some(b) = finally { collect_local_decls(b, acc); }
+            }
+            _ => {}
+        }
+    }
+}
+
 pub(crate) fn stmts_contain_return(stmts: &[Statement]) -> bool {
     for s in stmts {
         if stmt_contains_return(s) { return true; }
