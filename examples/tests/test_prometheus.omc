@@ -263,3 +263,38 @@ fn test_substrate_full_has_zero_params() {
     h ps = prom_attention_substrate_full_params(attn);
     assert_eq(arr_len(ps), 0, "parameter-free substrate attention");
 }
+
+fn test_substrate_k_default_has_smod_alpha() {
+    h attn = prom_attention_substrate_k_new(4, 3, 0);
+    assert_true(dict_get(attn, "smod_alpha") > 0.0,
+                "substrate-K default has S-MOD active (alpha>0)");
+}
+
+fn test_substrate_softmax_alpha_zero_matches_standard() {
+    tape_reset();
+    h scores = tape_const([[1.0, 2.0, 3.0]]);
+    h plain = tape_softmax(scores);
+    h smod = prom_substrate_softmax(scores, 0.0);
+    h pv = tape_value(plain);
+    h sv = tape_value(smod);
+    assert_eq(arr_get(pv, 0), arr_get(sv, 0), "alpha=0 element 0 matches");
+    assert_eq(arr_get(pv, 1), arr_get(sv, 1), "alpha=0 element 1 matches");
+    assert_eq(arr_get(pv, 2), arr_get(sv, 2), "alpha=0 element 2 matches");
+}
+
+fn test_substrate_softmax_alpha_positive_still_sums_to_one() {
+    tape_reset();
+    h scores = tape_const([[1.0, 2.0, 3.0], [-1.0, 0.5, 2.5]]);
+    h smod = prom_substrate_softmax(scores, 0.5);
+    h v = tape_value(smod);
+    h i = 0;
+    while i < arr_len(v) {
+        h row = arr_get(v, i);
+        h s = 0.0;
+        h j = 0;
+        while j < arr_len(row) { s = s + arr_get(row, j); j = j + 1; }
+        assert_true(approx_eq(s, 1.0, 0.001),
+            "row " + to_string(i) + " sums to 1 after renormalize");
+        i = i + 1;
+    }
+}

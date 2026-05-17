@@ -94,6 +94,57 @@ fn test_render_produces_nonempty_string() {
     assert_true(str_len(s) > 10, "rendered output is nonempty");
 }
 
+fn test_extended_tier_sizes_reach_1597() {
+    h sizes = fibtier_default_sizes();
+    assert_eq(arr_len(sizes), 16, "16 tiers defined");
+    assert_eq(arr_get(sizes, 11), 233, "tier 12 = 233");
+    assert_eq(arr_get(sizes, 12), 377, "tier 13 = 377");
+    assert_eq(arr_get(sizes, 13), 610, "tier 14 = 610");
+    assert_eq(arr_get(sizes, 14), 987, "tier 15 = 987");
+    assert_eq(arr_get(sizes, 15), 1597, "tier 16 = 1597");
+}
+
+fn test_default_fold_strategy_is_oldest() {
+    h mem = fibtier_new(4);
+    assert_eq(dict_get(mem, "fold_strategy"), "oldest", "default strategy");
+}
+
+fn test_set_fold_strategy_flips_to_semantic() {
+    h mem = fibtier_new(4);
+    fibtier_set_fold_strategy(mem, "semantic");
+    assert_eq(dict_get(mem, "fold_strategy"), "semantic", "switched to semantic");
+}
+
+fn test_semantic_fold_picks_closest_substrate_pair() {
+    # Build a tier with 4 entries where two are very close in hash
+    # space and two are far. _fibtier_pick_fold_pair("semantic") must
+    # return the closest pair, not [0, 1].
+    h mem = fibtier_new_with_strategy(4, "semantic");
+    h tier = [
+        _fibtier_make_entry("aaa", [0]),
+        _fibtier_make_entry("zzz", [0]),
+        _fibtier_make_entry("aaa", [0]),    # exact-hash twin of index 0
+        _fibtier_make_entry("qqq", [0])
+    ];
+    h pair = _fibtier_pick_fold_pair(tier, "semantic");
+    h ia = arr_get(pair, 0);
+    h ib = arr_get(pair, 1);
+    # The twins are at indices 0 and 2 — closest pair has distance 0.
+    assert_true((ia == 0 && ib == 2) || (ia == 2 && ib == 0),
+                "semantic strategy picked the hash-identical twins");
+}
+
+fn test_oldest_fold_strategy_always_picks_zero_one() {
+    h tier = [
+        _fibtier_make_entry("a", [0]),
+        _fibtier_make_entry("b", [0]),
+        _fibtier_make_entry("c", [0])
+    ];
+    h pair = _fibtier_pick_fold_pair(tier, "oldest");
+    assert_eq(arr_get(pair, 0), 0, "oldest picks index 0");
+    assert_eq(arr_get(pair, 1), 1, "oldest picks index 1");
+}
+
 fn test_capacity_growth_geometric() {
     # Sum of first N Fibonacci = Fib(N+2) - 1.
     # Sanity: cap(1..6) sum = 1+2+3+5+8+13 = 32 = Fib(8)-1 = 21-1 = 20.

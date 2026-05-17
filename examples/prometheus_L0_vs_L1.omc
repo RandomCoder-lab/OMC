@@ -183,7 +183,7 @@ fn main() {
     h ff_dim = 32;
     h lr = 0.01;
     h steps = 300;
-    h seeds = [42, 7, 123];
+    h seeds = [42, 7, 123, 2026, 1, 99];
 
     print(concat_many("vocab: ", to_string(vocab_size),
         "  seq_len: ", to_string(seq_len),

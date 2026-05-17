@@ -697,6 +697,50 @@ fn prom_attention_forward(layer, x_id) {
 # ---------------------------------------------------------------------------
 
 # L1: substrate-K attention. K is fixed at CRT-PE; Q, V trained.
+# Compute the per-cell S-MOD modulation matrix from a [N, T] scores
+# value snapshot. Each cell: 1 / (1 + alpha * attractor_distance(cell)).
+# Used as a non-differentiable const inside the tape's S-MOD path.
+fn _prom_smod_matrix(scores_val, alpha) {
+    h rows = arr_len(scores_val);
+    h out = [];
+    h i = 0;
+    while i < rows {
+        h row = arr_get(scores_val, i);
+        h new_row = [];
+        h j = 0;
+        while j < arr_len(row) {
+            h s = arr_get(row, j);
+            h d = attractor_distance(s);
+            arr_push(new_row, 1.0 / (1.0 + alpha * d));
+            j = j + 1;
+        }
+        arr_push(out, new_row);
+        i = i + 1;
+    }
+    return out;
+}
+
+# Substrate-modulated softmax. alpha=0.0 returns standard softmax.
+# alpha>0.0 applies the S-MOD post-softmax modulation + renormalize,
+# the variant that won -4.27% val on TinyShakespeare multi-head.
+fn prom_substrate_softmax(scores_id, alpha) {
+    h attn = tape_softmax(scores_id);
+    if alpha == 0.0 { return attn; }
+    # Modulation is computed from the score VALUES (not params), so it
+    # rides as a const in the tape graph — no gradient backward through
+    # the substrate-distance term itself. The gradient still flows
+    # through attn (softmax output) and through tape_div renormalization.
+    h scores_val = tape_value(scores_id);
+    h mod_mat = _prom_smod_matrix(scores_val, alpha);
+    h mod_const = tape_const(mod_mat);
+    h attn_unnorm = tape_mul(attn, mod_const);
+    h row_sums = tape_row_sum(attn_unnorm);
+    return tape_div(attn_unnorm, row_sums);
+}
+
+# Substrate-K attention with optional S-MOD softmax.
+# smod_alpha=0.0 → standard softmax (legacy behavior).
+# smod_alpha>0.0 → S-MOD substrate-modulated softmax (the recommended default).
 fn prom_attention_substrate_k_new(d_model, seq_len, rng_state) {
     h Q = _prom_random_matrix(d_model, d_model, 0.3, rng_state);
     h V = _prom_random_matrix(d_model, d_model, 0.3, dict_get(Q, "state"));
@@ -709,7 +753,11 @@ fn prom_attention_substrate_k_new(d_model, seq_len, rng_state) {
     dict_set(layer, "V", dict_get(V, "node"));
     # K is precomputed as a [seq_len, d_model] CRT-PE table — no tape_var.
     dict_set(layer, "K_const", prom_crt_pe_matrix(seq_len, d_model));
-    dict_set(layer, "alpha", 0.0);
+    dict_set(layer, "alpha", 0.0);          # geodesic bias (unused here)
+    # S-MOD modulation strength. α=1.0 won the 3-seed sweep on
+    # TinyShakespeare L1-MH (val 3.084 vs 3.301 at α=0, -6.57%).
+    # Sweep details: experiments/prometheus_parity/results_torch_smod_alpha_sweep.json
+    dict_set(layer, "smod_alpha", 1.0);
     dict_set(layer, "rng_state", dict_get(V, "state"));
     return layer;
 }
@@ -718,6 +766,7 @@ fn prom_attention_substrate_k_forward(layer, x_id) {
     h Q_w = dict_get(layer, "Q");
     h V_w = dict_get(layer, "V");
     h K_const = dict_get(layer, "K_const");
+    h smod_alpha = dict_get(layer, "smod_alpha");
 
     h q = tape_matmul(x_id, Q_w);
     h v = tape_matmul(x_id, V_w);
@@ -727,7 +776,8 @@ fn prom_attention_substrate_k_forward(layer, x_id) {
     h kt = tape_transpose(k);
     h scores = tape_matmul(q, kt);
 
-    h attn = tape_softmax(scores);
+    # Substrate-modulated softmax (smod_alpha=0.0 falls back to standard).
+    h attn = prom_substrate_softmax(scores, smod_alpha);
     return tape_matmul(attn, v);
 }
 

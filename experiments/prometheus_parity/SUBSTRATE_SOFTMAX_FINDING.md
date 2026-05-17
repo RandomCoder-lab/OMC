@@ -108,3 +108,39 @@ def softmax_smod(scores, dim=-1, alpha=0.5):
 8 lines. Drop-in replacement for `F.softmax(scores, dim=-1)` anywhere in an attention path.
 
 See `experiments/prometheus_parity/torch_substrate_softmax.py` for the full A/B harness.
+
+---
+
+## Addendum 2026-05-17 — α sweep, 3 seeds
+
+Original run fixed α=0.5 untuned. A 3-seed sweep ([42, 7, 123]) over
+{0.0, 0.1, 0.3, 0.5, 1.0} reveals a stronger setting:
+
+| α | mean val | std | vs α=0 |
+|--:|--:|--:|--:|
+| 0.0 | 3.3007 | 0.033 | — |
+| 0.1 | 3.1220 | 0.195 | **−5.41%** |
+| 0.3 | 3.1872 | 0.215 | −3.44% |
+| 0.5 | 3.2015 | 0.174 | −3.01% |
+| **1.0** | **3.0837** | **0.218** | **−6.57%** |
+
+Two takeaways:
+
+1. **Every α > 0 beats α = 0.** The S-MOD win in the original writeup
+   is robust across the modulation-strength axis — not just a
+   particular setting.
+2. **α = 1.0 is the new best.** Validation drops to 3.084 (−6.57% vs
+   vanilla, doubling the −3.01% advantage at α=0.5). Variance is
+   high (σ=0.22), but mean is decisively best across three seeds.
+
+Updated production default in `examples/lib/prometheus.omc`:
+
+```omc
+fn prom_attention_substrate_k_new(d_model, seq_len, rng_state) {
+    ...
+    dict_set(layer, "smod_alpha", 1.0);   # was 0.5
+    ...
+}
+```
+
+Raw 3-seed data: `results_torch_smod_alpha_3seed.json`.

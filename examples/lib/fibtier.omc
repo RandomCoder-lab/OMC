@@ -36,8 +36,11 @@
 
 fn fibtier_default_sizes() {
     # Standard Fibonacci sequence (skipping the leading 1 since tier 1 = 1).
-    # 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144 = ~280 total slots if all full.
-    return [1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144];
+    # Total cap when all tiers full = Fib(N+2) − 1 = 4180 slots at 16 tiers.
+    # Real-world conversation memory rarely needs beyond tier 13 (377 slots);
+    # the extra tiers give headroom for multi-day / multi-session agents
+    # without changing the cascade-fold mechanics.
+    return [1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610, 987, 1597];
 }
 
 # Capacity of a tier (1-indexed).
@@ -52,6 +55,10 @@ fn fibtier_capacity(tier_idx) {
 # ---------------------------------------------------------------------------
 
 fn fibtier_new(max_tiers) {
+    return fibtier_new_with_strategy(max_tiers, "oldest");
+}
+
+fn fibtier_new_with_strategy(max_tiers, fold_strategy) {
     h tiers = [];
     h i = 0;
     while i < max_tiers {
@@ -63,7 +70,8 @@ fn fibtier_new(max_tiers) {
     dict_set(mem, "max_tiers", max_tiers);
     dict_set(mem, "total_pushes", 0);
     dict_set(mem, "total_folds", 0);
-    dict_set(mem, "evicted", 0);       # entries that fell off the top tier
+    dict_set(mem, "evicted", 0);
+    dict_set(mem, "fold_strategy", fold_strategy);   # "oldest" or "semantic"
     return mem;
 }
 
@@ -161,10 +169,9 @@ fn _fibtier_cascade_overflow_with_fold(mem, tier_idx) {
     if tier_idx > max_tiers { return mem; }
     h tier = arr_get(tiers, tier_idx - 1);
     h capacity = fibtier_capacity(tier_idx);
+    h fold_strategy = dict_get(mem, "fold_strategy");
     while arr_len(tier) > capacity {
-        # Take the oldest TWO entries and fold them.
         if arr_len(tier) < 2 {
-            # Edge: 1 entry but already over cap (cap=0 only) — just evict.
             h new_tier = [];
             h k = 1;
             while k < arr_len(tier) { arr_push(new_tier, arr_get(tier, k)); k = k + 1; }
@@ -172,17 +179,25 @@ fn _fibtier_cascade_overflow_with_fold(mem, tier_idx) {
             tier = new_tier;
             dict_set(mem, "evicted", dict_get(mem, "evicted") + 1);
         } else {
-            h a = arr_get(tier, 0);
-            h b = arr_get(tier, 1);
+            # Pick the pair to fold based on strategy.
+            h pair_idx = _fibtier_pick_fold_pair(tier, fold_strategy);
+            h ia = arr_get(pair_idx, 0);
+            h ib = arr_get(pair_idx, 1);
+            h a = arr_get(tier, ia);
+            h b = arr_get(tier, ib);
             h folded = fibtier_fold_default(a, b);
             dict_set(mem, "total_folds", dict_get(mem, "total_folds") + 1);
-            # Rebuild tier without those two.
+            # Rebuild tier without those two indices (preserve order).
             h new_tier = [];
-            h k = 2;
-            while k < arr_len(tier) { arr_push(new_tier, arr_get(tier, k)); k = k + 1; }
+            h k = 0;
+            while k < arr_len(tier) {
+                if k != ia && k != ib {
+                    arr_push(new_tier, arr_get(tier, k));
+                }
+                k = k + 1;
+            }
             arr_set(tiers, tier_idx - 1, new_tier);
             tier = new_tier;
-            # Promote the folded entry upward.
             if tier_idx == max_tiers {
                 dict_set(mem, "evicted", dict_get(mem, "evicted") + 1);
             } else {
@@ -198,9 +213,49 @@ fn _fibtier_cascade_overflow_with_fold(mem, tier_idx) {
     return mem;
 }
 
+# Pick which pair of indices in `tier` to fold together.
+# strategy ∈ {"oldest", "semantic"}
+#   "oldest"  : always pick [0, 1] (FIFO, default)
+#   "semantic": find the pair with the smallest substrate distance
+#               (most semantically related; consolidate redundancy first)
+fn _fibtier_pick_fold_pair(tier, strategy) {
+    if strategy == "semantic" && arr_len(tier) >= 2 {
+        h best_i = 0;
+        h best_j = 1;
+        h best_dist = 0;
+        h found = false;
+        h i = 0;
+        while i < arr_len(tier) {
+            h j = i + 1;
+            while j < arr_len(tier) {
+                h h_i = dict_get(arr_get(tier, i), "canonical_hash");
+                h h_j = dict_get(arr_get(tier, j), "canonical_hash");
+                h d = h_i - h_j;
+                if d < 0 { d = 0 - d; }
+                if !found {
+                    best_i = i; best_j = j; best_dist = d; found = true;
+                } elif d < best_dist {
+                    best_i = i; best_j = j; best_dist = d;
+                }
+                j = j + 1;
+            }
+            i = i + 1;
+        }
+        return [best_i, best_j];
+    }
+    # Default: oldest pair.
+    return [0, 1];
+}
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+# Flip fold strategy on an existing memory.
+fn fibtier_set_fold_strategy(mem, strategy) {
+    dict_set(mem, "fold_strategy", strategy);
+    return mem;
+}
 
 # Push an entry. Returns the memory (for chaining).
 fn fibtier_push(mem, content) {
