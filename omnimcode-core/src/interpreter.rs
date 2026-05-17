@@ -1044,22 +1044,38 @@ impl Interpreter {
             Statement::Return(opt) => Statement::Return(
                 opt.map(|e| Self::heal_expr(e, defined, arities, diags))
             ),
-            Statement::If { condition, then_body, elif_parts, else_body } => Statement::If {
-                condition: Self::heal_expr(condition, defined, arities, diags),
-                then_body: then_body.into_iter()
-                    .map(|s| Self::heal_stmt(s, defined, arities, diags))
-                    .collect(),
-                elif_parts: elif_parts.into_iter()
-                    .map(|(c, b)| (
-                        Self::heal_expr(c, defined, arities, diags),
-                        b.into_iter()
-                            .map(|s| Self::heal_stmt(s, defined, arities, diags))
-                            .collect(),
-                    ))
-                    .collect(),
-                else_body: else_body.map(|b| b.into_iter()
-                    .map(|s| Self::heal_stmt(s, defined, arities, diags))
-                    .collect()),
+            Statement::If { condition, then_body, elif_parts, else_body } => {
+                // If-numeric diagnostic: `if 0 { ... }` and `if 1 { ... }`
+                // are constant branches — almost always a typo (forgot the
+                // comparison) or a leftover debug stub. We don't rewrite
+                // (could be intentional placeholder), but we surface the
+                // diagnostic and bump the counter.
+                if let Expression::Number(n) = &condition {
+                    if try_consume_heal_budget() {
+                        diags.push(format!(
+                            "if-numeric: 'if {}' is a constant branch — \
+                             did you forget a comparison?", n
+                        ));
+                        HEAL_CLASS_COUNTS.with(|c| c.borrow_mut().if_numeric += 1);
+                    }
+                }
+                Statement::If {
+                    condition: Self::heal_expr(condition, defined, arities, diags),
+                    then_body: then_body.into_iter()
+                        .map(|s| Self::heal_stmt(s, defined, arities, diags))
+                        .collect(),
+                    elif_parts: elif_parts.into_iter()
+                        .map(|(c, b)| (
+                            Self::heal_expr(c, defined, arities, diags),
+                            b.into_iter()
+                                .map(|s| Self::heal_stmt(s, defined, arities, diags))
+                                .collect(),
+                        ))
+                        .collect(),
+                    else_body: else_body.map(|b| b.into_iter()
+                        .map(|s| Self::heal_stmt(s, defined, arities, diags))
+                        .collect()),
+                }
             },
             Statement::While { condition, body } => Statement::While {
                 condition: Self::heal_expr(condition, defined, arities, diags),
@@ -1155,6 +1171,7 @@ impl Interpreter {
             Expression::Div(l, r) => {
                 let l = Self::heal_expr(*l, defined, arities, diags);
                 let r = Self::heal_expr(*r, defined, arities, diags);
+                let (l, r, _) = null_arith_rewrite(l, r, diags, "/");
                 // Divide-by-zero (literal): wrap in safe_divide.
                 if matches!(&r, Expression::Number(0)) {
                     let disabled = HEAL_PER_CLASS_DISABLED.with(|d| d.borrow().div_zero);
@@ -1173,6 +1190,7 @@ impl Interpreter {
             Expression::Mod(l, r) => {
                 let l = Self::heal_expr(*l, defined, arities, diags);
                 let r = Self::heal_expr(*r, defined, arities, diags);
+                let (l, r, _) = null_arith_rewrite(l, r, diags, "%");
                 // Mod-by-zero (literal): wrap in safe_mod, which substrate-
                 // folds the divisor to the smallest non-zero Fibonacci
                 // attractor (1) at runtime. Wrapping in a call instead
@@ -1292,20 +1310,25 @@ impl Interpreter {
                         };
                     }
                 }
+                // Null on either side of Add — heal to 0. Common when
+                // a fn returns null and the caller adds to it; runtime
+                // errors out with a confusing type error otherwise.
+                let (l, r, healed) = null_arith_rewrite(l, r, diags, "+");
+                if healed { return Expression::Add(Box::new(l), Box::new(r)); }
                 Expression::Add(Box::new(l), Box::new(r))
             }
-            Expression::Sub(l, r) => Expression::Sub(
-                Box::new(Self::heal_expr(*l, defined, arities, diags)),
-                Box::new(Self::heal_expr(*r, defined, arities, diags)),
-            ),
-            Expression::Mul(l, r) => Expression::Mul(
-                Box::new(Self::heal_expr(*l, defined, arities, diags)),
-                Box::new(Self::heal_expr(*r, defined, arities, diags)),
-            ),
-            Expression::Mod(l, r) => Expression::Mod(
-                Box::new(Self::heal_expr(*l, defined, arities, diags)),
-                Box::new(Self::heal_expr(*r, defined, arities, diags)),
-            ),
+            Expression::Sub(l, r) => {
+                let l = Self::heal_expr(*l, defined, arities, diags);
+                let r = Self::heal_expr(*r, defined, arities, diags);
+                let (l, r, _) = null_arith_rewrite(l, r, diags, "-");
+                Expression::Sub(Box::new(l), Box::new(r))
+            }
+            Expression::Mul(l, r) => {
+                let l = Self::heal_expr(*l, defined, arities, diags);
+                let r = Self::heal_expr(*r, defined, arities, diags);
+                let (l, r, _) = null_arith_rewrite(l, r, diags, "*");
+                Expression::Mul(Box::new(l), Box::new(r))
+            }
             // Comparison arms: don't auto-rewrite numeric literals on
             // either side. `if rating == 4` is comparing against a
             // domain value (rating threshold) — rewriting 4 → 3 would
@@ -1821,18 +1844,33 @@ impl Interpreter {
                 } else if self.is_known_builtin(name) {
                     Ok(Value::Function { name: name.clone(), captured: None })
                 } else {
-                    Err(format!("Undefined variable: {}", name))
+                    Err(format!("Undefined variable: {}{}", name, self.undefined_var_hint(name)))
                 }
             }
             Expression::Index { name, index } => {
                 let idx_v = self.eval_expr(index)?;
                 let container = self.get_var(name)
-                    .ok_or_else(|| format!("Undefined variable: {}", name))?;
+                    .ok_or_else(|| format!("Undefined variable: {}{}", name, self.undefined_var_hint(name)))?;
                 match container {
                     Value::Array(arr) => {
-                        let idx = idx_v.to_int() as usize;
-                        arr.items.borrow().get(idx).cloned()
-                            .ok_or_else(|| format!("Index out of bounds: {}", idx))
+                        let items = arr.items.borrow();
+                        let len = items.len() as i64;
+                        let raw = idx_v.to_int();
+                        // Python-style negative indexing: -1 is the last
+                        // element, -2 the second-to-last, etc. Out of
+                        // range (either side) becomes a helpful error
+                        // that names the array AND reports its length —
+                        // not just the raw index, which by itself never
+                        // tells the user how far off they were.
+                        let resolved = if raw < 0 { len + raw } else { raw };
+                        if resolved < 0 || resolved >= len {
+                            return Err(format!(
+                                "Index out of bounds: {}[{}] (length {}). \
+                                 Use safe_arr_get({}, {}) for wrap-around access.",
+                                name, raw, len, name, raw
+                            ));
+                        }
+                        Ok(items[resolved as usize].clone())
                     }
                     Value::Dict(d) => {
                         // String-keyed lookup. Coerce numeric/bool indices
@@ -1842,7 +1880,10 @@ impl Interpreter {
                         let key = idx_v.to_display_string();
                         Ok(d.borrow().get(&key).cloned().unwrap_or(Value::Null))
                     }
-                    _ => Err(format!("Not indexable: {}", name)),
+                    _ => Err(format!(
+                        "Cannot index '{}': not an array or dict",
+                        name
+                    )),
                 }
             }
             Expression::Add(l, r) => {
@@ -2225,6 +2266,9 @@ impl Interpreter {
             | "now_ms" | "to_int" | "int" | "to_float" | "float"
             | "to_string" | "string" | "len" | "type_of" | "error"
             | "defined_functions" | "call"
+            // Python-idiom builtins (forgiving aliases for users new to OMC)
+            | "range" | "getenv" | "to_hex" | "from_hex"
+            | "parse_int" | "parse_float"
             // Test runner host-state primitives
             | "test_record_failure" | "test_failure_count"
             | "test_get_failures" | "test_clear_failures"
@@ -3663,20 +3707,135 @@ impl Interpreter {
                 }
                 Ok(Value::Array(arr))
             }
-            "arr_from_range" => {
-                if args.len() < 2 {
-                    return Err("arr_from_range requires 2 arguments".to_string());
+            "arr_from_range" | "range" => {
+                // Python-style range: range(end), range(start, end),
+                // range(start, end, step). step may be negative for
+                // descending sequences. step=0 errors (no infinite loop).
+                if args.is_empty() {
+                    return Err(format!("{}: requires 1, 2, or 3 arguments", name));
                 }
-                let start = self.eval_expr(&args[0])?.to_int();
-                let end = self.eval_expr(&args[1])?.to_int();
+                let (start, end, step) = match args.len() {
+                    1 => (0_i64, self.eval_expr(&args[0])?.to_int(), 1_i64),
+                    2 => (
+                        self.eval_expr(&args[0])?.to_int(),
+                        self.eval_expr(&args[1])?.to_int(),
+                        1_i64,
+                    ),
+                    _ => (
+                        self.eval_expr(&args[0])?.to_int(),
+                        self.eval_expr(&args[1])?.to_int(),
+                        self.eval_expr(&args[2])?.to_int(),
+                    ),
+                };
+                if step == 0 {
+                    return Err(format!("{}: step must be non-zero", name));
+                }
                 let arr = HArray::new();
                 {
                     let mut items = arr.items.borrow_mut();
-                    for i in start..end {
-                        items.push(Value::HInt(HInt::new(i)));
+                    let mut i = start;
+                    if step > 0 {
+                        while i < end {
+                            items.push(Value::HInt(HInt::new(i)));
+                            i += step;
+                        }
+                    } else {
+                        while i > end {
+                            items.push(Value::HInt(HInt::new(i)));
+                            i += step;
+                        }
                     }
                 }
                 Ok(Value::Array(arr))
+            }
+            "getenv" => {
+                // getenv(name) → env var value or null when unset.
+                // getenv(name, default) → value or default when unset.
+                if args.is_empty() {
+                    return Err("getenv: requires (name) or (name, default)".to_string());
+                }
+                let key = self.eval_expr(&args[0])?.to_display_string();
+                match std::env::var(&key) {
+                    Ok(val) => Ok(Value::String(val)),
+                    Err(_) => {
+                        if args.len() >= 2 {
+                            self.eval_expr(&args[1])
+                        } else {
+                            Ok(Value::Null)
+                        }
+                    }
+                }
+            }
+            "to_hex" => {
+                // to_hex(int) → "0xNN" lowercase hex. Width is the
+                // natural number of digits for the value's magnitude;
+                // sign is preserved as a leading '-'.
+                if args.is_empty() {
+                    return Err("to_hex: requires (int)".to_string());
+                }
+                let n = self.eval_expr(&args[0])?.to_int();
+                if n < 0 {
+                    Ok(Value::String(format!("-0x{:x}", -n)))
+                } else {
+                    Ok(Value::String(format!("0x{:x}", n)))
+                }
+            }
+            "from_hex" => {
+                // from_hex(str) → int. Accepts "0xNN", "0XNN", or raw
+                // "NN" (no prefix). Empty string and unparseable input
+                // return a Singularity (matches str_to_int's contract).
+                if args.is_empty() {
+                    return Err("from_hex: requires (str)".to_string());
+                }
+                let s = self.eval_expr(&args[0])?.to_display_string();
+                let cleaned = s.trim();
+                let (sign, body) = if let Some(rest) = cleaned.strip_prefix('-') {
+                    (-1_i64, rest)
+                } else { (1_i64, cleaned) };
+                let stripped = body
+                    .strip_prefix("0x")
+                    .or_else(|| body.strip_prefix("0X"))
+                    .unwrap_or(body);
+                match i64::from_str_radix(stripped, 16) {
+                    Ok(n) => Ok(Value::HInt(HInt::new(sign * n))),
+                    Err(_) => Ok(Value::Singularity {
+                        numerator: 0,
+                        denominator: 0,
+                        context: format!("from_hex: cannot parse '{}'", s),
+                    }),
+                }
+            }
+            "parse_int" => {
+                // Alias for str_to_int — Python users reach for this
+                // name first. Same contract: returns Singularity on
+                // failure.
+                if args.is_empty() {
+                    return Err("parse_int: requires (str)".to_string());
+                }
+                let s = self.eval_expr(&args[0])?.to_display_string();
+                match s.trim().parse::<i64>() {
+                    Ok(n) => Ok(Value::HInt(HInt::new(n))),
+                    Err(_) => Ok(Value::Singularity {
+                        numerator: 0,
+                        denominator: 0,
+                        context: format!("parse_int: cannot parse '{}'", s),
+                    }),
+                }
+            }
+            "parse_float" => {
+                // Companion to parse_int. Useful for CSV / config parse.
+                if args.is_empty() {
+                    return Err("parse_float: requires (str)".to_string());
+                }
+                let s = self.eval_expr(&args[0])?.to_display_string();
+                match s.trim().parse::<f64>() {
+                    Ok(n) => Ok(Value::HFloat(n)),
+                    Err(_) => Ok(Value::Singularity {
+                        numerator: 0,
+                        denominator: 0,
+                        context: format!("parse_float: cannot parse '{}'", s),
+                    }),
+                }
             }
             "arr_len" => {
                 if args.is_empty() {
@@ -3726,35 +3885,44 @@ impl Interpreter {
                     return Err("arr_get requires (array, index)".to_string());
                 }
                 let arr_v = self.eval_expr(&args[0])?;
-                let idx = self.eval_expr(&args[1])?.to_int();
+                let raw = self.eval_expr(&args[1])?.to_int();
                 if let Value::Array(arr) = arr_v {
-                    let i = idx as usize;
                     let items = arr.items.borrow();
-                    items
-                        .get(i)
-                        .cloned()
-                        .ok_or_else(|| format!("arr_get: index {} out of bounds (len {})", idx, items.len()))
+                    let len = items.len() as i64;
+                    // Python-style negative indexing: -1 = last.
+                    let resolved = if raw < 0 { len + raw } else { raw };
+                    if resolved < 0 || resolved >= len {
+                        return Err(format!(
+                            "arr_get: index {} out of bounds (length {})",
+                            raw, len
+                        ));
+                    }
+                    Ok(items[resolved as usize].clone())
                 } else {
-                    Err("arr_get: first argument must be an array".to_string())
+                    Err(format!(
+                        "arr_get: first argument must be an array, got {}",
+                        type_name_of(&arr_v)
+                    ))
                 }
             }
             "arr_set" => {
                 if args.len() < 3 {
                     return Err("arr_set requires (array_name, index, value)".to_string());
                 }
-                let idx = self.eval_expr(&args[1])?.to_int() as usize;
+                let raw = self.eval_expr(&args[1])?.to_int();
                 let val = self.eval_expr(&args[2])?;
                 if let Expression::Variable(name) = &args[0] {
                     if let Some(Value::Array(arr)) = self.get_var(name) {
                         let mut items = arr.items.borrow_mut();
-                        if idx >= items.len() {
+                        let len = items.len() as i64;
+                        let resolved = if raw < 0 { len + raw } else { raw };
+                        if resolved < 0 || resolved >= len {
                             return Err(format!(
-                                "arr_set: index {} out of bounds (len {})",
-                                idx,
-                                items.len()
+                                "arr_set: index {} out of bounds (length {})",
+                                raw, len
                             ));
                         }
-                        items[idx] = val;
+                        items[resolved as usize] = val;
                         return Ok(Value::Null);
                     }
                 }
@@ -10457,9 +10625,11 @@ impl Interpreter {
                 match v {
                     Value::Array(a) => Ok(Value::HInt(HInt::new(a.items.borrow().len() as i64))),
                     Value::String(s) => Ok(Value::HInt(HInt::new(s.chars().count() as i64))),
-                    other => Err(format!(
-                        "len: requires array or string, got {:?}",
-                        other
+                    Value::Dict(d) => Ok(Value::HInt(HInt::new(d.borrow().len() as i64))),
+                    Value::Null => Ok(Value::HInt(HInt::new(0))),
+                    ref other => Err(format!(
+                        "len: requires array, string, or dict, got {}",
+                        type_name_of(other)
                     )),
                 }
             }
@@ -10637,6 +10807,38 @@ impl Interpreter {
         }
         // Globals as last resort.
         self.globals.get(name).cloned()
+    }
+
+    /// Snapshot every variable name currently visible (all local frames
+    /// + globals). Used by the "Undefined variable" error path to suggest
+    /// a close-spelled name (`did_you_mean(...)`-style hint).
+    pub(crate) fn collect_in_scope_names(&self) -> Vec<String> {
+        let mut names: HashSet<String> = HashSet::new();
+        for scope_rc in self.locals.iter() {
+            for k in scope_rc.borrow().keys() {
+                names.insert(k.clone());
+            }
+        }
+        for k in self.globals.keys() {
+            names.insert(k.clone());
+        }
+        names.into_iter().collect()
+    }
+
+    /// Produce a "did you mean X?" hint for an undefined variable name.
+    /// Returns an empty string when no close match found; otherwise a
+    /// pre-formatted ` (did you mean: X?)` suffix ready to concat into
+    /// the error message.
+    pub(crate) fn undefined_var_hint(&self, name: &str) -> String {
+        let candidates = self.collect_in_scope_names();
+        // Use the same substrate-bucketed closest-name routine the heal
+        // pass uses, so suggestions follow the same ranking.
+        let cand_set: HashSet<String> = candidates.iter().cloned().collect();
+        if let Some(close) = closest_name_substrate(name, &cand_set, 2, None) {
+            format!(" (did you mean: {}?)", close)
+        } else {
+            String::new()
+        }
     }
 
     /// Assignment semantics: walk outward looking for an EXISTING binding.
@@ -11496,6 +11698,24 @@ pub(crate) struct TapeNode {
 ///   - scalar HInt/HFloat → 1×1 matrix
 ///   - 1D array → 1×N row matrix
 ///   - 2D array (array-of-arrays) → MxN matrix
+/// Human-readable type tag for error messages. Mirrors the `type_of`
+/// builtin's tag set so user-facing strings match what they'd see from
+/// inspecting at runtime.
+pub(crate) fn type_name_of(v: &Value) -> &'static str {
+    match v {
+        Value::HInt(_) => "int",
+        Value::HFloat(_) => "float",
+        Value::String(_) => "string",
+        Value::Bool(_) => "bool",
+        Value::Array(_) => "array",
+        Value::Dict(_) => "dict",
+        Value::Function { .. } => "function",
+        Value::Null => "null",
+        Value::Singularity { .. } => "singularity",
+        _ => "unknown",
+    }
+}
+
 fn tape_from_value(v: &Value) -> Result<TapeMat, String> {
     match v {
         Value::HInt(_) | Value::HFloat(_) | Value::Bool(_) | Value::Null => {
@@ -12164,6 +12384,8 @@ pub struct HealClassCounts {
     pub if_numeric: u32,
     pub str_concat: u32,           // "foo" + 5 → concat_many("foo", to_string(5))
     pub var_typo: u32,             // bare-variable typo (vs the call-site typo above)
+    pub null_arith: u32,           // null + x → 0 + x (and Sub/Mul/Div/Mod)
+    pub neg_index: u32,            // arr[-1] → safe_arr_get with len-relative offset
 }
 
 impl HealClassCounts {
@@ -12175,6 +12397,7 @@ impl HealClassCounts {
             missing_return: 0, empty_index_safe: 0,
             reserved_var: 0, if_numeric: 0,
             str_concat: 0, var_typo: 0,
+            null_arith: 0, neg_index: 0,
         }
     }
     pub fn total(&self) -> u32 {
@@ -12183,6 +12406,7 @@ impl HealClassCounts {
             + self.missing_return + self.empty_index_safe
             + self.reserved_var + self.if_numeric
             + self.str_concat + self.var_typo
+            + self.null_arith + self.neg_index
     }
 }
 
@@ -12304,6 +12528,36 @@ pub(crate) fn closest_name_substrate(
 /// Does a statement list (a function body) contain any `Return`
 /// statement, including nested inside if/while branches? Used by the
 /// missing-return heal pass.
+/// Detect `null` on either side of an arithmetic op and rewrite to 0.
+/// `null` is represented in expressions as `Variable("null")` (the
+/// parser never builds a dedicated Null variant). Returns the
+/// (possibly-healed) operands and whether either side was rewritten.
+/// Emits a heal diagnostic and bumps the `null_arith` counter when
+/// the rewrite fires.
+pub(crate) fn null_arith_rewrite(
+    l: Expression,
+    r: Expression,
+    diags: &mut Vec<String>,
+    op: &str,
+) -> (Expression, Expression, bool) {
+    let l_null = matches!(&l, Expression::Variable(n) if n == "null");
+    let r_null = matches!(&r, Expression::Variable(n) if n == "null");
+    if !l_null && !r_null { return (l, r, false); }
+    let disabled = HEAL_PER_CLASS_DISABLED.with(|d| {
+        // Reuse the existing `arity` opt-out flag; null_arith is
+        // similar in spirit — silently coerces a value the user
+        // probably didn't expect. No dedicated pragma yet.
+        d.borrow().arity
+    });
+    if disabled || !try_consume_heal_budget() { return (l, r, false); }
+    diags.push(format!("null-arith: 'null {op} x' rewritten with 0 (null → 0)"));
+    HEAL_CLASS_COUNTS.with(|c| c.borrow_mut().null_arith += 1);
+    let zero = || Expression::Number(0);
+    let l_out = if l_null { zero() } else { l };
+    let r_out = if r_null { zero() } else { r };
+    (l_out, r_out, true)
+}
+
 /// Walk a statement list and insert every VarDecl name (and For-loop
 /// iteration variable, and Parameter declaration) into `acc`. Used by
 /// the heal pass to hoist locally-declared names into scope so the
@@ -12517,6 +12771,14 @@ pub(crate) const HEAL_BUILTIN_NAMES: &[&str] = &[
     "test_record_failure", "test_failure_count",
     "test_get_failures", "test_clear_failures",
     "test_set_current", "test_get_current",
+    // Python-idiom builtins
+    "range", "getenv", "to_hex", "from_hex",
+    "parse_int", "parse_float",
+    // Language literals. These are parsed as Variable(...) but get
+    // special-cased at runtime — they must never be typo-corrected
+    // (a "var_typo" rewriting `null` to a close-spelled name would
+    // change semantics catastrophically).
+    "null", "true", "false",
 ];
 
 impl Interpreter {

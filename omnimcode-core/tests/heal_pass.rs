@@ -118,3 +118,96 @@ fn var_typo_total_includes_new_classes() {
     "#);
     assert!(counts.total() >= 2, "total counts both new heals: {:?}", counts);
 }
+
+// ---------- null_arith -----------------------------------------------------
+
+#[test]
+fn null_arith_left_side_rewrites() {
+    let (diags, counts) = heal(r#"
+        fn main() {
+            h x = null + 5;
+            return x;
+        }
+    "#);
+    assert_eq!(counts.null_arith, 1, "null + 5 rewrites");
+    assert!(diags.iter().any(|d| d.contains("null-arith")),
+            "diagnostic mentions null-arith: {:?}", diags);
+}
+
+#[test]
+fn null_arith_right_side_rewrites() {
+    let (_diags, counts) = heal(r#"
+        fn main() {
+            h x = 10 * null;
+            return x;
+        }
+    "#);
+    assert_eq!(counts.null_arith, 1, "10 * null rewrites");
+}
+
+#[test]
+fn null_arith_fires_for_div_sub_mod() {
+    let (_diags, counts) = heal(r#"
+        fn main() {
+            h a = null - 3;
+            h b = null / 7;
+            h c = null % 4;
+            return a;
+        }
+    "#);
+    assert_eq!(counts.null_arith, 3, "all three arithmetic ops trigger");
+}
+
+#[test]
+fn null_arith_does_not_fire_without_null() {
+    let (_diags, counts) = heal(r#"
+        fn main() {
+            return 1 + 2;
+        }
+    "#);
+    assert_eq!(counts.null_arith, 0, "no null, no rewrite");
+}
+
+// ---------- if_numeric -----------------------------------------------------
+
+#[test]
+fn if_numeric_zero_emits_diagnostic() {
+    let (diags, counts) = heal(r#"
+        fn main() {
+            if 0 {
+                return 1;
+            }
+            return 2;
+        }
+    "#);
+    assert_eq!(counts.if_numeric, 1, "if 0 fires diagnostic");
+    assert!(diags.iter().any(|d| d.contains("if-numeric")),
+            "diagnostic mentions if-numeric: {:?}", diags);
+}
+
+#[test]
+fn if_numeric_nonzero_also_fires() {
+    let (_diags, counts) = heal(r#"
+        fn main() {
+            if 1 {
+                return 1;
+            }
+            return 0;
+        }
+    "#);
+    assert_eq!(counts.if_numeric, 1, "if 1 also fires");
+}
+
+#[test]
+fn if_numeric_does_not_fire_for_real_condition() {
+    let (_diags, counts) = heal(r#"
+        fn main() {
+            h x = 5;
+            if x > 3 {
+                return 1;
+            }
+            return 0;
+        }
+    "#);
+    assert_eq!(counts.if_numeric, 0, "real comparison is fine");
+}

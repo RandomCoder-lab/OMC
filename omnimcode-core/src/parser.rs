@@ -1060,6 +1060,17 @@ impl Parser {
     fn parse_if_stmt(&mut self) -> Result<Statement, String> {
         self.expect(Token::If)?;
         let condition = self.parse_expression()?;
+        // Friendlier hint for the classic `if x = 5 { ... }` typo. After
+        // parsing `x` as the condition, the next token will be `=` which
+        // is unexpected here. The generic LBrace-expect error says
+        // "Expected LBrace, got Eq" — replace with an actionable hint.
+        if self.current() == Token::Eq {
+            return Err(format!(
+                "at {}: `if` condition followed by `=`. Did you mean `==`? \
+                 (assignment isn't a value; use `==` for the comparison.)",
+                self.current_pos()
+            ));
+        }
         self.expect(Token::LBrace)?;
         let then_body = self.parse_block()?;
 
@@ -1785,10 +1796,27 @@ impl Parser {
                 }
             }
             Token::Ident(_) => self.parse_ident_expr(),
-            _ => Err(format!(
-                "at {}: Unexpected token in expression: {:?}",
+            // `range` is a soft keyword: when it appears in a `for x in
+            // range(...)` it's special-cased in parse_for_stmt for the
+            // optimized ForIterable::Range path; everywhere else it's
+            // an ordinary builtin call. Parse it as a Call so it's
+            // usable like Python's range outside loops too.
+            Token::Range => {
+                let pos = self.current_pos();
+                self.advance();
+                self.expect(Token::LParen)?;
+                let mut args = Vec::new();
+                while self.current() != Token::RParen {
+                    args.push(self.parse_expression()?);
+                    if self.current() == Token::Comma { self.advance(); }
+                }
+                self.expect(Token::RParen)?;
+                Ok(Expression::Call { name: "range".to_string(), args, pos })
+            }
+            other => Err(format!(
+                "at {}: Unexpected token in expression: {}",
                 self.current_pos(),
-                self.current()
+                describe_token_in_expr(&other),
             )),
         }
     }
@@ -1898,13 +1926,85 @@ impl Parser {
                 self.advance();
                 Ok(val)
             }
-            _ => Err(format!(
-                "at {}: Expected identifier, got {:?}",
-                self.current_pos(),
-                self.current()
-            )),
+            other => {
+                // Friendlier error: when the current token is a reserved
+                // keyword the user accidentally tried to use as an
+                // identifier, name it and suggest a fix. `h h = 1` is
+                // the canonical case — the second `h` is the harmonic-
+                // type keyword, not an identifier.
+                let pos = self.current_pos();
+                let hint = reserved_word_hint(&other);
+                if let Some(hint) = hint {
+                    Err(format!("at {}: {}", pos, hint))
+                } else {
+                    Err(format!(
+                        "at {}: Expected identifier, got {:?}",
+                        pos, other
+                    ))
+                }
+            }
         }
     }
+}
+
+/// Pretty-print a token that turned up in expression position, with a
+/// hint for common mistakes (assignment-vs-equality, semicolon between
+/// expressions, etc.). The goal is to spend the parser's already-broken
+/// state on something genuinely actionable.
+fn describe_token_in_expr(tok: &Token) -> String {
+    match tok {
+        Token::Eq => "`=` here. Did you mean `==`? `=` is for assignment, \
+                      `==` for equality.".to_string(),
+        Token::Semicolon => "`;`. An expression can't be empty here — \
+                              either remove the leading operator or fill \
+                              in the missing value.".to_string(),
+        Token::RBrace => "`}`. A block ended where an expression value \
+                          was expected — check for a missing `return` or \
+                          stray semicolon inside the block.".to_string(),
+        Token::RParen => "`)`. Closing paren with no expression — empty \
+                          parens are only allowed in fn calls / defs, not \
+                          in value position.".to_string(),
+        Token::Comma => "`,`. Unexpected comma — likely a stray trailing \
+                          delimiter or a missing left-hand-side value.".to_string(),
+        Token::Else => "`else` (with no `if`). Floating else — check for \
+                         a missing `if` block above.".to_string(),
+        Token::Catch | Token::Finally => format!(
+            "`{:?}` (with no `try`). Check for a missing `try {{ }}` above.",
+            tok
+        ),
+        other => format!("{:?}", other),
+    }
+}
+
+/// When the parser expected an identifier but got a keyword, return a
+/// human-facing hint that names the keyword and proposes a non-reserved
+/// alternative. None for tokens that aren't keyword-like (literals,
+/// punctuation) — those fall back to the generic error.
+fn reserved_word_hint(tok: &Token) -> Option<String> {
+    let (word, suggested) = match tok {
+        Token::Harmonic => ("h", "hval"),
+        Token::Fn => ("fn", "func"),
+        Token::If => ("if", "cond"),
+        Token::Else => ("else", "alt"),
+        Token::Elif => ("elif", "alt"),
+        Token::While => ("while", "loop_cond"),
+        Token::For => ("for", "iter"),
+        Token::In => ("in", "inside"),
+        Token::Return => ("return", "ret"),
+        Token::Break => ("break", "stop"),
+        Token::Continue => ("continue", "skip"),
+        Token::Import => ("import", "imp"),
+        Token::From => ("from", "src"),
+        Token::Range => ("range", "rng"),
+        Token::Fold => ("fold", "folded"),
+        Token::Res => ("res", "resval"),
+        _ => return None,
+    };
+    Some(format!(
+        "'{}' is a reserved keyword; can't use it as a variable name. \
+         Try `{}` (or any non-reserved name).",
+        word, suggested
+    ))
 }
 
 #[cfg(test)]

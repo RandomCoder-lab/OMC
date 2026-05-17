@@ -1,0 +1,139 @@
+# Tests for the OMC "no trouble using this" pass:
+# - Python-idiom builtins: len, range(start, end, step), getenv,
+#   to_hex / from_hex, parse_int / parse_float
+# - Negative array indexing (arr[-1], arr_get(arr, -1), arr_set)
+# - Helpful out-of-bounds error
+#
+# Together, these are the moves a user reaching for Python intuitions
+# would try first — and now they Just Work.
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected)
+                            + " got " + to_string(actual));
+    }
+}
+
+# ---- len() is polymorphic ----
+
+fn test_len_array() { assert_eq(len([1, 2, 3, 4]), 4, "len([1..4])"); }
+fn test_len_string() { assert_eq(len("hello"), 5, "len(\"hello\")"); }
+fn test_len_dict() {
+    h d = dict_new();
+    dict_set(d, "a", 1);
+    dict_set(d, "b", 2);
+    assert_eq(len(d), 2, "len(d)");
+}
+fn test_len_null_is_zero() { assert_eq(len(null), 0, "len(null)"); }
+
+# ---- range(start, end, step) ----
+
+fn test_range_one_arg_is_zero_to_end() {
+    h r = range(5);
+    assert_eq(arr_len(r), 5, "range(5) len");
+    assert_eq(arr_get(r, 0), 0, "range(5)[0]");
+    assert_eq(arr_get(r, 4), 4, "range(5)[4]");
+}
+
+fn test_range_two_args() {
+    h r = range(2, 6);
+    assert_eq(arr_len(r), 4, "range(2,6) len");
+    assert_eq(arr_get(r, 0), 2, "range(2,6)[0]");
+    assert_eq(arr_get(r, 3), 5, "range(2,6)[3]");
+}
+
+fn test_range_step() {
+    h r = range(0, 10, 2);
+    assert_eq(arr_len(r), 5, "range(0,10,2) len");
+    assert_eq(arr_get(r, 0), 0, "range(0,10,2)[0]");
+    assert_eq(arr_get(r, 1), 2, "range(0,10,2)[1]");
+    assert_eq(arr_get(r, 4), 8, "range(0,10,2)[4]");
+}
+
+fn test_range_negative_step() {
+    h r = range(10, 0, 0 - 2);   # 10, 8, 6, 4, 2
+    assert_eq(arr_len(r), 5, "range(10,0,-2) len");
+    assert_eq(arr_get(r, 0), 10, "range(10,0,-2)[0]");
+    assert_eq(arr_get(r, 4), 2, "range(10,0,-2)[4]");
+}
+
+# ---- Negative array indexing (Python-style) ----
+
+fn test_arr_get_negative_index() {
+    h xs = [10, 20, 30, 40];
+    assert_eq(arr_get(xs, 0 - 1), 40, "arr_get(-1)");
+    assert_eq(arr_get(xs, 0 - 2), 30, "arr_get(-2)");
+}
+
+fn test_index_expression_negative() {
+    h xs = [10, 20, 30, 40];
+    assert_eq(xs[0 - 1], 40, "xs[-1]");
+    assert_eq(xs[0 - 4], 10, "xs[-4]");
+}
+
+fn test_arr_set_negative_index() {
+    h xs = [10, 20, 30];
+    arr_set(xs, 0 - 1, 99);
+    assert_eq(arr_get(xs, 2), 99, "arr_set(-1) writes last");
+}
+
+# ---- Hex conversion ----
+
+fn test_to_hex_basic() {
+    assert_eq(to_hex(255), "0xff", "255 → 0xff");
+    assert_eq(to_hex(0), "0x0", "0 → 0x0");
+    assert_eq(to_hex(16), "0x10", "16 → 0x10");
+}
+
+fn test_from_hex_basic() {
+    assert_eq(from_hex("0xff"), 255, "0xff → 255");
+    assert_eq(from_hex("0X10"), 16, "0X10 → 16");
+    assert_eq(from_hex("ff"), 255, "ff (no prefix) → 255");
+}
+
+fn test_hex_round_trip() {
+    h vals = [1, 16, 255, 4096, 65535];
+    h i = 0;
+    while i < arr_len(vals) {
+        h v = arr_get(vals, i);
+        assert_eq(from_hex(to_hex(v)), v, "round-trip " + to_string(v));
+        i = i + 1;
+    }
+}
+
+# ---- parse_int / parse_float ----
+
+fn test_parse_int_basic() {
+    assert_eq(parse_int("42"), 42, "parse_int(\"42\")");
+    assert_eq(parse_int("-7"), 0 - 7, "parse_int(\"-7\")");
+}
+
+fn test_parse_int_trims_whitespace() {
+    assert_eq(parse_int("  123  "), 123, "parse_int trims");
+}
+
+fn test_parse_float_basic() {
+    h f = parse_float("3.14");
+    h d = f - 3.14;
+    if d < 0.0 { d = 0.0 - d; }
+    assert_true(d < 1e-9, "parse_float(\"3.14\") ≈ 3.14");
+}
+
+# ---- getenv ----
+
+fn test_getenv_unset_returns_null() {
+    assert_eq(getenv("OMC_DEFINITELY_NOT_SET_X837"), null,
+              "unset env returns null");
+}
+
+fn test_getenv_with_default() {
+    assert_eq(getenv("OMC_DEFINITELY_NOT_SET_X837", "fallback"), "fallback",
+              "default returned when env unset");
+}
+
+fn test_getenv_path_is_set() {
+    h p = getenv("PATH");
+    assert_true(p != null, "PATH is set");
+    assert_true(len(p) > 0, "PATH is non-empty");
+}
