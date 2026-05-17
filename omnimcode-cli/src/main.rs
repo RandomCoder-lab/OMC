@@ -714,7 +714,31 @@ fn run_named_fn(source: &str, name: &str) -> Result<(), String> {
     // execute_program path runs it after the rest of the file
     // (including all other fn defs the test might depend on).
     let augmented = format!("{}\n{}();\n", source, name);
-    execute_program(&augmented)
+    // File-level pragma `# @needs_heal` (in a comment line near the top
+    // of the file) auto-enables OMC_HEAL for the duration of this test
+    // run. Used by test_heal_pass.omc, which exercises the heal pass
+    // directly — its tests EXPECT the heal pass to fire and rewrite
+    // typos/arity mismatches before execution. Honors a per-invocation
+    // env-var save/restore so it doesn't bleed across tests.
+    let needs_heal = source.lines()
+        .take(40)
+        .any(|l| l.trim_start().starts_with('#') && l.contains("@needs_heal"));
+    let saved = std::env::var("OMC_HEAL").ok();
+    if needs_heal {
+        std::env::set_var("OMC_HEAL", "1");
+        // Also silence the diagnostic dump per-test so output stays clean.
+        if std::env::var("OMC_HEAL_QUIET").is_err() {
+            std::env::set_var("OMC_HEAL_QUIET", "1");
+        }
+    }
+    let result = execute_program(&augmented);
+    if needs_heal {
+        match saved {
+            Some(v) => std::env::set_var("OMC_HEAL", v),
+            None => std::env::remove_var("OMC_HEAL"),
+        }
+    }
+    result
 }
 
 /// `--audit FILE`: run FILE under both engines (tree-walk + VM)

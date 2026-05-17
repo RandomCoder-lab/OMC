@@ -1,8 +1,11 @@
+# @needs_heal
+#
 # Tests for the self-healing compiler.
 #
-# These tests run UNDER the heal pass (the runner enables OMC_HEAL
-# automatically when `--test` is invoked with healed-aware mode), so
-# the SUT is the heal pass itself transforming the test fn AST.
+# The @needs_heal pragma above tells `--test` to enable OMC_HEAL for
+# this file — the SUT IS the heal pass transforming the test fn AST.
+# Without heal, tests for typo/arity correction would surface as
+# runtime errors because the typo'd identifiers wouldn't resolve.
 #
 # Each test asserts that the heal observed a specific rewrite by
 # checking the RUNTIME behavior of the healed code rather than the
