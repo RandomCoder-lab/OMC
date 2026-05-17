@@ -1,25 +1,42 @@
 # OMC Roadmap
 
-Current chapter: **v0.3-symbolic-prediction** (shipped 2026-05-17).
-Next chapter: open — candidates listed below.
+Current chapter: **v0.3.1-symbolic-compression** (shipped 2026-05-17).
+Next chapter: **v0.4-substrate-context** (planned — the symbolic-context compression thesis taken seriously).
 
 See [CHANGELOG.md](CHANGELOG.md) and [GitHub Releases](https://github.com/RandomCoder-lab/OMC/releases) for the chapter-by-chapter history of how OMC got here. This file describes what's on the path going forward.
 
 ---
 
-## Post-v0.3 candidates (none committed yet)
+## v0.4-substrate-context (planned)
 
-### v0.4 candidate A — predict engine grows up
+**Take the symbolic-context compression thesis end-to-end.** v0.3.1 added format options to omc_predict (3.8× compression on the predict response path). v0.4 generalizes: every LLM-facing OMC surface becomes substrate-aware about its context cost.
 
-The v0.3 engine ships a stateless predictor with substrate ranking. Natural extensions:
+The substrate codec from v0.0.5 already does library-lookup compression (`omc_codec_encode` → 10-50× ratios when the receiver has the library). The v0.4 chapter wires it into the LLM flow as a first-class context-compression mechanism:
 
-- **Prometheus rerank pass** — train a small Prometheus model on the corpus and rerank top-k by token-stream probability. Substrate ranking is the structural prior; Prometheus would be the learned overlay.
-- **Stateful corpus API** — `omc_corpus_build` returns a handle, `omc_predict_from(handle, prefix, top_k)` reuses it. The current API rebuilds per call (fine for interactive use; slow in tight loops).
-- **MCP tool surface** — wrap `omc_predict_files` as an MCP tool so LLM clients can query during code generation without launching a subprocess.
+### Tracks
+
+- **`omc_export_module(path, format=codec)`** — emit a module as a sampled-token codec payload. The LLM consumes the payload (a few hundred bytes) instead of the full source (several KB). Recovery is via library lookup against the LLM's known corpus, or via `omc_codec_decode_lookup` for explicit reconstruction.
+- **Substrate-keyed conversation memory** — wire the `fibtier` memory primitive to store conversation entries as canonical hashes; fetch on demand via the kernel. An LLM's conversation history becomes a stream of hash references that recover into full content when reasoning needs it.
+- **MCP tool: `omc_compress_context(text)`** — given a chunk of OMC code or prose, return a substrate-keyed compressed form the LLM can reference. The complement of `omc_fetch_by_hash`.
+- **Cross-corpus blending** — query multiple corpora (project, stdlib, registry) with weighted ranking, return substrate-keyed identifiers that work across any of them.
+- **Substrate-typed conversation transcripts** — every message in an agent conversation gets a canonical hash; threading + memory operations index by hash, not by string.
+- **Benchmark: end-to-end context-budget reduction** — measure how many fns an LLM agent can hold "in mind" with v0.4 vs without. Hypothesis: 5-10× more candidates fit in the same context window.
+
+### Win condition
+
+An LLM agent solves a multi-step OMC authoring task using ~10% of the context budget a baseline agent would consume, with no loss in solution quality — because the predict engine's output, the conversation memory, and the codec payloads all compose through the substrate's content-addressed identity.
+
+### Deferred from v0.3
+
+- **Prometheus rerank pass** — train a small Prometheus model on the corpus and rerank top-k by token-stream probability.
+- **Stateful corpus API** — `omc_corpus_build` returns a handle, `omc_predict_from(handle, prefix, top_k)` reuses it.
 - **Streaming queries** — incremental updates as the prefix grows token-by-token.
-- **Cross-corpus blending** — query multiple corpora (project, stdlib, registry) with weighted ranking.
 
-### v0.4 candidate B — substrate-attention follow-ups
+---
+
+## v0.5+ candidates
+
+### Substrate-attention follow-ups
 
 - Substrate-modulated Q projection. Q hasn't been swapped yet; the V resample recipe (post-projection modulation) may generalize.
 - Substrate FF: dampen off-attractor activations in the feed-forward residual.
@@ -50,6 +67,7 @@ The substrate-attention components stack to −8.94% inside one block. The path 
 
 | Chapter | Key shipped items |
 |---|---|
+| [v0.3.1-symbolic-compression](https://github.com/RandomCoder-lab/OMC/releases/tag/v0.3.1-symbolic-compression) | `omc_predict` gains `format=hash`/`signature`/`full` (3.8× compression default) + `omc_fetch_by_hash` for on-demand recovery |
 | [v0.3-symbolic-prediction](https://github.com/RandomCoder-lab/OMC/releases/tag/v0.3-symbolic-prediction) | `omc_predict_files(paths, prefix, top_k)` returns ranked provenance-tracked continuations from a content-addressed corpus |
 | [v0.2-ergonomics](https://github.com/RandomCoder-lab/OMC/releases/tag/v0.2-ergonomics) | `+=` / `-=` / `*=` / `/=` / `%=`, `len`/`range`/`getenv`/`to_hex`/`parse_int`, negative array indexing, did-you-mean, traced errors, 11 heal classes |
 | [v0.1-substrate-attention](https://github.com/RandomCoder-lab/OMC/releases/tag/v0.1-substrate-attention) | Substrate-K + S-MOD softmax + substrate-V resample → −8.94% val on TinyShakespeare |

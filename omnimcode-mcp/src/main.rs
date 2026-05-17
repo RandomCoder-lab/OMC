@@ -218,11 +218,16 @@ fn list_tools() -> Vec<Json> {
             "description": "Substrate-indexed code completion. Given a partial OMC code prefix \
                             (e.g. `fn prom_linear_`), return the top-k ranked continuations from \
                             a content-addressed corpus of OMC files. Each result is a viable \
-                            branch: it carries the full source of the matching fn, its file \
-                            path, canonical hash, prefix-match depth, and substrate distance. \
-                            Use to find similar fns when authoring code, to navigate a corpus \
-                            without grepping, or to surface stable callable shapes that an LLM \
-                            can adapt rather than invent from scratch.",
+                            branch.\n\
+                            \n\
+                            The `format` arg controls how much context each suggestion costs:\n\
+                            - `hash` (default, ~50 bytes/suggestion): fn_name + file + \
+                              canonical_hash + substrate_distance. Use this for browsing — \
+                              cheap context. Fetch the body on demand with omc_fetch_by_hash.\n\
+                            - `signature` (~100 bytes/suggestion): adds the fn signature line. \
+                              Enough for an LLM to know the call shape.\n\
+                            - `full`: includes the complete source. Use only when you'll \
+                              actually edit/adapt the body.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -240,6 +245,12 @@ fn list_tools() -> Vec<Json> {
                         "minimum": 1,
                         "default": 5,
                         "description": "Number of ranked continuations to return."
+                    },
+                    "format": {
+                        "type": "string",
+                        "enum": ["hash", "signature", "full"],
+                        "default": "hash",
+                        "description": "Response detail level. See tool description."
                     }
                 },
                 "required": ["paths", "prefix"]
@@ -260,6 +271,33 @@ fn list_tools() -> Vec<Json> {
                     }
                 },
                 "required": ["paths"]
+            }
+        }),
+        json!({
+            "name": "omc_fetch_by_hash",
+            "description": "Recover a function body by its canonical hash. The companion to \
+                            omc_predict with format=hash: the LLM browses cheaply via hash \
+                            digests, then fetches the actual source only when ready to use \
+                            it. Walks the same paths corpus as omc_predict; returns the full \
+                            source of the matching fn, or notFound:true if no fn in the \
+                            corpus has that hash.\n\
+                            \n\
+                            The canonical_hash is alpha-rename invariant — a fn that's been \
+                            renamed still recovers from the same hash.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "paths": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Source file paths to search."
+                    },
+                    "canonical_hash": {
+                        "type": "integer",
+                        "description": "The canonical_hash returned by a previous omc_predict call."
+                    }
+                },
+                "required": ["paths", "canonical_hash"]
             }
         }),
     ]
@@ -343,22 +381,20 @@ fn dispatch_tool(interp: &mut Interpreter, name: &str, args: &Json) -> Result<St
             let top_k = args.get("top_k").and_then(Json::as_i64)
                 .unwrap_or(5)
                 .clamp(1, 50) as usize;
+            let format = args.get("format")
+                .and_then(Json::as_str)
+                .unwrap_or("hash");
             let corpus = build_corpus(&paths)?;
             let suggestions = predict_continuations(&corpus, prefix, top_k);
+            let suggestion_jsons: Vec<Json> = suggestions.iter()
+                .map(|s| project_suggestion(s, format))
+                .collect();
             let payload = json!({
                 "prefix": prefix,
                 "corpus_size": corpus.len(),
                 "top_k": top_k,
-                "suggestions": suggestions.iter().map(|s| json!({
-                    "fn_name": s.fn_name,
-                    "source": s.source,
-                    "file": s.file,
-                    "canonical_hash": s.canonical_hash,
-                    "attractor": s.attractor,
-                    "prefix_match_len": s.prefix_match_len,
-                    "substrate_distance": s.substrate_distance,
-                    "query_attractor": s.query_attractor,
-                })).collect::<Vec<_>>(),
+                "format": format,
+                "suggestions": suggestion_jsons,
             });
             Ok(serde_json::to_string_pretty(&payload).unwrap())
         }
@@ -371,8 +407,90 @@ fn dispatch_tool(interp: &mut Interpreter, name: &str, args: &Json) -> Result<St
             });
             Ok(serde_json::to_string_pretty(&payload).unwrap())
         }
+        "omc_fetch_by_hash" => {
+            let paths = parse_paths_arg(args, "omc_fetch_by_hash")?;
+            let target = args.get("canonical_hash").and_then(Json::as_i64)
+                .ok_or_else(|| "omc_fetch_by_hash: missing 'canonical_hash' (i64) arg".to_string())?;
+            let corpus = build_corpus(&paths)?;
+            match corpus.entries.iter().find(|e| e.canonical_hash == target) {
+                Some(entry) => {
+                    let payload = json!({
+                        "found": true,
+                        "canonical_hash": entry.canonical_hash,
+                        "fn_name": entry.fn_name,
+                        "file": entry.file,
+                        "source": entry.source,
+                    });
+                    Ok(serde_json::to_string_pretty(&payload).unwrap())
+                }
+                None => {
+                    let payload = json!({
+                        "found": false,
+                        "canonical_hash": target,
+                        "searched_paths": paths,
+                        "corpus_size": corpus.len(),
+                    });
+                    Ok(serde_json::to_string_pretty(&payload).unwrap())
+                }
+            }
+        }
         _ => Err(format!("Unknown tool: {}", name)),
     }
+}
+
+/// Compact one Suggestion into the requested response format.
+///
+/// - `hash` (~50 bytes): identity only. The LLM uses it to remember a
+///   match it might fetch later via omc_fetch_by_hash.
+/// - `signature` (~100 bytes): adds the fn signature line so the LLM
+///   knows the call shape without paying for the body.
+/// - `full`: everything including the body. Use when the LLM intends
+///   to read or adapt the implementation.
+///
+/// `prefix_match_len` and `substrate_distance` are included at every
+/// level — they're the ranking explanation and cost essentially nothing.
+fn project_suggestion(s: &omnimcode_core::predict::Suggestion, format: &str) -> Json {
+    match format {
+        "full" => json!({
+            "fn_name": s.fn_name,
+            "source": s.source,
+            "file": s.file,
+            "canonical_hash": s.canonical_hash,
+            "attractor": s.attractor,
+            "prefix_match_len": s.prefix_match_len,
+            "substrate_distance": s.substrate_distance,
+            "query_attractor": s.query_attractor,
+        }),
+        "signature" => json!({
+            "fn_name": s.fn_name,
+            "signature": extract_signature(&s.source),
+            "file": s.file,
+            "canonical_hash": s.canonical_hash,
+            "prefix_match_len": s.prefix_match_len,
+            "substrate_distance": s.substrate_distance,
+        }),
+        // "hash" is the default and the most compressed form.
+        _ => json!({
+            "fn_name": s.fn_name,
+            "file": s.file,
+            "canonical_hash": s.canonical_hash,
+            "prefix_match_len": s.prefix_match_len,
+            "substrate_distance": s.substrate_distance,
+        }),
+    }
+}
+
+/// Extract the function signature line from a fn body's source. The
+/// signature is everything from `fn` through the closing paren of the
+/// argument list, plus any `-> ReturnType` annotation. Stops at the
+/// opening `{` of the body.
+///
+/// Robust to multi-line signatures (joins lines, collapses whitespace).
+fn extract_signature(source: &str) -> String {
+    // Join everything before the first `{` then collapse whitespace.
+    let head = source.split_once('{').map(|(h, _)| h).unwrap_or(source);
+    let cleaned: String = head.split_whitespace().collect::<Vec<_>>().join(" ");
+    cleaned.trim().to_string()
 }
 
 /// Extract a `paths` array argument from a tool's JSON args. Used by

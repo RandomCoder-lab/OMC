@@ -13,6 +13,7 @@ Read top-to-bottom for the arc; jump to any chapter for the detail.
 
 | Tag | Date | One-line |
 |---|---|---|
+| [v0.3.1-symbolic-compression](#v031-symbolic-compression--2026-05-17) | 2026-05-17 | `omc_predict` gains `format=hash`/`signature`/`full` (default = compressed hash form, 3.8× smaller context cost) + `omc_fetch_by_hash` companion for on-demand recovery |
 | [v0.3-symbolic-prediction](#v03-symbolic-prediction--2026-05-17) | 2026-05-17 | Substrate-indexed code completion: `omc_predict_files(paths, prefix, top_k)` returns ranked provenance-tracked continuations from a content-addressed corpus |
 | [v0.2-ergonomics](#v02-ergonomics--2026-05-17) | 2026-05-17 | OMC becomes forgiving: Python-idiom builtins, `+=`, friendly errors with traces, 11 heal classes total |
 | [v0.1-substrate-attention](#v01-substrate-attention--2026-05-17) | 2026-05-17 | Three substrate-component swaps inside transformer attention (K, S-MOD softmax, V) stack to −8.94% val on TinyShakespeare |
@@ -22,6 +23,53 @@ Read top-to-bottom for the arc; jump to any chapter for the detail.
 | [v0.0.3-substrate-and-stdlib](#v003-substrate-and-stdlib--2026-05-08) | 2026-05-08 | Self-healing heal pass (typo/arity/div-zero), substrate-routed search family, stdlib expansion, closures, `--check`/`--fmt` CLI |
 | [v0.0.2-language-core](#v002-language-core--2026-04-25) | 2026-04-25 | The language exists: parser, tree-walk interpreter, HInt + φ-resonance, bytecode VM, self-hosting compiler (gen2 == gen3 byte-identical) |
 | [V0.0.1](#v001---2026-05-02) | 2025-Sep | Genesis: circuit evolution engine, FFI, Python/Unity/Unreal bindings (pre-language) |
+
+---
+
+## [v0.3.1-symbolic-compression] - 2026-05-17
+
+**`omc_predict` learns to compress: default response is hash-only (~50 bytes/suggestion), with on-demand body recovery via `omc_fetch_by_hash`.**
+
+v0.3 shipped the predict engine but its MCP response sent the full source of every suggestion — typically 4-8KB for a top-k=5 query. This burns LLM context window with body text the model often doesn't need to read. v0.3.1 closes that gap.
+
+### What changed
+
+- **`omc_predict` gains a `format` parameter** with three projections:
+  - `hash` (default): `{fn_name, file, canonical_hash, prefix_match_len, substrate_distance}`. ~50 bytes/suggestion. Use for browsing.
+  - `signature`: adds the fn signature line (`fn name(args) -> ret`). ~100 bytes/suggestion. Use when call shape is enough.
+  - `full`: complete source (previous default behavior). Use when you'll actually adapt the body.
+- **New `omc_fetch_by_hash(paths, canonical_hash)` MCP tool**: recovers a function body by canonical hash. The companion to format=hash — browse cheaply, fetch only when needed. Returns `{found, fn_name, file, source}` or `{found: false}` if no fn in the corpus has that hash.
+
+### Measured compression
+
+Same query `fn prom_attention_` × top_k=5 against `examples/lib/prometheus.omc`:
+
+| Format | Bytes | Ratio vs full |
+|---|---:|---:|
+| **hash** (new default) | 1,253 | **26.2%** (3.8× smaller) |
+| signature | 1,622 | 33.9% |
+| full (v0.3 behavior) | 4,783 | 100% |
+
+The ratio widens on corpora with longer fns — a top_k=5 over fns averaging 60 lines compresses ~10×.
+
+### Why it matters
+
+The canonical hash is alpha-rename invariant — recovery via `omc_fetch_by_hash` works even if the function was renamed in the source after the predict call. The LLM workflow becomes: predict cheaply (hash), reason over candidates, fetch only the body it commits to using. Branching is now ~free at the context budget level — the LLM can hold 50 candidates in mind for the cost of 6-7 full bodies.
+
+### Tests
+
+13/13 MCP integration tests pass (was 8 + 5 new):
+- format=hash omits source field
+- format=signature includes signature, omits body
+- format=full unchanged from v0.3
+- omc_fetch_by_hash round-trips through omc_predict (predict returns a hash → fetch returns the same fn)
+- unknown hash returns `{found: false}` gracefully (not an error)
+
+Final: 231 Rust pass, 1087/1087 OMC.
+
+### What's next (v0.4 candidate)
+
+The compression story has more to give: the substrate codec from v0.0.5 can ship a 5-line "library reference + sampled tokens" payload that recovers losslessly via library lookup. Wiring codec output into omc_predict completes the symbolic-context compression thesis — the LLM exchanges canonical hashes as if they were words, and the substrate carries the meaning.
 
 ---
 

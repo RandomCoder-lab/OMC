@@ -118,6 +118,9 @@ fn omc_corpus_size_ingests_prometheus() {
 
 #[test]
 fn omc_predict_ranks_prom_linear_prefix() {
+    // Explicitly request format=full so the source field is present —
+    // this test exists to verify ranking against the real corpus and
+    // wants to inspect the body for provenance.
     let responses = rpc_exchange(&[
         json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
         json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
@@ -125,7 +128,8 @@ fn omc_predict_ranks_prom_linear_prefix() {
             "arguments":{
                 "paths":["examples/lib/prometheus.omc"],
                 "prefix":"fn prom_linear_",
-                "top_k":5
+                "top_k":5,
+                "format":"full"
             }
         }}),
     ]);
@@ -144,7 +148,7 @@ fn omc_predict_ranks_prom_linear_prefix() {
     assert!(names.contains(&"prom_linear_params"), "missing prom_linear_params in {:?}", names);
     // Each suggestion carries provenance fields.
     let first = &suggestions[0];
-    assert!(first["source"].is_string(), "source field");
+    assert!(first["source"].is_string(), "source field (full format)");
     assert_eq!(first["file"], "examples/lib/prometheus.omc");
     assert!(first["canonical_hash"].is_i64(), "canonical_hash field");
     assert!(first["prefix_match_len"].as_i64().unwrap() > 0, "prefix matched some tokens");
@@ -202,6 +206,145 @@ fn omc_predict_unreadable_path_is_friendly() {
     let text = r["result"]["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("read") && text.contains("nonexistent"),
             "names the bad path: {}", text);
+}
+
+#[test]
+fn omc_predict_default_format_is_hash_compact() {
+    // Default (no format arg) returns the hash-only projection — no
+    // `source` field, just identity + ranking metadata. This is the
+    // compression story for the LLM.
+    let responses = rpc_exchange(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+            "name":"omc_predict",
+            "arguments":{
+                "paths":["examples/lib/prometheus.omc"],
+                "prefix":"fn prom_linear_"
+            }
+        }}),
+    ]);
+    let text = responses[1]["result"]["content"][0]["text"].as_str().unwrap();
+    let payload: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(payload["format"], "hash");
+    let s0 = &payload["suggestions"][0];
+    assert!(s0["canonical_hash"].is_i64(), "hash present");
+    assert!(s0["file"].is_string(), "file present");
+    assert!(s0["fn_name"].is_string(), "fn_name present");
+    // The whole point: NO source field in compact format.
+    assert!(s0.get("source").is_none(), "compact format omits source");
+    assert!(s0.get("attractor").is_none(), "compact format omits attractor");
+}
+
+#[test]
+fn omc_predict_signature_format_includes_signature_not_body() {
+    let responses = rpc_exchange(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+            "name":"omc_predict",
+            "arguments":{
+                "paths":["examples/lib/prometheus.omc"],
+                "prefix":"fn prom_linear_",
+                "format":"signature"
+            }
+        }}),
+    ]);
+    let text = responses[1]["result"]["content"][0]["text"].as_str().unwrap();
+    let payload: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(payload["format"], "signature");
+    let s0 = &payload["suggestions"][0];
+    let sig = s0["signature"].as_str().unwrap();
+    assert!(sig.starts_with("fn prom_linear_"),
+            "signature looks right: {}", sig);
+    assert!(!sig.contains("dict_get"),
+            "signature stops at body (no dict_get): {}", sig);
+    // Still no full source — that's the contract.
+    assert!(s0.get("source").is_none(), "signature format omits source");
+}
+
+#[test]
+fn omc_predict_full_format_includes_complete_source() {
+    let responses = rpc_exchange(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+            "name":"omc_predict",
+            "arguments":{
+                "paths":["examples/lib/prometheus.omc"],
+                "prefix":"fn prom_linear_",
+                "format":"full"
+            }
+        }}),
+    ]);
+    let text = responses[1]["result"]["content"][0]["text"].as_str().unwrap();
+    let payload: Value = serde_json::from_str(text).unwrap();
+    let s0 = &payload["suggestions"][0];
+    let source = s0["source"].as_str().unwrap();
+    assert!(source.starts_with("fn prom_linear_"),
+            "source starts with fn keyword: {}", &source[..50]);
+    assert!(source.contains("{"), "source has body");
+    assert!(s0["attractor"].is_i64(), "full format includes attractor");
+}
+
+#[test]
+fn omc_fetch_by_hash_round_trips_through_predict() {
+    // The full LLM workflow: cheap predict (hash format) → pick a
+    // suggestion → fetch by hash → get back the same source the
+    // original ingestion produced.
+    let predict_responses = rpc_exchange(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+            "name":"omc_predict",
+            "arguments":{
+                "paths":["examples/lib/prometheus.omc"],
+                "prefix":"fn prom_linear_",
+                "format":"hash"
+            }
+        }}),
+    ]);
+    let predict_text = predict_responses[1]["result"]["content"][0]["text"].as_str().unwrap();
+    let predict_payload: Value = serde_json::from_str(predict_text).unwrap();
+    let s0 = &predict_payload["suggestions"][0];
+    let hash = s0["canonical_hash"].as_i64().unwrap();
+    let expected_name = s0["fn_name"].as_str().unwrap().to_string();
+
+    // Now fetch by that hash and confirm we get the same fn back.
+    let fetch_responses = rpc_exchange(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+            "name":"omc_fetch_by_hash",
+            "arguments":{
+                "paths":["examples/lib/prometheus.omc"],
+                "canonical_hash": hash
+            }
+        }}),
+    ]);
+    let fetch_text = fetch_responses[1]["result"]["content"][0]["text"].as_str().unwrap();
+    let fetch_payload: Value = serde_json::from_str(fetch_text).unwrap();
+    assert_eq!(fetch_payload["found"], true);
+    assert_eq!(fetch_payload["fn_name"], expected_name);
+    assert_eq!(fetch_payload["canonical_hash"], hash);
+    let recovered = fetch_payload["source"].as_str().unwrap();
+    assert!(recovered.starts_with(&format!("fn {}", expected_name)),
+            "recovered source starts with fn name: {}", &recovered[..50]);
+}
+
+#[test]
+fn omc_fetch_by_hash_unknown_hash_returns_not_found() {
+    let responses = rpc_exchange(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+            "name":"omc_fetch_by_hash",
+            "arguments":{
+                "paths":["examples/lib/prometheus.omc"],
+                "canonical_hash": 1
+            }
+        }}),
+    ]);
+    let r = &responses[1];
+    assert_eq!(r["result"]["isError"], false, "graceful not-found, not an error");
+    let text = r["result"]["content"][0]["text"].as_str().unwrap();
+    let payload: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(payload["found"], false);
+    assert_eq!(payload["canonical_hash"], 1);
 }
 
 #[test]
