@@ -34,7 +34,7 @@ These are concrete, present-in-the-code features, not aspirations:
 
 - **Substrate-routed harmonic libraries.** `harmonic_anomaly` beats scikit-learn's IsolationForest **10/10 vs 7/10** on multi-dim credential-stuffing detection (the structural-anomaly regime).
 
-- **Substrate-keyed code codec + compressed substrate-signed messaging.** `omc_codec_encode` produces a sampled-token payload addressed by the canonical AST hash (invariant under whitespace, comments, alpha-rename). `omc_codec_decode_lookup` returns the exact library entry on hash match. `omc_msg_sign_compressed` / `omc_msg_recover_compressed` carry the codec payload inside the substrate-signed wire format — ~5–7× smaller payloads with lossless library recovery and full signature integrity. 13 tests pass ([`test_codec.omc`](examples/tests/test_codec.omc), [`test_compressed_messaging.omc`](examples/tests/test_compressed_messaging.omc)). See [`experiments/seed_expansion/FINDINGS.md`](experiments/seed_expansion/FINDINGS.md) for the full extrapolation including what the open-set ML side does *not* yet deliver.
+- **Substrate-keyed code codec + compressed substrate-signed messaging.** `omc_codec_encode` produces a sampled-token payload addressed by the canonical AST hash (invariant under whitespace, comments, alpha-rename). `omc_codec_decode_lookup` returns the exact library entry on hash match. `omc_msg_sign_compressed` / `omc_msg_recover_compressed` carry the codec payload inside the substrate-signed wire format with lossless library recovery and full signature integrity. **Wire-byte sizing is honest**: token-count compression is ~N×, but wire-byte savings only appear at payloads ≳500 B with N≥8 (single-message). The always-on value is **library-lookup recovery** — alpha-rename invariant content addressing on the receiver, no shared key. 13 tests pass ([`test_codec.omc`](examples/tests/test_codec.omc), [`test_compressed_messaging.omc`](examples/tests/test_compressed_messaging.omc)). See [`experiments/seed_expansion/FINDINGS.md`](experiments/seed_expansion/FINDINGS.md).
 
 ---
 
@@ -347,7 +347,7 @@ Submit a package: PR an entry to [`registry/index.json`](registry/index.json).
 | Hybrid HBit-gate distractor-mix test | **falsified at current gate formulation (0/3 wins)**, score-level / learned-threshold reformulations documented |
 | Self-hosting compiler V.9b | shipped, gen2 == gen3 byte-identical |
 | **Self-healing pass (7 classes, substrate-routed typo)** | shipped, `OMC_HEAL=1`, **10× typo lookup**, 16 tests, per-class pragmas |
-| **Substrate-keyed code codec + compressed messaging** | **shipped**, `omc_codec_encode/decode_lookup` + `omc_msg_sign_compressed/recover`, alpha-rename invariant, ~5–7× wire payload reduction, 13 tests, lossless on in-library content |
+| **Substrate-keyed code codec + compressed messaging** | **shipped**, `omc_codec_encode/decode_lookup` + `omc_msg_sign_compressed/recover`, alpha-rename invariant, token-count ~N× (wire-byte breaks even at ≥500 B + N≥8); always-on win is library-lookup recovery; 13 tests, lossless on in-library content |
 | **Inline error-fix hints** | **shipped**, `Undefined function` errors now carry the suggested fn's signature inline (eliminates a separate `omc_help` round-trip after a typo) |
 | Two-engine parity (tree-walk + VM) | shipped, 44/45 byte-identical |
 | Embedded CPython + callbacks | shipped, 6 wrapper libs |

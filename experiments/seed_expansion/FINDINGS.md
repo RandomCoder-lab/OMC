@@ -97,12 +97,27 @@ real attention-based model.
 - Tested: 7 OMC test cases pass
 
 ### 2. Substrate-signed compressed messaging (`omc_msg_sign_compressed` / `omc_msg_recover_compressed`)
-- Wire-format payload that's ~7× smaller than raw source
-- Library-based recovery on the receiver
-- Substrate-signature integrity preserved (same metadata as
-  uncompressed)
-- Alpha-rename-invariant: sender's renamed code recovers to
-  library's canonical form
+- Compression metric `compression_ratio` is **token-count**, not wire-byte.
+  Token sampling shrinks the canonical-token vector ~N× at every-Nth
+  sampling. JSON-serialized integer arrays add overhead vs the raw
+  source string, so wire-byte savings only appear at larger payloads.
+- **Honest wire-byte break-even (measured, single message):**
+
+  | Source size | Baseline wire | Comp N=3 | Comp N=5 | Comp N=8 |
+  |---:|---:|---:|---:|---:|
+  | 21 B (tiny fn) | 186 B | 293 B (+107) | — | — |
+  | 127 B (medium fn) | 294 B | 448 B (+154) | 378 B (+84) | — |
+  | 542 B (4 fns) | 712 B | 1205 B | 748 B (+36) | **545 B (-167)** |
+  | 2483 B (16 fns) | 2669 B | — | 2519 B (-150) | **1661 B (-1008)** |
+
+  So: codec wins on wire bytes for payloads ≳500 B at N≥8. For small
+  payloads, use `omc_msg_sign`.
+- The always-on value (regardless of size) is **library-lookup recovery**:
+  alpha-rename invariant content-addressing on the receiver, no shared
+  key. The demo (`llm_tandem_send_compressed.omc` /
+  `llm_tandem_receive_compressed.omc`) verifies a renamed sender
+  function (`xs`) recovers to the library's canonical form (`vs`).
+- Substrate-signature integrity preserved (same metadata as uncompressed)
 - Tested: 6 OMC test cases pass
 
 ### 3. Closed-set lookup-by-seed codec (v2)
@@ -194,8 +209,8 @@ The 4 things this could help with, from the original goal:
 
 | Use case | Verdict | Mechanism shipped |
 |----------|---------|---------------------|
-| 1. OMC-library storage/transmission (7-8x compression) | ✓ shipped | `omc_codec_encode/decode_lookup` |
-| 2. Substrate-signed payload reduction | ✓ shipped | `omc_msg_sign_compressed/recover` |
+| 1. OMC-library storage/transmission | ✓ shipped (token compression ~N×; wire-byte win at ≥500 B payloads w/ N≥8) | `omc_codec_encode/decode_lookup` |
+| 2. Substrate-signed payload reduction | ✓ shipped (same scaling caveat; always-on win is library lookup) | `omc_msg_sign_compressed/recover` |
 | 3. Validates substrate-aware compression thesis | ✓ documented | This file + RESULTS.md |
 | 4. Conditioning layer for future OMC-aware models | ✓ documented | Path A + Path B notes above |
 

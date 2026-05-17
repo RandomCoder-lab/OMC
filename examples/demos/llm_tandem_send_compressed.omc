@@ -1,0 +1,67 @@
+# Tandem demo: SEND side, compressed variant (Claude → Hermes).
+#
+# Uses omc_msg_sign_compressed instead of omc_msg_sign. Carries every-Nth
+# canonical token of the source plus the canonical hash for library lookup.
+#
+# Honest sizing finding (measured below): for SMALL single functions the
+# codec overhead (token array as JSON ints + extra metadata fields) exceeds
+# the sampling savings. The codec wins on LARGER payloads (~600B+) at N>=8.
+# The always-on win is library-lookup recovery itself: alpha-rename
+# invariant content-addressing on the receiver, no shared key.
+#
+# Run with:
+#   ./target/release/omnimcode-standalone examples/demos/llm_tandem_send_compressed.omc
+
+fn show(label, v) { print(concat_many(label, " = ", to_string(v))); }
+
+fn measure(payload, n) {
+    h baseline = omc_msg_sign(payload, 18173, 1);
+    h baseline_wire = omc_msg_serialize(baseline);
+    h baseline_size = str_len(baseline_wire);
+    h comp = omc_msg_sign_compressed(payload, 18173, 1, n);
+    h comp_wire = omc_msg_serialize(comp);
+    h comp_size = str_len(comp_wire);
+    print(concat_many(
+        "  src=", to_string(str_len(payload)),
+        "B  baseline=", to_string(baseline_size),
+        "B  comp(N=", to_string(n), ")=", to_string(comp_size),
+        "B  delta=", to_string(comp_size - baseline_size), "B"
+    ));
+}
+
+fn main() {
+    h CLAUDE_ID = 18173;
+    h KIND_REQUEST = 1;
+    h EVERY_N = 3;
+
+    h payload = "fn compute_mean(xs) { h n = arr_len(xs); h s = 0.0; h i = 0; while i < n { s = s + arr_get(xs, i); i = i + 1; } return s / n; }";
+
+    h msg = omc_msg_sign_compressed(payload, CLAUDE_ID, KIND_REQUEST, EVERY_N);
+    h wire = omc_msg_serialize(msg);
+
+    show("packed ID         ", dict_get(msg, "packed"));
+    show("content_hash      ", dict_get(msg, "content_hash"));
+    show("attractor         ", dict_get(msg, "attractor"));
+    show("compression_ratio ", dict_get(msg, "compression_ratio"));
+    print("");
+    print("compression_ratio is TOKEN-COUNT compression, not wire-byte.");
+    print("Wire-byte break-even sweep (this payload + larger ones):");
+    measure(payload, 3);
+    measure(payload, 5);
+    h larger = concat_many(payload, "\n",
+        "fn variance(xs) { h m = compute_mean(xs); h n = arr_len(xs); h s = 0.0; h i = 0; while i < n { h d = arr_get(xs, i) - m; s = s + d * d; i = i + 1; } return s / n; }", "\n",
+        "fn std_dev(xs) { return sqrt(variance(xs)); }", "\n",
+        "fn covariance(a, b) { h ma = compute_mean(a); h mb = compute_mean(b); h n = arr_len(a); h s = 0.0; h i = 0; while i < n { s = s + (arr_get(a, i) - ma) * (arr_get(b, i) - mb); i = i + 1; } return s / n; }");
+    measure(larger, 5);
+    measure(larger, 8);
+
+    write_file("/home/thearchitect/omc_channel/from_claude_compressed.json", wire);
+    print("");
+    print("Wrote /home/thearchitect/omc_channel/from_claude_compressed.json");
+    print("(Single-fn payload — codec loses ~50%+ on wire bytes for this size.");
+    print(" Real win: library-lookup recovery, demonstrated next.)");
+    print("Run llm_tandem_receive_compressed.omc to verify alpha-rename");
+    print("invariant recovery.");
+}
+
+main();

@@ -1,0 +1,49 @@
+# Tandem demo: RECEIVE side, compressed variant (Hermes reading Claude).
+#
+# Reads a compressed substrate-signed message, looks up the library entry
+# by canonical hash, prints whether substrate signature integrity verifies.
+#
+# The library is the recipient's known-good function dictionary. The
+# canonical hash matches across alpha-rename (parameter renaming), so a
+# renamed sender function still recovers the library's canonical form.
+
+fn show(label, v) { print(concat_many(label, " = ", to_string(v))); }
+
+fn main() {
+    h wire = read_file("/home/thearchitect/omc_channel/from_claude_compressed.json");
+    h msg = omc_msg_deserialize(wire);
+
+    show("sender_id         ", dict_get(msg, "sender_id"));
+    show("kind              ", dict_get(msg, "kind"));
+    show("content_hash      ", dict_get(msg, "content_hash"));
+    show("attractor         ", dict_get(msg, "attractor"));
+    show("compression_ratio ", dict_get(msg, "compression_ratio"));
+    show("wire bytes        ", str_len(wire));
+    print("");
+
+    # Recipient library — what Hermes already knows.
+    # Note: parameter names differ from sender ("vs" vs "xs"), to prove
+    # alpha-rename invariance of canonical-hash addressing.
+    h library = [
+        "fn dot(a, b) { h n = arr_len(a); h s = 0.0; h i = 0; while i < n { s = s + arr_get(a, i) * arr_get(b, i); i = i + 1; } return s; }",
+        "fn compute_mean(vs) { h n = arr_len(vs); h s = 0.0; h i = 0; while i < n { s = s + arr_get(vs, i); i = i + 1; } return s / n; }",
+        "fn variance(xs) { h m = compute_mean(xs); h n = arr_len(xs); h s = 0.0; h i = 0; while i < n { h d = arr_get(xs, i) - m; s = s + d * d; i = i + 1; } return s / n; }",
+    ];
+
+    h recovered = omc_msg_recover_compressed(msg, library);
+
+    if recovered == null {
+        print("=== MISS — content_hash not in recipient library ===");
+        print("The sender function is novel (not in Hermes's library).");
+        print("Fallback: request full payload via uncompressed channel.");
+    } else {
+        print("=== RECOVERED via library lookup ===");
+        print("Canonical source (alpha-renamed to library form):");
+        print(recovered);
+        print("");
+        print("Notice: sender used parameter 'xs', library entry uses 'vs'.");
+        print("Canonical hash matched because rename is invariant.");
+    }
+}
+
+main();
