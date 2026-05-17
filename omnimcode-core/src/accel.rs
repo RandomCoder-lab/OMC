@@ -26,12 +26,30 @@ pub type MatmulAccelerator = Box<
         + Send + Sync,
 >;
 
+/// Per-row softmax accelerator. Receives `(rows, cols, input_row_major)`,
+/// returns the same-shape output. Per-row stable softmax. Same hook
+/// pattern as matmul. As of v0.8.6 this exists primarily as scaffolding —
+/// per-row softmax is memory-bound and GPU rarely wins at the shapes
+/// Prometheus exercises today (e.g. 64×64 scores at d_model=256). Wired
+/// here so larger-scale runs and future hardware can opt in without
+/// touching omnimcode-core.
+pub type SoftmaxAccelerator = Box<
+    dyn Fn(usize, usize, &[f64]) -> Option<Result<Vec<f64>, String>>
+        + Send + Sync,
+>;
+
 static MATMUL_ACCELERATOR: OnceLock<MatmulAccelerator> = OnceLock::new();
+static SOFTMAX_ACCELERATOR: OnceLock<SoftmaxAccelerator> = OnceLock::new();
 
 /// Register a matmul accelerator. Idempotent — second call is a no-op,
 /// matching `OnceLock::set` semantics. Call once during binary startup.
 pub fn register_matmul_accelerator(f: MatmulAccelerator) -> Result<(), &'static str> {
     MATMUL_ACCELERATOR.set(f).map_err(|_| "matmul accelerator already registered")
+}
+
+/// Register a softmax accelerator. Same semantics as matmul registration.
+pub fn register_softmax_accelerator(f: SoftmaxAccelerator) -> Result<(), &'static str> {
+    SOFTMAX_ACCELERATOR.set(f).map_err(|_| "softmax accelerator already registered")
 }
 
 /// Internal — used by `interpreter::tape_matmul`. Returns
@@ -42,4 +60,11 @@ pub(crate) fn try_accelerated_matmul(
     m: usize, k: usize, n: usize, a: &[f64], b: &[f64],
 ) -> Option<Result<Vec<f64>, String>> {
     MATMUL_ACCELERATOR.get().and_then(|f| f(m, k, n, a, b))
+}
+
+/// Internal — used by `interpreter` for `tape_softmax`.
+pub(crate) fn try_accelerated_softmax(
+    rows: usize, cols: usize, input: &[f64],
+) -> Option<Result<Vec<f64>, String>> {
+    SOFTMAX_ACCELERATOR.get().and_then(|f| f(rows, cols, input))
 }

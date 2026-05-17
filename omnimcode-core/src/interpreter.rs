@@ -6872,6 +6872,20 @@ impl Interpreter {
                 }
                 let a = self.eval_expr(&args[0])?.to_int() as usize;
                 let av = self.autograd_tape[a].value.clone();
+                // Try the GPU softmax accelerator first (v0.8.6 scaffold).
+                // The accelerator may decline (return None) for small shapes,
+                // in which case the CPU triple-pass below runs.
+                if let Some(result) = crate::accel::try_accelerated_softmax(av.rows, av.cols, &av.data) {
+                    return result.map(|data| {
+                        let out = TapeMat { rows: av.rows, cols: av.cols, data };
+                        let grad = TapeMat::zeros(av.rows, av.cols);
+                        let id = self.autograd_tape.len();
+                        self.autograd_tape.push(TapeNode {
+                            op: TapeOp::Softmax(a), value: out, grad,
+                        });
+                        Value::HInt(HInt::new(id as i64))
+                    }).map_err(|e| format!("tape_softmax accelerated: {}", e));
+                }
                 let mut out = TapeMat::zeros(av.rows, av.cols);
                 for r in 0..av.rows {
                     // Row max for numerical stability.

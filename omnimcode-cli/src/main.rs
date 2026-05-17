@@ -1373,6 +1373,29 @@ fn install_gpu_matmul_accelerator() {
             }
         },
     ));
+
+    // v0.8.6 — softmax accelerator scaffold. Per-row softmax is memory-bound
+    // and the GPU rarely wins on shapes Prometheus exercises at d_model ≤ 256
+    // (e.g. 64×64 scores ≈ 4k cells = microseconds of CPU work). Wired so
+    // larger-shape runs and future hardware can opt in via OMC_GPU_SOFTMAX_MIN_CELLS,
+    // but the default threshold is high enough that this declines on every
+    // Prometheus call today. The architectural slot exists; the win waits.
+    let softmax_threshold: usize = std::env::var("OMC_GPU_SOFTMAX_MIN_CELLS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1_000_000);  // intentionally high — opt-in scaffolding
+    let _ = omnimcode_core::accel::register_softmax_accelerator(Box::new(
+        move |_rows: usize, _cols: usize, _input: &[f64]| {
+            if _rows * _cols < softmax_threshold {
+                return None;
+            }
+            // Decline for now — actual GPU softmax kernel is a v0.8.7+
+            // candidate. Path A: WGSL with per-row threadgroup reduce.
+            // Path B: f64 → f32 → GPU softmax → f32 → f64 round-trip.
+            // Both are scoped but not in this chapter.
+            None
+        },
+    ));
 }
 
 #[cfg(test)]
