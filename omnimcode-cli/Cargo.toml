@@ -21,6 +21,13 @@ name = "omc-bench"
 path = "src/bench.rs"
 required-features = ["llvm-jit"]
 
+# Code-archaeology tool: walks a tree, extracts top-level fns, clusters
+# by canonical hash + substrate distance. The alpha-rename-invariant
+# duplicate finder. Doesn't depend on JIT or Python.
+[[bin]]
+name = "omc-grep"
+path = "src/bin/omc_grep.rs"
+
 [features]
 default = ["python-embed"]
 # CPython embedding for `py_*` builtins. Forwards to core.

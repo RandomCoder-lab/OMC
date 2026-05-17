@@ -34,6 +34,8 @@ These are concrete, present-in-the-code features, not aspirations:
 
 - **Substrate-routed harmonic libraries.** `harmonic_anomaly` beats scikit-learn's IsolationForest **10/10 vs 7/10** on multi-dim credential-stuffing detection (the structural-anomaly regime).
 
+- **`omc-grep`: alpha-rename-invariant duplicate finder.** A standalone CLI ([`docs/omc_grep.md`](docs/omc_grep.md)) that walks a tree, extracts every top-level fn, canonicalizes, and clusters by canonical hash. `--body-only` mode strips the fn signature so duplicates with *different names* surface — something text-grep, ast-grep, and tree-sitter queries can't do. On OMC's own examples tree (151 files / 2388 fns): **31.7%** redundancy with name-sensitive hashing, **33.0%** with body-only — surfacing renamed-but-identical fns like `_bucket_discrete` ≡ `endpoint_bucket` ≡ `status_bucket` that share no token in their names.
+
 - **Substrate-keyed code codec + compressed substrate-signed messaging.** `omc_codec_encode` produces a sampled-token payload addressed by the canonical AST hash (invariant under whitespace, comments, alpha-rename). `omc_codec_decode_lookup` returns the exact library entry on hash match. `omc_msg_sign_compressed` / `omc_msg_recover_compressed` carry the codec payload inside the substrate-signed wire format with lossless library recovery and full signature integrity. **Wire-byte sizing is honest**: token-count compression is ~N×, but wire-byte savings only appear at payloads ≳500 B with N≥8 (single-message). The always-on value is **library-lookup recovery** — alpha-rename invariant content addressing on the receiver, no shared key. 13 tests pass ([`test_codec.omc`](examples/tests/test_codec.omc), [`test_compressed_messaging.omc`](examples/tests/test_compressed_messaging.omc)). See [`experiments/seed_expansion/FINDINGS.md`](experiments/seed_expansion/FINDINGS.md).
 
 ---
@@ -262,7 +264,7 @@ fn coherent_loop(n) {
 |---|---|
 | `omnimcode-core/` | Parser, AST, interpreter, bytecode VM, substrate (`phi_pi_fib`), HBit, harmonic types, 50+ substrate builtins, substrate-routed heal pass |
 | `omnimcode-codegen/` | LLVM-backed JIT, dual-band lowerer, L1.6 array bridges, 22 harmonic-primitive intrinsics (table-driven) |
-| `omnimcode-cli/` | Standalone binary (`omnimcode-standalone`) + `omc-bench` |
+| `omnimcode-cli/` | Standalone binary (`omnimcode-standalone`) + `omc-bench` + `omc-grep` |
 | `omnimcode-wasm/` | WebAssembly target (no LLVM, no Python) |
 | `omnimcode-lsp/` | LSP server for editor integration |
 | `omnimcode-gdextension/` | Godot 4 GDExtension binding |
@@ -351,6 +353,7 @@ Submit a package: PR an entry to [`registry/index.json`](registry/index.json).
 | **Self-healing pass (7 classes, substrate-routed typo)** | shipped, `OMC_HEAL=1`, **10× typo lookup**, 16 tests, per-class pragmas |
 | **Substrate-keyed code codec + compressed messaging** | **shipped**, `omc_codec_encode/decode_lookup` + `omc_msg_sign_compressed/recover`, alpha-rename invariant, token-count ~N× (wire-byte breaks even at ≥500 B + N≥8); always-on win is library-lookup recovery; 13 tests, lossless on in-library content |
 | **Inline error-fix hints** | **shipped**, `Undefined function` errors now carry the suggested fn's signature inline (eliminates a separate `omc_help` round-trip after a typo) |
+| **`omc-grep`: alpha-rename-invariant code archaeology** | **shipped** ([docs/omc_grep.md](docs/omc_grep.md)) — standalone CLI; on OMC's examples: 31.7% redundancy (name-sensitive), 33.0% (body-only); surfaces renamed-but-identical fns that text-grep and ast-grep can't catch |
 | Two-engine parity (tree-walk + VM) | shipped, 44/45 byte-identical |
 | Embedded CPython + callbacks | shipped, 6 wrapper libs |
 | WASM + LSP + GDExtension targets | shipped |

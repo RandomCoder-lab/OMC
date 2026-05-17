@@ -10674,8 +10674,8 @@ impl Interpreter {
 /// separate string. Skips nested fns and `#`-prefixed line comments;
 /// tracks `"..."` and `'...'` so braces inside string literals don't
 /// throw off depth counting. Used by omc_registry_codec_library and
-/// omc_msg_recover_from_registry.
-fn extract_top_level_fns(src: &str) -> Vec<String> {
+/// omc_msg_recover_from_registry, plus the omc-grep tool.
+pub fn extract_top_level_fns(src: &str) -> Vec<String> {
     let bytes = src.as_bytes();
     let n = bytes.len();
     let mut out = Vec::new();
