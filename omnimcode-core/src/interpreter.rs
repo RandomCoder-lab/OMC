@@ -6370,6 +6370,32 @@ impl Interpreter {
                 let all_int = m.data.iter().all(|x| x.fract() == 0.0 && x.abs() < (i64::MAX as f64));
                 Ok(tape_to_value(m, all_int))
             }
+            "tape_set_value" => {
+                // Replace a tape node's stored value with a new one.
+                // Used by custom optimizers (Adam, AdamW) that want to
+                // compute the parameter update in OMC space instead of
+                // routing through tape_update's hard-coded SGD step.
+                if args.len() < 2 {
+                    return Err("tape_set_value requires (node_id, new_value)".to_string());
+                }
+                let id = self.eval_expr(&args[0])?.to_int() as usize;
+                if id >= self.autograd_tape.len() {
+                    return Err(format!("tape_set_value: id {} out of range", id));
+                }
+                let new_val = self.eval_expr(&args[1])?;
+                let new_mat = tape_from_value(&new_val)?;
+                // Shape mismatch is a usage error — better to error than
+                // silently reshape and corrupt later math.
+                let cur = &self.autograd_tape[id].value;
+                if new_mat.rows != cur.rows || new_mat.cols != cur.cols {
+                    return Err(format!(
+                        "tape_set_value: shape mismatch (got {}x{}, expected {}x{})",
+                        new_mat.rows, new_mat.cols, cur.rows, cur.cols
+                    ));
+                }
+                self.autograd_tape[id].value = new_mat;
+                Ok(Value::Null)
+            }
             "tape_grad" => {
                 if args.is_empty() {
                     return Err("tape_grad requires (node_id)".to_string());

@@ -693,3 +693,363 @@ fn prom_attention_params(layer) {
     arr_push(out, dict_get(layer, "V"));
     return out;
 }
+
+# ---------------------------------------------------------------------------
+# AdamW optimizer — the workhorse modern optimizer.
+#
+# Maintains per-param first & second gradient moments (m, v); applies
+# bias-corrected updates with decoupled weight decay. Implementation
+# uses the new tape_set_value Rust builtin so the actual update math
+# happens in pure OMC space — easy to instrument or replace.
+#
+#   m_t = β1 · m_{t-1} + (1-β1) · g
+#   v_t = β2 · v_{t-1} + (1-β2) · g²
+#   θ_t = θ_{t-1} − lr · (m_t/(1-β1^t)) / (sqrt(v_t/(1-β2^t)) + ε)
+#          − lr · wd · θ_{t-1}                         (decoupled weight decay)
+# ---------------------------------------------------------------------------
+
+fn prom_adamw_new(params, lr, beta1, beta2, eps, weight_decay) {
+    h state = dict_new();
+    dict_set(state, "params", params);
+    dict_set(state, "lr", lr);
+    dict_set(state, "beta1", beta1);
+    dict_set(state, "beta2", beta2);
+    dict_set(state, "eps", eps);
+    dict_set(state, "wd", weight_decay);
+    dict_set(state, "step", 0);
+    # m and v are arrays parallel to params, each storing a value
+    # matching the param's shape. Initialized to zeros on first step
+    # to avoid having to compute shapes here.
+    dict_set(state, "m", []);
+    dict_set(state, "v", []);
+    return state;
+}
+
+# Zero-shaped-like for a numeric value (scalar / 1D / 2D array).
+fn _prom_zeros_like(v) {
+    if type_of(v) == "array" {
+        h out = [];
+        h i = 0;
+        while i < arr_len(v) {
+            h e = arr_get(v, i);
+            if type_of(e) == "array" {
+                arr_push(out, _prom_zeros_like(e));
+            } else {
+                arr_push(out, 0.0);
+            }
+            i = i + 1;
+        }
+        return out;
+    }
+    return 0.0;
+}
+
+# Element-wise binary op on values of arbitrary nested shape (scalar/1D/2D).
+fn _prom_zip(a, b, op) {
+    if type_of(a) == "array" {
+        h out = [];
+        h i = 0;
+        while i < arr_len(a) {
+            arr_push(out, _prom_zip(arr_get(a, i), arr_get(b, i), op));
+            i = i + 1;
+        }
+        return out;
+    }
+    if op == "add" { return a + b; }
+    if op == "sub" { return a - b; }
+    if op == "mul" { return a * b; }
+    if op == "div" { return a / b; }
+    return 0.0;
+}
+
+# Element-wise scalar op on a nested-shape value.
+fn _prom_scale(v, s, op) {
+    if type_of(v) == "array" {
+        h out = [];
+        h i = 0;
+        while i < arr_len(v) {
+            arr_push(out, _prom_scale(arr_get(v, i), s, op));
+            i = i + 1;
+        }
+        return out;
+    }
+    if op == "mul" { return v * s; }
+    if op == "add" { return v + s; }
+    if op == "sub" { return v - s; }
+    return v;
+}
+
+fn _prom_sqrt_eps(v, eps) {
+    if type_of(v) == "array" {
+        h out = [];
+        h i = 0;
+        while i < arr_len(v) {
+            arr_push(out, _prom_sqrt_eps(arr_get(v, i), eps));
+            i = i + 1;
+        }
+        return out;
+    }
+    return sqrt(v) + eps;
+}
+
+# One AdamW step. Updates state in-place (mutates dict + tape values).
+fn prom_adamw_step(state) {
+    h params = dict_get(state, "params");
+    h lr = dict_get(state, "lr");
+    h b1 = dict_get(state, "beta1");
+    h b2 = dict_get(state, "beta2");
+    h eps = dict_get(state, "eps");
+    h wd = dict_get(state, "wd");
+    h step = dict_get(state, "step") + 1;
+    dict_set(state, "step", step);
+
+    h m = dict_get(state, "m");
+    h v = dict_get(state, "v");
+
+    # Lazy-init m and v on first step using grad shapes.
+    if arr_len(m) == 0 {
+        h i = 0;
+        while i < arr_len(params) {
+            h g = tape_grad(arr_get(params, i));
+            arr_push(m, _prom_zeros_like(g));
+            arr_push(v, _prom_zeros_like(g));
+            i = i + 1;
+        }
+        dict_set(state, "m", m);
+        dict_set(state, "v", v);
+    }
+
+    h bias1 = 1.0 - pow(b1, step * 1.0);
+    h bias2 = 1.0 - pow(b2, step * 1.0);
+
+    h i = 0;
+    while i < arr_len(params) {
+        h p = arr_get(params, i);
+        h g = tape_grad(p);
+
+        # m_t = b1*m + (1-b1)*g
+        h m_old = arr_get(m, i);
+        h m_new = _prom_zip(_prom_scale(m_old, b1, "mul"),
+                            _prom_scale(g, 1.0 - b1, "mul"), "add");
+        arr_set(m, i, m_new);
+
+        # v_t = b2*v + (1-b2)*g²
+        h v_old = arr_get(v, i);
+        h gsq = _prom_zip(g, g, "mul");
+        h v_new = _prom_zip(_prom_scale(v_old, b2, "mul"),
+                            _prom_scale(gsq, 1.0 - b2, "mul"), "add");
+        arr_set(v, i, v_new);
+
+        # m_hat = m_t / bias1; v_hat = v_t / bias2
+        h m_hat = _prom_scale(m_new, 1.0 / bias1, "mul");
+        h v_hat = _prom_scale(v_new, 1.0 / bias2, "mul");
+        h denom = _prom_sqrt_eps(v_hat, eps);
+        h adam_step = _prom_zip(m_hat, denom, "div");
+
+        # θ ← θ − lr*adam_step − lr*wd*θ
+        h cur = tape_value(p);
+        h wd_term = _prom_scale(cur, lr * wd, "mul");
+        h main_term = _prom_scale(adam_step, lr, "mul");
+        h decayed = _prom_zip(cur, wd_term, "sub");
+        h new_val = _prom_zip(decayed, main_term, "sub");
+        tape_set_value(p, new_val);
+
+        i = i + 1;
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Embedding layer — direct row lookup.
+# table: [vocab, d_model]; forward(token_idx) = table[token_idx, :]
+# Built without a tape_embedding_lookup builtin yet — we use
+# tape_matmul with a one-hot, which is mathematically equivalent and
+# composes with the existing autograd. Will replace with a fused
+# Rust op when JIT'd embedding is a bottleneck.
+# ---------------------------------------------------------------------------
+
+fn prom_embedding_new(vocab, d_model, rng_state) {
+    h table = _prom_random_matrix(vocab, d_model, 0.3, rng_state);
+    h layer = dict_new();
+    dict_set(layer, "kind", "embedding");
+    dict_set(layer, "vocab", vocab);
+    dict_set(layer, "d_model", d_model);
+    dict_set(layer, "table", dict_get(table, "node"));
+    dict_set(layer, "rng_state", dict_get(table, "state"));
+    return layer;
+}
+
+# Forward: token_idx → [1, d_model] embedding row.
+# Uses one-hot @ table internally; result is differentiable into the
+# table param so backward updates the relevant row.
+fn prom_embedding_forward(layer, token_idx) {
+    h vocab = dict_get(layer, "vocab");
+    h table = dict_get(layer, "table");
+    h x = prom_one_hot(token_idx, vocab);
+    return tape_matmul(x, table);
+}
+
+fn prom_embedding_params(layer) {
+    return [dict_get(layer, "table")];
+}
+
+# ---------------------------------------------------------------------------
+# LayerNorm — normalize each row to zero mean / unit variance, then
+# scale + shift by learned gamma/beta.
+#
+# Composed from existing tape ops: subtract row mean, divide by row
+# std + eps, multiply by gamma, add beta. Backward is automatic via
+# the tape.
+# ---------------------------------------------------------------------------
+
+fn prom_layernorm_new(d_model, rng_state) {
+    # Initialize gamma=1, beta=0 (identity transform at init).
+    h gamma_row = [];
+    h beta_row = [];
+    h i = 0;
+    while i < d_model {
+        arr_push(gamma_row, 1.0);
+        arr_push(beta_row, 0.0);
+        i = i + 1;
+    }
+    h gamma = tape_var([gamma_row]);
+    h beta = tape_var([beta_row]);
+    h layer = dict_new();
+    dict_set(layer, "kind", "layernorm");
+    dict_set(layer, "d_model", d_model);
+    dict_set(layer, "gamma", gamma);
+    dict_set(layer, "beta", beta);
+    dict_set(layer, "eps", 1e-5);
+    dict_set(layer, "rng_state", rng_state);
+    return layer;
+}
+
+# Forward: x is [1, d_model] (single row); subtract mean, divide by
+# stable std, scale + shift. The Mean op already gives us per-tensor
+# mean; for per-row mean we use the same op since our inputs here are
+# single-row.
+fn prom_layernorm_forward(layer, x_id) {
+    h gamma = dict_get(layer, "gamma");
+    h beta = dict_get(layer, "beta");
+    h eps = dict_get(layer, "eps");
+
+    h mean_id = tape_mean(x_id);
+    # Broadcast mean as a const shaped like x; OMC's tape mul handles
+    # scalar broadcast.
+    h centered = tape_sub(x_id, mean_id);
+    h sq = tape_mul(centered, centered);
+    h variance = tape_mean(sq);
+    h std_const = tape_const(eps);
+    h denom_sq = tape_add(variance, std_const);
+    # We need sqrt(variance); use tape_pow_int(denom_sq, ...) — but
+    # pow_int can only do integer powers. Approximate sqrt via the
+    # identity sqrt(x) = x^0.5: not directly available; use exp(0.5*log(x)).
+    h log_v = tape_log(denom_sq);
+    h half = tape_const(0.5);
+    h half_log = tape_mul(log_v, half);
+    h std_inv_log = tape_neg(half_log);
+    h std_inv = tape_exp(std_inv_log);   # = 1 / sqrt(variance + eps)
+
+    h normed = tape_mul(centered, std_inv);
+    h scaled = tape_mul(normed, gamma);
+    return tape_add(scaled, beta);
+}
+
+fn prom_layernorm_params(layer) {
+    return [dict_get(layer, "gamma"), dict_get(layer, "beta")];
+}
+
+# ---------------------------------------------------------------------------
+# CRT-Fibonacci positional encoding — validated transformerless-LM win.
+#
+# Today's PyTorch experiments showed:
+#   - CRT-PE wins −5.4% on TinyShakespeare (3/3 seeds, train_scale.py)
+#   - −2.9% on distractor mix (3/3, train_distractor_mix.py)
+#   - Pairs each Fibonacci modulus with a sin/cos pair on a 2π·pos/m circle
+#
+# Same moduli as the geodesic bias for architectural coherence.
+# ---------------------------------------------------------------------------
+
+fn prom_crt_pe_matrix(seq_len, d_model) {
+    h moduli = _prom_geodesic_moduli();
+    h n_pairs = d_model / 2;
+    h table = [];
+    h pos = 0;
+    while pos < seq_len {
+        h row = [];
+        h i = 0;
+        while i < n_pairs {
+            h m = arr_get(moduli, i - (i / arr_len(moduli)) * arr_len(moduli));
+            h residue = pos - (pos / m) * m;
+            h angle = 6.283185307179586 * residue / (m * 1.0);
+            arr_push(row, sin(angle));
+            arr_push(row, cos(angle));
+            i = i + 1;
+        }
+        # If d_model is odd, pad final cell with 0.
+        if (n_pairs * 2) < d_model {
+            arr_push(row, 0.0);
+        }
+        arr_push(table, row);
+        pos = pos + 1;
+    }
+    return table;
+}
+
+# ---------------------------------------------------------------------------
+# Sequential composition — chain layers; collect params automatically.
+# ---------------------------------------------------------------------------
+
+fn prom_sequential(layers) {
+    h model = dict_new();
+    dict_set(model, "kind", "sequential");
+    dict_set(model, "layers", layers);
+    return model;
+}
+
+fn prom_sequential_forward(model, x_id) {
+    h layers = dict_get(model, "layers");
+    h cur = x_id;
+    h i = 0;
+    while i < arr_len(layers) {
+        h L = arr_get(layers, i);
+        h kind = dict_get(L, "kind");
+        if kind == "linear" { cur = prom_linear_forward(L, cur); }
+        elif kind == "embedding" { cur = prom_embedding_forward(L, cur); }
+        elif kind == "layernorm" { cur = prom_layernorm_forward(L, cur); }
+        elif kind == "attention" { cur = prom_attention_forward(L, cur); }
+        elif kind == "relu" { cur = prom_relu(cur); }
+        elif kind == "sigmoid" { cur = prom_sigmoid(cur); }
+        i = i + 1;
+    }
+    return cur;
+}
+
+# Activation pseudo-layers — let users put them inline in a Sequential.
+fn prom_relu_layer() {
+    h L = dict_new(); dict_set(L, "kind", "relu"); return L;
+}
+fn prom_sigmoid_layer() {
+    h L = dict_new(); dict_set(L, "kind", "sigmoid"); return L;
+}
+
+# Collect params from all layers (extends to embedding + layernorm too).
+fn prom_collect_params_v2(layers) {
+    h out = [];
+    h i = 0;
+    while i < arr_len(layers) {
+        h L = arr_get(layers, i);
+        h kind = dict_get(L, "kind");
+        h ps = [];
+        if kind == "linear" { ps = prom_linear_params(L); }
+        elif kind == "embedding" { ps = prom_embedding_params(L); }
+        elif kind == "layernorm" { ps = prom_layernorm_params(L); }
+        elif kind == "attention" { ps = prom_attention_params(L); }
+        h j = 0;
+        while j < arr_len(ps) {
+            arr_push(out, arr_get(ps, j));
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return out;
+}
