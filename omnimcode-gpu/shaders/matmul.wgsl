@@ -1,15 +1,12 @@
-// Naive WGSL matmul kernel.
+// Parameterized WGSL matmul kernel — workgroup tile size + inner-loop
+// body are substituted at module load time by `WgpuBackend::new_async`.
 //
-// One thread per output cell. C[i, j] = sum_k A[i, k] * B[k, j].
-// 16x16 workgroup = 256 threads per dispatch group (typical "warp"-
-// friendly size for Polaris and most GPUs we'd target).
+// The default substitution gives the standard 16×16 linear-K accumulator
+// (one thread per output cell). Other tiles (13×13, 21×21, 8×32, ...) and
+// the substrate Fib-K-stride variant come from the same template.
 //
-// Shape passed via uniform buffer (m, k, n, _pad) so we can dispatch
-// the same shader against any input dimensions.
-//
-// Performance note: this is the "ground truth" GPU kernel — no
-// tiling, no shared-memory caching. For real adoption we'd add a
-// tiled variant. The point of v0.7 is wiring; perf is v0.8.
+// Shape is passed via a small uniform buffer so we can dispatch this
+// shader against any input dimensions.
 
 struct Shape {
     m: u32,
@@ -31,8 +28,6 @@ fn matmul(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     var acc: f32 = 0.0;
-    for (var kk: u32 = 0u; kk < shape.k; kk = kk + 1u) {
-        acc = acc + a[i * shape.k + kk] * b[kk * shape.n + j];
-    }
+    // __INNER_LOOP__
     c[i * shape.n + j] = acc;
 }

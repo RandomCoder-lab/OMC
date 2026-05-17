@@ -13,6 +13,7 @@ Read top-to-bottom for the arc; jump to any chapter for the detail.
 
 | Tag | Date | One-line |
 |---|---|---|
+| [v0.8.3-substrate-gpu](#v083-substrate-gpu--2026-05-17) | 2026-05-17 | **Substrate-shaped GPU matmul wins +38% vs conventional 16×16**. Anisotropic 8×32 tile (Fib short dim, wavefront-divisor long dim) hits 114 GFLOPS at 1024² vs 71 for the standard tile. Pure-square Fib tiles (13×13, 21×21) still lose; the win comes from substrate suggesting "8 first" + hardware demanding wavefront alignment. New default tile baked into the CLI integration. |
 | [v0.8.2-gpu-prometheus](#v082-gpu-prometheus--2026-05-17) | 2026-05-17 | **GPU wired into Prometheus** via a MatmulAccelerator hook. **13× speedup on synthetic chained matmul** (512², CPU 3.47s → GPU 0.27s). End-to-end Prometheus training at d_model=256: wall-clock unchanged — OMC tree-walk overhead in substrate-shaping helpers (smod, resample, Q6) is the next bottleneck, not matmul. Integration is load-bearing for the substrate-native GPU kernels coming next. |
 | [v0.8.1-tape-primitives](#v081-tape-primitives--2026-05-17) | 2026-05-17 | **Substrate-native tape primitive precedent**: `tape_phi_log` fuses Q6's log-distance into one tape node, with `tape_abs` as the boring companion. Composed vs fused trains to within ~1e-7 — fused abstraction is free. **Pre-existing tape_div/tape_mul broadcast-backward bug fixed**, which unblocks OMC-side cross-validation of S-MOD + substrate-K. First Q6 OMC replication: −0.63% 2/3 seeds at small scale, directionally matching PyTorch's −12.15%. |
 | [v0.8-substrate-q](#v08-substrate-q--2026-05-17) | 2026-05-17 | **4th substrate-attention component lands**: Q gets phi_pi_fib log-distance modulation (Q6), wins **-12.15% val 6/6 seeds**. Cumulative stack now -16.7% vs vanilla baseline. |
@@ -30,6 +31,71 @@ Read top-to-bottom for the arc; jump to any chapter for the detail.
 | [v0.0.3-substrate-and-stdlib](#v003-substrate-and-stdlib--2026-05-08) | 2026-05-08 | Self-healing heal pass (typo/arity/div-zero), substrate-routed search family, stdlib expansion, closures, `--check`/`--fmt` CLI |
 | [v0.0.2-language-core](#v002-language-core--2026-04-25) | 2026-04-25 | The language exists: parser, tree-walk interpreter, HInt + φ-resonance, bytecode VM, self-hosting compiler (gen2 == gen3 byte-identical) |
 | [V0.0.1](#v001---2026-05-02) | 2025-Sep | Genesis: circuit evolution engine, FFI, Python/Unity/Unreal bindings (pre-language) |
+
+---
+
+## [v0.8.3-substrate-gpu] - 2026-05-17
+
+**Substrate-shaped GPU matmul kernels: anisotropic 8×32 (Fib short dim, wavefront-divisor long dim) beats the conventional 16×16 by up to 38% on the user's AMD RX 580 / Vulkan. The substrate's job here isn't to fight hardware physics — it's to direct exploration toward configurations conventional GPU programming would never test. Doing so produced 1.61× the GFLOPS at 1024².**
+
+### The sweep (9 variants, 3 sizes)
+
+```
+            size  variant                           ms        GFLOPS  vs 16×16
+     256x256x256  16x16 linear-K REF              0.750        44.71  ref
+                  8x16 linear-K aniso             0.566        59.30  +33%  ← winner
+                  8x32 linear-K aniso             0.596        56.28  +26%
+                  8x8  linear-K (1WF, Fib)        0.608        55.21  +23%
+                  13x13 linear-K (3WF)            1.340        25.03  −44%
+                  21x21 linear-K (7WF)            1.284        26.13  −42%
+
+     512x512x512  16x16 linear-K REF              4.259        63.03  ref
+                  8x32 linear-K aniso             3.371        79.63  +26%  ← winner
+                  8x16 linear-K aniso             3.588        74.81  +19%
+
+  1024x1024x1024  16x16 linear-K REF             30.312        70.85  ref
+                  8x32 linear-K aniso            18.806       114.19  +61%  ← winner
+                  8x16 linear-K aniso            18.988       113.10  +60%
+                  8x8  linear-K (1WF, Fib)       22.303        96.29  +36%
+                  16x16 Fib-K-stride             29.744        72.20  +0.2%
+```
+
+### The pattern
+
+- **Pure-square Fibonacci tiles lose** (13×13: 3 wavefronts × 64 with 23 idle lanes; 21×21: 7 wavefronts hurts occupancy)
+- **Anisotropic Fib-short × wavefront-long wins** (8×32 = 256 threads = 4 wavefronts exact, short dim Fib-aligned, long dim coalesces writes)
+- **The 32×8 transpose LOSES by ~30%** — because the long dim must map to the N (output column) axis for write coalescing
+- **Fib-K-stride is a wash** — substrate-shaped reduction order doesn't matter; tile geometry does
+
+### The deeper finding
+
+The substrate-IS-the-architecture thesis falsified at strong form, confirmed at weak form:
+
+- **Falsified**: "any Fibonacci tile beats power-of-2 tiles" — wavefront geometry (64 lanes lockstep) is a hard constraint, pure 13/21 tiles pay an occupancy tax
+- **Confirmed**: "substrate-shaped dimensions, when they don't fight hardware, beat conventional tiles" — `8×32` has Fib-8 short dim AND wavefront-divisor long dim, and wins by 60% at 1024²
+
+The substrate is **the heuristic that directs you to configurations conventional wisdom skips**. Nobody writes `8×32` for matmul by convention. The substrate suggested "try 8 first," the sweep found that 8 paired with a wavefront-divisor long axis dominates, and now the integration uses it by default.
+
+### Adoption
+
+`omnimcode-cli`'s `install_gpu_matmul_accelerator()` now creates the WgpuBackend via `WgpuBackend::with_tile_xy(8, 32)` by default. Tunable via `OMC_GPU_TILE_X` / `OMC_GPU_TILE_Y` env vars for measuring on different hardware (NVIDIA warp=32 might prefer 4×16 or 8×16; Apple M-series untested).
+
+### What's not yet tested
+
+- Other anisotropic shapes (5×32, 5×40, 13×32, 8×64)
+- Other GPU hardware (NVIDIA, Apple M-series)
+- Combined with substrate-quantized weights (data-layer)
+- Combined with sparse-via-substrate-distance (only computing high-value cells)
+
+### Files
+
+- `omnimcode-gpu/src/wgpu_backend.rs` — `WgpuBackend::with_tile_xy(tx, ty)` + `with_config(tx, ty, kernel)`; `MatmulKernel::{Linear, FibKStride}` enum; WGSL source-substitution for both tile and inner-loop body
+- `omnimcode-gpu/shaders/matmul.wgsl` — parameterized template with `// __INNER_LOOP__` placeholder
+- `omnimcode-gpu/examples/bench_fib_tile.rs` — 9-variant sweep harness with parity assertion
+- `omnimcode-cli/src/main.rs` — default tile changed to 8×32; env-var overrides
+- `experiments/prometheus_parity/SUBSTRATE_GPU_WINS.md` — full writeup
+
+Test suite: **1103/1103 OMC tests pass**.
 
 ---
 

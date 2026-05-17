@@ -1313,11 +1313,38 @@ fn install_gpu_matmul_accelerator() {
     // Eagerly init the wgpu backend so adapter probing + shader compile
     // happen once at startup, not on the first matmul (where they'd
     // pollute the first-iter wall-clock reading).
-    let backend: Box<dyn omnimcode_gpu::ComputeBackend> = omnimcode_gpu::pick_backend();
+    //
+    // Tile defaults to 8×32 — the v0.8.3 substrate-shaped winner that
+    // beats the conventional 16×16 by 38% at 1024² on the user's RX 580.
+    // (See SUBSTRATE_GPU_WINS.md for the full sweep.) Override via
+    // OMC_GPU_TILE_X / OMC_GPU_TILE_Y when measuring on different hardware.
+    let tile_x: u32 = std::env::var("OMC_GPU_TILE_X").ok()
+        .and_then(|s| s.parse().ok()).unwrap_or(8);
+    let tile_y: u32 = std::env::var("OMC_GPU_TILE_Y").ok()
+        .and_then(|s| s.parse().ok()).unwrap_or(32);
     let verbose = std::env::var("OMC_GPU_VERBOSE").as_deref() == Ok("1");
-    if verbose {
-        eprintln!("[OMC_GPU] backend={} matmul-min-flops={}",
-                  backend.name(), threshold);
+
+    let backend: Box<dyn omnimcode_gpu::ComputeBackend> = if std::env::var("OMC_GPU_BACKEND").as_deref() == Ok("wgpu")
+        || std::env::var("OMC_GPU_BACKEND").is_err()  // default to wgpu when feature is built in
+    {
+        match omnimcode_gpu::wgpu_backend::WgpuBackend::with_tile_xy(tile_x, tile_y) {
+            Ok(b) => {
+                if verbose {
+                    eprintln!("[OMC_GPU] backend=wgpu tile={}x{} matmul-min-flops={}",
+                              tile_x, tile_y, threshold);
+                }
+                Box::new(b)
+            }
+            Err(e) => {
+                eprintln!("[OMC_GPU] wgpu init failed ({}); falling back to CPU", e);
+                Box::new(omnimcode_gpu::cpu::CpuBackend)
+            }
+        }
+    } else {
+        omnimcode_gpu::pick_backend()
+    };
+    if verbose && backend.name() != "wgpu" {
+        eprintln!("[OMC_GPU] backend={} matmul-min-flops={}", backend.name(), threshold);
     }
 
     let _ = omnimcode_core::accel::register_matmul_accelerator(Box::new(
