@@ -13,6 +13,7 @@ The transformer architecture has multiple components OMC has measured against su
 | Component | Substrate variant | Result |
 |---|---|---|
 | **Attention K matrix** | **CRT-Fibonacci positional table** | **WINS −6.3% val @ multi-head × multi-block × TinyShakespeare (2/3 seeds, 10.8% fewer params)** |
+| **Attention softmax** | **S-MOD: softmax × harmonic-modulation, renormalize** | **WINS −4.27% val (stacks with substrate-K for −10.3% cumulative)** |
 | Positional encoding | CRT-Fibonacci PE | WINS −5.4% / −2.9% PyTorch |
 | Geodesic attention bias | additive position-distance bias | WINS 3/3 seeds (PyTorch, single-block) |
 | OOD detection | HBit cross-cutting tension | WINS AUROC 1.0 |
