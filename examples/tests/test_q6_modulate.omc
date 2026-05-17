@@ -1,0 +1,85 @@
+# Verifies the two Q6 modulation paths inside prom_q6_modulate are
+# mathematically equivalent: composed (tape_abs+tape_log+denom) and
+# fused (tape_phi_log) must give identical forward values AND identical
+# gradients flowing back into Q.
+
+import "examples/lib/prometheus.omc";
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+
+fn approx_eq(a, b, tol) {
+    h d = a - b;
+    if d < 0.0 { d = 0.0 - d; }
+    return d <= tol;
+}
+
+fn approx_eq_mat(a, b, tol, msg) {
+    h rows = arr_len(a);
+    h i = 0;
+    while i < rows {
+        h ra = arr_get(a, i);
+        h rb = arr_get(b, i);
+        h j = 0;
+        while j < arr_len(ra) {
+            h va = arr_get(ra, j);
+            h vb = arr_get(rb, j);
+            if !approx_eq(va, vb, tol) {
+                test_record_failure(msg + " mismatch at [" + to_string(i) + "][" + to_string(j) + "]: " + to_string(va) + " vs " + to_string(vb));
+                return;
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+}
+
+fn test_q6_off_is_identity() {
+    tape_reset();
+    h q = tape_var([[0.3, 0.7], [1.2, 0.0 - 0.5]]);
+    h y = prom_q6_modulate(q, 10.0, 0.5, "off");
+    assert_true(q == y, "off mode returns q unchanged");
+}
+
+fn test_q6_composed_equals_fused_forward() {
+    tape_reset();
+    h q_data = [[0.3, 0.7], [1.2, 0.0 - 0.5]];
+    h qa = tape_var(q_data);
+    h qb = tape_var(q_data);
+    h ya = prom_q6_modulate(qa, 10.0, 0.5, "composed");
+    h yb = prom_q6_modulate(qb, 10.0, 0.5, "fused");
+    h va = tape_value(ya);
+    h vb = tape_value(yb);
+    approx_eq_mat(va, vb, 1e-9, "composed vs fused forward");
+}
+
+fn test_q6_composed_equals_fused_backward() {
+    tape_reset();
+    h q_data = [[0.3, 0.7], [1.2, 0.0 - 0.5]];
+    h qa = tape_var(q_data);
+    h qb = tape_var(q_data);
+    h ya = prom_q6_modulate(qa, 10.0, 0.5, "composed");
+    h yb = prom_q6_modulate(qb, 10.0, 0.5, "fused");
+    h sa = tape_sum(ya);
+    h sb = tape_sum(yb);
+    tape_backward(sa);
+    tape_backward(sb);
+    h ga = tape_grad(qa);
+    h gb = tape_grad(qb);
+    approx_eq_mat(ga, gb, 1e-9, "composed vs fused backward");
+}
+
+fn test_q6_dampens_large_magnitudes() {
+    # Verify the modulation actually suppresses large |q| values (the
+    # whole point of Q6). With scale=10, γ=0.5, modulator at q=0.05
+    # should leave q nearly intact; at q=2.0 it should dampen much harder.
+    tape_reset();
+    h q = tape_var([[0.05, 2.0]]);
+    h y = prom_q6_modulate(q, 10.0, 0.5, "fused");
+    # 1-row matrices come back as a 1D array.
+    h row = tape_value(y);
+    h v_small = arr_get(row, 0);
+    h v_big   = arr_get(row, 1);
+    h ratio_small = v_small / 0.05;
+    h ratio_big   = v_big / 2.0;
+    assert_true(ratio_small > ratio_big, "small q dampened less than big q");
+}

@@ -13,6 +13,7 @@ Read top-to-bottom for the arc; jump to any chapter for the detail.
 
 | Tag | Date | One-line |
 |---|---|---|
+| [v0.8.1-tape-primitives](#v081-tape-primitives--2026-05-17) | 2026-05-17 | **Substrate-native tape primitive precedent**: `tape_phi_log` fuses Q6's log-distance into one tape node, with `tape_abs` as the boring companion. Composed vs fused trains to within ~1e-7 — fused abstraction is free. **Pre-existing tape_div/tape_mul broadcast-backward bug fixed**, which unblocks OMC-side cross-validation of S-MOD + substrate-K. First Q6 OMC replication: −0.63% 2/3 seeds at small scale, directionally matching PyTorch's −12.15%. |
 | [v0.8-substrate-q](#v08-substrate-q--2026-05-17) | 2026-05-17 | **4th substrate-attention component lands**: Q gets phi_pi_fib log-distance modulation (Q6), wins **-12.15% val 6/6 seeds**. Cumulative stack now -16.7% vs vanilla baseline. |
 | [v0.7-gpu-scaffold](#v07-gpu-scaffold--2026-05-17) | 2026-05-17 | GPU compute scaffold: `omnimcode-gpu` crate with wgpu (Vulkan) backend, ROCm/CUDA stubs. **4.04× speedup verified on the user's AMD RX 580** via Vulkan (no ROCm pain). |
 | [v0.6-fibtier-memory](#v06-fibtier-memory--2026-05-17) | 2026-05-17 | Fibtier-bounded eviction for memory: cap the index at fibonacci-tier capacity (default 232), evicted entries still recoverable by hash. Memory now safe for arbitrarily long agent sessions. |
@@ -28,6 +29,52 @@ Read top-to-bottom for the arc; jump to any chapter for the detail.
 | [v0.0.3-substrate-and-stdlib](#v003-substrate-and-stdlib--2026-05-08) | 2026-05-08 | Self-healing heal pass (typo/arity/div-zero), substrate-routed search family, stdlib expansion, closures, `--check`/`--fmt` CLI |
 | [v0.0.2-language-core](#v002-language-core--2026-04-25) | 2026-04-25 | The language exists: parser, tree-walk interpreter, HInt + φ-resonance, bytecode VM, self-hosting compiler (gen2 == gen3 byte-identical) |
 | [V0.0.1](#v001---2026-05-02) | 2025-Sep | Genesis: circuit evolution engine, FFI, Python/Unity/Unreal bindings (pre-language) |
+
+---
+
+## [v0.8.1-tape-primitives] - 2026-05-17
+
+**Two new tape autograd primitives + a latent backward-broadcast bug fix. The substrate-native `tape_phi_log` is mathematically equivalent to the boring composed reference and trains to within ~1e-7 of it — the substrate-native abstraction is free. The broadcast-backward fix unblocks S-MOD + substrate-K end-to-end training in OMC for the first time.**
+
+### What's new
+
+- **`tape_abs(x)`** — element-wise |x|, the obvious-but-missing PyTorch-parity primitive.
+- **`tape_phi_log(x, scale=10.0)`** — fused `ln(|x · scale| + 1) / (π · ln φ)`. One tape node instead of four. Defined at zero (boring `tape_log(0)` returns -∞). Substrate basis (π·ln φ) visible at the AST level rather than buried in a scalar constant.
+- **`prom_q6_modulate(q, scale, gamma, mode)`** — dispatches Q6 modulation through `"off"`, `"composed"` (boring `tape_abs` + `tape_log` + scalar denom), or `"fused"` (`tape_phi_log`).
+- **`q6_mode` field on `prom_attention_substrate_k_*`** — opt-in (default `"off"` for backward compat) for the substrate-K layer.
+
+### Broadcast-backward fix (the real load-bearing fix)
+
+`tape_div` and `tape_mul` backwards were panicking with col-broadcast denominators (`bv.cols == 1`) — the `prom_substrate_softmax` α>0 path ends in `tape_div(attn_unnorm[N, N], row_sums[N, 1])` and indexed out-of-bounds during backward. This meant **S-MOD + substrate-K had never actually trained end-to-end in OMC**; it would panic at first backward.
+
+Fix: both backwards now iterate the output (dy) shape, reduce indices against each operand's actual extent, and sum contributions across broadcast axes. This is the correct broadcast-aware backward.
+
+### A/B result: substrate-native primitive is exact
+
+`examples/prometheus_q6_ab.omc`, substrate-K transformer, seq_len=6, d_model=8, ff_dim=16, 80 AdamW steps, 3 seeds:
+
+| | mean val | Δ vs off | composed − fused |
+|---|--:|--:|--:|
+| off (no Q6) | 2.5692 | — | — |
+| composed Q6 | 2.5530 | −0.0162 (−0.63%) | — |
+| fused Q6    | 2.5530 | −0.0162 (−0.63%) | **1.2 × 10⁻⁷** |
+
+Composed and fused agree to ~1e-7 after 80 forward+backward AdamW steps — floating-point accumulation noise floor. **The substrate-native primitive matches the boring composed reference exactly under actual training.** Q6 itself wins 2/3 seeds at this tiny scale, directionally consistent with PyTorch's −12.15% 6/6 seeds at TinyShakespeare L1-MH.
+
+### What this opens up
+
+`tape_phi_log` is the precedent. Future substrate-native primitives can be slotted in the same way: composed reference + fused alternative + A/B at the unit + training levels. Candidates: `tape_substrate_resample`, `tape_attractor_snap`, attractor-modulated-backward `tape_phi_log_v2`.
+
+### Files
+
+- `omnimcode-core/src/interpreter.rs` — `TapeOp::Abs`, `TapeOp::PhiLog(usize, f64)`, broadcast-aware Mul/Div backward
+- `examples/lib/prometheus.omc` — `prom_q6_modulate` + `q6_mode` field
+- `examples/prometheus_q6_ab.omc` — A/B harness
+- `examples/tests/test_tape_abs_phi_log.omc` — 12 primitive unit tests
+- `examples/tests/test_q6_modulate.omc` — 4 modulation-dispatch tests
+- `experiments/prometheus_parity/TAPE_PRIMITIVES_AB.md` — full writeup
+
+Test suite: **1103/1103 pass** after these additions and the broadcast-backward fix.
 
 ---
 

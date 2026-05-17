@@ -1,0 +1,155 @@
+# Tests for tape_abs (boring PyTorch-parity primitive) and tape_phi_log
+# (substrate-native fused log_φπfib(|x·scale| + 1)).
+#
+# Verifies forward values and backward gradients match analytic formulas.
+# The two ops are designed so that composed-vs-fused gives the same Q6
+# attention modulation result — these tests lock in that mathematical
+# equivalence at the unit level.
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+
+fn approx_eq(a, b, tol) {
+    h d = a - b;
+    if d < 0.0 { d = 0.0 - d; }
+    return d <= tol;
+}
+
+# -----------------------------------------------------------------
+# tape_abs forward + backward
+# -----------------------------------------------------------------
+
+fn test_abs_forward_positive() {
+    tape_reset();
+    h x = tape_var(3.0);
+    h y = tape_abs(x);
+    h v = tape_value(y);
+    assert_true(approx_eq(v, 3.0, 1e-9), "|3|=3");
+}
+
+fn test_abs_forward_negative() {
+    tape_reset();
+    h x = tape_var(0.0 - 4.5);
+    h y = tape_abs(x);
+    h v = tape_value(y);
+    assert_true(approx_eq(v, 4.5, 1e-9), "|-4.5|=4.5");
+}
+
+fn test_abs_backward_positive() {
+    tape_reset();
+    h x = tape_var(2.0);
+    h y = tape_abs(x);
+    tape_backward(y);
+    # d|x|/dx at x>0 is +1
+    assert_true(approx_eq(tape_grad(x), 1.0, 1e-9), "sign(2)=+1");
+}
+
+fn test_abs_backward_negative() {
+    tape_reset();
+    h x = tape_var(0.0 - 7.0);
+    h y = tape_abs(x);
+    tape_backward(y);
+    # d|x|/dx at x<0 is -1
+    assert_true(approx_eq(tape_grad(x), 0.0 - 1.0, 1e-9), "sign(-7)=-1");
+}
+
+fn test_abs_chained_with_square() {
+    # y = |x|^2 = x^2 → dy/dx = 2x
+    tape_reset();
+    h x = tape_var(0.0 - 3.0);
+    h ax = tape_abs(x);
+    h y = tape_mul(ax, ax);
+    tape_backward(y);
+    # 2*(-3) = -6
+    assert_true(approx_eq(tape_grad(x), 0.0 - 6.0, 1e-6), "d(|x|^2)/dx at -3");
+}
+
+# -----------------------------------------------------------------
+# tape_phi_log forward + backward
+# -----------------------------------------------------------------
+
+# Reference formula: y = ln(|x·scale|+1) / (π · ln φ)
+# At x=1, scale=10:  ln(11)/( π · ln 1.618 ) = ln(11)/(π · 0.4812) ≈ 2.3979/1.5119 ≈ 1.5861
+
+fn test_phi_log_forward_default_scale() {
+    tape_reset();
+    h x = tape_var(1.0);
+    h y = tape_phi_log(x);   # default scale = 10.0
+    h v = tape_value(y);
+    assert_true(approx_eq(v, 1.5861, 1e-3), "phi_log(1, default)");
+}
+
+fn test_phi_log_forward_explicit_scale() {
+    tape_reset();
+    h x = tape_var(1.0);
+    h y = tape_phi_log(x, 1.0);
+    h v = tape_value(y);
+    # ln(2)/(π · ln φ) = 0.6931/1.5119 ≈ 0.4585
+    assert_true(approx_eq(v, 0.4585, 1e-3), "phi_log(1, 1.0)");
+}
+
+fn test_phi_log_zero_is_defined() {
+    # tape_log(0) blows up; tape_phi_log(0) = ln(1)/(π·ln φ) = 0.
+    # This is the substrate-native primitive's edge-case advantage.
+    tape_reset();
+    h x = tape_var(0.0);
+    h y = tape_phi_log(x);
+    h v = tape_value(y);
+    assert_true(approx_eq(v, 0.0, 1e-9), "phi_log(0) defined");
+}
+
+fn test_phi_log_negative_uses_abs() {
+    tape_reset();
+    h a = tape_var(1.0);
+    h b = tape_var(0.0 - 1.0);
+    h ya = tape_phi_log(a, 1.0);
+    h yb = tape_phi_log(b, 1.0);
+    # Both should give ln(2)/(π·ln φ) — sign drops via |·|.
+    assert_true(approx_eq(tape_value(ya), tape_value(yb), 1e-9), "|·| symmetry");
+}
+
+# Backward analytic check:
+# dy/dx = scale · sign(x) / ((|x·scale|+1) · π · ln φ)
+# At x=1, scale=10: 10·1 / (11 · 1.5119) = 10/16.631 ≈ 0.6013
+
+fn test_phi_log_backward_positive() {
+    tape_reset();
+    h x = tape_var(1.0);
+    h y = tape_phi_log(x);
+    tape_backward(y);
+    assert_true(approx_eq(tape_grad(x), 0.6013, 1e-3), "dy/dx at x=1, scale=10");
+}
+
+fn test_phi_log_backward_negative() {
+    tape_reset();
+    h x = tape_var(0.0 - 1.0);
+    h y = tape_phi_log(x);
+    tape_backward(y);
+    # Same magnitude, opposite sign.
+    assert_true(approx_eq(tape_grad(x), 0.0 - 0.6013, 1e-3), "dy/dx at x=-1");
+}
+
+# -----------------------------------------------------------------
+# Composed-vs-fused equivalence — the key A/B precondition.
+# Q6 modulation can be written either way; both must yield the same
+# value and the same gradient.
+# -----------------------------------------------------------------
+
+fn test_composed_equals_fused_forward() {
+    tape_reset();
+    h x = tape_var(0.5);
+
+    # Composed: ln(|x*10|+1) / (π · ln φ)
+    h ten = tape_const(10.0);
+    h xs = tape_mul(x, ten);
+    h ax = tape_abs(xs);
+    h one = tape_const(1.0);
+    h ax1 = tape_add(ax, one);
+    h lx = tape_log(ax1);
+    h denom = tape_const(3.141592653589793 * 0.4812118250596035);  # π · ln φ
+    h composed = tape_div(lx, denom);
+
+    h fused = tape_phi_log(x);  # default scale = 10
+
+    assert_true(approx_eq(tape_value(composed), tape_value(fused), 1e-6),
+                "composed == fused forward");
+}

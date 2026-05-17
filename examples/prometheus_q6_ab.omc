@@ -1,0 +1,216 @@
+# Q6 substrate-modulation A/B in pure-OMC Prometheus.
+#
+# Trains the substrate-K transformer three ways:
+#   "off"      → Q passes through unmodulated (baseline)
+#   "composed" → Q6 via tape_abs + tape_log + scalar denom
+#   "fused"    → Q6 via tape_phi_log (substrate-native primitive)
+#
+# Composed and fused are mathematically equivalent (test_q6_modulate.omc
+# locks that in at the unit level). The end-to-end training comparison
+# answers a different question: does the fused primitive give identical
+# results once thousands of forward/backward passes have accumulated, or
+# does abstraction cost (allocation patterns, accumulation order) show up
+# at training time?
+#
+# Both Q6 paths compared to "off" also gives an OMC-side cross-validation
+# of the PyTorch -12.15% Q6 finding at small scale.
+
+import "examples/lib/prometheus.omc";
+
+fn build_vocab(text) {
+    h seen = dict_new();
+    h chars = [];
+    h i = 0;
+    while i < str_len(text) {
+        h ch = str_slice(text, i, i + 1);
+        if !dict_has(seen, ch) {
+            dict_set(seen, ch, arr_len(chars));
+            arr_push(chars, ch);
+        }
+        i = i + 1;
+    }
+    h v = dict_new();
+    dict_set(v, "chars", chars);
+    dict_set(v, "lookup", seen);
+    return v;
+}
+
+fn encode(text, vocab) {
+    h lookup = dict_get(vocab, "lookup");
+    h ids = [];
+    h i = 0;
+    while i < str_len(text) {
+        h ch = str_slice(text, i, i + 1);
+        arr_push(ids, dict_get(lookup, ch));
+        i = i + 1;
+    }
+    return ids;
+}
+
+fn build_model(q6_mode, vocab_size, d_model, ff_dim, seq_len, seed) {
+    h emb = prom_embedding_new(vocab_size, d_model, seed);
+    h s1 = dict_get(emb, "rng_state");
+    h attn = prom_attention_substrate_k_new(d_model, seq_len, s1 + 11);
+    dict_set(attn, "q6_mode", q6_mode);
+    h s2 = dict_get(attn, "rng_state");
+    h ln1 = prom_layernorm_new(d_model, s2);
+    h ff_up = prom_linear_new(d_model, ff_dim, s2 + 13);
+    h s3 = dict_get(ff_up, "rng_state");
+    h ff_down = prom_linear_new(ff_dim, d_model, s3);
+    h s4 = dict_get(ff_down, "rng_state");
+    h ln2 = prom_layernorm_new(d_model, s4);
+    h head = prom_linear_new(d_model, vocab_size, s4 + 17);
+    h m = dict_new();
+    dict_set(m, "q6_mode", q6_mode);
+    dict_set(m, "emb", emb);
+    dict_set(m, "attn", attn);
+    dict_set(m, "ln1", ln1);
+    dict_set(m, "ff_up", ff_up);
+    dict_set(m, "ff_down", ff_down);
+    dict_set(m, "ln2", ln2);
+    dict_set(m, "head", head);
+    return m;
+}
+
+fn forward_window(model, token_ids, pe_table) {
+    h x = prom_embedding_batch(dict_get(model, "emb"), token_ids);
+    h pe_rows = [];
+    h i = 0;
+    while i < arr_len(token_ids) {
+        arr_push(pe_rows, arr_get(pe_table, i));
+        i = i + 1;
+    }
+    h pe_const = tape_const(pe_rows);
+    x = tape_add(x, pe_const);
+    h attn_out = prom_attention_substrate_k_forward(dict_get(model, "attn"), x);
+    h x_post_attn = tape_add(x, attn_out);
+    h normed1 = prom_layernorm_forward(dict_get(model, "ln1"), x_post_attn);
+    h up = prom_linear_forward(dict_get(model, "ff_up"), normed1);
+    h activated = prom_relu(up);
+    h down = prom_linear_forward(dict_get(model, "ff_down"), activated);
+    h x_post_ff = tape_add(x_post_attn, down);
+    h normed2 = prom_layernorm_forward(dict_get(model, "ln2"), x_post_ff);
+    return prom_linear_forward(dict_get(model, "head"), normed2);
+}
+
+fn collect_all_params(model) {
+    h attn_p = prom_attention_substrate_k_params(dict_get(model, "attn"));
+    h other = prom_collect_params_v2([
+        dict_get(model, "emb"),
+        dict_get(model, "ln1"),
+        dict_get(model, "ff_up"),
+        dict_get(model, "ff_down"),
+        dict_get(model, "ln2"),
+        dict_get(model, "head"),
+    ]);
+    h out = [];
+    h i = 0;
+    while i < arr_len(attn_p) { arr_push(out, arr_get(attn_p, i)); i = i + 1; }
+    i = 0;
+    while i < arr_len(other) { arr_push(out, arr_get(other, i)); i = i + 1; }
+    return out;
+}
+
+fn train_arm(q6_mode, vocab_size, ids, seq_len, d_model, ff_dim, lr, steps, seed) {
+    tape_reset();
+    h model = build_model(q6_mode, vocab_size, d_model, ff_dim, seq_len, seed);
+    h params = collect_all_params(model);
+    h opt = prom_adamw_new(params, lr, 0.9, 0.999, 1e-8, 0.0);
+    h pe_table = prom_crt_pe_matrix(seq_len, d_model);
+    h n_windows = arr_len(ids) - seq_len - 1;
+
+    h tail_losses = [];
+    h step = 0;
+    while step < steps {
+        h start = step - (step / n_windows) * n_windows;
+        h window = [];
+        h targets = [];
+        h k = 0;
+        while k < seq_len {
+            arr_push(window, arr_get(ids, start + k));
+            arr_push(targets, arr_get(ids, start + k + 1));
+            k = k + 1;
+        }
+        h logits = forward_window(model, window, pe_table);
+        h loss = prom_cross_entropy_batch(logits, targets, vocab_size);
+        tape_backward(loss);
+        prom_adamw_step(opt);
+        if step >= steps - 10 { arr_push(tail_losses, tape_value(loss)); }
+        step = step + 1;
+    }
+    h sum = 0.0;
+    h i = 0;
+    while i < arr_len(tail_losses) { sum = sum + arr_get(tail_losses, i); i = i + 1; }
+    return sum / arr_len(tail_losses);
+}
+
+fn mean_arr(xs) {
+    h sum = 0.0;
+    h i = 0;
+    while i < arr_len(xs) { sum = sum + arr_get(xs, i); i = i + 1; }
+    return sum / arr_len(xs);
+}
+
+fn main() {
+    print("=== OMC Q6 A/B (off vs composed vs fused) ===");
+    h text = "the rain in spain falls mainly on the plain and the sun rises in the east while the moon hides behind the mountain peaks of distant lands where ancient creatures sleep in caves of silver";
+    h vocab = build_vocab(text);
+    h vocab_size = arr_len(dict_get(vocab, "chars"));
+    h ids = encode(text, vocab);
+    h seq_len = 6;
+    h d_model = 8;
+    h ff_dim = 16;
+    h lr = 0.01;
+    h steps = 80;
+    h seeds = [42, 7, 123];
+
+    print(concat_many("vocab: ", to_string(vocab_size),
+        "  seq_len: ", to_string(seq_len),
+        "  d_model: ", to_string(d_model),
+        "  ff: ", to_string(ff_dim),
+        "  steps: ", to_string(steps),
+        "  seeds: ", to_string(arr_len(seeds))));
+    print("");
+
+    h off_losses = [];
+    h composed_losses = [];
+    h fused_losses = [];
+
+    h s = 0;
+    while s < arr_len(seeds) {
+        h seed = arr_get(seeds, s);
+        print(concat_many("seed=", to_string(seed)));
+
+        h loff = train_arm("off", vocab_size, ids, seq_len, d_model, ff_dim, lr, steps, seed);
+        h lcomp = train_arm("composed", vocab_size, ids, seq_len, d_model, ff_dim, lr, steps, seed);
+        h lfus = train_arm("fused", vocab_size, ids, seq_len, d_model, ff_dim, lr, steps, seed);
+
+        print(concat_many("  off=     ", to_string(loff)));
+        print(concat_many("  composed=", to_string(lcomp)));
+        print(concat_many("  fused=   ", to_string(lfus)));
+
+        arr_push(off_losses, loff);
+        arr_push(composed_losses, lcomp);
+        arr_push(fused_losses, lfus);
+        s = s + 1;
+    }
+
+    print("");
+    print("=== aggregate ===");
+    h moff = mean_arr(off_losses);
+    h mcomp = mean_arr(composed_losses);
+    h mfus = mean_arr(fused_losses);
+    print(concat_many("mean off=     ", to_string(moff)));
+    print(concat_many("mean composed=", to_string(mcomp), "   Δ vs off: ", to_string(mcomp - moff)));
+    print(concat_many("mean fused=   ", to_string(mfus),  "   Δ vs off: ", to_string(mfus - moff)));
+    print(concat_many("composed vs fused divergence: ", to_string(mfus - mcomp)));
+    print("");
+    print("Interpretation:");
+    print("  | composed - fused | small (~1e-6) → fused primitive matches math (expected)");
+    print("  Q6 modes vs off → does Q6 help at small scale in OMC?");
+    print("  PyTorch-side -12.15% baseline was at multi-head TinyShakespeare; small-scale");
+    print("  single-head OMC may show smaller or noisier signal — what we want to confirm");
+    print("  is that the fused path doesn't introduce its own training-time divergence.");
+}
+
+main();

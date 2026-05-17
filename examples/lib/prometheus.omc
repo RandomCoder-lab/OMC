@@ -801,6 +801,15 @@ fn prom_attention_substrate_k_new(d_model, seq_len, rng_state) {
     # seeds (-2.52% val on top of S-MOD α=1.0) on TinyShakespeare L1-MH.
     # scale=0.0 disables. Sweep candidate; not yet tuned.
     dict_set(layer, "v_resample_scale", 10.0);
+    # Q6 substrate-modulation: q ← q * exp(-γ · log_φπfib(|q·scale|+1)).
+    # PyTorch parity confirmed -12.15% val 6/6 seeds at L1-MH. Mode picks
+    # between the composed (tape_abs + tape_log) and fused (tape_phi_log)
+    # primitive paths — they are mathematically equivalent, so a divergence
+    # at training time pinpoints the cost of the abstraction. "off"
+    # disables (legacy behavior).
+    dict_set(layer, "q6_mode", "off");
+    dict_set(layer, "q6_scale", 10.0);
+    dict_set(layer, "q6_gamma", 0.5);
     dict_set(layer, "rng_state", dict_get(V, "state"));
     return layer;
 }
@@ -814,8 +823,19 @@ fn prom_attention_substrate_k_forward(layer, x_id) {
     # loaded from checkpoints predating substrate-V won't have it.
     h v_scale = dict_get(layer, "v_resample_scale");
     if v_scale == null { v_scale = 0.0; }
+    h q6_mode = dict_get(layer, "q6_mode");
+    if q6_mode == null { q6_mode = "off"; }
+    h q6_scale = dict_get(layer, "q6_scale");
+    if q6_scale == null { q6_scale = 10.0; }
+    h q6_gamma = dict_get(layer, "q6_gamma");
+    if q6_gamma == null { q6_gamma = 0.5; }
 
     h q = tape_matmul(x_id, Q_w);
+    # Q6 substrate-modulation on the projected Q. The two modes are
+    # mathematically equivalent — the divergence under the optimizer is
+    # what we measure.
+    h q_mod = prom_q6_modulate(q, q6_scale, q6_gamma, q6_mode);
+
     h v_raw = tape_matmul(x_id, V_w);
     # Substrate-resample post-projection (v_scale=0.0 → identity).
     h v = prom_substrate_resample(v_raw, v_scale);
@@ -823,11 +843,59 @@ fn prom_attention_substrate_k_forward(layer, x_id) {
     # K is the substrate (CRT-PE table). No learnable params on K side.
     h k = tape_const(K_const);
     h kt = tape_transpose(k);
-    h scores = tape_matmul(q, kt);
+    h scores = tape_matmul(q_mod, kt);
 
     # Substrate-modulated softmax (smod_alpha=0.0 falls back to standard).
     h attn = prom_substrate_softmax(scores, smod_alpha);
     return tape_matmul(attn, v);
+}
+
+# ---------------------------------------------------------------------------
+# Q6 modulation: q_full = q * exp(-γ · log_φπfib(|q·scale|+1))
+#
+# Three modes:
+#   "off"      → identity (legacy behavior)
+#   "composed" → tape_abs + tape_log + scalar denom (boring PyTorch-parity)
+#   "fused"    → tape_phi_log (substrate-native fused op)
+#
+# The composed and fused paths compute identical forward values (verified by
+# test_composed_equals_fused_forward) and propagate identical analytic
+# gradients. Any training-time divergence between them comes from rounding
+# accumulation, allocation patterns, or AdamW interactions — NOT from the
+# math. Measuring that divergence is exactly what the A/B is for.
+# ---------------------------------------------------------------------------
+
+fn _prom_q6_log_distance_composed(q_id, scale) {
+    # ln(|q · scale| + 1) / (π · ln φ)
+    h scale_c = tape_const(scale);
+    h qs = tape_mul(q_id, scale_c);
+    h qs_abs = tape_abs(qs);
+    h one = tape_const(1.0);
+    h qs_abs1 = tape_add(qs_abs, one);
+    h ln_qs = tape_log(qs_abs1);
+    # π · ln φ = 3.14159... · 0.481211... ≈ 1.511919...
+    h denom = tape_const(1.5119192540204373);
+    return tape_div(ln_qs, denom);
+}
+
+fn _prom_q6_modulation_from_log_d(log_d_id, gamma) {
+    # exp(-γ · log_d)
+    h neg_gamma = tape_const(0.0 - gamma);
+    h scaled = tape_mul(neg_gamma, log_d_id);
+    return tape_exp(scaled);
+}
+
+fn prom_q6_modulate(q_id, scale, gamma, mode) {
+    if mode == "off" { return q_id; }
+    h log_d = null;
+    if mode == "fused" {
+        log_d = tape_phi_log(q_id, scale);
+    } else {
+        # "composed" (or any unrecognized mode falls through to the boring path)
+        log_d = _prom_q6_log_distance_composed(q_id, scale);
+    }
+    h modulation = _prom_q6_modulation_from_log_d(log_d, gamma);
+    return tape_mul(q_id, modulation);
 }
 
 # L2: substrate K + Q. Only V is learned.
