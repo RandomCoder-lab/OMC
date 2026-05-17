@@ -2,6 +2,254 @@
 
 All notable changes to OMNIcode will be documented in this file.
 
+The release timeline is structured as **annotated tags** carrying chapter
+summaries — start at the earliest tag and read forward to follow the
+shape of how OMC got here. Each tag's `git show <tag>` is its
+chapter; the per-version sections below mirror those messages.
+
+## Release timeline
+
+Read top-to-bottom for the arc; jump to any chapter for the detail.
+
+| Tag | Date | One-line |
+|---|---|---|
+| [v0.2-ergonomics](#v02-ergonomics--2026-05-17) | 2026-05-17 | OMC becomes forgiving: Python-idiom builtins, `+=`, friendly errors with traces, 11 heal classes total |
+| [v0.1-substrate-attention](#v01-substrate-attention--2026-05-17) | 2026-05-17 | Three substrate-component swaps inside transformer attention (K, S-MOD softmax, V) stack to −8.94% val on TinyShakespeare |
+| [v0.0.6-prometheus](#v006-prometheus--2026-05-16) | 2026-05-16 | Substrate-native ML framework in pure OMC: tape autograd, AdamW, attention, multi-block transformer. First substrate-K (L1) wins land. Ends with the two-agent demo |
+| [v0.0.5-codec-kernel-protocol](#v005-codec-kernel-protocol--2026-05-15) | 2026-05-15 | Substrate codec, content-addressed `omc-kernel`, `omc-grep`, OMC-PROTOCOL v1 wire format, substrate-aware tokenizer |
+| [v0.0.4-jit-and-dual-band](#v004-jit-and-dual-band--2026-05-13) | 2026-05-13 | LLVM-18 JIT, dual-band `<2 x i64>` SSE2 codegen, harmony-gated branch elision, array support, NSL-KDD wall-clock honest negative |
+| [v0.0.3-substrate-and-stdlib](#v003-substrate-and-stdlib--2026-05-08) | 2026-05-08 | Self-healing heal pass (typo/arity/div-zero), substrate-routed search family, stdlib expansion, closures, `--check`/`--fmt` CLI |
+| [v0.0.2-language-core](#v002-language-core--2026-04-25) | 2026-04-25 | The language exists: parser, tree-walk interpreter, HInt + φ-resonance, bytecode VM, self-hosting compiler (gen2 == gen3 byte-identical) |
+| [V0.0.1](#v001---2026-05-02) | 2025-Sep | Genesis: circuit evolution engine, FFI, Python/Unity/Unreal bindings (pre-language) |
+
+---
+
+## [v0.2-ergonomics] - 2026-05-17
+
+**OMC becomes forgiving: a Python user can sit down and write code without a manual.**
+
+### What changed
+
+- **Python-idiom builtins**: `len()` polymorphic over array/string/dict/null; `range(start, end, step)` with negative step; `getenv(name, default)`; `to_hex` / `from_hex` round-trip; `parse_int` / `parse_float` aliases.
+- **Negative array indexing** (Python-style): `xs[-1]`, `arr_get(xs, -1)`, `arr_set(xs, -1, v)` all work. Out-of-bounds errors now name the array, report length, and hint at `safe_arr_get` for wrap-around.
+- **Compound assignment**: `+=`, `-=`, `*=`, `/=`, `%=` desugared at parse time. Single-line parser change, no runtime impact.
+- **For-loop iterables expanded**: `for k in dict` iterates keys; `for c in string` iterates chars. Anything else errors with `for-loop: cannot iterate over <type>` instead of silently no-op'ing.
+- **Self-healing pass**: two new classes — `null_arith` (`null + 5` → `0 + 5`) and `if_numeric` (`if 0 { ... }` flagged as constant branch). 11 heal classes total.
+- **Did-you-mean for undefined variables** mirroring the existing function-typo hint. Substrate-bucketed close-name lookup over the current scope.
+- **Cross-container hints**: `arr_get(some_dict, k)` suggests `dict_get(d, key)`; symmetric for `dict_get(arr, k)`.
+- **Parser hints**: `h h = 1` → `'h' is a reserved keyword; can't use it as a variable name. Try \`hval\``. `if x = 5 { ... }` → `did you mean ==?`. Generic "Unexpected token" gets actionable messages for `=` / `;` / `)` / `}` / `,` / `else` / `catch`.
+- **Runtime errors carry call-stack traces** in the CLI: `Error: ...\n  at fn_name (line:col)`.
+- **Type-mismatch errors report received type**: `arr_get: first argument must be an array (got dict; did you mean dict_get(d, key)?)`.
+
+### Why it matters
+
+The most common bites a Python user hit on first contact — cryptic `{:?}` token names in parser errors, no `+=`, silent no-op `for k in dict`, undefined-variable errors with no suggestion — are gone. The language now lives up to its "forgiving by default" pitch instead of just promising it.
+
+### What's now possible that wasn't before
+
+- A new user can write OMC reaching for Python intuitions (`len(d)`, `range(0, 10, 2)`, `x += 1`, `for key in scores`) and have it Just Work.
+- Runtime errors are debuggable from the error message alone, including the call chain.
+- Mistakes that previously surfaced as silent nulls or cryptic type errors now surface as actionable hints at the right layer (parser vs heal-pass vs runtime).
+
+### Tests
+
++29 new Rust tests (heal_pass.rs + error_quality.rs), +28 new OMC tests (test_ergonomics.omc). Final: 213 Rust pass, 1073/1076 OMC pass (3 pre-existing failures from `--test` bypassing heal).
+
+### Commits in this chapter
+
+`13b1332` Error handling: heal classes, Python-idiom builtins, friendly errors  ·  `b2bdd5d` Cross-container hints + for-loop over dict/string  ·  `e9009ee` Compound assignment operators  ·  `a1027b1` CLI: decorate runtime errors with call-stack trace
+
+---
+
+## [v0.1-substrate-attention] - 2026-05-17
+
+**Three substrate-component swaps inside transformer attention stack to −8.94% val on TinyShakespeare.**
+
+The substrate-attention thesis — that the K matrix, attention softmax, and V projection can each be replaced by substrate-derived alternatives that match or beat learned components — finally lands as a stack. None of these wins are individually new (substrate-K wins single-head; CRT-PE wins; harmony-gated attention wins); the chapter's point is that they **stack inside one transformer block** at TinyShakespeare scale.
+
+### What changed
+
+Three independent substrate replacements, each measured against the prior baseline and each winning:
+
+- **Substrate-K** (commit `1462d45`, see [`SUBSTRATE_K_FINDING.md`](experiments/prometheus_parity/SUBSTRATE_K_FINDING.md)) — replace the learned `W_K` matrix with the CRT-Fibonacci positional table. K becomes structurally pre-built; Q and V stay learned. **−6.3% val** at multi-head TinyShakespeare scale (2/3 seeds), with ~10% fewer attention parameters.
+
+- **S-MOD softmax** (commit `761180f`, see [`SUBSTRATE_SOFTMAX_FINDING.md`](experiments/prometheus_parity/SUBSTRATE_SOFTMAX_FINDING.md)) — replace `softmax(s)` with `softmax(s) × 1/(1 + α·attractor_distance(s))`, then renormalize. Off-attractor attention weights get dampened, biasing attention toward the substrate's integer lattice. Initial finding at α=0.5 won −4.27%; a 3-seed α sweep found α=1.0 wins **−6.57%** vs vanilla softmax.
+
+- **Substrate-V resample** (commit `1080da2`, see [`SUBSTRATE_V_FINDING.md`](experiments/prometheus_parity/SUBSTRATE_V_FINDING.md)) — apply `substrate_resample(x @ W_v)` to V post-projection (keep W_v learned). Off-attractor V-magnitudes get dampened the same way attention does. Wins **−2.52%** on top of L1-MH + S-MOD (3/3 seeds).
+
+### Cumulative result
+
+| Stack | val |
+|---|--:|
+| L0 (vanilla softmax + learned V) | 3.301 |
+| L1-MH + S-MOD α=1.0 (production) | 3.084 |
+| **L1-MH + S-MOD α=1.0 + V1 (production)** | **3.006** |
+| | **−8.94%** |
+
+### Why it matters
+
+Each substrate replacement is a **modulation**, not a wholesale swap of the learned projection. The substrate *composes with* task learning instead of replacing it. The opposite recipe — substrate-V with no learned W_v and no S-MOD — lost decisively (L4, the day prior). The principle: substrate modulation works when applied to a quantity that already has integer-coherent structure; substrate replacement of learned projections does not.
+
+### What's now possible that wasn't before
+
+- Substrate-aware attention is the production default in Prometheus.
+- Three substrate-component wins now stack in a single transformer block on real data (TinyShakespeare 1.1MB).
+- Future component swaps (Q, FF, layernorm) measured against this stacked baseline rather than vanilla — raising the bar for any further claims.
+- Cross-runtime parity established: every result reproduced in both pure-OMC Prometheus (tape autograd) and PyTorch.
+
+### Tests
+
+22 Prometheus tests + 13 fibtier tests pass. PyTorch sweeps include 3-seed multi-seed runs and an α sweep over `{0.0, 0.1, 0.3, 0.5, 1.0}`.
+
+---
+
+## [v0.0.6-prometheus] - 2026-05-16
+
+**Substrate-native ML framework in pure OMC: tape autograd, AdamW, attention, multi-block transformer. First substrate-K wins land. Ends with the two-agent demo.**
+
+### What changed
+
+- **Tape-based reverse-mode autograd** in pure OMC (`tape_var`, `tape_const`, `tape_add`, `tape_matmul`, `tape_softmax`, ~20 ops). Substrate-preserving — values round-trip through HInt when integer-valued.
+- **Prometheus framework**: `prom_linear`, `prom_relu`, `prom_softmax`, `prom_mse_loss`, `prom_sgd_step`. Then AdamW, Embedding, LayerNorm, CRT-Fibonacci PE, Sequential, TransformerBlock composition.
+- **Multi-token batched forward** with broadcast-aware tape ops, per-row mean/var, multi-token attention.
+- **TinyShakespeare end-to-end** in pure OMC.
+- **Cross-framework parity bench**: every Prometheus result reproduced in PyTorch with `experiments/prometheus_parity/` harness.
+- **Substrate-K (L1) wins single-head** at TinyShakespeare scale: −8% val vs vanilla, 3/3 seeds. First substrate-component win that survives at real scale.
+- **PyTorch 10-seed + multi-block reproduction** of substrate-L3 (parameter-free attention) wins (−21.5% on toy data).
+- **Fibonacci-tier memory primitive** (`fibtier`) — bounded power-law context buffer.
+- **Substrate-native agent demo** — two agents conversing over OMC-PROTOCOL with persistent fibtier memory across simulated process restart. Every primitive shipped this week composed into one demonstrable system.
+
+### Why it matters
+
+OMC's substrate finally produces a measurable win on a real ML training task at real scale, in both a pure-OMC implementation and an independent PyTorch reproduction. The autograd + Prometheus stack is the platform that the substrate-attention chapter (v0.1) is built on top of.
+
+### What's now possible that wasn't before
+
+- Train a transformer end-to-end in pure OMC.
+- Compare substrate variants apples-to-apples in PyTorch (independent reproduction).
+- Compose substrate primitives (codec + kernel + protocol + agent + Prometheus) into a single working agent demo.
+
+### Tests
+
+Prometheus regression suite (~20 tests) lands at this chapter. Fibtier suite (~10 tests).
+
+### Ends at commit
+
+`686fc7a` 🥂 Substrate-native AI agent — end-to-end demo composing the week's primitives
+
+---
+
+## [v0.0.5-codec-kernel-protocol] - 2026-05-15
+
+**Substrate codec, content-addressed `omc-kernel`, `omc-grep`, OMC-PROTOCOL v1 wire format, substrate-aware tokenizer.**
+
+### What changed
+
+- **Substrate codec** (`omc_codec_encode` / `omc_codec_decode_lookup`) — canonicalize source, tokenize, sample every Nth ID, return compressed payload + content hash. Library-lookup decode for lossless recovery.
+- **omc-kernel** — content-addressed filesystem store at `~/.omc/kernel/store/<hex_hash>.omc`. Alpha-rename invariant: two processes converging on the same canonical form produce the same address. CLI: `ingest`, `fetch`, `stat`, `ls`, `sign`, `verify`.
+- **omc-grep** — code archaeology via canonical hash. Found 31.7% redundancy in OMC's own examples tree.
+- **OMC-PROTOCOL v1** — formalized substrate-signed wire format for inter-agent messaging. No PKI; integrity verified via canonical-hash recompute.
+- **MCP server** (`omnimcode-mcp`) exposes OMC as a runtime to LLM clients.
+- **Substrate-aware tokenizer** with 285+ builtins + 113 phrase-level dict entries + CRT-packed `(kind, vocab_id, position_class)` IDs.
+
+### Why it matters
+
+The substrate gains an identity layer (canonical hash) and a wire format. Two agents talking over OMC-PROTOCOL can verify each other's claims by recomputing hashes, no shared keys needed. The tokenizer turns OMC source into a substrate-typed symbol stream — the foundation for the substrate-indexed completion engine that comes next.
+
+### Ends at commit
+
+`586112c` Goal 4: substrate-aware tokenizer infrastructure
+
+---
+
+## [v0.0.4-jit-and-dual-band] - 2026-05-13
+
+**LLVM-18 JIT, dual-band `<2 x i64>` SSE2 codegen, harmony-gated branch elision, array support, NSL-KDD wall-clock honest negative.**
+
+### What changed
+
+- **`omnimcode-codegen` crate** — LLVM 18 codegen lowering OMC bytecode to native code via `inkwell`.
+- **Scalar lowerer** — locals via allocas, CFG for branches, comparisons, recursive Call, f64 support.
+- **Dual-band lowerer** — i64 → `<2 x i64>` SSE2 vectors, packing classical α-band with harmonic shadow β-band into a single SSE register.
+- **Cross-fn calls in dual-band lowerer**.
+- **`phi_shadow(x)` + `harmony(x)`** primitives.
+- **Harmony-gated branch elision**: high-coherence inputs skip entire conditional blocks at native code speed. Real measurable speedup (270× on the @hbit benchmark; +95% reduction with @harmony+@predict stacked).
+- **Array support** in JIT — `NewArray`, `ArrayLen`, `ArrayIndex` (read), `ArrSetNamed` (write).
+- **NSL-KDD real-world JIT measurement** — honest negative result: array-heavy code doesn't beat tree-walk by enough to justify the lowering cost. Documented in detail.
+- **L1.6 Array ↔ JIT bridging** at the dispatch boundary.
+- **`omc-bench`** benchmark harness with criterion.
+
+### Why it matters
+
+OMC gains a credible JIT path. Dual-band SSE2 codegen is novel — no other language packs a value's classical band with its harmonic shadow band into one register. Harmony-gated branch elision is the first demonstration that substrate metadata can drive native-code-level optimization (skip whole branches when input has high substrate coherence).
+
+The NSL-KDD negative result is part of the chapter — being honest about where the JIT *doesn't* help is what makes the *does help* claims trustworthy.
+
+### Ends at commit
+
+`ca30037` Path B: real-world JIT measurement on NSL-KDD — honest negative result
+
+---
+
+## [v0.0.3-substrate-and-stdlib] - 2026-05-08
+
+**Self-healing heal pass (typo/arity/div-zero), substrate-routed search family, stdlib expansion, closures, `--check`/`--fmt` CLI.**
+
+### What changed
+
+- **Self-healing compiler** (Phase H.1–H.5): harmonic + typo + divide-by-singularity + parse-level recovery + `safe` keyword for runtime self-healing. AST rewrites at compile time; runtime guards via `safe x[i]`.
+- **Substrate-routed O(log_phi_pi_fib N) algorithm family**: `substrate_search`, `substrate_lower_bound`, `substrate_upper_bound`, `substrate_rank`, `substrate_count_range`, `substrate_slice_range`, `substrate_intersect`, `substrate_difference`, `substrate_insert`, `substrate_quantile`, `substrate_select_k`, `substrate_nearest`, `substrate_min_distance`, `substrate_hash`.
+- **Zeckendorf encoding** as first-class integer representation: `zeckendorf(n)`, `from_zeckendorf`, `zeckendorf_weight`, `is_zeckendorf_valid`.
+- **Stdlib expansion**: 16 new built-ins for Python-tier ergonomics (Phase 1), then v2 with first-class functions + 28 more, then closures + harmonic hash/diff/dedupe + 15 more.
+- **Mutable closures + module aliasing + benchmark suite**.
+- **Test runner** + `--test` / `--test-all` CLI modes.
+- **Iterative heal-to-fixpoint**, **heal-on-runtime-error retry**.
+- **CLI gains**: `--check` (heal + report without exec), `--fmt` (pretty-print canonical OMC), `--help`.
+- **HBit harmony substrate-routing**: every place harmony is computed routes through the same substrate.
+
+### Why it matters
+
+The language gains the safety primitives that the original pitch promised (self-healing) and the substrate-routed algorithms that make the substrate observable in everyday code (search, quantile, select-k). Closures + first-class functions + test runner round out the ergonomics for real programming.
+
+### Ends at commit
+
+`2a4321c` Iterative heal + heal-retry + VM-native reflective dispatch + --check/--fmt
+
+---
+
+## [v0.0.2-language-core] - 2026-04-25
+
+**The language exists: parser, tree-walk interpreter, HInt + φ-resonance, bytecode VM, self-hosting compiler.**
+
+### What changed
+
+- **Phase A+B**: HFloat, phi.X modules, pragmas, type annotations.
+- **Phase C**: HSingularity as first-class Value variant.
+- **Phase D+E**: stdlib expansion + conformance golden tests.
+- **Phase F**: triple-quoted strings, fixed-size arrays, imports, +25 stdlib.
+- **Phase G**: real module resolution for `import` statements.
+- **Phase H**: bytecode VM (optional fast execution path).
+- **Phase I+J**: bitwise operators + VM coverage parity (tree-walk == VM byte-identical).
+- **Phase K**: bytecode optimizer (constant folding + peephole).
+- **Phase L+M**: resonance caching + typed HIR with specialized dispatch.
+- **Phase N**: Phi-Field LLM kernel demo with OMNIweights.
+- **Phase O**: ONN self-healing primitives (Fibonacci alignment auto-repair).
+- **Phase P+Q**: bytecode disassembler + VM inline cache for Op::Call.
+- **Phase R+S**: multi-layer Phi-Field LLM + OmniWeight quantization.
+- **Phase T**: source positions in parser errors.
+- **Phase U**: real benchmark suite with criterion.
+- **Phase V (V.1 → V.9b)**: **self-hosting lexer → parser → codegen → SELF-HOSTING FIXPOINT** (OMC compiles its own compiler) → bytecode bootstrap fixpoint → UTF-8 safety → **gen2 == gen3 of a compiler** (byte-identical).
+
+### Why it matters
+
+This chapter is the foundation: a language exists, with two execution engines (tree-walk + bytecode VM) kept byte-identical, a self-hosting compiler that's reflexively stable (gen2 == gen3), HInt as the substrate primitive carrying φ-resonance at construction, and conformance tests locking the semantics.
+
+### Ends at commit
+
+`ddb553d` Phase V.5: SELF-HOSTING FIXPOINT — OMC compiles its own compiler
+
+---
+
 ## [Unreleased]
 
 ### Added (Iterative heal + heal-retry + VM-native reflective dispatch + --check / --fmt CLI, 2026-05-14)

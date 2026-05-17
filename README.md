@@ -6,6 +6,23 @@ OMC is not a thin layer over IEEE-754 and types. Its substrate is **φ** (the go
 
 It runs as one binary with two execution engines kept byte-identical, optional LLVM-18 JIT producing dual-band SSE2 code, embedded CPython for bidirectional interop, WASM and LSP targets, a self-hosting compiler that's gen2==gen3 byte-identical, a self-healing pass that fixes typos/off-attractor literals/divide-by-zero, and a registry-backed package manager.
 
+## Reading order
+
+If you're trying to understand how OMC got here, **read the [CHANGELOG](CHANGELOG.md) top-to-bottom**. Each release tag is a chapter — `git show v0.X-name` (or click the linked sections in CHANGELOG) gives a self-contained summary of what changed in that chapter, why it matters, and what's now possible that wasn't before. The titles, in chronological order:
+
+| Tag | One-line |
+|---|---|
+| [v0.0.1](CHANGELOG.md#100---2026-05-02) | Genesis: circuit evolution engine + FFI bindings (pre-language) |
+| [v0.0.2-language-core](CHANGELOG.md#v002-language-core--2026-04-25) | The language exists — parser, two-engine interpreter, HInt, self-hosting fixpoint |
+| [v0.0.3-substrate-and-stdlib](CHANGELOG.md#v003-substrate-and-stdlib--2026-05-08) | Self-healing heal pass + substrate-routed search family + closures + `--check`/`--fmt` |
+| [v0.0.4-jit-and-dual-band](CHANGELOG.md#v004-jit-and-dual-band--2026-05-13) | LLVM JIT, dual-band SSE2 codegen, harmony-gated branch elision |
+| [v0.0.5-codec-kernel-protocol](CHANGELOG.md#v005-codec-kernel-protocol--2026-05-15) | Substrate codec, content-addressed `omc-kernel`, OMC-PROTOCOL v1 wire format |
+| [v0.0.6-prometheus](CHANGELOG.md#v006-prometheus--2026-05-16) | Pure-OMC ML framework, multi-block transformer, first substrate-K (L1) wins |
+| [v0.1-substrate-attention](CHANGELOG.md#v01-substrate-attention--2026-05-17) | Three substrate components (K, S-MOD, V) stack inside attention for −8.94% val |
+| [v0.2-ergonomics](CHANGELOG.md#v02-ergonomics--2026-05-17) | OMC becomes forgiving: Python-idiom builtins, `+=`, traced errors, 11 heal classes |
+
+The headline scoreboard below is the **state as of v0.2** — the chapters above are how it got there.
+
 ## The substrate-aware transformer (validated this week)
 
 The transformer architecture has multiple components OMC has measured against substrate replacements. The current scoreboard:
