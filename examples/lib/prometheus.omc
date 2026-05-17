@@ -1,0 +1,220 @@
+# Prometheus — substrate-native ML composition layer.
+#
+# A pure-OMC framework built on the existing tape_* (reverse-mode autograd)
+# and arr_* (ML kernels + linalg) primitives. NOT a PyTorch wrapper — every
+# layer here is implemented in OMC and trains via the substrate's own
+# autograd engine.
+#
+# Status: MVP. Provides Linear + activations + MSE loss + SGD step.
+# Trained end-to-end in examples/prometheus_tinylm.omc.
+#
+# Strategic intent: be substrate-native for the things substrate uniquely
+# provides (alpha-rename-invariant content hashing of model weights,
+# harmonic-resonance modulated gradients, geodesic attention as a first-
+# class layer), while harvesting Python's correctness oracles via py_*
+# imports during development.
+#
+# Conventions:
+#   - A "module" is a dict carrying parameter tape-var IDs.
+#   - prom_*_new(...)         → constructs the module + registers params on the tape
+#   - prom_*_forward(mod, x)  → runs the forward pass; returns a tape node id
+#   - prom_collect_params(mod) → returns a flat list of every tape-var id in the module
+#   - The user manages tape_reset() once before constructing the model;
+#     param IDs persist across training steps as the forward graph rebuilds.
+
+# ---------------------------------------------------------------------------
+# Initialization helpers
+# ---------------------------------------------------------------------------
+
+# Uniform [-bound, bound) — deterministic if seed_state is threaded through.
+# OMC doesn't ship a real RNG; we use a tiny LCG for reproducibility.
+fn _prom_lcg_step(state) {
+    return (state * 1103515245 + 12345) % 2147483648;
+}
+
+fn _prom_uniform(state, bound) {
+    h s = _prom_lcg_step(state);
+    h r = s / 2147483648.0;          # [0, 1)
+    h v = (r * 2.0 - 1.0) * bound;   # [-bound, bound)
+    h out = dict_new();
+    dict_set(out, "state", s);
+    dict_set(out, "value", v);
+    return out;
+}
+
+# Build a random matrix [rows][cols] in OMC array form, register each cell
+# as a tape_var, return both the matrix-of-ids and the updated rng state.
+fn _prom_random_matrix(rows, cols, bound, state) {
+    h matrix = [];
+    h s = state;
+    h i = 0;
+    while i < rows {
+        h row = [];
+        h j = 0;
+        while j < cols {
+            h step = _prom_uniform(s, bound);
+            s = dict_get(step, "state");
+            arr_push(row, dict_get(step, "value"));
+            j = j + 1;
+        }
+        arr_push(matrix, row);
+        i = i + 1;
+    }
+    h node = tape_var(matrix);   # register the whole matrix as one variable
+    h out = dict_new();
+    dict_set(out, "node", node);
+    dict_set(out, "state", s);
+    return out;
+}
+
+# Same as above but produces a zero-initialized bias row vector.
+fn _prom_zeros_row(cols) {
+    h row = [];
+    h j = 0;
+    while j < cols {
+        arr_push(row, 0.0);
+        j = j + 1;
+    }
+    h matrix = [row];   # 1 x cols
+    return tape_var(matrix);
+}
+
+# ---------------------------------------------------------------------------
+# Linear layer: y = x @ W + b
+# x: [batch, in_dim],  W: [in_dim, out_dim],  b: [1, out_dim]
+# ---------------------------------------------------------------------------
+
+fn prom_linear_new(in_dim, out_dim, rng_state) {
+    # Xavier-ish bound: sqrt(6 / (in + out))
+    h bound = 0.5;
+    h Wr = _prom_random_matrix(in_dim, out_dim, bound, rng_state);
+    h b = _prom_zeros_row(out_dim);
+    h layer = dict_new();
+    dict_set(layer, "kind", "linear");
+    dict_set(layer, "in_dim", in_dim);
+    dict_set(layer, "out_dim", out_dim);
+    dict_set(layer, "W", dict_get(Wr, "node"));
+    dict_set(layer, "b", b);
+    dict_set(layer, "rng_state", dict_get(Wr, "state"));
+    return layer;
+}
+
+fn prom_linear_forward(layer, x_id) {
+    h W = dict_get(layer, "W");
+    h b = dict_get(layer, "b");
+    h xW = tape_matmul(x_id, W);
+    return tape_add(xW, b);
+}
+
+fn prom_linear_params(layer) {
+    h out = [];
+    arr_push(out, dict_get(layer, "W"));
+    arr_push(out, dict_get(layer, "b"));
+    return out;
+}
+
+# ---------------------------------------------------------------------------
+# Activations — substrate-native (route to tape ops).
+# ---------------------------------------------------------------------------
+
+fn prom_relu(x_id)    { return tape_relu(x_id); }
+fn prom_sigmoid(x_id) { return tape_sigmoid(x_id); }
+
+# ---------------------------------------------------------------------------
+# Losses — MSE works with what the tape currently supports
+# (no exp/log on the tape, so true softmax+CE isn't yet here; using
+# sigmoid + MSE against one-hot target is a viable LM loss for tiny
+# scale and demonstrates substrate-native training).
+# ---------------------------------------------------------------------------
+
+fn prom_mse_loss(pred_id, target_id) {
+    h diff = tape_sub(pred_id, target_id);
+    h sq = tape_mul(diff, diff);
+    return tape_mean(sq);
+}
+
+# ---------------------------------------------------------------------------
+# Optimizer — substrate-native SGD step.
+# Calls tape_update on every parameter in the supplied flat list.
+# ---------------------------------------------------------------------------
+
+fn prom_sgd_step(params, lr) {
+    h i = 0;
+    while i < arr_len(params) {
+        tape_update(arr_get(params, i), lr);
+        i = i + 1;
+    }
+}
+
+# Variant: substrate-modulated SGD step.
+# Reads each param's gradient, scales by (1 + phi.res(grad_hash)) so
+# gradients pointing toward Fibonacci attractors get a small boost.
+# Experimental; the architectural rule derived today says substrate
+# metric on float activations doesn't work as an attention modulator,
+# but on GRADIENT MAGNITUDES (integer-keyed via hash of grad bytes)
+# the rule may differ. Worth measuring once the baseline converges.
+fn prom_harmonic_sgd_step(params, lr) {
+    # TODO: read tape_grad(p), compute substrate scaling factor, then
+    # call a (yet-to-add) tape_update_scaled(p, lr, scale). For now,
+    # fall back to plain SGD.
+    prom_sgd_step(params, lr);
+}
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+# Build a [vocab] one-hot row vector as a tape_const.
+fn prom_one_hot(idx, vocab) {
+    h row = [];
+    h i = 0;
+    while i < vocab {
+        if i == idx { arr_push(row, 1.0); }
+        else { arr_push(row, 0.0); }
+        i = i + 1;
+    }
+    return tape_const([row]);    # [1, vocab]
+}
+
+# Argmax over a logits vector. Handles either a flat 1D array (when
+# tape_value collapses a 1xN matrix) or a true 2D [1, vocab] matrix.
+fn prom_argmax_row(logits) {
+    h row = logits;
+    # If the first element is itself an array, this is 2D and we need row 0.
+    if arr_len(logits) > 0 {
+        h first = arr_get(logits, 0);
+        if type_of(first) == "array" { row = first; }
+    }
+    h best = 0;
+    h best_val = arr_get(row, 0);
+    h i = 1;
+    while i < arr_len(row) {
+        h v = arr_get(row, i);
+        if v > best_val { best_val = v; best = i; }
+        i = i + 1;
+    }
+    return best;
+}
+
+# ---------------------------------------------------------------------------
+# Convenience: collect parameters from a list of layers.
+# ---------------------------------------------------------------------------
+
+fn prom_collect_params(layers) {
+    h out = [];
+    h i = 0;
+    while i < arr_len(layers) {
+        h layer = arr_get(layers, i);
+        h kind = dict_get(layer, "kind");
+        if kind == "linear" {
+            h ps = prom_linear_params(layer);
+            h j = 0;
+            while j < arr_len(ps) {
+                arr_push(out, arr_get(ps, j));
+                j = j + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return out;
+}

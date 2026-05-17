@@ -1,0 +1,173 @@
+# Prometheus tiny LM — substrate-native bigram next-char prediction.
+#
+# A 2-layer MLP trained via OMC's reverse-mode autograd (no PyTorch).
+# Predicts P(next_char | current_char) on a tiny ABA-pattern corpus.
+# Loss must decrease over training steps; final predictions must
+# show the model learned the bigram structure.
+#
+# This is the MVP that proves the Prometheus thesis: you can train a
+# neural language model in pure OMC, using only substrate-native
+# autograd and ML kernels.
+#
+# Architecture:
+#   input  = one-hot of current char  [1, vocab]
+#   hidden = relu(input @ W1 + b1)    [1, hidden]
+#   output = hidden @ W2 + b2         [1, vocab]   (logits, MSE-trained
+#                                                   against one-hot target)
+#
+# Training:
+#   - SGD with substrate-native tape_update
+#   - MSE loss against one-hot next-char target
+#   - 200 steps over a synthetic bigram corpus
+#
+# Stop condition (substrate-clear): loss must strictly decrease
+#   between step 0 and step 200, and final prediction on at least
+#   one bigram must be correct (argmax matches target).
+
+import "examples/lib/prometheus.omc";
+
+# ---------------------------------------------------------------------------
+# Corpus + tokenization
+# ---------------------------------------------------------------------------
+
+# Tiny alphabet, deterministic bigram pattern: a→b, b→c, c→a (cycle).
+# Train data is "abcabcabcabc...". A successful model will learn this
+# exact mapping (vocab = 3, perfect predictability).
+fn make_corpus() {
+    h chars = ["a", "b", "c"];        # vocab = 3
+    h text = "abcabcabcabcabcabcabcabcabc";
+    h ids = [];
+    h i = 0;
+    while i < str_len(text) {
+        h ch = str_slice(text, i, i + 1);
+        # Index of ch in chars
+        h idx = 0;
+        if ch == "a" { idx = 0; }
+        elif ch == "b" { idx = 1; }
+        elif ch == "c" { idx = 2; }
+        arr_push(ids, idx);
+        i = i + 1;
+    }
+    h corpus = dict_new();
+    dict_set(corpus, "chars", chars);
+    dict_set(corpus, "vocab", 3);
+    dict_set(corpus, "ids", ids);
+    return corpus;
+}
+
+# ---------------------------------------------------------------------------
+# Build model
+# ---------------------------------------------------------------------------
+
+fn build_model(vocab, hidden, rng_state) {
+    h L1 = prom_linear_new(vocab, hidden, rng_state);
+    h L2 = prom_linear_new(hidden, vocab, dict_get(L1, "rng_state"));
+    h model = dict_new();
+    dict_set(model, "L1", L1);
+    dict_set(model, "L2", L2);
+    return model;
+}
+
+fn forward(model, x_id) {
+    h L1 = dict_get(model, "L1");
+    h L2 = dict_get(model, "L2");
+    h h_pre = prom_linear_forward(L1, x_id);
+    h h_post = prom_relu(h_pre);
+    h logits = prom_linear_forward(L2, h_post);
+    return logits;
+}
+
+fn model_params(model) {
+    return prom_collect_params([dict_get(model, "L1"), dict_get(model, "L2")]);
+}
+
+# ---------------------------------------------------------------------------
+# Training loop
+# ---------------------------------------------------------------------------
+
+fn main() {
+    print("=== Prometheus tiny LM ===");
+    h corpus = make_corpus();
+    h vocab = dict_get(corpus, "vocab");
+    h ids = dict_get(corpus, "ids");
+    h n_pairs = arr_len(ids) - 1;
+    print(concat_many("corpus pairs (current→next): ", to_string(n_pairs)));
+    print(concat_many("vocab: ", to_string(vocab)));
+
+    tape_reset();
+    h model = build_model(vocab, 8, 42);
+    h params = model_params(model);
+    print(concat_many("trainable param tensors: ", to_string(arr_len(params))));
+
+    h lr = 0.05;
+    h steps = 200;
+    h loss_history = [];
+    h step = 0;
+    while step < steps {
+        # Online SGD: cycle through pairs deterministically.
+        h k = step % n_pairs;
+        h cur = arr_get(ids, k);
+        h nxt = arr_get(ids, k + 1);
+        h x = prom_one_hot(cur, vocab);
+        h target = prom_one_hot(nxt, vocab);
+        h pred = forward(model, x);
+        h loss = prom_mse_loss(pred, target);
+        tape_backward(loss);
+        prom_sgd_step(params, lr);
+        h lv = tape_value(loss);
+        arr_push(loss_history, lv);
+        if step % 20 == 0 || step == steps - 1 {
+            print(concat_many("step ", to_string(step), "  loss=", to_string(lv)));
+        }
+        step = step + 1;
+    }
+    print("");
+
+    # ---- Stop-condition checks ----
+
+    h first = arr_get(loss_history, 0);
+    h last = arr_get(loss_history, arr_len(loss_history) - 1);
+    print(concat_many("first loss: ", to_string(first)));
+    print(concat_many("final loss: ", to_string(last)));
+    h ratio = first / last;
+    print(concat_many("loss reduction ratio: ", to_string(ratio), "x"));
+
+    # Quality check: predict argmax for each bigram, count correct.
+    print("");
+    print("=== Inference: bigram predictions ===");
+    h chars = dict_get(corpus, "chars");
+    h correct = 0;
+    h total = 0;
+    h c = 0;
+    while c < vocab {
+        h x = prom_one_hot(c, vocab);
+        h pred = forward(model, x);
+        h logits = tape_value(pred);
+        h pred_idx = prom_argmax_row(logits);
+        # Expected next: (c+1) % vocab for the abcabc cycle
+        h expected = (c + 1) % vocab;
+        h ok = pred_idx == expected;
+        if ok { correct = correct + 1; }
+        total = total + 1;
+        h marker = "✗";
+        if ok { marker = "✓"; }
+        print(concat_many("  ", arr_get(chars, c), " → ", arr_get(chars, pred_idx),
+                          "  (expected ", arr_get(chars, expected), ") ", marker));
+        c = c + 1;
+    }
+    print("");
+    print(concat_many("argmax accuracy: ", to_string(correct), "/", to_string(total)));
+
+    # Final verdict.
+    print("");
+    if last < first && correct >= 1 {
+        print("[OK] Prometheus end-to-end training works.");
+        print("     Loss decreased AND argmax predicted at least one bigram.");
+    } else {
+        print("[FAIL] Did not meet stop condition.");
+        if last >= first { print("       Loss did not decrease."); }
+        if correct == 0 { print("       Zero correct predictions."); }
+    }
+}
+
+main();

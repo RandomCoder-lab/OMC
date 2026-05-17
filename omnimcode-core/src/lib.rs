@@ -26,6 +26,7 @@ pub mod vm;            // Stack-based VM execution loop [Phase H]
 pub mod bytecode_opt;  // Constant folding + peephole optimizer [Phase K]
 pub mod disasm;        // Bytecode disassembler [Phase P]
 pub mod formatter;     // AST -> canonical OMC source (for --fmt)
+pub mod prometheus;    // Substrate-native ML framework (MVP shipped in OMC; Rust extensions documented)
 
 // Embedded CPython: py_* builtins (numpy, pandas, ...). Default-on
 // for desktop builds; downstream WASM / no_std crates can disable
