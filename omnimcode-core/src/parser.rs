@@ -69,6 +69,13 @@ pub enum Token {
     Percent,
     Eq,
     EqEq,
+    // Compound assignment — desugared into `name = name op rhs` at
+    // parse time. No runtime semantics of their own.
+    PlusEq,
+    MinusEq,
+    StarEq,
+    SlashEq,
+    PercentEq,
     Ne,
     Lt,
     Le,
@@ -488,6 +495,10 @@ impl Lexer {
                 }
                 Some('+') => {
                     self.advance();
+                    if self.current() == Some('=') {
+                        self.advance();
+                        return Token::PlusEq;
+                    }
                     return Token::Plus;
                 }
                 Some('-') => {
@@ -496,18 +507,34 @@ impl Lexer {
                         self.advance();
                         return Token::Arrow;
                     }
+                    if self.current() == Some('=') {
+                        self.advance();
+                        return Token::MinusEq;
+                    }
                     return Token::Minus;
                 }
                 Some('*') => {
                     self.advance();
+                    if self.current() == Some('=') {
+                        self.advance();
+                        return Token::StarEq;
+                    }
                     return Token::Star;
                 }
                 Some('/') => {
                     self.advance();
+                    if self.current() == Some('=') {
+                        self.advance();
+                        return Token::SlashEq;
+                    }
                     return Token::Slash;
                 }
                 Some('%') => {
                     self.advance();
+                    if self.current() == Some('=') {
+                        self.advance();
+                        return Token::PercentEq;
+                    }
                     return Token::Percent;
                 }
                 Some('=') => {
@@ -1010,6 +1037,28 @@ impl Parser {
                             name: ident,
                             value,
                         })
+                    }
+                    Token::PlusEq | Token::MinusEq | Token::StarEq
+                    | Token::SlashEq | Token::PercentEq => {
+                        // Desugar `x += expr` → `x = x + expr`. Same
+                        // for -=, *=, /=, %=. We don't introduce a new
+                        // AST node — the rewrite stays inside the parser
+                        // and the rest of the pipeline sees a normal
+                        // Assignment with a binop on the RHS.
+                        let op = self.current();
+                        self.advance();
+                        let rhs = self.parse_expression()?;
+                        self.expect(Token::Semicolon)?;
+                        let lhs = Expression::Variable(ident.clone());
+                        let value = match op {
+                            Token::PlusEq => Expression::Add(Box::new(lhs), Box::new(rhs)),
+                            Token::MinusEq => Expression::Sub(Box::new(lhs), Box::new(rhs)),
+                            Token::StarEq => Expression::Mul(Box::new(lhs), Box::new(rhs)),
+                            Token::SlashEq => Expression::Div(Box::new(lhs), Box::new(rhs)),
+                            Token::PercentEq => Expression::Mod(Box::new(lhs), Box::new(rhs)),
+                            _ => unreachable!(),
+                        };
+                        Ok(Statement::Assignment { name: ident, value })
                     }
                     Token::LBracket => {
                         // Could be `arr[idx] = value;` (IndexAssignment) or

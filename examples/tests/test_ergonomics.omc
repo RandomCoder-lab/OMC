@@ -165,3 +165,47 @@ fn test_for_in_string_yields_chars() {
     assert_eq(arr_get(chars, 0), "a", "[0]=a");
     assert_eq(arr_get(chars, 2), "c", "[2]=c");
 }
+
+# ---- Compound assignment operators ----
+
+fn test_plus_eq() {
+    h x = 10;
+    x += 5;
+    assert_eq(x, 15, "x += 5");
+    x += 100;
+    assert_eq(x, 115, "x += 100");
+}
+
+fn test_minus_eq() {
+    h x = 100;
+    x -= 30;
+    assert_eq(x, 70, "x -= 30");
+}
+
+fn test_star_eq() {
+    h x = 6;
+    x *= 7;
+    assert_eq(x, 42, "x *= 7");
+}
+
+fn test_slash_eq() {
+    h x = 100;
+    x /= 4;
+    assert_eq(x, 25, "x /= 4");
+}
+
+fn test_percent_eq() {
+    h x = 17;
+    x %= 5;
+    assert_eq(x, 2, "x %= 5");
+}
+
+fn test_compound_in_loop() {
+    h total = 0;
+    h i = 0;
+    while i < 10 {
+        total += i;
+        i += 1;
+    }
+    assert_eq(total, 45, "sum 0..9");
+}
