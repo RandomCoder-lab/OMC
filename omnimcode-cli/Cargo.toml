@@ -28,6 +28,13 @@ required-features = ["llvm-jit"]
 name = "omc-grep"
 path = "src/bin/omc_grep.rs"
 
+# Content-addressed store keyed by canonical hash. The distributed-agent
+# kernel primitive: code as a content-addressed Merkle DAG over
+# substrate-canonical addresses. Uses serde_json for wire format.
+[[bin]]
+name = "omc-kernel"
+path = "src/bin/omc_kernel.rs"
+
 [features]
 default = ["python-embed"]
 # CPython embedding for `py_*` builtins. Forwards to core.
@@ -40,6 +47,7 @@ llvm-jit = ["dep:omnimcode-codegen", "dep:inkwell"]
 [dependencies]
 omnimcode-core = { path = "../omnimcode-core", default-features = false }
 omnimcode-codegen = { path = "../omnimcode-codegen", optional = true, features = ["llvm-jit"] }
+serde_json = "1.0"  # used by omc-kernel for wire-format messages
 # inkwell is needed at the CLI level only because we leak the LLVM
 # Context for process-lifetime; the dispatch closure lives on the
 # Interpreter and references the engine memory.

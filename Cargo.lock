@@ -758,6 +758,7 @@ dependencies = [
  "inkwell",
  "omnimcode-codegen",
  "omnimcode-core",
+ "serde_json",
 ]
 
 [[package]]
