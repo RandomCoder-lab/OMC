@@ -6899,6 +6899,137 @@ impl Interpreter {
                 });
                 Ok(Value::HInt(HInt::new(id as i64)))
             }
+            "tape_substrate_resample" => {
+                // tape_substrate_resample(v_id, scale) — fused substrate-V resample.
+                // out[i, c] = v[i, c] * 1 / (1 + attractor_distance(int(v[i, c] · scale)) / scale).
+                // Equivalent to the prom_substrate_resample OMC composition but
+                // skips the tape_value → tape_const round-trip (which at d_model=256
+                // seq_len=64 was extracting 16k f64s into an OMC array and lifting
+                // them back).
+                if args.is_empty() {
+                    return Err("tape_substrate_resample requires (v_id, scale)".to_string());
+                }
+                let v_id = self.eval_expr(&args[0])?.to_int() as usize;
+                let scale = if args.len() >= 2 {
+                    self.eval_expr(&args[1])?.to_float()
+                } else {
+                    10.0
+                };
+                if scale == 0.0 {
+                    // scale=0 is the "off" sentinel — return the input unchanged.
+                    return Ok(Value::HInt(HInt::new(v_id as i64)));
+                }
+                let v = self.autograd_tape[v_id].value.clone();
+                let mut out = TapeMat::zeros(v.rows, v.cols);
+                for k in 0..v.data.len() {
+                    let x = v.data[k];
+                    let n = (x * scale) as i64;
+                    let (_, d) = crate::phi_pi_fib::nearest_attractor_with_dist(n);
+                    let modulator = 1.0 / (1.0 + (d as f64) / scale);
+                    out.data[k] = x * modulator;
+                }
+                let grad = TapeMat::zeros(v.rows, v.cols);
+                let id = self.autograd_tape.len();
+                self.autograd_tape.push(TapeNode {
+                    op: TapeOp::SubstrateResample(v_id, scale),
+                    value: out, grad,
+                });
+                Ok(Value::HInt(HInt::new(id as i64)))
+            }
+            "tape_embedding_lookup" => {
+                // tape_embedding_lookup(table_id, token_ids[]) → [N, d_model]
+                // Direct row gather: out[i, :] = table[token_ids[i], :].
+                if args.len() < 2 {
+                    return Err("tape_embedding_lookup requires (table_id, token_ids)".to_string());
+                }
+                let table_id = self.eval_expr(&args[0])?.to_int() as usize;
+                let ids_val = self.eval_expr(&args[1])?;
+                let ids_arr = match &ids_val {
+                    Value::Array(a) => a,
+                    _ => return Err("tape_embedding_lookup: token_ids must be an array".to_string()),
+                };
+                let token_ids: Vec<usize> = ids_arr.items.borrow().iter()
+                    .map(|v| v.to_int() as usize)
+                    .collect();
+                let table = self.autograd_tape[table_id].value.clone();
+                let vocab = table.rows;
+                let d_model = table.cols;
+                let n = token_ids.len();
+                let mut out = TapeMat::zeros(n, d_model);
+                for i in 0..n {
+                    let row = token_ids[i];
+                    if row >= vocab {
+                        return Err(format!(
+                            "tape_embedding_lookup: token id {} out of vocab range {}",
+                            row, vocab
+                        ));
+                    }
+                    for c in 0..d_model {
+                        out.set(i, c, table.at(row, c));
+                    }
+                }
+                let grad = TapeMat::zeros(n, d_model);
+                let id = self.autograd_tape.len();
+                self.autograd_tape.push(TapeNode {
+                    op: TapeOp::EmbeddingLookup(table_id, token_ids),
+                    value: out, grad,
+                });
+                Ok(Value::HInt(HInt::new(id as i64)))
+            }
+            "tape_cross_entropy_batch" => {
+                // tape_cross_entropy_batch(logits_id, targets[])
+                // Fused softmax + select-target-log + per-token mean.
+                // Forward returns scalar mean loss. Backward uses the
+                // closed-form (p - 1{target}) / N rather than chaining
+                // tape_softmax / tape_log / tape_mul / tape_sum backwards.
+                if args.len() < 2 {
+                    return Err("tape_cross_entropy_batch requires (logits_id, targets)".to_string());
+                }
+                let logits_id = self.eval_expr(&args[0])?.to_int() as usize;
+                let targets_val = self.eval_expr(&args[1])?;
+                let targets_arr = match &targets_val {
+                    Value::Array(a) => a,
+                    _ => return Err("tape_cross_entropy_batch: targets must be an array".to_string()),
+                };
+                let targets: Vec<usize> = targets_arr.items.borrow().iter()
+                    .map(|v| v.to_int() as usize)
+                    .collect();
+                let logits = self.autograd_tape[logits_id].value.clone();
+                let n = logits.rows;
+                let vocab = logits.cols;
+                if targets.len() != n {
+                    return Err(format!(
+                        "tape_cross_entropy_batch: targets length {} != logits rows {}",
+                        targets.len(), n
+                    ));
+                }
+                // Forward: numerically-stable per-row softmax, then pick log p_target,
+                // sum across rows, divide by N.
+                let mut total: f64 = 0.0;
+                for i in 0..n {
+                    let mut row_max = f64::NEG_INFINITY;
+                    for c in 0..vocab {
+                        let x = logits.at(i, c);
+                        if x > row_max { row_max = x; }
+                    }
+                    let mut row_sum_exp: f64 = 0.0;
+                    for c in 0..vocab {
+                        row_sum_exp += (logits.at(i, c) - row_max).exp();
+                    }
+                    let log_z = row_max + row_sum_exp.ln();
+                    let log_p_target = logits.at(i, targets[i]) - log_z;
+                    total += -log_p_target;
+                }
+                let mean_loss = total / (n.max(1) as f64);
+                let out = TapeMat::scalar(mean_loss);
+                let grad = TapeMat::scalar(0.0);
+                let id = self.autograd_tape.len();
+                self.autograd_tape.push(TapeNode {
+                    op: TapeOp::CrossEntropyBatch(logits_id, targets),
+                    value: out, grad,
+                });
+                Ok(Value::HInt(HInt::new(id as i64)))
+            }
             "tape_phi_log" => {
                 // Substrate-native fused log_φπfib(|x·scale| + 1).
                 // Mathematically equivalent to:
@@ -7230,6 +7361,72 @@ impl Interpreter {
                                 let x = av.data[k];
                                 let g = if x != 0.0 { dy.data[k] / x } else { 0.0 };
                                 da.data[k] = g;
+                            }
+                            self.autograd_tape[a].grad.add(&da);
+                        }
+                        TapeOp::SubstrateResample(a, scale) => {
+                            // out = v * modulator(v) where modulator is treated as const
+                            // (matches OMC reference). dL/dv[k] = dy[k] * modulator(v[k]).
+                            let av = self.autograd_tape[a].value.clone();
+                            let mut da = TapeMat::zeros(av.rows, av.cols);
+                            for k in 0..av.data.len() {
+                                let x = av.data[k];
+                                let n = (x * scale) as i64;
+                                let (_, d) = crate::phi_pi_fib::nearest_attractor_with_dist(n);
+                                let modulator = 1.0 / (1.0 + (d as f64) / scale);
+                                da.data[k] = dy.data[k] * modulator;
+                            }
+                            self.autograd_tape[a].grad.add(&da);
+                        }
+                        TapeOp::EmbeddingLookup(a, ref token_ids) => {
+                            // dL/dtable[v, :] = sum over i: dy[i, :] where token_ids[i] == v.
+                            // Same-token-id collisions accumulate (sum), which is the
+                            // correct gradient when a token appears multiple times.
+                            let table_shape = (
+                                self.autograd_tape[a].value.rows,
+                                self.autograd_tape[a].value.cols,
+                            );
+                            let d_model = table_shape.1;
+                            let mut dtable = TapeMat::zeros(table_shape.0, table_shape.1);
+                            for (i, &tok) in token_ids.iter().enumerate() {
+                                if tok >= table_shape.0 { continue; }
+                                for c in 0..d_model {
+                                    let g = dy.at(i, c);
+                                    let cur = dtable.at(tok, c);
+                                    dtable.set(tok, c, cur + g);
+                                }
+                            }
+                            self.autograd_tape[a].grad.add(&dtable);
+                        }
+                        TapeOp::CrossEntropyBatch(a, ref targets) => {
+                            // dL/dlogits[i, c] = (softmax(logits)[i, c] - 1{c==t_i}) / N
+                            // dy is the upstream gradient on the scalar loss (typically 1.0
+                            // at the loss seed; scaled when this op is chained inside more math).
+                            let av = self.autograd_tape[a].value.clone();
+                            let n = av.rows;
+                            let vocab = av.cols;
+                            let dy_scalar = if dy.data.is_empty() { 0.0 } else { dy.data[0] };
+                            let scale = dy_scalar / (n.max(1) as f64);
+                            let mut da = TapeMat::zeros(n, vocab);
+                            for i in 0..n {
+                                // Recompute the per-row softmax. (Could be cached at the cost
+                                // of memory; the recompute is one extra pass through N×vocab
+                                // f64s and is dwarfed by the matmul backward in any real model.)
+                                let mut row_max = f64::NEG_INFINITY;
+                                for c in 0..vocab {
+                                    let x = av.at(i, c);
+                                    if x > row_max { row_max = x; }
+                                }
+                                let mut row_sum_exp: f64 = 0.0;
+                                for c in 0..vocab {
+                                    row_sum_exp += (av.at(i, c) - row_max).exp();
+                                }
+                                let target = targets[i];
+                                for c in 0..vocab {
+                                    let p = (av.at(i, c) - row_max).exp() / row_sum_exp;
+                                    let indicator = if c == target { 1.0 } else { 0.0 };
+                                    da.set(i, c, scale * (p - indicator));
+                                }
                             }
                             self.autograd_tape[a].grad.add(&da);
                         }
@@ -12104,6 +12301,27 @@ pub(crate) enum TapeOp {
     PowInt(usize, i32),
     Exp(usize),
     Log(usize),
+    /// Fused per-batch cross-entropy: softmax + select target log-probs +
+    /// mean, all in one node. Forward returns a scalar; backward uses the
+    /// closed-form `dL/dlogits[i, c] = (softmax(logits)[i, c] - 1{c == t_i}) / N`,
+    /// which is *much* tighter than chaining tape_softmax + tape_log +
+    /// tape_mul(mask) + tape_sum backward through 5 intermediate nodes.
+    /// `targets` stored inside the op so backward has it without
+    /// recomputing or threading through another tape node.
+    CrossEntropyBatch(usize, Vec<usize>),
+    /// Fused embedding row-gather: out[i, :] = table[token_ids[i], :].
+    /// Replaces `prom_embedding_batch`'s OMC-built one-hot batch + matmul
+    /// (which was N×vocab cells of one-hot construction + an N×vocab×D
+    /// matmul) with a direct copy. Backward scatters dL/dout rows back
+    /// into the corresponding dL/dtable rows.
+    EmbeddingLookup(usize, Vec<usize>),
+    /// Fused substrate-V resample: out[i, c] = v[i, c] * 1/(1 + d(v[i,c]·scale)/scale).
+    /// Modulator is treated as a const w.r.t. v (matches the OMC reference
+    /// `prom_substrate_resample` which uses tape_const). Stores `scale` in
+    /// the op so backward can reconstruct the modulator without round-
+    /// tripping through OMC value arrays. Replaces the
+    /// tape_value → modulator_matrix → tape_const → tape_mul chain.
+    SubstrateResample(usize, f64),
     /// Element-wise |x|. Boring PyTorch-parity primitive. Backward is
     /// subgradient: sign(x) at x ≠ 0, 0 at x = 0.
     Abs(usize),

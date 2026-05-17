@@ -727,11 +727,11 @@ fn _prom_substrate_resample_matrix(v_val, scale) {
 # flows through v unchanged (modulation rides as a const). scale=0.0
 # disables (returns v unchanged).
 fn prom_substrate_resample(v_id, scale) {
-    if scale == 0.0 { return v_id; }
-    h v_val = tape_value(v_id);
-    h mod_mat = _prom_substrate_resample_matrix(v_val, scale);
-    h mod_const = tape_const(mod_mat);
-    return tape_mul(v_id, mod_const);
+    # v0.8.5 — defers to the fused tape_substrate_resample Rust builtin.
+    # Skips the tape_value → modulator_matrix → tape_const round-trip
+    # the old composition did (16k f64 cells at d_model=256 seq_len=64
+    # being extracted and re-lifted per call).
+    return tape_substrate_resample(v_id, scale);
 }
 
 # Substrate-modulated softmax. alpha=0.0 returns standard softmax.
@@ -934,6 +934,121 @@ fn prom_attention_substrate_full_forward(layer, x_id) {
     # V is x itself — no transformation. The block weights x by
     # substrate-determined attention.
     return tape_matmul(attn, x_id);
+}
+
+# ---------------------------------------------------------------------------
+# Multi-head substrate-K attention.
+#
+# PyTorch's L1-MH (-8.94% val) and Q6-MH (-12.15% val) findings need
+# multi-head capacity to fire — single-head OMC saw roughly a third of
+# those wins (SUBSTRATE_STACK_OMC_XVAL.md). This wraps n_heads independent
+# substrate-K heads with per-head W_O projections. Their outputs SUM to
+# the final attention output, which is mathematically identical to the
+# standard "concat then project" formulation:
+#
+#   standard:  out = concat(out_1, ..., out_h) @ W_O
+#              W_O is [n_h·d_head, d_model] = block-stack of [W_O_1; ...; W_O_h]
+#   so:        out = sum_h(out_h @ W_O_h)        ← what we use
+#
+# Equivalent math, no tape_concat op needed. Each head gets its own
+# Q_h, V_h, W_O_h, and per-head substrate K (CRT-PE of width d_head).
+# All the single-head toggles (smod_alpha, v_resample_scale, q6_mode)
+# are honored per-head; defaults match the single-head layer.
+# ---------------------------------------------------------------------------
+
+fn prom_attention_substrate_k_mh_new(d_model, seq_len, n_heads, rng_state) {
+    if d_model - (d_model / n_heads) * n_heads != 0 {
+        # d_model must be divisible by n_heads.
+        # (OMC has no error-throw primitive here; fall through and the
+        # smaller-than-expected d_head will produce a shape error later.)
+    }
+    h d_head = d_model / n_heads;
+    h heads = [];
+    h state = rng_state;
+    h hi = 0;
+    while hi < n_heads {
+        h Q = _prom_random_matrix(d_model, d_head, 0.3, state);
+        state = dict_get(Q, "state");
+        h V = _prom_random_matrix(d_model, d_head, 0.3, state);
+        state = dict_get(V, "state");
+        h W_O = _prom_random_matrix(d_head, d_model, 0.3, state);
+        state = dict_get(W_O, "state");
+        h head = dict_new();
+        dict_set(head, "Q", dict_get(Q, "node"));
+        dict_set(head, "V", dict_get(V, "node"));
+        dict_set(head, "W_O", dict_get(W_O, "node"));
+        dict_set(head, "K_const", prom_crt_pe_matrix(seq_len, d_head));
+        arr_push(heads, head);
+        hi = hi + 1;
+    }
+    h layer = dict_new();
+    dict_set(layer, "kind", "attention");
+    dict_set(layer, "variant", "substrate_k_mh");
+    dict_set(layer, "d_model", d_model);
+    dict_set(layer, "d_head", d_head);
+    dict_set(layer, "n_heads", n_heads);
+    dict_set(layer, "seq_len", seq_len);
+    dict_set(layer, "heads", heads);
+    # Per-head toggles match the single-head substrate_k_new defaults.
+    dict_set(layer, "smod_alpha", 1.0);
+    dict_set(layer, "v_resample_scale", 10.0);
+    dict_set(layer, "q6_mode", "off");
+    dict_set(layer, "q6_scale", 10.0);
+    dict_set(layer, "q6_gamma", 0.5);
+    dict_set(layer, "rng_state", state);
+    return layer;
+}
+
+fn prom_attention_substrate_k_mh_forward(layer, x_id) {
+    h n_heads = dict_get(layer, "n_heads");
+    h heads = dict_get(layer, "heads");
+    h smod_alpha = dict_get(layer, "smod_alpha");
+    h v_scale = dict_get(layer, "v_resample_scale");
+    h q6_mode = dict_get(layer, "q6_mode");
+    h q6_scale = dict_get(layer, "q6_scale");
+    h q6_gamma = dict_get(layer, "q6_gamma");
+
+    h sum_proj = null;
+    h hi = 0;
+    while hi < n_heads {
+        h head = arr_get(heads, hi);
+        h Q_w = dict_get(head, "Q");
+        h V_w = dict_get(head, "V");
+        h W_O = dict_get(head, "W_O");
+        h K_const = dict_get(head, "K_const");
+
+        h q = tape_matmul(x_id, Q_w);                          # [N, d_head]
+        h q_mod = prom_q6_modulate(q, q6_scale, q6_gamma, q6_mode);
+        h v_raw = tape_matmul(x_id, V_w);                       # [N, d_head]
+        h v = prom_substrate_resample(v_raw, v_scale);
+        h k = tape_const(K_const);
+        h kt = tape_transpose(k);
+        h scores = tape_matmul(q_mod, kt);                      # [N, seq_len]
+        h attn = prom_substrate_softmax(scores, smod_alpha);
+        h out_h = tape_matmul(attn, v);                         # [N, d_head]
+        h proj_h = tape_matmul(out_h, W_O);                     # [N, d_model]
+        if sum_proj == null {
+            sum_proj = proj_h;
+        } else {
+            sum_proj = tape_add(sum_proj, proj_h);
+        }
+        hi = hi + 1;
+    }
+    return sum_proj;
+}
+
+fn prom_attention_substrate_k_mh_params(layer) {
+    h heads = dict_get(layer, "heads");
+    h out = [];
+    h hi = 0;
+    while hi < arr_len(heads) {
+        h head = arr_get(heads, hi);
+        arr_push(out, dict_get(head, "Q"));
+        arr_push(out, dict_get(head, "V"));
+        arr_push(out, dict_get(head, "W_O"));
+        hi = hi + 1;
+    }
+    return out;
 }
 
 # Param collectors per variant.
@@ -1141,55 +1256,23 @@ fn prom_embedding_params(layer) {
 # Implemented via an [N, vocab] one-hot batch then matmul with the
 # embedding table. Differentiable end-to-end.
 fn prom_embedding_batch(layer, token_ids) {
-    h vocab = dict_get(layer, "vocab");
+    # v0.8.5 — defers to the tape_embedding_lookup Rust builtin. Direct
+    # row gather instead of building an [N, vocab] one-hot in OMC and
+    # matmulling. Backward scatters dL/dout rows back into table grad,
+    # which is the same gradient as the one-hot @ table chain produced.
     h table = dict_get(layer, "table");
-    h n = arr_len(token_ids);
-    h onehot = [];
-    h i = 0;
-    while i < n {
-        h row = [];
-        h idx = arr_get(token_ids, i);
-        h j = 0;
-        while j < vocab {
-            if j == idx { arr_push(row, 1.0); }
-            else { arr_push(row, 0.0); }
-            j = j + 1;
-        }
-        arr_push(onehot, row);
-        i = i + 1;
-    }
-    h onehot_const = tape_const(onehot);
-    return tape_matmul(onehot_const, table);
+    return tape_embedding_lookup(table, token_ids);
 }
 
 # Batched cross-entropy: logits is [N, vocab], targets is array of N
 # integer indices. Returns scalar mean loss (averaged over positions).
+#
+# v0.8.5 — defers to the fused tape_cross_entropy_batch Rust builtin
+# (closed-form (p - one_hot) / N backward, no intermediate tape nodes).
+# `vocab` is accepted but unused (the builtin reads it from logits.cols);
+# kept in the signature for callers that pass it.
 fn prom_cross_entropy_batch(logits_id, targets, vocab) {
-    h n = arr_len(targets);
-    h probs = tape_softmax(logits_id);
-    h log_probs = tape_log(probs);
-    # Build [N, vocab] mask: -1.0 at (i, targets[i]), 0 elsewhere.
-    h mask_rows = [];
-    h i = 0;
-    while i < n {
-        h row = [];
-        h tgt = arr_get(targets, i);
-        h c = 0;
-        while c < vocab {
-            if c == tgt { arr_push(row, -1.0); }
-            else { arr_push(row, 0.0); }
-            c = c + 1;
-        }
-        arr_push(mask_rows, row);
-        i = i + 1;
-    }
-    h mask = tape_const(mask_rows);
-    h selected = tape_mul(log_probs, mask);
-    # Mean over all cells = (sum of -log p_target) / (N * vocab).
-    # We want per-token mean = sum / N. Use sum + divide.
-    h s = tape_sum(selected);
-    h scale = tape_const(1.0 / n);
-    return tape_mul(s, scale);
+    return tape_cross_entropy_batch(logits_id, targets);
 }
 
 # ---------------------------------------------------------------------------
