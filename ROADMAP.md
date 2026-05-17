@@ -1,52 +1,32 @@
 # OMC Roadmap
 
-Current chapter: **v0.2-ergonomics** (shipped 2026-05-17).
-Next chapter: **v0.3-symbolic-prediction** (in flight).
+Current chapter: **v0.3-symbolic-prediction** (shipped 2026-05-17).
+Next chapter: open — candidates listed below.
 
 See [CHANGELOG.md](CHANGELOG.md) and [GitHub Releases](https://github.com/RandomCoder-lab/OMC/releases) for the chapter-by-chapter history of how OMC got here. This file describes what's on the path going forward.
 
 ---
 
-## v0.3-symbolic-prediction (in flight)
+## Post-v0.3 candidates (none committed yet)
 
-**Substrate-indexed code completion: given a partial OMC prefix, return ranked provenance-tracked continuations from a content-addressed corpus.**
+### v0.4 candidate A — predict engine grows up
 
-The synthesis of two earlier threads — substrate codec (symbolic context) and Prometheus (text prediction) — into a single primitive that LLM agents (and humans) can use to navigate "what could come next here?" while writing OMC. Branching is first-class: each result is a viable continuation with a substrate-distance score and a pointer back to the source function it came from.
+The v0.3 engine ships a stateless predictor with substrate ranking. Natural extensions:
 
-### Architecture
-
-- `omnimcode-core/src/predict.rs` — `CodeCorpus`, `PrefixTrie`, `predict_continuations`.
-- Builtins: `omc_corpus_build(paths)` → handle, `omc_predict(prefix_source, corpus_handle, top_k)` → ranked dict.
-- CLI subcommand: `omc --predict --files DIR --prefix "fn ..." --top-k 5 --json`.
-- Win condition: prefix `fn prom_linear_` against the Prometheus corpus returns `prom_linear_new`, `prom_linear_forward`, `prom_linear_params` ranked by substrate distance, with provenance pointers to the source files.
-
-### Phases
-
-1. Symbol-stream encoding wrapper over the existing `tokenizer::encode` — already produces `Vec<i64>` symbol IDs; just expose a clean ingestion API.
-2. `CodeCorpus` builder: parse each file in a path list, extract top-level fns via `extract_top_level_fns`, build entries `{fn_name, source, symbol_stream, canonical_hash, attractor}`.
-3. `PrefixTrie` over symbol streams: insert each stream once, query a prefix to get matching corpus indices in O(prefix length).
-4. `predict_continuations(corpus, trie, prefix_source, top_k)` — tokenize prefix, query trie, rank surviving matches by `(longest prefix match, smallest substrate distance)`.
-5. Rust tests + OMC tests against the lib/ corpus.
-6. CLI demo + writeup as `experiments/symbolic_prediction/FINDING.md`.
-7. Tag as `v0.3-symbolic-prediction` with chapter release notes.
-
-### Deferred (post-v0.3)
-
-- **Prometheus rerank pass** — once the trie-based candidate list is solid, train a small Prometheus model on the corpus and rerank top-k by token-stream probability.
-- **MCP tool surface** — expose `predict_omc_continuation(prefix, top_k)` as an MCP tool so LLM clients can query during code generation.
+- **Prometheus rerank pass** — train a small Prometheus model on the corpus and rerank top-k by token-stream probability. Substrate ranking is the structural prior; Prometheus would be the learned overlay.
+- **Stateful corpus API** — `omc_corpus_build` returns a handle, `omc_predict_from(handle, prefix, top_k)` reuses it. The current API rebuilds per call (fine for interactive use; slow in tight loops).
+- **MCP tool surface** — wrap `omc_predict_files` as an MCP tool so LLM clients can query during code generation without launching a subprocess.
 - **Streaming queries** — incremental updates as the prefix grows token-by-token.
 - **Cross-corpus blending** — query multiple corpora (project, stdlib, registry) with weighted ranking.
 
----
-
-## Beyond v0.3 (rough)
-
-### Substrate-attention follow-ups
+### v0.4 candidate B — substrate-attention follow-ups
 
 - Substrate-modulated Q projection. Q hasn't been swapped yet; the V resample recipe (post-projection modulation) may generalize.
 - Substrate FF: dampen off-attractor activations in the feed-forward residual.
 - Substrate LayerNorm: substrate-distance-weighted variance computation.
 - Larger-scale validation: every substrate-attention claim was made at TinyShakespeare scale (1.1MB). Need to verify the stack holds at 10-100MB corpora.
+
+### Beyond (rough)
 
 ### Transformerless LLM
 
@@ -70,6 +50,7 @@ The substrate-attention components stack to −8.94% inside one block. The path 
 
 | Chapter | Key shipped items |
 |---|---|
+| [v0.3-symbolic-prediction](https://github.com/RandomCoder-lab/OMC/releases/tag/v0.3-symbolic-prediction) | `omc_predict_files(paths, prefix, top_k)` returns ranked provenance-tracked continuations from a content-addressed corpus |
 | [v0.2-ergonomics](https://github.com/RandomCoder-lab/OMC/releases/tag/v0.2-ergonomics) | `+=` / `-=` / `*=` / `/=` / `%=`, `len`/`range`/`getenv`/`to_hex`/`parse_int`, negative array indexing, did-you-mean, traced errors, 11 heal classes |
 | [v0.1-substrate-attention](https://github.com/RandomCoder-lab/OMC/releases/tag/v0.1-substrate-attention) | Substrate-K + S-MOD softmax + substrate-V resample → −8.94% val on TinyShakespeare |
 | [v0.0.6-prometheus](https://github.com/RandomCoder-lab/OMC/releases/tag/v0.0.6-prometheus) | Tape autograd, AdamW, Embedding, LayerNorm, multi-block transformer, first substrate-K wins |

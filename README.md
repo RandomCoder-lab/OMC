@@ -264,6 +264,7 @@ If you're trying to understand how OMC got here, **read the [GitHub Releases](ht
 | [v0.0.6-prometheus](https://github.com/RandomCoder-lab/OMC/releases/tag/v0.0.6-prometheus) | Pure-OMC ML framework, multi-block transformer, first substrate-K (L1) wins |
 | [v0.1-substrate-attention](https://github.com/RandomCoder-lab/OMC/releases/tag/v0.1-substrate-attention) | Three substrate components (K, S-MOD, V) stack inside attention for −8.94% val |
 | [v0.2-ergonomics](https://github.com/RandomCoder-lab/OMC/releases/tag/v0.2-ergonomics) | OMC becomes forgiving: Python-idiom builtins, `+=`, traced errors, 11 heal classes |
+| [v0.3-symbolic-prediction](https://github.com/RandomCoder-lab/OMC/releases/tag/v0.3-symbolic-prediction) | Substrate-indexed code completion: `omc_predict_files` returns ranked provenance-tracked continuations |
 
 ---
 

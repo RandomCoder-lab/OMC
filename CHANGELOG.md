@@ -13,6 +13,7 @@ Read top-to-bottom for the arc; jump to any chapter for the detail.
 
 | Tag | Date | One-line |
 |---|---|---|
+| [v0.3-symbolic-prediction](#v03-symbolic-prediction--2026-05-17) | 2026-05-17 | Substrate-indexed code completion: `omc_predict_files(paths, prefix, top_k)` returns ranked provenance-tracked continuations from a content-addressed corpus |
 | [v0.2-ergonomics](#v02-ergonomics--2026-05-17) | 2026-05-17 | OMC becomes forgiving: Python-idiom builtins, `+=`, friendly errors with traces, 11 heal classes total |
 | [v0.1-substrate-attention](#v01-substrate-attention--2026-05-17) | 2026-05-17 | Three substrate-component swaps inside transformer attention (K, S-MOD softmax, V) stack to −8.94% val on TinyShakespeare |
 | [v0.0.6-prometheus](#v006-prometheus--2026-05-16) | 2026-05-16 | Substrate-native ML framework in pure OMC: tape autograd, AdamW, attention, multi-block transformer. First substrate-K (L1) wins land. Ends with the two-agent demo |
@@ -21,6 +22,63 @@ Read top-to-bottom for the arc; jump to any chapter for the detail.
 | [v0.0.3-substrate-and-stdlib](#v003-substrate-and-stdlib--2026-05-08) | 2026-05-08 | Self-healing heal pass (typo/arity/div-zero), substrate-routed search family, stdlib expansion, closures, `--check`/`--fmt` CLI |
 | [v0.0.2-language-core](#v002-language-core--2026-04-25) | 2026-04-25 | The language exists: parser, tree-walk interpreter, HInt + φ-resonance, bytecode VM, self-hosting compiler (gen2 == gen3 byte-identical) |
 | [V0.0.1](#v001---2026-05-02) | 2025-Sep | Genesis: circuit evolution engine, FFI, Python/Unity/Unreal bindings (pre-language) |
+
+---
+
+## [v0.3-symbolic-prediction] - 2026-05-17
+
+**Substrate-indexed code completion: `omc_predict_files(paths, prefix, top_k)` returns ranked provenance-tracked continuations from a content-addressed corpus.**
+
+The synthesis of two earlier substrates — `tokenizer::encode` (symbol stream) and `canonical_hash` + `attractor_distance` (substrate metric) — into one primitive that LLM agents (and humans) can use while writing OMC to find out "what could come next here?" with each result carrying a substrate-distance score and a pointer back to the source function it came from. Branching is first-class: every result is a viable continuation.
+
+### What changed
+
+- **New module `omnimcode-core/src/predict.rs`** (~370 lines):
+  - `CorpusEntry { fn_name, source, file, symbol_stream, canonical_hash, attractor }`
+  - `PrefixTrie` — each node accumulates corpus indices whose stream passes through it
+  - `CodeCorpus` — entries + trie; `ingest_fn` and `ingest_file`
+  - `predict_continuations(corpus, prefix_source, top_k) -> Vec<Suggestion>`
+  - Ranking: `(longest prefix match, smallest substrate distance, corpus index)`
+- **Two new builtins** in interpreter.rs:
+  - `omc_predict_files(paths_array, prefix_source, top_k) -> array of dicts` — stateless
+  - `omc_corpus_size(paths_array) -> int` — diagnostic
+- **Result dict fields**: `fn_name`, `source`, `file`, `canonical_hash`, `attractor`, `prefix_match_len`, `substrate_distance`, `query_attractor`.
+- **10 Rust unit tests** (`predict::tests`) cover trie semantics, ingestion, ranking, top_k cap, empty inputs, provenance.
+- **11 OMC end-to-end tests** (`test_predict.omc`) exercise the builtins against the real Prometheus corpus.
+
+### Win condition (verified)
+
+Prefix `fn prom_linear_` against the Prometheus corpus (70 fns) returns exactly the three `prom_linear_*` functions, ranked by substrate distance:
+
+```
+prom_linear_forward  (substrate_distance=1.4e18, prefix_match_len=24)
+prom_linear_new      (substrate_distance=2.4e18, prefix_match_len=24)
+prom_linear_params   (substrate_distance=5.5e18, prefix_match_len=24)
+```
+
+All three share `prefix_match_len=24` (the canonicalized prefix matched 24 tokens before diverging into the function-specific suffix). The wider `fn prom_attention_` prefix surfaces 5 attention-related fns with substrate distances ~3 orders of magnitude tighter than the linear namespace — substrate distance reflects code-shape similarity inside a namespace.
+
+### Why it matters
+
+Three primitives already in OMC — `canonicalize` (alpha-rename invariance), `tokenizer::encode` (substrate-aware symbol stream), `code_hash` (substrate-routed identity) — combine without modification. The trie is a 50-line data structure on top. No embedding model, no neural inference. Deterministic: same corpus + same prefix → same top-k, every run.
+
+### What's now possible that wasn't before
+
+- An LLM agent can query "what previous code came next at this shape?" as a single tool call.
+- Branching is first-class — each result is a viable continuation, not a "best guess."
+- Provenance is content-addressed: every suggestion includes its source file path AND its canonical hash, so a downstream agent can verify integrity by recompute.
+- The corpus is just file paths; no index-build step, no maintenance overhead.
+
+### Deferred (post-v0.3)
+
+- **Prometheus rerank pass** — train a small Prometheus model on the corpus and rerank top-k by token-stream probability. Substrate is the structural prior; Prometheus would be the learned overlay.
+- **Stateful corpus API** — `omc_corpus_build` returns a handle, `omc_predict_from(handle, prefix, top_k)` reuses it. Current stateless API rebuilds per call.
+- **MCP tool surface** — wrap as an MCP tool so LLM clients can query during code generation without launching a subprocess.
+- **Streaming / cross-corpus** — incremental updates as the prefix grows; weighted blending across project + stdlib + registry corpora.
+
+### Tests
+
+10 Rust + 11 OMC end-to-end. Final: **223 Rust pass, 1087/1087 OMC pass** (1087 = 1076 from previous + 11 new).
 
 ---
 

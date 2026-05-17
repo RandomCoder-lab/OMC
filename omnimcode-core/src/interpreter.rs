@@ -2283,6 +2283,8 @@ impl Interpreter {
             // Python-idiom builtins (forgiving aliases for users new to OMC)
             | "range" | "getenv" | "to_hex" | "from_hex"
             | "parse_int" | "parse_float"
+            // v0.3 symbolic prediction
+            | "omc_predict_files" | "omc_corpus_size"
             // Test runner host-state primitives
             | "test_record_failure" | "test_failure_count"
             | "test_get_failures" | "test_clear_failures"
@@ -8882,6 +8884,63 @@ impl Interpreter {
             //   model trained on the corresponding library to fully
             //   recover; for in-library inputs, recovery is exact via
             //   omc_codec_decode_lookup against a known store.
+            // ----- v0.3 symbolic prediction --------------------------
+            // Stateless single-call API: given an array of source-file
+            // paths and a partial-code prefix, return the top-k
+            // ranked continuations (each a dict with fn_name, source,
+            // file, canonical_hash, prefix_match_len, substrate_distance).
+            //
+            // The corpus is built fresh per call. For repeated queries
+            // against the same corpus, prefer omc_corpus_build +
+            // omc_predict_from (returns a handle).
+            //
+            // Example:
+            //   h hits = omc_predict_files(
+            //       ["examples/lib/prometheus.omc"],
+            //       "fn prom_linear_",
+            //       5);
+            //   for h in hits { print(dict_get(h, "fn_name")); }
+            "omc_predict_files" => {
+                if args.len() < 3 {
+                    return Err("omc_predict_files: requires (paths_array, prefix_source, top_k)".to_string());
+                }
+                let paths_val = self.eval_expr(&args[0])?;
+                let prefix_source = self.eval_expr(&args[1])?.to_display_string();
+                let top_k = self.eval_expr(&args[2])?.to_int().max(0) as usize;
+                let paths: Vec<String> = if let Value::Array(arr) = paths_val {
+                    arr.items.borrow().iter().map(|v| v.to_display_string()).collect()
+                } else {
+                    return Err("omc_predict_files: first argument must be an array of strings".to_string());
+                };
+                let mut corpus = crate::predict::CodeCorpus::new();
+                for path in &paths {
+                    let src = std::fs::read_to_string(path)
+                        .map_err(|e| format!("omc_predict_files: read {}: {}", path, e))?;
+                    corpus.ingest_file(path, &src);
+                }
+                let suggestions = crate::predict::predict_continuations(&corpus, &prefix_source, top_k);
+                Ok(predict_suggestions_to_value(&suggestions))
+            }
+            // Diagnostic: just ingest + return corpus size. Useful for
+            // sanity-checking that file paths resolve and fns parse.
+            "omc_corpus_size" => {
+                if args.is_empty() {
+                    return Err("omc_corpus_size: requires (paths_array)".to_string());
+                }
+                let paths_val = self.eval_expr(&args[0])?;
+                let paths: Vec<String> = if let Value::Array(arr) = paths_val {
+                    arr.items.borrow().iter().map(|v| v.to_display_string()).collect()
+                } else {
+                    return Err("omc_corpus_size: first argument must be an array of strings".to_string());
+                };
+                let mut corpus = crate::predict::CodeCorpus::new();
+                for path in &paths {
+                    let src = std::fs::read_to_string(path)
+                        .map_err(|e| format!("omc_corpus_size: read {}: {}", path, e))?;
+                    corpus.ingest_file(path, &src);
+                }
+                Ok(Value::HInt(HInt::new(corpus.len() as i64)))
+            }
             "omc_codec_encode" => {
                 if args.is_empty() {
                     return Err("omc_codec_encode requires (code: string, every_n?: int)".to_string());
@@ -11735,6 +11794,30 @@ pub(crate) fn wrong_container_hint(received: &Value, suggested: &str) -> String 
     )
 }
 
+/// Convert a vec of substrate-predicted suggestions into an OMC
+/// Value (array of dicts). Each dict carries fn_name, source, file,
+/// canonical_hash, prefix_match_len, substrate_distance.
+pub(crate) fn predict_suggestions_to_value(
+    suggestions: &[crate::predict::Suggestion],
+) -> Value {
+    let out: Vec<Value> = suggestions.iter().map(|s| {
+        let pairs: Vec<(String, Value)> = vec![
+            ("fn_name".to_string(), Value::String(s.fn_name.clone())),
+            ("source".to_string(), Value::String(s.source.clone())),
+            ("file".to_string(), Value::String(s.file.clone())),
+            ("canonical_hash".to_string(), Value::HInt(HInt::new(s.canonical_hash))),
+            ("attractor".to_string(), Value::HInt(HInt::new(s.attractor))),
+            ("prefix_match_len".to_string(), Value::HInt(HInt::new(s.prefix_match_len as i64))),
+            ("substrate_distance".to_string(), Value::HInt(HInt::new(s.substrate_distance))),
+            ("query_attractor".to_string(), Value::HInt(HInt::new(s.query_attractor))),
+        ];
+        Value::Dict(std::rc::Rc::new(std::cell::RefCell::new(
+            pairs.into_iter().collect()
+        )))
+    }).collect();
+    Value::Array(HArray::from_vec(out))
+}
+
 /// Human-readable type tag for error messages. Mirrors the `type_of`
 /// builtin's tag set so user-facing strings match what they'd see from
 /// inspecting at runtime.
@@ -12811,6 +12894,8 @@ pub(crate) const HEAL_BUILTIN_NAMES: &[&str] = &[
     // Python-idiom builtins
     "range", "getenv", "to_hex", "from_hex",
     "parse_int", "parse_float",
+    // v0.3 symbolic prediction
+    "omc_predict_files", "omc_corpus_size",
     // Language literals. These are parsed as Variable(...) but get
     // special-cased at runtime — they must never be typo-corrected
     // (a "var_typo" rewriting `null` to a close-spelled name would

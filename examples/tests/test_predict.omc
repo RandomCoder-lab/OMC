@@ -1,0 +1,117 @@
+# Tests for the substrate-indexed code completion engine.
+#
+# Each test runs the predictor against examples/lib/prometheus.omc as
+# a real corpus and asserts ranking properties.
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected)
+                            + " got " + to_string(actual));
+    }
+}
+
+fn _corpus() {
+    return ["examples/lib/prometheus.omc"];
+}
+
+# ---- Corpus ingestion ----
+
+fn test_corpus_size_matches_real_corpus() {
+    h size = omc_corpus_size(_corpus());
+    # Prometheus has ~70 top-level fns currently. Lower bound is the
+    # only stable assertion (the corpus grows over time).
+    assert_true(size > 30, "corpus has > 30 fns (got " + to_string(size) + ")");
+}
+
+# ---- Predict shape ----
+
+fn test_predict_returns_array_of_dicts() {
+    h hits = omc_predict_files(_corpus(), "fn prom_linear_", 3);
+    assert_eq(type_of(hits), "array", "result is array");
+    assert_true(arr_len(hits) > 0, "got at least one hit");
+    h first = arr_get(hits, 0);
+    assert_eq(type_of(first), "dict", "elements are dicts");
+}
+
+fn test_predict_top_k_caps_results() {
+    h hits = omc_predict_files(_corpus(), "fn prom_", 2);
+    assert_true(arr_len(hits) <= 2, "respects top_k=2");
+}
+
+# ---- Entry fields ----
+
+fn test_each_hit_has_required_fields() {
+    h hits = omc_predict_files(_corpus(), "fn prom_linear_", 1);
+    h h0 = arr_get(hits, 0);
+    assert_true(dict_has(h0, "fn_name"), "fn_name");
+    assert_true(dict_has(h0, "source"), "source");
+    assert_true(dict_has(h0, "file"), "file");
+    assert_true(dict_has(h0, "canonical_hash"), "canonical_hash");
+    assert_true(dict_has(h0, "attractor"), "attractor");
+    assert_true(dict_has(h0, "prefix_match_len"), "prefix_match_len");
+    assert_true(dict_has(h0, "substrate_distance"), "substrate_distance");
+}
+
+# ---- Ranking ----
+
+fn test_prom_linear_prefix_returns_the_three_prom_linear_fns() {
+    # The prefix `fn prom_linear_` should surface exactly the three
+    # prom_linear_* defs in Prometheus (new, forward, params).
+    h hits = omc_predict_files(_corpus(), "fn prom_linear_", 10);
+    assert_true(arr_len(hits) >= 3,
+                "at least 3 results for fn prom_linear_ prefix");
+    # Collect the names.
+    h names = [];
+    for entry in hits {
+        arr_push(names, dict_get(entry, "fn_name"));
+    }
+    assert_true(arr_contains(names, "prom_linear_new"),
+                "prom_linear_new present in " + to_string(names));
+    assert_true(arr_contains(names, "prom_linear_forward"),
+                "prom_linear_forward present in " + to_string(names));
+    assert_true(arr_contains(names, "prom_linear_params"),
+                "prom_linear_params present in " + to_string(names));
+}
+
+fn test_prefix_match_len_nonzero_when_prefix_exists_in_corpus() {
+    h hits = omc_predict_files(_corpus(), "fn prom_linear_", 3);
+    h h0 = arr_get(hits, 0);
+    assert_true(dict_get(h0, "prefix_match_len") > 0,
+                "prefix_match_len > 0 when prefix tokens are in corpus");
+}
+
+fn test_substrate_distance_is_nonneg() {
+    h hits = omc_predict_files(_corpus(), "fn prom_linear_", 5);
+    for entry in hits {
+        assert_true(dict_get(entry, "substrate_distance") >= 0,
+                    "substrate_distance is non-negative");
+    }
+}
+
+# ---- Provenance ----
+
+fn test_file_provenance_points_at_source() {
+    h hits = omc_predict_files(_corpus(), "fn prom_linear_", 1);
+    h h0 = arr_get(hits, 0);
+    assert_eq(dict_get(h0, "file"), "examples/lib/prometheus.omc",
+              "file is the source path we passed in");
+}
+
+fn test_source_contains_fn_keyword() {
+    h hits = omc_predict_files(_corpus(), "fn prom_linear_", 1);
+    h source = dict_get(arr_get(hits, 0), "source");
+    assert_true(str_contains(source, "fn "), "source has fn keyword");
+}
+
+# ---- Empty inputs ----
+
+fn test_empty_paths_returns_empty() {
+    h hits = omc_predict_files([], "fn anything", 5);
+    assert_eq(arr_len(hits), 0, "empty paths → empty hits");
+}
+
+fn test_top_k_zero_returns_empty() {
+    h hits = omc_predict_files(_corpus(), "fn prom_", 0);
+    assert_eq(arr_len(hits), 0, "top_k=0 → empty hits");
+}

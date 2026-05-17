@@ -1,0 +1,32 @@
+fn main() {
+    h paths = ["examples/lib/prometheus.omc"];
+
+    print("=== Corpus size ===");
+    print("functions: " + to_string(omc_corpus_size(paths)));
+
+    print("");
+    print("=== Predict: 'fn prom_linear_' ===");
+    h hits = omc_predict_files(paths, "fn prom_linear_", 5);
+    for entry in hits {
+        print("  " + dict_get(entry, "fn_name")
+              + "  (substrate_distance=" + to_string(dict_get(entry, "substrate_distance"))
+              + ", prefix_match_len=" + to_string(dict_get(entry, "prefix_match_len"))
+              + ")");
+    }
+
+    print("");
+    print("=== Predict: 'fn prom_attention_' ===");
+    h attn = omc_predict_files(paths, "fn prom_attention_", 5);
+    for entry in attn {
+        print("  " + dict_get(entry, "fn_name")
+              + "  (substrate_distance=" + to_string(dict_get(entry, "substrate_distance")) + ")");
+    }
+
+    print("");
+    print("=== Predict: 'fn tape_' ===");
+    h tape_hits = omc_predict_files(paths, "fn tape_", 5);
+    for entry in tape_hits {
+        print("  " + dict_get(entry, "fn_name"));
+    }
+}
+main();
