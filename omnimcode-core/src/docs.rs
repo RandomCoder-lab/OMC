@@ -1808,6 +1808,102 @@ pub const BUILTINS: &[BuiltinDoc] = &[
     BuiltinDoc { name: "lerp", category: "math", signature: "(a, b, t) -> float", description: "Linear interpolation: a + t*(b-a).", example: "lerp(0, 10, 0.5)  // 5", unique_to_omc: false },
     BuiltinDoc { name: "smooth_step", category: "math", signature: "(edge0, edge1, x) -> float", description: "Smoothstep 3t²-2t³ interpolation.", example: "smooth_step(0, 1, 0.5)", unique_to_omc: false },
     BuiltinDoc { name: "wrap_pi", category: "math", signature: "(angle: float) -> float", description: "Wrap angle into [-π, π].", example: "wrap_pi(7.0)  // ~0.717", unique_to_omc: false },
+    // ---- python: embedded CPython FFI (the "any-package adapter") ----
+    // OMC ships with embedded CPython via PyO3. py_import any Python
+    // module, py_call its methods, py_callback to let Python call OMC.
+    // This is how numpy, pandas, sklearn, torch, requests, sqlite, and
+    // anything else with a pip release become available to OMC code.
+    BuiltinDoc {
+        name: "py_import", category: "python",
+        signature: "(module_name: string) -> handle",
+        description: "Import a Python module via embedded CPython. Returns an opaque handle (int) that py_call / py_get / py_call_kw operate on. Any installed pip package works. Set OMC_NO_PYTHON=1 to disable embedded Python at startup.",
+        example: "h np = py_import(\"numpy\");  h pd = py_import(\"pandas\");",
+        unique_to_omc: false,
+    },
+    BuiltinDoc {
+        name: "py_call", category: "python",
+        signature: "(handle, method_name: string, args?: array) -> value",
+        description: "Call a method on a Python object. Args are auto-converted OMC→Python; the return value is auto-converted Python→OMC (int/float/str/list/dict pass through; complex objects are wrapped in a new handle). Use py_call_raw if you need to keep the result as a Python handle for chaining.",
+        example: "h arr = py_call(np, \"array\", [[1, 2, 3]]);  h n = py_call(arr, \"sum\", []);",
+        unique_to_omc: false,
+    },
+    BuiltinDoc {
+        name: "py_call_kw", category: "python",
+        signature: "(handle, method_name: string, args: array, kwargs: dict) -> value",
+        description: "Like py_call but with a kwargs dict for Python APIs that take named arguments (sklearn, matplotlib, etc.). Pass null for empty kwargs.",
+        example: "h split = py_call_kw(sk_ms, \"train_test_split\", [X, y], dict_from([[\"test_size\", 0.3]]));",
+        unique_to_omc: false,
+    },
+    BuiltinDoc {
+        name: "py_call_fn", category: "python",
+        signature: "(callable_handle, args?: array) -> value",
+        description: "Call a Python callable (function, lambda, or any __call__-able). Same conversion semantics as py_call. Use this for top-level functions (e.g. py_get a module attribute that's a function, then py_call_fn it).",
+        example: "h sqrt = py_get(math, \"sqrt\");  h r = py_call_fn(sqrt, [16]);  // 4.0",
+        unique_to_omc: false,
+    },
+    BuiltinDoc {
+        name: "py_call_fn_kw", category: "python",
+        signature: "(callable_handle, args: array, kwargs: dict) -> value",
+        description: "py_call_fn with a kwargs dict. Pass null for empty kwargs.",
+        example: "h cfg = py_call_fn_kw(open_fn, [\"file.txt\"], dict_from([[\"mode\", \"r\"]]));",
+        unique_to_omc: false,
+    },
+    BuiltinDoc {
+        name: "py_call_raw", category: "python",
+        signature: "(handle, method_name: string, args?: array) -> handle",
+        description: "Like py_call but ALWAYS returns a Python handle (no auto-conversion). Use when the result is a Python object you want to keep operating on (pandas Series that would otherwise collapse to an OMC array, etc.).",
+        example: "h ser = py_call_raw(df, \"groupby\", [\"col\"]);  // stays a pandas GroupBy",
+        unique_to_omc: false,
+    },
+    BuiltinDoc {
+        name: "py_get", category: "python",
+        signature: "(handle, attr_name: string) -> value",
+        description: "Attribute access on a Python object. Like Python's `obj.attr`. Returns auto-converted Python→OMC value (handle for complex objects).",
+        example: "h shape = py_get(arr, \"shape\");  h pi = py_get(py_import(\"math\"), \"pi\");",
+        unique_to_omc: false,
+    },
+    BuiltinDoc {
+        name: "py_eval", category: "python",
+        signature: "(code: string) -> value",
+        description: "Evaluate a Python EXPRESSION string. Returns the auto-converted result. For statements (assignments, imports, loops) use py_exec.",
+        example: "h n = py_eval(\"2 ** 10\");  // 1024",
+        unique_to_omc: false,
+    },
+    BuiltinDoc {
+        name: "py_exec", category: "python",
+        signature: "(code: string) -> null",
+        description: "Execute a Python STATEMENT string (assignments, loops, imports, function defs). Returns null. Side effects persist in the embedded interpreter's global namespace across calls.",
+        example: "py_exec(\"import math; x = math.pi * 2\");  h x = py_eval(\"x\");",
+        unique_to_omc: false,
+    },
+    BuiltinDoc {
+        name: "py_repr", category: "python",
+        signature: "(handle) -> string",
+        description: "Python repr() of a handle. Useful for inspection / debugging.",
+        example: "print(py_repr(df));  // <pandas.DataFrame ...>",
+        unique_to_omc: false,
+    },
+    BuiltinDoc {
+        name: "py_clear_registry", category: "python",
+        signature: "() -> null",
+        description: "Drop all stored Python handles. Use to free memory after a heavy session. Existing handles become invalid; subsequent py_call on them errors.",
+        example: "py_clear_registry();  // after a big batch is done",
+        unique_to_omc: false,
+    },
+    BuiltinDoc {
+        name: "py_fetch_text", category: "python",
+        signature: "(url: string) -> string",
+        description: "HTTP GET via embedded Python `requests`. Returns body string on 2xx. The convenience used internally by `omc --install`; for richer HTTP use `examples/lib/requests.omc` wrappers.",
+        example: "h body = py_fetch_text(\"https://example.com/data.json\");",
+        unique_to_omc: false,
+    },
+    BuiltinDoc {
+        name: "py_callback", category: "python",
+        signature: "(omc_fn_name: string) -> handle",
+        description: "REVERSE FFI: returns a Python callable that, when invoked from Python with positional args, dispatches to the named OMC fn with auto-converted args and returns the converted result. Enables df.apply(omc_fn) patterns. Lifecycle: callback is valid only while the OMC interpreter is on the stack.",
+        example: "h add_one = py_callback(\"add_one\");  py_call(df, \"apply\", [add_one]);",
+        unique_to_omc: true,
+    },
 ];
 
 /// Look up a builtin by name. Returns None when there's no docs entry
