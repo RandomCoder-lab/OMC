@@ -269,6 +269,7 @@ If you're trying to understand how OMC got here, **read the [GitHub Releases](ht
 | [v0.4-substrate-context](https://github.com/RandomCoder-lab/OMC/releases/tag/v0.4-substrate-context) | Symbolic compression end-to-end: `omc_compress_context` / `omc_decompress` + directory ingest + measured 2-3× LLM context-budget reduction |
 | [v0.5-substrate-memory](https://github.com/RandomCoder-lab/OMC/releases/tag/v0.5-substrate-memory) | Substrate-keyed conversation memory: `omc_memory_store` / `recall` / `list` / `stats` + filesystem persistence. **10.61× LLM context-budget reduction** on a 20-turn agent task. |
 | [v0.6-fibtier-memory](https://github.com/RandomCoder-lab/OMC/releases/tag/v0.6-fibtier-memory) | Fibtier-bounded eviction for memory: cap the index at fibonacci-tier capacity (default 232); evicted entries still recoverable by hash. Memory now safe for arbitrarily long agent sessions. |
+| [v0.7-gpu-scaffold](https://github.com/RandomCoder-lab/OMC/releases/tag/v0.7-gpu-scaffold) | GPU compute scaffold: `omnimcode-gpu` crate with wgpu (Vulkan) backend, ROCm/CUDA stubs. **4.04× speedup measured on AMD RX 580** via Vulkan, no ROCm pain. |
 
 ---
 

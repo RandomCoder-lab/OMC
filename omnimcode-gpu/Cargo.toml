@@ -1,0 +1,32 @@
+[package]
+name = "omnimcode-gpu"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "GPU compute scaffold for Prometheus. Vulkan/wgpu by default; ROCm/CUDA pluggable."
+
+[features]
+# Default: CPU-only fallback. Builds everywhere, runs everywhere.
+# No GPU dependencies pulled in.
+default = []
+
+# wgpu backend — Vulkan / Metal / DX12 / OpenGL compute. The safe
+# cross-vendor choice. Works on AMD Polaris (RX 580) via Vulkan
+# without ROCm. Trades raw FLOPS for portability + stability.
+wgpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
+
+# Future backends — stubbed in the trait, not implemented yet:
+# rocm   — AMD HIP/rocBLAS. Best on supported AMD GPUs; gfx803
+#          (Polaris) requires unofficial builds; high crash risk.
+# cuda   — NVIDIA. Highest performance on NVIDIA hardware.
+# metal  — Apple-only, native MPS bindings.
+
+[dependencies]
+omnimcode-core = { path = "../omnimcode-core", default-features = false }
+
+# wgpu deps — only pulled in with the wgpu feature. Keep the default
+# build dep-light so the scaffold compiles fast.
+wgpu = { version = "0.20", optional = true }
+pollster = { version = "0.3", optional = true }
+bytemuck = { version = "1.16", features = ["derive"], optional = true }

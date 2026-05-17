@@ -13,6 +13,7 @@ Read top-to-bottom for the arc; jump to any chapter for the detail.
 
 | Tag | Date | One-line |
 |---|---|---|
+| [v0.7-gpu-scaffold](#v07-gpu-scaffold--2026-05-17) | 2026-05-17 | GPU compute scaffold: `omnimcode-gpu` crate with wgpu (Vulkan) backend, ROCm/CUDA stubs. **4.04× speedup verified on the user's AMD RX 580** via Vulkan (no ROCm pain). |
 | [v0.6-fibtier-memory](#v06-fibtier-memory--2026-05-17) | 2026-05-17 | Fibtier-bounded eviction for memory: cap the index at fibonacci-tier capacity (default 232), evicted entries still recoverable by hash. Memory now safe for arbitrarily long agent sessions. |
 | [v0.5-substrate-memory](#v05-substrate-memory--2026-05-17) | 2026-05-17 | Substrate-keyed conversation memory: `omc_memory_store` / `recall` / `list` / `stats` MCP tools + filesystem-backed persistence. **Hits the 10× target** — measured 10.61× LLM context-budget reduction on a 20-turn agent task. |
 | [v0.4-substrate-context](#v04-substrate-context--2026-05-17) | 2026-05-17 | Symbolic compression end-to-end: `omc_compress_context` / `omc_decompress` tools + `format=codec` thumbnails + directory ingest. Measured 1.85×–2.81× LLM context budget reduction. |
@@ -26,6 +27,79 @@ Read top-to-bottom for the arc; jump to any chapter for the detail.
 | [v0.0.3-substrate-and-stdlib](#v003-substrate-and-stdlib--2026-05-08) | 2026-05-08 | Self-healing heal pass (typo/arity/div-zero), substrate-routed search family, stdlib expansion, closures, `--check`/`--fmt` CLI |
 | [v0.0.2-language-core](#v002-language-core--2026-04-25) | 2026-04-25 | The language exists: parser, tree-walk interpreter, HInt + φ-resonance, bytecode VM, self-hosting compiler (gen2 == gen3 byte-identical) |
 | [V0.0.1](#v001---2026-05-02) | 2025-Sep | Genesis: circuit evolution engine, FFI, Python/Unity/Unreal bindings (pre-language) |
+
+---
+
+## [v0.7-gpu-scaffold] - 2026-05-17
+
+**GPU compute scaffold for Prometheus: `omnimcode-gpu` crate with wgpu (Vulkan) backend, ROCm/CUDA stubs, 4.04× speedup verified end-to-end on the user's AMD RX 580 via Vulkan.**
+
+The Polaris-friendly path. The user's primary target is an AMD RX 580 (gfx803), which official ROCm dropped at version 4.0 and Ollama explicitly struggles with. wgpu via Vulkan works out of the box on the same hardware with the open-source RADV driver — no ROCm install, no crash risk.
+
+### What changed
+
+- **New `omnimcode-gpu` crate**:
+  - `ComputeBackend` trait — one method (`matmul`) for v0.7, open for extension
+  - `Matrix` — row-major f32 tensor, the boundary type
+  - `CpuBackend` — naive triple-loop, always available, ground-truth parity reference
+  - `WgpuBackend` (feature `wgpu`) — Vulkan / Metal / DX12 / OpenGL compute
+  - `pick_backend()` — runtime-chooses based on built-in features + `OMC_GPU_BACKEND` env override
+- **Matmul kernel** in WGSL: 16×16 workgroup, one thread per output cell, no tiling (the scaffold's job is to be honest, not tuned)
+- **Bench example** (`examples/bench_matmul.rs`): CPU vs GPU wall-clock + parity check across sizes
+- **Workspace integration**: `omnimcode-gpu` added to root Cargo.toml workspace members
+
+### Measured on the target hardware (AMD RX 580 / RADV Vulkan)
+
+```
+adapter: AMD Radeon RX 580 Series (RADV POLARIS10) — Vulkan
+
+    size (m x k x n)       cpu ms      wgpu ms    speedup  parity
+            64x64x64        0.052        0.228      0.23x  OK
+         128x128x128        0.281        0.340      0.83x  OK
+         256x256x256        1.966        0.880      2.24x  OK
+         512x512x512       14.503        4.273      3.39x  OK
+      1024x1024x1024      115.516       28.577      4.04x  OK
+```
+
+Crossover at ~128×128. By 1024×1024, GPU is **4.04× faster than the naive CPU baseline**. Parity passes at every size (GPU output matches CPU output within f32 rounding).
+
+### Why wgpu over ROCm
+
+The honest situation for the user's hardware:
+
+- **Official ROCm dropped Polaris (gfx803) at version 4.0.** Newer ROCm releases don't ship kernels for this GPU.
+- **Unofficial Polaris ROCm builds exist** but they're community-maintained and fragile — "Ollama gets fussy about it" was the user's verbatim experience, which matches the broader pattern.
+- **Vulkan compute works out of the box** on the same hardware via the open-source RADV driver. The Mesa-driven Vulkan path is stable and well-tested.
+
+So wgpu is the default. The `ComputeBackend` trait is ready for ROCm/CUDA backends to plug in when running on supported hardware — but no SDK install attempt on this machine.
+
+### Tests
+
+11/11 GPU tests pass, including the wgpu kernel parity check on the user's actual GPU:
+- `cpu_matmul_*` — basic, identity, shape-mismatch
+- `wgpu_matmul_basic_2x3_3x2` — small-shape parity
+- `wgpu_matmul_matches_cpu_8x8` — larger parity, max diff < 1e-4
+- `wgpu_shape_mismatch_errors` — error handling
+- `matrix_new_*` / `max_abs_diff_*` / `pick_backend_returns_cpu_when_env_forces` — utilities
+
+### What's NOT in v0.7
+
+- **Prometheus integration.** The tape ops in `examples/lib/prometheus.omc` still run pure-OMC. v0.8 candidate: route `tape_matmul` through this backend when shapes exceed the CPU-crossover threshold.
+- **Backward pass on GPU.** Only forward matmul. Backward requires the autotape to live on GPU too.
+- **Tiled / shared-memory kernels.** The wgpu shader is naive. Tuned kernels would extract more from the hardware.
+- **f16 / bfloat16.** f32 only.
+- **ROCm / CUDA / Metal backends.** Trait is ready; impls are deferred until on supported hardware.
+
+### Files
+
+- `omnimcode-gpu/Cargo.toml` — crate manifest, wgpu as optional feature
+- `omnimcode-gpu/src/lib.rs` — trait + Matrix + pick_backend
+- `omnimcode-gpu/src/cpu.rs` — CPU backend
+- `omnimcode-gpu/src/wgpu_backend.rs` — wgpu backend
+- `omnimcode-gpu/shaders/matmul.wgsl` — compute kernel
+- `omnimcode-gpu/examples/bench_matmul.rs` — bench harness
+- `omnimcode-gpu/README.md` — usage + measured speedups
+- `Cargo.toml` — workspace member added
 
 ---
 
