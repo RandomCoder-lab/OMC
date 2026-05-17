@@ -1,0 +1,12 @@
+{
+  "approach": "token-sampled seq2seq (1/N sparse input)",
+  "sample_n": 2,
+  "train_exact": 40,
+  "train_n": 40,
+  "test_exact": 0,
+  "test_n": 10,
+  "test_near": 2,
+  "test_mean_prefix": 0.29115425465270667,
+  "vocab_size": 111,
+  "params": 771759
+}

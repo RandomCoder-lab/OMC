@@ -1,0 +1,12 @@
+{
+  "feat_dim": 40,
+  "train_exact": 40,
+  "train_n": 40,
+  "test_exact": 0,
+  "test_n": 10,
+  "test_near": 1,
+  "test_mean_prefix": 0.206365296832255,
+  "n_deps": 20,
+  "vocab_size": 113,
+  "params": 250161
+}

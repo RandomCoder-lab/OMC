@@ -1,0 +1,48 @@
+# Tandem demo: REPLY side (Hermes responding to Claude).
+# Reads a substrate-signed message from Claude, verifies it,
+# then sends back a signed response with sender_id=28765 and kind=2.
+
+fn show(label, v) { print(concat_many(label, " = ", to_string(v))); }
+
+fn main() {
+    h HERMES_ID = 28765;
+    h KIND_RESPONSE = 2;
+
+    // Read the incoming wire from Claude
+    h wire = read_file("/home/thearchitect/omc_channel/from_claude.json");
+    h msg = omc_msg_deserialize(wire);
+    h check = omc_msg_verify(msg);
+
+    show("valid signature?  ", dict_get(check, "valid"));
+    show("sender_id         ", dict_get(check, "sender_id"));
+    show("kind              ", dict_get(check, "kind"));
+    show("expected_hash     ", dict_get(check, "expected_hash"));
+    show("actual_hash       ", dict_get(check, "actual_hash"));
+    show("drift_resonance   ", dict_get(check, "drift_resonance"));
+    show("drift_him         ", dict_get(check, "drift_him"));
+
+    if dict_get(check, "valid") == 1 {
+        print("");
+        print("=== Signature valid — content trustworthy ===");
+        h payload = dict_get(check, "content");   // extract verified content
+        print("Payload:");
+        print(payload);
+
+        // Now sign a response (we echo back the same payload for demo)
+        h resp_msg = omc_msg_sign(payload, HERMES_ID, KIND_RESPONSE);
+        show("resp packed ID    ", dict_get(resp_msg, "packed"));
+        show("resp content_hash ", dict_get(resp_msg, "content_hash"));
+        show("resp resonance    ", dict_get(resp_msg, "resonance"));
+        show("resp attractor    ", dict_get(resp_msg, "attractor"));
+
+        h resp_wire = omc_msg_serialize(resp_msg);
+        write_file("/home/thearchitect/omc_channel/from_hermes.json", resp_wire);
+        print("");
+        print("Wrote /home/thearchitect/omc_channel/from_hermes.json");
+        print("Hermes response sent (kind=2, sender_id=28765).");
+    } else {
+        print("");
+        print("=== SIGNATURE MISMATCH — will not respond ===");
+    }
+}
+main();

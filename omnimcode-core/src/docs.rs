@@ -1080,6 +1080,20 @@ pub const BUILTINS: &[BuiltinDoc] = &[
         example: "omc_find_similar(q, corpus)  // [{index, distance}] — index of any distance-0 hit is the alpha-equiv match",
         unique_to_omc: true,
     },
+    BuiltinDoc {
+        name: "omc_codec_encode", category: "code_intel",
+        signature: "(code: string, every_n?: int) -> dict",
+        description: "Substrate-keyed compressed payload: keeps every Nth canonical token plus substrate hash + attractor + distance. Designed for in-library exact recovery via omc_codec_decode_lookup. Compression ~2.5N× from raw source.",
+        example: "omc_codec_encode(\"fn f(x){return x;}\", 3)  // ~7x ratio",
+        unique_to_omc: true,
+    },
+    BuiltinDoc {
+        name: "omc_codec_decode_lookup", category: "code_intel",
+        signature: "(codec: dict, library: string[]) -> string|null",
+        description: "Lossless decode via library lookup: returns the library entry whose canonical hash matches the codec's content_hash. The 'verify and retry' half of the codec — works for any in-library input, null otherwise.",
+        example: "omc_codec_decode_lookup(codec, library)  // matching entry or null",
+        unique_to_omc: true,
+    },
     // ---- Substrate-signed messaging (LLM ↔ LLM protocol) ----
     BuiltinDoc {
         name: "omc_msg_sign", category: "messaging",
@@ -1108,6 +1122,20 @@ pub const BUILTINS: &[BuiltinDoc] = &[
         description: "Inverse of omc_msg_serialize. Parse JSON wire form back to a dict for omc_msg_verify.",
         example: "omc_msg_verify(omc_msg_deserialize(wire))",
         unique_to_omc: false,
+    },
+    BuiltinDoc {
+        name: "omc_msg_sign_compressed", category: "messaging",
+        signature: "(content: string, sender_id: int, kind: int, every_n?: int) -> dict",
+        description: "Like omc_msg_sign but carries sampled-token codec payload instead of raw content. Receiver recovers via omc_msg_recover_compressed against a shared library. Compression ~2.5N× vs raw source. Best for code exchange between agents who share an OMC library.",
+        example: "omc_msg_sign_compressed(fn_source, 18173, 1, 3)  // 7x payload reduction",
+        unique_to_omc: true,
+    },
+    BuiltinDoc {
+        name: "omc_msg_recover_compressed", category: "messaging",
+        signature: "(msg: dict, library: string[]) -> string|null",
+        description: "Recover original content from a sign_compressed message by matching content_hash against canonical-hashes of library entries. Returns recovered source or null.",
+        example: "omc_msg_recover_compressed(msg, shared_library)  // recovered source",
+        unique_to_omc: true,
     },
     BuiltinDoc {
         name: "omc_prompt_agent", category: "messaging",

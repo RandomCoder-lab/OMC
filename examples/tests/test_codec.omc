@@ -1,0 +1,72 @@
+# Substrate-keyed codec — round-trip on a known library.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+
+fn test_encode_returns_required_fields() {
+    h codec = omc_codec_encode("fn f(x) { return x; }", 3);
+    assert_true(dict_has(codec, "sampled_tokens"), "has sampled_tokens");
+    assert_true(dict_has(codec, "content_hash"), "has content_hash");
+    assert_true(dict_has(codec, "attractor"), "has attractor");
+    assert_true(dict_has(codec, "dist"), "has dist");
+    assert_true(dict_has(codec, "original_tok_count"), "has original_tok_count");
+    assert_true(dict_has(codec, "compression_ratio"), "has compression_ratio");
+}
+
+fn test_compression_ratio_positive() {
+    h codec = omc_codec_encode("fn f(x) { return x; }", 3);
+    assert_true(dict_get(codec, "compression_ratio") > 1.0, "ratio > 1");
+}
+
+fn test_lookup_finds_known() {
+    h lib = [
+        "fn a() { return 1; }",
+        "fn b() { return 2; }",
+        "fn c() { return 3; }",
+    ];
+    h codec = omc_codec_encode(arr_get(lib, 1), 3);
+    h decoded = omc_codec_decode_lookup(codec, lib);
+    assert_eq(decoded, "fn b() { return 2; }", "library lookup");
+}
+
+fn test_lookup_misses_unknown() {
+    h lib = ["fn a() { return 1; }"];
+    h codec = omc_codec_encode("fn z() { return 99; }", 3);
+    h decoded = omc_codec_decode_lookup(codec, lib);
+    assert_true(decoded == null, "miss returns null");
+}
+
+fn test_alpha_equivalent_lookup_succeeds() {
+    # Canonical hash is invariant under rename, so encoding one
+    # alpha-equivalent form and looking up the other still hits.
+    h lib = ["fn f(x) { return x; }"];
+    h codec = omc_codec_encode("fn f(y) { return y; }", 3);
+    h decoded = omc_codec_decode_lookup(codec, lib);
+    assert_eq(decoded, "fn f(x) { return x; }", "alpha-rename lookup hits");
+}
+
+fn test_encode_n_2_keeps_more() {
+    # Same source, N=2 keeps roughly twice as many tokens as N=4.
+    h c2 = omc_codec_encode("fn add(x, y) { return x + y + 1; }", 2);
+    h c4 = omc_codec_encode("fn add(x, y) { return x + y + 1; }", 4);
+    h n2 = arr_len(dict_get(c2, "sampled_tokens"));
+    h n4 = arr_len(dict_get(c4, "sampled_tokens"));
+    assert_true(n2 > n4, "N=2 keeps more than N=4");
+}
+
+# Unknown-function error now includes signature hint inline.
+fn test_unknown_fn_inlines_signature_hint() {
+    h err = "";
+    try {
+        h _ = arr_softmx([1.0]);  # typo
+    } catch e {
+        err = e;
+    }
+    assert_true(re_match("did you mean", err) == 1, "did-you-mean present");
+    assert_true(re_match("signature", err) == 1, "inline signature hint present");
+}

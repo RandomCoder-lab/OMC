@@ -802,6 +802,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "omnimcode-mcp"
+version = "1.0.0"
+dependencies = [
+ "omnimcode-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "omnimcode-wasm"
 version = "1.0.0"
 dependencies = [

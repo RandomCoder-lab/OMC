@@ -8160,6 +8160,79 @@ impl Interpreter {
                     format!("omc_prompt_agent: write {}: {}", path, e))?;
                 Ok(Value::HInt(HInt::new(packed)))
             }
+            "omc_msg_sign_compressed" => {
+                if args.len() < 3 {
+                    return Err("omc_msg_sign_compressed requires (content, sender_id, kind, every_n?)".to_string());
+                }
+                let content = self.eval_expr(&args[0])?.to_display_string();
+                let sender_id = self.eval_expr(&args[1])?.to_int();
+                let kind = self.eval_expr(&args[2])?.to_int();
+                let every_n = if args.len() >= 4 {
+                    self.eval_expr(&args[3])?.to_int().max(1) as usize
+                } else { 3usize };
+                let canon = crate::canonical::canonicalize(&content)
+                    .unwrap_or_else(|_| content.clone());
+                let tokens = crate::tokenizer::encode(&canon);
+                let sampled: Vec<Value> = tokens.iter().enumerate()
+                    .filter(|(i, _)| i % every_n == 0)
+                    .map(|(_, t)| Value::HInt(HInt::new(*t)))
+                    .collect();
+                let hash = crate::tokenizer::fnv1a_64(canon.as_bytes());
+                let h = HInt::new(hash);
+                let (attractor, _) = crate::phi_pi_fib::nearest_attractor_with_dist(hash);
+                let moduli = crate::tokenizer::CRT_MODULI;
+                let streams = [
+                    sender_id.rem_euclid(moduli[0]),
+                    kind.rem_euclid(moduli[1]),
+                    hash.rem_euclid(moduli[2]),
+                ];
+                let packed = crate::tokenizer::crt_pack(&streams, moduli).unwrap_or(0);
+                let mut map = std::collections::BTreeMap::new();
+                map.insert("sampled_tokens".to_string(),
+                    Value::Array(HArray::from_vec(sampled.clone())));
+                map.insert("sender_id".to_string(), Value::HInt(HInt::new(sender_id)));
+                map.insert("kind".to_string(), Value::HInt(HInt::new(kind)));
+                map.insert("content_hash".to_string(), Value::HInt(HInt::new(hash)));
+                map.insert("resonance".to_string(), Value::HFloat(h.resonance));
+                map.insert("him_score".to_string(), Value::HFloat(h.him_score));
+                map.insert("attractor".to_string(), Value::HInt(HInt::new(attractor)));
+                map.insert("packed".to_string(), Value::HInt(HInt::new(packed)));
+                map.insert("every_n".to_string(), Value::HInt(HInt::new(every_n as i64)));
+                map.insert("original_tok_count".to_string(),
+                    Value::HInt(HInt::new(tokens.len() as i64)));
+                map.insert("source_bytes".to_string(),
+                    Value::HInt(HInt::new(content.len() as i64)));
+                let ratio = if !sampled.is_empty() {
+                    content.len() as f64 / sampled.len() as f64
+                } else { 0.0 };
+                map.insert("compression_ratio".to_string(), Value::HFloat(ratio));
+                Ok(Value::dict_from(map))
+            }
+            "omc_msg_recover_compressed" => {
+                if args.len() < 2 {
+                    return Err("omc_msg_recover_compressed requires (msg, library)".to_string());
+                }
+                let v = self.eval_expr(&args[0])?;
+                let lib_v = self.eval_expr(&args[1])?;
+                let target_hash = if let Value::Dict(d) = v {
+                    d.borrow().get("content_hash").map(|x| x.to_int()).unwrap_or(0)
+                } else {
+                    return Err("omc_msg_recover_compressed: msg must be a dict".to_string());
+                };
+                let library: Vec<String> = if let Value::Array(arr) = lib_v {
+                    arr.items.borrow().iter().map(|x| x.to_display_string()).collect()
+                } else {
+                    return Err("omc_msg_recover_compressed: library must be a string array".to_string());
+                };
+                for entry in &library {
+                    let canon = crate::canonical::canonicalize(entry)
+                        .unwrap_or_else(|_| entry.clone());
+                    if crate::tokenizer::fnv1a_64(canon.as_bytes()) == target_hash {
+                        return Ok(Value::String(entry.clone()));
+                    }
+                }
+                Ok(Value::Null)
+            }
             "omc_msg_serialize" => {
                 // Convert a signed-message dict into a JSON wire string.
                 // Useful when writing to a shared file / pipe / socket.
@@ -8180,6 +8253,84 @@ impl Interpreter {
                     Ok(j) => Ok(crate::interpreter::json_to_value(j)),
                     Err(e) => Err(format!("omc_msg_deserialize: {}", e)),
                 }
+            }
+            // ---- Substrate-keyed compressed code store ----
+            //
+            // omc_codec_encode(code: string) -> dict
+            //   Produce a wire-format compressed payload:
+            //     {sampled_tokens, content_hash, attractor, dist,
+            //      original_tok_count, source_bytes, compression_ratio}
+            //   This is the v4 "token-sampled" form — keeps every Nth
+            //   token of the canonical encoding. Decoder side requires a
+            //   model trained on the corresponding library to fully
+            //   recover; for in-library inputs, recovery is exact via
+            //   omc_codec_decode_lookup against a known store.
+            "omc_codec_encode" => {
+                if args.is_empty() {
+                    return Err("omc_codec_encode requires (code: string, every_n?: int)".to_string());
+                }
+                let code = self.eval_expr(&args[0])?.to_display_string();
+                let every_n = if args.len() >= 2 {
+                    self.eval_expr(&args[1])?.to_int().max(1) as usize
+                } else { 3usize };
+                let canon = crate::canonical::canonicalize(&code)
+                    .unwrap_or_else(|_| code.clone());
+                let tokens = crate::tokenizer::encode(&canon);
+                let sampled: Vec<Value> = tokens.iter().enumerate()
+                    .filter(|(i, _)| i % every_n == 0)
+                    .map(|(_, t)| Value::HInt(HInt::new(*t)))
+                    .collect();
+                let hash = crate::tokenizer::fnv1a_64(canon.as_bytes());
+                let (attractor, dist) = crate::phi_pi_fib::nearest_attractor_with_dist(hash);
+                let mut map = std::collections::BTreeMap::new();
+                map.insert("sampled_tokens".to_string(),
+                    Value::Array(HArray::from_vec(sampled.clone())));
+                map.insert("content_hash".to_string(), Value::HInt(HInt::new(hash)));
+                map.insert("attractor".to_string(), Value::HInt(HInt::new(attractor)));
+                map.insert("dist".to_string(), Value::HInt(HInt::new(dist)));
+                map.insert("original_tok_count".to_string(),
+                    Value::HInt(HInt::new(tokens.len() as i64)));
+                map.insert("source_bytes".to_string(),
+                    Value::HInt(HInt::new(code.len() as i64)));
+                map.insert("every_n".to_string(), Value::HInt(HInt::new(every_n as i64)));
+                let ratio = if !sampled.is_empty() {
+                    code.len() as f64 / sampled.len() as f64
+                } else { 0.0 };
+                map.insert("compression_ratio".to_string(), Value::HFloat(ratio));
+                Ok(Value::dict_from(map))
+            }
+            // omc_codec_decode_lookup(codec: dict, library: string[]) -> string|null
+            //   Lossless decode via library lookup: hash each library
+            //   entry's canonical form; return the one whose hash
+            //   matches the codec's content_hash. Returns null on miss.
+            //   This is the "verify and retry" half of the codec.
+            "omc_codec_decode_lookup" => {
+                if args.len() < 2 {
+                    return Err("omc_codec_decode_lookup requires (codec: dict, library: string[])".to_string());
+                }
+                let codec_v = self.eval_expr(&args[0])?;
+                let lib_v = self.eval_expr(&args[1])?;
+                let target_hash = if let Value::Dict(d) = codec_v {
+                    d.borrow().get("content_hash")
+                        .map(|v| v.to_int())
+                        .unwrap_or(0)
+                } else {
+                    return Err("omc_codec_decode_lookup: codec must be a dict".to_string());
+                };
+                let library: Vec<String> = if let Value::Array(arr) = lib_v {
+                    arr.items.borrow().iter().map(|v| v.to_display_string()).collect()
+                } else {
+                    return Err("omc_codec_decode_lookup: library must be a string array".to_string());
+                };
+                for entry in &library {
+                    let canon = crate::canonical::canonicalize(entry)
+                        .unwrap_or_else(|_| entry.clone());
+                    let h = crate::tokenizer::fnv1a_64(canon.as_bytes());
+                    if h == target_hash {
+                        return Ok(Value::String(entry.clone()));
+                    }
+                }
+                Ok(Value::Null)
             }
             "omc_find_similar" => {
                 // omc_find_similar(query, corpus[]) → [{index, distance}, ...]
@@ -9857,18 +10008,23 @@ impl Interpreter {
                     }
                 }
                 // Unknown function — return a did_you_mean-augmented
-                // error message. Suggestions come from the documented
-                // builtin set (src/docs.rs); on no hits, we surface a
-                // plain "Undefined function" so LLMs / users don't see
-                // a confusing trailing "did you mean:" with nothing.
+                // error message PLUS inline signature hint for the top
+                // suggestion. Closes the loop: LLM (or human) doesn't
+                // need a follow-up omc_help call to know what to do.
                 let suggestions = crate::docs::did_you_mean(name, 3);
                 if suggestions.is_empty() {
                     Err(format!("Undefined function: {}", name))
                 } else {
+                    // Inline the signature of the top suggestion so the
+                    // user sees both the suggestion AND its call shape.
+                    let sig_hint = crate::docs::lookup(suggestions[0])
+                        .map(|d| format!(" — signature: `{}`", d.signature))
+                        .unwrap_or_default();
                     Err(format!(
-                        "Undefined function: {} (did you mean: {}?)",
+                        "Undefined function: {} (did you mean: {}?{})",
                         name,
-                        suggestions.join(", ")
+                        suggestions.join(", "),
+                        sig_hint,
                     ))
                 }
             }

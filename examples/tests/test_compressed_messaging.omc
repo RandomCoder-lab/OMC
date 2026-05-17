@@ -1,0 +1,62 @@
+# Compressed substrate-signed messaging round-trip.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+
+fn test_compressed_sign_includes_codec() {
+    h msg = omc_msg_sign_compressed("fn f(x) { return x; }", 18173, 1, 3);
+    assert_true(dict_has(msg, "sampled_tokens"), "carries sampled_tokens");
+    assert_true(dict_has(msg, "content_hash"), "carries content_hash");
+    assert_true(dict_has(msg, "compression_ratio"), "has ratio");
+    assert_true(dict_get(msg, "compression_ratio") > 1.0, "compression > 1");
+}
+
+fn test_recover_in_library() {
+    h lib = [
+        "fn a() { return 1; }",
+        "fn b(x) { return x * 2; }",
+        "fn c(x, y) { return x + y; }",
+    ];
+    h msg = omc_msg_sign_compressed("fn b(x) { return x * 2; }", 18173, 1, 3);
+    h recovered = omc_msg_recover_compressed(msg, lib);
+    assert_eq(recovered, "fn b(x) { return x * 2; }", "recovered exact");
+}
+
+fn test_recover_alpha_equivalent() {
+    # Sender renames params; receiver's library has the original name.
+    h lib = ["fn b(x) { return x * 2; }"];
+    h msg = omc_msg_sign_compressed("fn b(y) { return y * 2; }", 18173, 1, 3);
+    h recovered = omc_msg_recover_compressed(msg, lib);
+    # Recovers the library version (canonical-hash invariant under rename).
+    assert_eq(recovered, "fn b(x) { return x * 2; }", "alpha-eq recovery");
+}
+
+fn test_recover_miss() {
+    h lib = ["fn a() { return 1; }"];
+    h msg = omc_msg_sign_compressed("fn nope() { return 99; }", 18173, 1, 3);
+    h recovered = omc_msg_recover_compressed(msg, lib);
+    assert_true(recovered == null, "miss → null");
+}
+
+fn test_substrate_metadata_present() {
+    h msg = omc_msg_sign_compressed("fn f() {}", 18173, 1, 3);
+    assert_true(dict_has(msg, "resonance"), "has resonance");
+    assert_true(dict_has(msg, "him_score"), "has him");
+    assert_true(dict_has(msg, "attractor"), "has attractor");
+    assert_true(dict_has(msg, "packed"), "has packed");
+}
+
+fn test_wire_serialize_roundtrip() {
+    # Sign compressed, serialize to wire, deserialize, recover via library.
+    h lib = ["fn add(x, y) { return x + y; }"];
+    h msg = omc_msg_sign_compressed("fn add(a, b) { return a + b; }", 18173, 1, 3);
+    h wire = omc_msg_serialize(msg);
+    h received = omc_msg_deserialize(wire);
+    h recovered = omc_msg_recover_compressed(received, lib);
+    assert_eq(recovered, "fn add(x, y) { return x + y; }", "wire roundtrip");
+}
