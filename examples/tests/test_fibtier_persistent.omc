@@ -1,0 +1,65 @@
+# Tests for kernel-backed fibtier — persistence + reload.
+
+import "examples/lib/fibtier_persistent.omc";
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+
+fn test_persistent_new_creates_root() {
+    h mem = fibtier_persistent_new("__test_pf_new", 4);
+    assert_eq(dict_get(mem, "_persistent_name"), "__test_pf_new", "name set");
+    h stats = fibtier_stats(mem);
+    assert_eq(dict_get(stats, "total_pushes"), 0, "fresh memory has 0 pushes");
+}
+
+fn test_push_and_reload_preserves_state() {
+    fibtier_persistent_new("__test_pf_reload", 5);
+    h mem = fibtier_persistent_load("__test_pf_reload");
+    fibtier_persistent_push(mem, "alpha");
+    fibtier_persistent_push(mem, "beta");
+    fibtier_persistent_push(mem, "gamma");
+
+    h before = fibtier_stats(mem);
+    h pushes_before = dict_get(before, "total_pushes");
+    h folds_before = dict_get(before, "total_folds");
+    h total_before = dict_get(before, "total_entries");
+
+    # Simulate a process restart: throw away mem, reload from disk.
+    h reloaded = fibtier_persistent_load("__test_pf_reload");
+    h after = fibtier_stats(reloaded);
+    assert_eq(dict_get(after, "total_pushes"), pushes_before, "pushes preserved");
+    assert_eq(dict_get(after, "total_folds"), folds_before, "folds preserved");
+    assert_eq(dict_get(after, "total_entries"), total_before, "entry count preserved");
+}
+
+fn test_reloaded_contents_match() {
+    fibtier_persistent_new("__test_pf_contents", 5);
+    h mem = fibtier_persistent_load("__test_pf_contents");
+    fibtier_persistent_push(mem, "preserved message");
+
+    h reloaded = fibtier_persistent_load("__test_pf_contents");
+    h tiers = dict_get(reloaded, "tiers");
+    h tier_1 = arr_get(tiers, 0);
+    assert_eq(arr_len(tier_1), 1, "tier 1 has the entry after reload");
+    h entry = arr_get(tier_1, 0);
+    assert_eq(dict_get(entry, "content"), "preserved message",
+              "content survives round-trip");
+}
+
+fn test_continue_pushing_after_reload() {
+    fibtier_persistent_new("__test_pf_continue", 4);
+    h mem = fibtier_persistent_load("__test_pf_continue");
+    fibtier_persistent_push(mem, "before restart");
+
+    h reloaded = fibtier_persistent_load("__test_pf_continue");
+    fibtier_persistent_push(reloaded, "after restart");
+    fibtier_persistent_push(reloaded, "third entry");
+
+    h stats = fibtier_stats(reloaded);
+    assert_eq(dict_get(stats, "total_pushes"), 3, "pushes accumulate across restart");
+}

@@ -1,0 +1,140 @@
+# Substrate-native agent — composes fibtier + kernel + protocol + (optional) Prometheus.
+#
+# An agent is:
+#   - identity (sender_id derived from name)
+#   - memory (persistent fibtier; ~/.omc/fibtier/<name>/)
+#   - knowledge (a dict of fact → response, for the demo's generator)
+#   - role (string, used in introductions)
+#
+# Agents talk over OMC-PROTOCOL: every message is substrate-signed
+# (omc_msg_sign), serialized via omc_msg_serialize. Recipients verify
+# via omc_msg_verify with no shared key. The wire format and identity
+# guarantees come for free from primitives shipped earlier.
+#
+# Replace knowledge_dispatch with a Prometheus-trained generator
+# when you want the agent's responses to come from a substrate-native
+# LM. For now, the demo uses a dictionary-driven responder so the
+# conversation is intelligible.
+
+import "examples/lib/fibtier_persistent.omc";
+
+# ---------------------------------------------------------------------------
+# Identity: substrate-derived sender_id from the agent name.
+# ---------------------------------------------------------------------------
+
+fn _agent_sender_id(name) {
+    h hval = fnv1a_hash(name);
+    # Truncate to 31 bits (positive int32) to match omc_msg_sign expectation.
+    h pos = hval - (hval / 2147483648) * 2147483648;
+    if pos < 0 { pos = 0 - pos; }
+    return pos;
+}
+
+# ---------------------------------------------------------------------------
+# Agent construction
+# ---------------------------------------------------------------------------
+
+fn agent_new(name, role, knowledge_dict, max_tiers) {
+    fibtier_persistent_new(name, max_tiers);
+    h mem = fibtier_persistent_load(name);
+    h agent = dict_new();
+    dict_set(agent, "name", name);
+    dict_set(agent, "role", role);
+    dict_set(agent, "sender_id", _agent_sender_id(name));
+    dict_set(agent, "memory", mem);
+    dict_set(agent, "knowledge", knowledge_dict);
+    return agent;
+}
+
+# Reload an existing agent (preserves memory).
+fn agent_load(name, role, knowledge_dict) {
+    h mem = fibtier_persistent_load(name);
+    h agent = dict_new();
+    dict_set(agent, "name", name);
+    dict_set(agent, "role", role);
+    dict_set(agent, "sender_id", _agent_sender_id(name));
+    dict_set(agent, "memory", mem);
+    dict_set(agent, "knowledge", knowledge_dict);
+    return agent;
+}
+
+# ---------------------------------------------------------------------------
+# Response generator (knowledge-based for the demo)
+#
+# Looks up the input text against the agent's knowledge dict. If
+# nothing matches, returns a substrate-aware "I don't know"-style
+# response. Production agents would replace this with a Prometheus
+# forward pass over the input + retrieved context from memory.
+# ---------------------------------------------------------------------------
+
+fn _agent_respond(agent, input_text) {
+    h kn = dict_get(agent, "knowledge");
+    # Linear scan; keys are short substrings to match against input.
+    h keys = dict_keys(kn);
+    h i = 0;
+    while i < arr_len(keys) {
+        h key = arr_get(keys, i);
+        if re_match(key, input_text) == 1 {
+            return dict_get(kn, key);
+        }
+        i = i + 1;
+    }
+    # Fallback: query memory for closest related entry.
+    h hits = fibtier_query(dict_get(agent, "memory"), input_text, 1);
+    if arr_len(hits) > 0 {
+        h hit = arr_get(hits, 0);
+        h entry = dict_get(hit, "entry");
+        return concat_many("That reminds me of: ", dict_get(entry, "content"));
+    }
+    return concat_many("I haven't encountered \"", input_text, "\" yet.");
+}
+
+# ---------------------------------------------------------------------------
+# Inter-agent messaging via OMC-PROTOCOL
+# ---------------------------------------------------------------------------
+
+# Send a substrate-signed message. Returns the wire-serialized form
+# that the recipient deserializes via omc_msg_deserialize.
+fn agent_send(agent, content) {
+    h KIND_REQUEST = 1;
+    h msg = omc_msg_sign(content, dict_get(agent, "sender_id"), KIND_REQUEST);
+    return omc_msg_serialize(msg);
+}
+
+# Receive a wire message: deserialize, verify signature, push verified
+# content into the agent's memory, generate a response, sign + return
+# the response wire. This is the full inbound→outbound loop.
+fn agent_receive(agent, wire) {
+    h msg = omc_msg_deserialize(wire);
+    h check = omc_msg_verify(msg);
+    if dict_get(check, "valid") != 1 {
+        return omc_msg_serialize(
+            omc_msg_sign("[INVALID SIGNATURE]", dict_get(agent, "sender_id"), 8)
+        );
+    }
+    h content = dict_get(check, "content");
+    h reply_content = _agent_respond(agent, content);
+    # Push the Q+A pair into memory.
+    h qa = concat_many("Q: ", content, " | A: ", reply_content);
+    fibtier_persistent_push(dict_get(agent, "memory"), qa);
+    # Sign + serialize the reply.
+    h reply_msg = omc_msg_sign(reply_content, dict_get(agent, "sender_id"), 2);
+    return omc_msg_serialize(reply_msg);
+}
+
+# ---------------------------------------------------------------------------
+# Stats
+# ---------------------------------------------------------------------------
+
+fn agent_stats(agent) {
+    h mem_stats = fibtier_stats(dict_get(agent, "memory"));
+    h s = dict_new();
+    dict_set(s, "name", dict_get(agent, "name"));
+    dict_set(s, "role", dict_get(agent, "role"));
+    dict_set(s, "sender_id", dict_get(agent, "sender_id"));
+    dict_set(s, "memory_pushes", dict_get(mem_stats, "total_pushes"));
+    dict_set(s, "memory_folds", dict_get(mem_stats, "total_folds"));
+    dict_set(s, "memory_entries", dict_get(mem_stats, "total_entries"));
+    dict_set(s, "memory_occupancy", dict_get(mem_stats, "occupancy"));
+    return s;
+}

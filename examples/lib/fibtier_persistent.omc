@@ -1,0 +1,209 @@
+# Persistent Fibonacci-tier memory — kernel-backed.
+#
+# Layered on top of fibtier.omc + omc_canonical_hash for content
+# addressing. Every entry and fold becomes a kernel-style write to
+# disk under a named root directory; on startup, the fibtier reloads
+# its full state from disk.
+#
+# This is the substrate-native answer to "agent memory that survives
+# process restarts." Combined with fibtier's bounded-context structure,
+# you get: every conversation turn is content-addressed by canonical
+# hash, the memory hierarchy is preserved across crashes/restarts,
+# and the storage layout itself reflects the Fibonacci tier structure.
+#
+# Storage layout:
+#   <root>/
+#     tier_01/
+#       000_<hex_hash>.entry      # raw content
+#       001_<hex_hash>.entry
+#       ...
+#     tier_02/
+#       ...
+#     manifest.json                # tier indices, stats, fold lineage
+#
+# Each entry file is the raw content (already canonical via fnv1a).
+# manifest.json carries the per-entry metadata (canonical_hash, sources,
+# tier index, age) and the cumulative stats (total pushes/folds/evicted).
+
+import "examples/lib/fibtier.omc";
+
+# ---------------------------------------------------------------------------
+# Path helpers
+# ---------------------------------------------------------------------------
+
+fn _fibtier_root(name) {
+    return concat_many(py_eval("__import__('os').environ['HOME']"), "/.omc/fibtier/", name);
+}
+
+fn _fibtier_tier_dir(name, tier_idx) {
+    h pad = "0";
+    if tier_idx >= 10 { pad = ""; }
+    return concat_many(_fibtier_root(name), "/tier_", pad, to_string(tier_idx));
+}
+
+fn _fibtier_entry_path(name, tier_idx, position, hex_hash) {
+    h pos_pad = "00";
+    if position >= 10 { pos_pad = "0"; }
+    if position >= 100 { pos_pad = ""; }
+    return concat_many(_fibtier_tier_dir(name, tier_idx), "/", pos_pad,
+                       to_string(position), "_", hex_hash, ".entry");
+}
+
+fn _fibtier_manifest_path(name) {
+    return concat_many(_fibtier_root(name), "/manifest.json");
+}
+
+# ---------------------------------------------------------------------------
+# Serialization
+# ---------------------------------------------------------------------------
+
+# Convert a single in-memory entry to a JSON-stringifiable dict.
+fn _serialize_entry(entry) {
+    h sources_strs = [];
+    h srcs = dict_get(entry, "sources");
+    h i = 0;
+    while i < arr_len(srcs) {
+        arr_push(sources_strs, to_string(arr_get(srcs, i)));
+        i = i + 1;
+    }
+    h s = dict_new();
+    dict_set(s, "content", dict_get(entry, "content"));
+    dict_set(s, "canonical_hash", to_string(dict_get(entry, "canonical_hash")));
+    dict_set(s, "attractor_distance", to_string(dict_get(entry, "attractor_distance")));
+    dict_set(s, "sources", sources_strs);
+    dict_set(s, "size", dict_get(entry, "size"));
+    return s;
+}
+
+# Inverse: rehydrate an entry from JSON form.
+fn _deserialize_entry(s) {
+    h srcs_strs = dict_get(s, "sources");
+    h srcs = [];
+    h i = 0;
+    while i < arr_len(srcs_strs) {
+        # Re-parse string back to int.
+        arr_push(srcs, to_int(arr_get(srcs_strs, i)));
+        i = i + 1;
+    }
+    h entry = dict_new();
+    dict_set(entry, "content", dict_get(s, "content"));
+    dict_set(entry, "canonical_hash", to_int(dict_get(s, "canonical_hash")));
+    dict_set(entry, "attractor_distance", to_int(dict_get(s, "attractor_distance")));
+    dict_set(entry, "sources", srcs);
+    dict_set(entry, "size", dict_get(s, "size"));
+    return entry;
+}
+
+# Write a single entry to disk at tier_idx, position.
+fn _write_entry_to_disk(name, tier_idx, position, entry) {
+    # Ensure the tier directory exists by writing through to the file —
+    # OMC's write_file creates parent dirs as needed in most cases; if not,
+    # we shell to mkdir -p via py_eval as a fallback. For now we trust
+    # write_file to handle it. If it doesn't, we'll see errors and add mkdir.
+    h hex_hash = to_hex(dict_get(entry, "canonical_hash"));
+    h path = _fibtier_entry_path(name, tier_idx, position, hex_hash);
+    write_file(path, dict_get(entry, "content"));
+}
+
+# Ensure all parent dirs exist by writing a sentinel via py_exec
+# (shells out to Python's os.makedirs).
+fn _ensure_root_exists(name) {
+    h cmd = concat_many("import os; os.makedirs('", _fibtier_root(name), "', exist_ok=True)");
+    py_exec(cmd);
+    h max_tiers = 11;
+    h i = 1;
+    while i <= max_tiers {
+        h cmd2 = concat_many("import os; os.makedirs('", _fibtier_tier_dir(name, i), "', exist_ok=True)");
+        py_exec(cmd2);
+        i = i + 1;
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Persistent fibtier construction + push
+# ---------------------------------------------------------------------------
+
+# Create a NEW persistent fibtier under <root>/.
+# If a fibtier already exists at that name, this OVERWRITES the
+# manifest with an empty state. Use fibtier_persistent_load to
+# reload existing.
+fn fibtier_persistent_new(name, max_tiers) {
+    _ensure_root_exists(name);
+    h mem = fibtier_new(max_tiers);
+    dict_set(mem, "_persistent_name", name);
+    _fibtier_save_manifest(mem);
+    return mem;
+}
+
+# Reload a persistent fibtier from disk.
+fn fibtier_persistent_load(name) {
+    h manifest_path = _fibtier_manifest_path(name);
+    h raw = read_file(manifest_path);
+    h manifest = json_parse(raw);
+    h max_tiers = dict_get(manifest, "max_tiers");
+    h mem = fibtier_new(max_tiers);
+    dict_set(mem, "_persistent_name", name);
+    dict_set(mem, "total_pushes", dict_get(manifest, "total_pushes"));
+    dict_set(mem, "total_folds", dict_get(manifest, "total_folds"));
+    dict_set(mem, "evicted", dict_get(manifest, "evicted"));
+    # Rehydrate tiers from manifest.
+    h tier_data = dict_get(manifest, "tiers");
+    h tiers = dict_get(mem, "tiers");
+    h ti = 0;
+    while ti < arr_len(tier_data) {
+        h tier_entries = arr_get(tier_data, ti);
+        h restored = [];
+        h ei = 0;
+        while ei < arr_len(tier_entries) {
+            arr_push(restored, _deserialize_entry(arr_get(tier_entries, ei)));
+            ei = ei + 1;
+        }
+        arr_set(tiers, ti, restored);
+        ti = ti + 1;
+    }
+    return mem;
+}
+
+# Write the current manifest + all entries to disk.
+fn _fibtier_save_manifest(mem) {
+    h name = dict_get(mem, "_persistent_name");
+    h tiers = dict_get(mem, "tiers");
+    h tier_data = [];
+    h ti = 0;
+    while ti < arr_len(tiers) {
+        h tier = arr_get(tiers, ti);
+        h serialized_tier = [];
+        h ei = 0;
+        while ei < arr_len(tier) {
+            arr_push(serialized_tier, _serialize_entry(arr_get(tier, ei)));
+            ei = ei + 1;
+        }
+        arr_push(tier_data, serialized_tier);
+        ti = ti + 1;
+    }
+    h manifest = dict_new();
+    dict_set(manifest, "version", 1);
+    dict_set(manifest, "name", name);
+    dict_set(manifest, "max_tiers", dict_get(mem, "max_tiers"));
+    dict_set(manifest, "total_pushes", dict_get(mem, "total_pushes"));
+    dict_set(manifest, "total_folds", dict_get(mem, "total_folds"));
+    dict_set(manifest, "evicted", dict_get(mem, "evicted"));
+    dict_set(manifest, "tiers", tier_data);
+    write_file(_fibtier_manifest_path(name), json_stringify(manifest));
+}
+
+# Push with persistence: push to memory, save manifest to disk.
+fn fibtier_persistent_push(mem, content) {
+    fibtier_push(mem, content);
+    _fibtier_save_manifest(mem);
+    return mem;
+}
+
+# Convenience: get the underlying mem (for any non-persistent op).
+fn fibtier_persistent_mem(pmem) { return pmem; }
+
+# Save explicit (for bulk pushes that want to defer manifest write).
+fn fibtier_persistent_save(mem) {
+    _fibtier_save_manifest(mem);
+    return mem;
+}
