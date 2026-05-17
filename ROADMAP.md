@@ -1,40 +1,44 @@
 # OMC Roadmap
 
-Current chapter: **v0.3.1-symbolic-compression** (shipped 2026-05-17).
-Next chapter: **v0.4-substrate-context** (planned — the symbolic-context compression thesis taken seriously).
+Current chapter: **v0.4-substrate-context** (shipped 2026-05-17).
+Next chapter: **v0.5-substrate-memory** candidate — substrate-keyed conversation memory via fibtier, the path to the 10× context-budget claim that v0.4 fell short of.
 
 See [CHANGELOG.md](CHANGELOG.md) and [GitHub Releases](https://github.com/RandomCoder-lab/OMC/releases) for the chapter-by-chapter history of how OMC got here. This file describes what's on the path going forward.
 
 ---
 
-## v0.4-substrate-context (planned)
+## v0.5-substrate-memory (candidate)
 
-**Take the symbolic-context compression thesis end-to-end.** v0.3.1 added format options to omc_predict (3.8× compression on the predict response path). v0.4 generalizes: every LLM-facing OMC surface becomes substrate-aware about its context cost.
+**Substrate-keyed conversation memory: agent history becomes a stream of canonical hashes that resolve into full content only when reasoning needs it.**
 
-The substrate codec from v0.0.5 already does library-lookup compression (`omc_codec_encode` → 10-50× ratios when the receiver has the library). The v0.4 chapter wires it into the LLM flow as a first-class context-compression mechanism:
+v0.4 hit 2.81× context compression on the predict + fetch flow. The structural ceiling for that pattern alone is ~3×; v0.5 targets the 10× regime by making **conversation transcripts themselves substrate-typed**:
 
-### Tracks
-
-- **`omc_export_module(path, format=codec)`** — emit a module as a sampled-token codec payload. The LLM consumes the payload (a few hundred bytes) instead of the full source (several KB). Recovery is via library lookup against the LLM's known corpus, or via `omc_codec_decode_lookup` for explicit reconstruction.
-- **Substrate-keyed conversation memory** — wire the `fibtier` memory primitive to store conversation entries as canonical hashes; fetch on demand via the kernel. An LLM's conversation history becomes a stream of hash references that recover into full content when reasoning needs it.
-- **MCP tool: `omc_compress_context(text)`** — given a chunk of OMC code or prose, return a substrate-keyed compressed form the LLM can reference. The complement of `omc_fetch_by_hash`.
-- **Cross-corpus blending** — query multiple corpora (project, stdlib, registry) with weighted ranking, return substrate-keyed identifiers that work across any of them.
-- **Substrate-typed conversation transcripts** — every message in an agent conversation gets a canonical hash; threading + memory operations index by hash, not by string.
-- **Benchmark: end-to-end context-budget reduction** — measure how many fns an LLM agent can hold "in mind" with v0.4 vs without. Hypothesis: 5-10× more candidates fit in the same context window.
+- Wire `fibtier` (Fibonacci-tier memory) as an MCP-exposed conversation store
+- Each turn is content-addressed; prior turns recovered via `omc_fetch_by_hash` only when the agent needs to "remember" them
+- Combined with v0.4's predict + compress + decompress, the total context budget for a multi-turn agent task drops to ~10% of baseline
 
 ### Win condition
 
-An LLM agent solves a multi-step OMC authoring task using ~10% of the context budget a baseline agent would consume, with no loss in solution quality — because the predict engine's output, the conversation memory, and the codec payloads all compose through the substrate's content-addressed identity.
+An LLM agent in a 20-turn conversation solves a non-trivial OMC authoring task with ~10× less context budget than a naive baseline that keeps the full transcript in the window.
 
-### Deferred from v0.3
+### Tracks
+
+- `omc_memory_store(key, text)` / `omc_memory_recall(key)` MCP tools backed by content-addressed kernel storage
+- Conversation-aware predict: `omc_predict(..., context_hash=H)` where H references prior reasoning state, biasing the ranking
+- Benchmark on a realistic multi-turn workflow
+
+---
+
+## Deferred from v0.3 / v0.4
 
 - **Prometheus rerank pass** — train a small Prometheus model on the corpus and rerank top-k by token-stream probability.
 - **Stateful corpus API** — `omc_corpus_build` returns a handle, `omc_predict_from(handle, prefix, top_k)` reuses it.
 - **Streaming queries** — incremental updates as the prefix grows token-by-token.
+- **Cross-corpus weighted blending** — give different paths different priority in the ranking.
 
 ---
 
-## v0.5+ candidates
+## v0.6+ candidates
 
 ### Substrate-attention follow-ups
 
@@ -67,6 +71,7 @@ The substrate-attention components stack to −8.94% inside one block. The path 
 
 | Chapter | Key shipped items |
 |---|---|
+| [v0.4-substrate-context](https://github.com/RandomCoder-lab/OMC/releases/tag/v0.4-substrate-context) | `omc_compress_context` / `omc_decompress` tools + `format=codec` thumbnails + directory ingest + measured 1.85×-2.81× LLM context-budget reduction |
 | [v0.3.1-symbolic-compression](https://github.com/RandomCoder-lab/OMC/releases/tag/v0.3.1-symbolic-compression) | `omc_predict` gains `format=hash`/`signature`/`full` (3.8× compression default) + `omc_fetch_by_hash` for on-demand recovery |
 | [v0.3-symbolic-prediction](https://github.com/RandomCoder-lab/OMC/releases/tag/v0.3-symbolic-prediction) | `omc_predict_files(paths, prefix, top_k)` returns ranked provenance-tracked continuations from a content-addressed corpus |
 | [v0.2-ergonomics](https://github.com/RandomCoder-lab/OMC/releases/tag/v0.2-ergonomics) | `+=` / `-=` / `*=` / `/=` / `%=`, `len`/`range`/`getenv`/`to_hex`/`parse_int`, negative array indexing, did-you-mean, traced errors, 11 heal classes |

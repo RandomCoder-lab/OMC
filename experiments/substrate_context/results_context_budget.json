@@ -1,0 +1,97 @@
+{
+  "config": {
+    "top_k": 5,
+    "fetches_per_task": 1,
+    "paths": [
+      "examples/lib"
+    ]
+  },
+  "tasks": [
+    {
+      "task": "fn prom_linear_",
+      "baseline_bytes": 1649,
+      "v04_browse": 596,
+      "v04_fetch": 305,
+      "v04_total": 901,
+      "ratio": 0.5463917525773195
+    },
+    {
+      "task": "fn prom_attention_",
+      "baseline_bytes": 4410,
+      "v04_browse": 980,
+      "v04_fetch": 791,
+      "v04_total": 1771,
+      "ratio": 0.4015873015873016
+    },
+    {
+      "task": "fn fibtier_",
+      "baseline_bytes": 3047,
+      "v04_browse": 922,
+      "v04_fetch": 678,
+      "v04_total": 1600,
+      "ratio": 0.5251066622907778
+    },
+    {
+      "task": "fn tape_",
+      "baseline_bytes": 844,
+      "v04_browse": 381,
+      "v04_fetch": 167,
+      "v04_total": 548,
+      "ratio": 0.6492890995260664
+    },
+    {
+      "task": "fn _prom_",
+      "baseline_bytes": 3096,
+      "v04_browse": 920,
+      "v04_fetch": 608,
+      "v04_total": 1528,
+      "ratio": 0.4935400516795866
+    },
+    {
+      "task": "fn arr_",
+      "baseline_bytes": 625,
+      "v04_browse": 379,
+      "v04_fetch": 172,
+      "v04_total": 551,
+      "ratio": 0.8816
+    },
+    {
+      "task": "fn harmonic_anomaly",
+      "baseline_bytes": 1470,
+      "v04_browse": 883,
+      "v04_fetch": 173,
+      "v04_total": 1056,
+      "ratio": 0.7183673469387755
+    },
+    {
+      "task": "fn substrate_search",
+      "baseline_bytes": 1954,
+      "v04_browse": 889,
+      "v04_fetch": 219,
+      "v04_total": 1108,
+      "ratio": 0.5670419651995906
+    },
+    {
+      "task": "fn dict_get",
+      "baseline_bytes": 1940,
+      "v04_browse": 875,
+      "v04_fetch": 189,
+      "v04_total": 1064,
+      "ratio": 0.5484536082474227
+    },
+    {
+      "task": "fn str_split",
+      "baseline_bytes": 1885,
+      "v04_browse": 901,
+      "v04_fetch": 297,
+      "v04_total": 1198,
+      "ratio": 0.6355437665782493
+    }
+  ],
+  "totals": {
+    "baseline_bytes": 20920,
+    "v04_bytes": 11325,
+    "ratio": 0.5413479923518164,
+    "compression_factor": 1.8472406181015453
+  }
+}

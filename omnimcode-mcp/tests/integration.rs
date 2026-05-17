@@ -348,6 +348,220 @@ fn omc_fetch_by_hash_unknown_hash_returns_not_found() {
 }
 
 #[test]
+fn omc_predict_codec_format_includes_sampled_tokens() {
+    let responses = rpc_exchange(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+            "name":"omc_predict",
+            "arguments":{
+                "paths":["examples/lib/prometheus.omc"],
+                "prefix":"fn prom_linear_",
+                "top_k":2,
+                "format":"codec"
+            }
+        }}),
+    ]);
+    let text = responses[1]["result"]["content"][0]["text"].as_str().unwrap();
+    let payload: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(payload["format"], "codec");
+    let s0 = &payload["suggestions"][0];
+    // Each suggestion has its own codec sub-dict.
+    let codec = &s0["codec"];
+    assert!(codec["sampled_tokens"].is_array(), "sampled_tokens present");
+    assert!(codec["content_hash"].is_i64(), "content_hash present");
+    assert!(codec["compression_ratio"].is_f64() || codec["compression_ratio"].is_i64(),
+            "compression_ratio present");
+    assert!(codec["every_n"].as_i64().unwrap() >= 1);
+    // The codec's content_hash equals the suggestion's canonical_hash —
+    // they're the same identity, alpha-rename invariant.
+    assert_eq!(codec["content_hash"], s0["canonical_hash"]);
+    // No source field — the whole point of codec format is to avoid it.
+    assert!(s0.get("source").is_none());
+}
+
+#[test]
+fn omc_compress_context_returns_codec_payload() {
+    let responses = rpc_exchange(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+            "name":"omc_compress_context",
+            "arguments":{
+                "text":"fn greet(name) {\n    return \"hello \" + name;\n}",
+                "every_n":3
+            }
+        }}),
+    ]);
+    let r = &responses[1];
+    assert_eq!(r["result"]["isError"], false, "should succeed: {}", r);
+    let text = r["result"]["content"][0]["text"].as_str().unwrap();
+    let payload: Value = serde_json::from_str(text).unwrap();
+    assert!(payload["original_bytes"].as_i64().unwrap() > 30);
+    let codec = &payload["codec"];
+    assert!(codec["sampled_tokens"].is_array());
+    assert!(codec["content_hash"].is_i64());
+    assert_eq!(codec["every_n"], 3);
+    // sampled_tokens length × every_n ≈ original_tok_count.
+    let sampled_len = codec["sampled_tokens"].as_array().unwrap().len() as i64;
+    let total = codec["original_tok_count"].as_i64().unwrap();
+    assert!(sampled_len * 3 >= total - 3, "sampling approximates 1/3 of tokens");
+}
+
+#[test]
+fn omc_compress_then_decompress_round_trips_via_corpus() {
+    // Full LLM workflow: compress arbitrary text into a codec payload,
+    // then decompress against a corpus that contains a fn with the
+    // same canonical form. Round-trip recovers the original source.
+
+    // First, read a real fn from prometheus.omc to use as test input.
+    let prom_src = std::fs::read_to_string(repo_root().join("examples/lib/prometheus.omc"))
+        .expect("read prometheus.omc");
+    // Find the first `fn prom_linear_forward(...) { ... }` block — keep
+    // it simple: grab from the fn keyword to the next top-level `}`.
+    let start = prom_src.find("fn prom_linear_forward")
+        .expect("prom_linear_forward exists");
+    // Naive but works for this fn: take 250 chars from the start, enough
+    // to include the body's closing brace.
+    let raw_fn = &prom_src[start..start + 250];
+    // Cut at the first balanced closing brace at the same indent level
+    // — simplest: take through the first newline + closing brace at col 0.
+    let cut = raw_fn.find("\n}").map(|i| i + 2).unwrap_or(raw_fn.len());
+    let target_fn = raw_fn[..cut].to_string();
+
+    let compress = rpc_exchange(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+            "name":"omc_compress_context",
+            "arguments":{"text": target_fn}
+        }}),
+    ]);
+    let compress_text = compress[1]["result"]["content"][0]["text"].as_str().unwrap();
+    let compress_payload: Value = serde_json::from_str(compress_text).unwrap();
+    let codec = compress_payload["codec"].clone();
+
+    // Now decompress against the original library — should recover the source.
+    let decompress = rpc_exchange(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+            "name":"omc_decompress",
+            "arguments":{
+                "paths":["examples/lib/prometheus.omc"],
+                "codec": codec
+            }
+        }}),
+    ]);
+    let dtext = decompress[1]["result"]["content"][0]["text"].as_str().unwrap();
+    let dpayload: Value = serde_json::from_str(dtext).unwrap();
+    assert_eq!(dpayload["found"], true, "round-trip recovered: {}", dpayload);
+    assert_eq!(dpayload["fn_name"], "prom_linear_forward");
+}
+
+#[test]
+fn omc_decompress_accepts_bare_hash() {
+    // Get a hash from predict (cheapest path).
+    let predict = rpc_exchange(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+            "name":"omc_predict",
+            "arguments":{
+                "paths":["examples/lib/prometheus.omc"],
+                "prefix":"fn prom_linear_forward",
+                "top_k":1
+            }
+        }}),
+    ]);
+    let predict_text = predict[1]["result"]["content"][0]["text"].as_str().unwrap();
+    let ppayload: Value = serde_json::from_str(predict_text).unwrap();
+    let hash = ppayload["suggestions"][0]["canonical_hash"].as_i64().unwrap();
+
+    // Decompress via bare hash (no codec dict).
+    let decompress = rpc_exchange(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+            "name":"omc_decompress",
+            "arguments":{
+                "paths":["examples/lib/prometheus.omc"],
+                "canonical_hash": hash
+            }
+        }}),
+    ]);
+    let dtext = decompress[1]["result"]["content"][0]["text"].as_str().unwrap();
+    let dpayload: Value = serde_json::from_str(dtext).unwrap();
+    assert_eq!(dpayload["found"], true);
+    assert!(dpayload["source"].as_str().unwrap().starts_with("fn prom_linear_forward"));
+}
+
+#[test]
+fn omc_decompress_missing_inputs_is_friendly() {
+    let responses = rpc_exchange(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+            "name":"omc_decompress",
+            "arguments":{"paths":["examples/lib/prometheus.omc"]}
+        }}),
+    ]);
+    let r = &responses[1];
+    assert_eq!(r["result"]["isError"], true);
+    let text = r["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("canonical_hash") && text.contains("codec"),
+            "error mentions both options: {}", text);
+}
+
+#[test]
+fn paths_argument_accepts_directories_recursively() {
+    // The cross-corpus story: an LLM passes `examples/lib` (a dir)
+    // and gets back results from every .omc file under it, not just
+    // a single hand-enumerated file.
+    let responses = rpc_exchange(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+            "name":"omc_corpus_size",
+            "arguments":{"paths":["examples/lib"]}
+        }}),
+        json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{
+            "name":"omc_predict",
+            "arguments":{
+                "paths":["examples/lib"],
+                "prefix":"fn fibtier_",
+                "top_k":5
+            }
+        }}),
+    ]);
+    // Corpus has more than just prometheus.omc — the directory walk
+    // picks up fibtier, harmonic libs, etc. Expect well over 100 fns.
+    let size_payload: Value = serde_json::from_str(
+        responses[1]["result"]["content"][0]["text"].as_str().unwrap()
+    ).unwrap();
+    let n = size_payload["fn_count"].as_i64().unwrap();
+    assert!(n > 100, "directory ingest pulls > 100 fns (got {})", n);
+
+    // The `fn fibtier_` query matches across multiple files in the
+    // lib tree (fibtier.omc and fibtier_persistent.omc).
+    let pred_payload: Value = serde_json::from_str(
+        responses[2]["result"]["content"][0]["text"].as_str().unwrap()
+    ).unwrap();
+    let suggestions = pred_payload["suggestions"].as_array().unwrap();
+    let files: std::collections::HashSet<String> = suggestions.iter()
+        .map(|s| s["file"].as_str().unwrap().to_string())
+        .collect();
+    assert!(files.len() >= 2,
+            "cross-file ranking pulls from multiple files: {:?}", files);
+}
+
+#[test]
+fn tools_list_now_includes_v04_compression_tools() {
+    let responses = rpc_exchange(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}),
+    ]);
+    let names: Vec<&str> = responses[1]["result"]["tools"].as_array().unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"omc_compress_context"), "omc_compress_context present");
+    assert!(names.contains(&"omc_decompress"), "omc_decompress present");
+}
+
+#[test]
 fn unknown_tool_returns_error_text() {
     let responses = rpc_exchange(&[
         json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),

@@ -24,11 +24,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as Json};
 use std::io::{self, BufRead, Write};
 
+use omnimcode_core::canonical;
 use omnimcode_core::docs;
 use omnimcode_core::errors;
 use omnimcode_core::interpreter::Interpreter;
 use omnimcode_core::parser::Parser;
 use omnimcode_core::predict::{CodeCorpus, predict_continuations};
+use omnimcode_core::tokenizer;
 use omnimcode_core::value::Value;
 
 #[derive(Debug, Deserialize)]
@@ -234,7 +236,7 @@ fn list_tools() -> Vec<Json> {
                     "paths": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "Source file paths to ingest. Top-level fns from each file are added to the corpus."
+                        "description": "Source file paths OR directories to ingest. Directories are walked recursively for .omc files — pass `examples/lib` to query against the entire lib tree."
                     },
                     "prefix": {
                         "type": "string",
@@ -248,7 +250,7 @@ fn list_tools() -> Vec<Json> {
                     },
                     "format": {
                         "type": "string",
-                        "enum": ["hash", "signature", "full"],
+                        "enum": ["hash", "signature", "codec", "full"],
                         "default": "hash",
                         "description": "Response detail level. See tool description."
                     }
@@ -268,6 +270,66 @@ fn list_tools() -> Vec<Json> {
                         "type": "array",
                         "items": { "type": "string" },
                         "description": "Source file paths to ingest."
+                    }
+                },
+                "required": ["paths"]
+            }
+        }),
+        json!({
+            "name": "omc_compress_context",
+            "description": "Compress an arbitrary OMC source string into a substrate-keyed \
+                            codec payload. Returns a dict with a canonical_hash (alpha-rename \
+                            invariant identity) plus sampled_tokens (structural thumbnail). \
+                            The LLM can hold the compressed payload in context as a cheap \
+                            reference, then recover the original source via omc_decompress \
+                            against a corpus that contains the same canonical form.\n\
+                            \n\
+                            Symmetric to omc_fetch_by_hash but for arbitrary text instead \
+                            of pre-indexed corpus entries. Use when the LLM wants to remember \
+                            a chunk of code it's just seen without paying its full byte cost.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "OMC source string to compress."
+                    },
+                    "every_n": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "default": 3,
+                        "description": "Token sampling stride. 1 = keep all tokens (no compression, useful for lossless transport). 3 (default) gives ~3x token-count reduction."
+                    }
+                },
+                "required": ["text"]
+            }
+        }),
+        json!({
+            "name": "omc_decompress",
+            "description": "Recover the original OMC source from a substrate-keyed codec \
+                            payload (or just a canonical_hash) by library lookup against a \
+                            corpus. Returns {found, source, fn_name, file} on hit or \
+                            {found: false} on miss.\n\
+                            \n\
+                            Generalizes omc_fetch_by_hash: accepts either a full codec \
+                            payload (dict with content_hash) or a bare canonical_hash int. \
+                            Lookup is alpha-rename invariant — works even if the fn was \
+                            renamed in source after compression.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "paths": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Source file paths to search for a matching canonical form."
+                    },
+                    "codec": {
+                        "type": "object",
+                        "description": "Codec payload from omc_compress_context. Either this or canonical_hash is required."
+                    },
+                    "canonical_hash": {
+                        "type": "integer",
+                        "description": "Bare canonical hash. Either this or codec is required."
                     }
                 },
                 "required": ["paths"]
@@ -434,6 +496,53 @@ fn dispatch_tool(interp: &mut Interpreter, name: &str, args: &Json) -> Result<St
                 }
             }
         }
+        "omc_compress_context" => {
+            let text = args.get("text").and_then(Json::as_str)
+                .ok_or_else(|| "omc_compress_context: missing 'text' arg".to_string())?;
+            let every_n = args.get("every_n").and_then(Json::as_i64)
+                .unwrap_or(3)
+                .max(1) as usize;
+            let codec = encode_codec_payload(text, every_n);
+            // Caller-facing payload: codec dict + the text length so the
+            // LLM can compute its own compression ratio against the JSON
+            // it receives (vs the raw input it had).
+            let payload = json!({
+                "original_bytes": text.len(),
+                "codec": codec,
+            });
+            Ok(serde_json::to_string_pretty(&payload).unwrap())
+        }
+        "omc_decompress" => {
+            let paths = parse_paths_arg(args, "omc_decompress")?;
+            // Accept either a bare canonical_hash or a codec dict that
+            // contains content_hash. This is the generalization of
+            // omc_fetch_by_hash that the LLM can use whether it kept
+            // the full codec payload or distilled to just the hash.
+            let target = if let Some(h) = args.get("canonical_hash").and_then(Json::as_i64) {
+                h
+            } else if let Some(codec) = args.get("codec") {
+                codec.get("content_hash").and_then(Json::as_i64)
+                    .ok_or_else(|| "omc_decompress: codec dict missing 'content_hash'".to_string())?
+            } else {
+                return Err("omc_decompress: requires either 'canonical_hash' or 'codec'".to_string());
+            };
+            let corpus = build_corpus(&paths)?;
+            match corpus.entries.iter().find(|e| e.canonical_hash == target) {
+                Some(entry) => Ok(serde_json::to_string_pretty(&json!({
+                    "found": true,
+                    "canonical_hash": entry.canonical_hash,
+                    "fn_name": entry.fn_name,
+                    "file": entry.file,
+                    "source": entry.source,
+                })).unwrap()),
+                None => Ok(serde_json::to_string_pretty(&json!({
+                    "found": false,
+                    "canonical_hash": target,
+                    "searched_paths": paths,
+                    "corpus_size": corpus.len(),
+                })).unwrap()),
+            }
+        }
         _ => Err(format!("Unknown tool: {}", name)),
     }
 }
@@ -444,6 +553,10 @@ fn dispatch_tool(interp: &mut Interpreter, name: &str, args: &Json) -> Result<St
 ///   match it might fetch later via omc_fetch_by_hash.
 /// - `signature` (~100 bytes): adds the fn signature line so the LLM
 ///   knows the call shape without paying for the body.
+/// - `codec` (~150-300 bytes): hash + sampled-token thumbnail. Carries
+///   structural information about the fn (matmul-heavy vs dict-traversal
+///   etc.) without paying for the body. Use when the LLM wants to
+///   distinguish between similarly-named candidates by shape.
 /// - `full`: everything including the body. Use when the LLM intends
 ///   to read or adapt the implementation.
 ///
@@ -469,6 +582,17 @@ fn project_suggestion(s: &omnimcode_core::predict::Suggestion, format: &str) -> 
             "prefix_match_len": s.prefix_match_len,
             "substrate_distance": s.substrate_distance,
         }),
+        "codec" => {
+            let codec = encode_codec_payload(&s.source, 3);
+            json!({
+                "fn_name": s.fn_name,
+                "file": s.file,
+                "canonical_hash": s.canonical_hash,
+                "prefix_match_len": s.prefix_match_len,
+                "substrate_distance": s.substrate_distance,
+                "codec": codec,
+            })
+        }
         // "hash" is the default and the most compressed form.
         _ => json!({
             "fn_name": s.fn_name,
@@ -479,6 +603,59 @@ fn project_suggestion(s: &omnimcode_core::predict::Suggestion, format: &str) -> 
         }),
     }
 }
+
+/// Canonicalize → tokenize → sample-every-Nth → produce the codec
+/// payload dict the v0.0.5 substrate-codec spec defines. Mirrors the
+/// omc_codec_encode builtin but builds a JSON value directly (no
+/// Value/Interpreter round-trip). every_n=1 means "keep all tokens"
+/// (no compression, useful for lossless transport); the practical
+/// default is 3 (matches the builtin's default), giving ~3× token-
+/// count reduction.
+///
+/// The content_hash is alpha-rename invariant — the LLM can recover
+/// the original source via omc_fetch_by_hash or omc_decompress
+/// against any corpus that contains a fn with the same canonical form.
+fn encode_codec_payload(source: &str, every_n: usize) -> Json {
+    let every_n = every_n.max(1);
+    let canon = canonical::canonicalize(source).unwrap_or_else(|_| source.to_string());
+    let tokens = tokenizer::encode(&canon);
+    // Cap the sampled-token thumbnail to MAX_THUMBNAIL_TOKENS so codec
+    // format stays bounded regardless of fn size. The hash is the
+    // identity (alpha-rename invariant, full lossless recovery via
+    // omc_decompress); the thumbnail is just enough structural signal
+    // to disambiguate candidates without paying for full source.
+    const MAX_THUMBNAIL_TOKENS: usize = 16;
+    // Effective stride: at least every_n, scaled up if needed to keep
+    // the sample below the cap. Preserves the every_n contract for
+    // small fns; uniformly subsamples for large ones.
+    let effective_n = (tokens.len() / MAX_THUMBNAIL_TOKENS.max(1)).max(every_n);
+    let sampled: Vec<i64> = tokens.iter().enumerate()
+        .filter(|(i, _)| i % effective_n == 0)
+        .take(MAX_THUMBNAIL_TOKENS)
+        .map(|(_, t)| *t)
+        .collect();
+    // Use tokenizer::code_hash so content_hash matches predict's
+    // canonical_hash. Both hash the TOKEN-PACKED bytes (not the raw
+    // canonical-source bytes) — without this alignment, a suggestion's
+    // canonical_hash wouldn't equal the codec's content_hash, and the
+    // LLM couldn't use them interchangeably with omc_fetch_by_hash /
+    // omc_decompress.
+    let (attractor, hash, dist) = tokenizer::code_hash(&canon);
+    let ratio = if !sampled.is_empty() {
+        source.len() as f64 / sampled.len() as f64
+    } else { 0.0 };
+    json!({
+        "sampled_tokens": sampled,
+        "content_hash": hash,
+        "attractor": attractor,
+        "dist": dist,
+        "original_tok_count": tokens.len(),
+        "source_bytes": source.len(),
+        "every_n": every_n,
+        "compression_ratio": ratio,
+    })
+}
+
 
 /// Extract the function signature line from a fn body's source. The
 /// signature is everything from `fn` through the closing paren of the
@@ -508,16 +685,54 @@ fn parse_paths_arg(args: &Json, tool: &str) -> Result<Vec<String>, String> {
 }
 
 /// Build a CodeCorpus by reading + ingesting every file in `paths`.
-/// Surface I/O errors as MCP-style strings so the client sees a clean
-/// `isError: true` text instead of a panic.
+///
+/// Each entry can be a file OR a directory. Directories are walked
+/// recursively for `*.omc` files. This is what makes cross-corpus
+/// blending cheap — an LLM can pass `["examples/lib"]` and ingest
+/// the entire lib tree without enumerating files itself.
+///
+/// I/O errors surface as MCP-style strings so the client sees a
+/// clean `isError: true` text instead of a panic.
 fn build_corpus(paths: &[String]) -> Result<CodeCorpus, String> {
     let mut corpus = CodeCorpus::new();
     for path in paths {
-        let src = std::fs::read_to_string(path)
-            .map_err(|e| format!("omc_predict: read {}: {}", path, e))?;
-        corpus.ingest_file(path, &src);
+        let p = std::path::Path::new(path);
+        if p.is_dir() {
+            // Walk the directory recursively for .omc files.
+            walk_omc_files(p, &mut corpus)?;
+        } else {
+            let src = std::fs::read_to_string(path)
+                .map_err(|e| format!("omc_predict: read {}: {}", path, e))?;
+            corpus.ingest_file(path, &src);
+        }
     }
     Ok(corpus)
+}
+
+/// Recursively ingest every `*.omc` file under `dir` into `corpus`.
+/// Stable iteration order (sorted by filename) so the same paths
+/// argument produces the same corpus across runs — predictability is
+/// part of the substrate contract.
+fn walk_omc_files(dir: &std::path::Path, corpus: &mut CodeCorpus) -> Result<(), String> {
+    let read_dir = std::fs::read_dir(dir)
+        .map_err(|e| format!("read_dir {}: {}", dir.display(), e))?;
+    let mut entries: Vec<std::path::PathBuf> = read_dir
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .collect();
+    entries.sort();
+    for entry in entries {
+        if entry.is_dir() {
+            walk_omc_files(&entry, corpus)?;
+        } else if entry.extension().and_then(|s| s.to_str()) == Some("omc") {
+            let path_str = entry.to_string_lossy().to_string();
+            if let Ok(src) = std::fs::read_to_string(&entry) {
+                corpus.ingest_file(&path_str, &src);
+            }
+            // Per-file read errors are silently skipped — a single
+            // unreadable file shouldn't break a directory ingest.
+        }
+    }
+    Ok(())
 }
 
 /// Evaluate an OMC program. Errors come back as structured strings

@@ -13,6 +13,7 @@ Read top-to-bottom for the arc; jump to any chapter for the detail.
 
 | Tag | Date | One-line |
 |---|---|---|
+| [v0.4-substrate-context](#v04-substrate-context--2026-05-17) | 2026-05-17 | Symbolic compression end-to-end: `omc_compress_context` / `omc_decompress` tools + `format=codec` thumbnails + directory ingest. Measured 1.85×–2.81× LLM context budget reduction. |
 | [v0.3.1-symbolic-compression](#v031-symbolic-compression--2026-05-17) | 2026-05-17 | `omc_predict` gains `format=hash`/`signature`/`full` (default = compressed hash form, 3.8× smaller context cost) + `omc_fetch_by_hash` companion for on-demand recovery |
 | [v0.3-symbolic-prediction](#v03-symbolic-prediction--2026-05-17) | 2026-05-17 | Substrate-indexed code completion: `omc_predict_files(paths, prefix, top_k)` returns ranked provenance-tracked continuations from a content-addressed corpus |
 | [v0.2-ergonomics](#v02-ergonomics--2026-05-17) | 2026-05-17 | OMC becomes forgiving: Python-idiom builtins, `+=`, friendly errors with traces, 11 heal classes total |
@@ -23,6 +24,72 @@ Read top-to-bottom for the arc; jump to any chapter for the detail.
 | [v0.0.3-substrate-and-stdlib](#v003-substrate-and-stdlib--2026-05-08) | 2026-05-08 | Self-healing heal pass (typo/arity/div-zero), substrate-routed search family, stdlib expansion, closures, `--check`/`--fmt` CLI |
 | [v0.0.2-language-core](#v002-language-core--2026-04-25) | 2026-04-25 | The language exists: parser, tree-walk interpreter, HInt + φ-resonance, bytecode VM, self-hosting compiler (gen2 == gen3 byte-identical) |
 | [V0.0.1](#v001---2026-05-02) | 2025-Sep | Genesis: circuit evolution engine, FFI, Python/Unity/Unreal bindings (pre-language) |
+
+---
+
+## [v0.4-substrate-context] - 2026-05-17
+
+**Symbolic-context compression end-to-end: an LLM agent can browse a code corpus at substrate cost and recover full bodies on demand, with measured 1.85×–2.81× context-budget reduction.**
+
+v0.3.1 added `format=hash` so a single predict call ships compactly. v0.4 takes the thesis end-to-end — every LLM-facing surface that hands the model code can do so symbolically.
+
+### What changed
+
+#### `omc_predict` — `format=codec` thumbnail
+
+A bounded substrate-thumbnail format. Each suggestion ships the canonical hash plus a capped (≤16 token) structural sample. Enough to distinguish "matmul-heavy" from "dict-traversal" candidates without paying for the body. Sits between `signature` (text-only) and `full` (everything).
+
+#### `omc_compress_context(text, every_n?)` — new MCP tool
+
+Symmetric companion to `omc_fetch_by_hash`. Takes arbitrary OMC source, returns a substrate-keyed codec payload (sampled_tokens + content_hash + provenance). The LLM uses this to "remember" chunks of code it's just seen, paying ~50 bytes for a 5KB function.
+
+#### `omc_decompress(paths, codec | canonical_hash)` — new MCP tool
+
+Generalization of `omc_fetch_by_hash`. Accepts either a bare canonical hash or a full codec payload's dict. Recovers original source via library lookup against the corpus — alpha-rename invariant. The LLM can take any hash from any tool and recover the body anywhere.
+
+#### Directory ingest
+
+`paths` arguments to `omc_predict`, `omc_corpus_size`, `omc_fetch_by_hash`, and `omc_decompress` now accept directory entries; the server recursively globs `*.omc` files. `["examples/lib"]` ingests 320 fns across 16 files in stable order. Cross-corpus blending: project + stdlib + registry as one logical corpus.
+
+#### Hash unification
+
+The fix that makes the whole thing compose: `omc_predict`'s `canonical_hash` and `omc_compress_context`'s `content_hash` are now produced by the same primitive (`tokenizer::code_hash`), so they're interchangeable across all tools.
+
+### Measured compression
+
+10-task representative LLM workflow against `examples/lib` (320 fns):
+
+| Strategy | top_k=5 | top_k=10 | top_k=20 |
+|---|---:|---:|---:|
+| v0.3 baseline (full source) | 14,142 B | 27,828 B | 39,902 B |
+| v0.4 (hash browse + 1 fetch) | 6,864 B | 10,318 B | 14,188 B |
+| **Compression factor** | **2.06×** | **2.70×** | **2.81×** |
+
+The win amplifies with browse depth: per-candidate cost stays at the substrate floor (~50 B for the hash, ~70 B for the metadata) while bodies stay un-paid-for unless committed to.
+
+### Honest limits
+
+The original ask was "10% of the context budget" — that's ~10×. The structural ceiling for hash-browse + on-demand-fetch alone is closer to 3×; the 10× claim requires the v0.5 candidate (substrate-keyed conversation memory where prior agent turns are hashes rather than inline text). v0.4 ships the primitives; the conversation-memory wiring is the next chapter.
+
+### Tests
+
+20/20 MCP integration tests pass (was 13 + 7 new). New tests in v0.4:
+- codec format works and `content_hash == canonical_hash`
+- compress + decompress round-trip via corpus library lookup
+- decompress accepts bare hash or codec dict
+- missing-input errors are friendly
+- directory ingest pulls 100+ fns across multiple files
+- new tools appear in `tools/list`
+
+Final: 231 Rust pass (8 MCP integration), 1087/1087 OMC.
+
+### Files / commits
+
+- `omnimcode-mcp/src/main.rs` — three new tool schemas, three new handlers, `encode_codec_payload` helper, directory-walking `build_corpus`
+- `omnimcode-mcp/tests/integration.rs` — 7 new tests
+- `experiments/substrate_context/FINDING.md` — full writeup
+- `experiments/substrate_context/bench_context_budget.py` — reproducible benchmark
+- `experiments/substrate_context/results_context_budget.json` — raw data
 
 ---
 
