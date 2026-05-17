@@ -180,3 +180,86 @@ fn test_harmonic_scale_bounded() {
         k = k + 1;
     }
 }
+
+# ---- Attention: gradient flows to ALL of Q, K, V ----
+# Regression test for the K-frozen bug. Before tape_transpose was
+# added, K's gradient via the score path was severed because we
+# pulled K out as a const for transposition. This test would have
+# caught it.
+
+fn _grad_nonzero(g) {
+    if type_of(g) == "array" {
+        h i = 0;
+        while i < arr_len(g) {
+            if _grad_nonzero(arr_get(g, i)) { return true; }
+            i = i + 1;
+        }
+        return false;
+    }
+    return g != 0.0;
+}
+
+fn test_attention_backward_flows_to_QKV() {
+    tape_reset();
+    h attn = prom_attention_new(4, 3, 42);
+    h x = tape_const([[1.0, 2.0, 3.0, 4.0],
+                      [0.5, -0.5, 1.0, 0.0],
+                      [-1.0, 0.0, 1.0, 0.5]]);
+    h out = prom_attention_forward(attn, x);
+    h loss = tape_sum(out);
+    tape_backward(loss);
+    h Q_g = tape_grad(dict_get(attn, "Q"));
+    h K_g = tape_grad(dict_get(attn, "K"));
+    h V_g = tape_grad(dict_get(attn, "V"));
+    assert_true(_grad_nonzero(Q_g), "Q gradient is non-zero");
+    assert_true(_grad_nonzero(K_g), "K gradient is non-zero (the K-frozen bug fix)");
+    assert_true(_grad_nonzero(V_g), "V gradient is non-zero");
+}
+
+# ---- tape_transpose forward + backward ----
+
+fn test_tape_transpose_forward() {
+    tape_reset();
+    h x = tape_var([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]);   # 2x3
+    h y = tape_transpose(x);                                # 3x2
+    h yv = tape_value(y);
+    assert_eq(arr_len(yv), 3, "transposed has 3 rows");
+    assert_eq(arr_get(arr_get(yv, 0), 0), 1.0, "T[0,0]=1");
+    assert_eq(arr_get(arr_get(yv, 0), 1), 4.0, "T[0,1]=4");
+    assert_eq(arr_get(arr_get(yv, 2), 0), 3.0, "T[2,0]=3");
+}
+
+fn test_tape_transpose_backward() {
+    tape_reset();
+    h x = tape_var([[1.0, 2.0], [3.0, 4.0]]);
+    h y = tape_transpose(x);
+    h loss = tape_sum(y);
+    tape_backward(loss);
+    h xg = tape_grad(x);
+    # Every cell of x should have gradient 1.0 (sum of transposed = sum of original).
+    h i = 0;
+    while i < 2 {
+        h row = arr_get(xg, i);
+        h j = 0;
+        while j < 2 {
+            assert_eq(arr_get(row, j), 1.0, "transpose backward elem");
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+}
+
+# ---- Substrate-K attention has no K params (variant check) ----
+
+fn test_substrate_k_has_no_K_params() {
+    tape_reset();
+    h attn = prom_attention_substrate_k_new(4, 3, 42);
+    h ps = prom_attention_substrate_k_params(attn);
+    assert_eq(arr_len(ps), 2, "substrate-K has 2 params (Q, V), not 3");
+}
+
+fn test_substrate_full_has_zero_params() {
+    h attn = prom_attention_substrate_full_new(4, 3);
+    h ps = prom_attention_substrate_full_params(attn);
+    assert_eq(arr_len(ps), 0, "parameter-free substrate attention");
+}

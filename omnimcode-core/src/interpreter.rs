@@ -6593,6 +6593,27 @@ impl Interpreter {
                 self.autograd_tape.push(TapeNode { op: TapeOp::Sum(a), value: out, grad });
                 Ok(Value::HInt(HInt::new(id as i64)))
             }
+            "tape_transpose" => {
+                // Matrix transpose: [rows, cols] → [cols, rows]
+                // Differentiable: backward just transposes the upstream gradient.
+                if args.is_empty() {
+                    return Err("tape_transpose requires (a_id)".to_string());
+                }
+                let a = self.eval_expr(&args[0])?.to_int() as usize;
+                let av = self.autograd_tape[a].value.clone();
+                let mut out = TapeMat::zeros(av.cols, av.rows);
+                for r in 0..av.rows {
+                    for c in 0..av.cols {
+                        out.set(c, r, av.at(r, c));
+                    }
+                }
+                let grad = TapeMat::zeros(out.rows, out.cols);
+                let id = self.autograd_tape.len();
+                self.autograd_tape.push(TapeNode {
+                    op: TapeOp::Transpose(a), value: out, grad,
+                });
+                Ok(Value::HInt(HInt::new(id as i64)))
+            }
             "tape_layernorm" => {
                 // tape_layernorm(x, gamma, beta, eps?) -> per-row layer-normed output
                 // x: [N, D], gamma: [1, D], beta: [1, D]
@@ -6905,6 +6926,11 @@ impl Interpreter {
                             let s = dy.data[0];
                             for v in da.data.iter_mut() { *v = s; }
                             self.autograd_tape[a].grad.add(&da);
+                        }
+                        TapeOp::Transpose(a) => {
+                            // dA = transpose(dy)
+                            let dyt = tape_transpose(&dy);
+                            self.autograd_tape[a].grad.add(&dyt);
                         }
                         TapeOp::LayerNormRow(xid, gid, bid, eps) => {
                             // Per-row LN backward:
@@ -11386,6 +11412,9 @@ pub(crate) enum TapeOp {
     /// op because composing it from primitives needs broadcasted sub/div
     /// that aren't yet in the tape.
     LayerNormRow(usize, usize, usize, f64),  // (x, gamma, beta, eps)
+    /// Matrix transpose: [rows, cols] → [cols, rows]. Differentiable —
+    /// backward is just another transpose of the upstream grad.
+    Transpose(usize),
 }
 
 pub(crate) struct TapeNode {

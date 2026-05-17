@@ -640,16 +640,15 @@ fn prom_attention_new(d_model, seq_len, rng_state) {
     return layer;
 }
 
-# Forward: given x as a tape node of shape [seq_len, d_model],
-# returns attention output [seq_len, d_model].
-# This is a hand-rolled attention since we don't have a fused
-# tape op for it — uses tape_matmul, tape_softmax, and the
-# geodesic bias as a const subtracted before softmax.
+# Forward (L0 — standard QKV attention with optional geodesic bias):
+# given x as a tape node of shape [seq_len, d_model], returns
+# attention output [seq_len, d_model].
+# Uses tape_transpose so K's gradient flows properly through the
+# score path (fixes the earlier K-frozen bug).
 fn prom_attention_forward(layer, x_id) {
     h Q_w = dict_get(layer, "Q");
     h K_w = dict_get(layer, "K");
     h V_w = dict_get(layer, "V");
-    h d_model = dict_get(layer, "d_model");
     h seq_len = dict_get(layer, "seq_len");
     h alpha = dict_get(layer, "alpha");
 
@@ -657,33 +656,153 @@ fn prom_attention_forward(layer, x_id) {
     h k = tape_matmul(x_id, K_w);
     h v = tape_matmul(x_id, V_w);
 
-    # scores = q @ k^T  (we have no tape_transpose so build k^T as a
-    # const slice of k.value — fine since it just shapes the data).
-    h k_val = tape_value(k);
-    h kt_val = arr_transpose(k_val);
-    h kt = tape_const(kt_val);
+    # scores = q @ k^T  — proper differentiable transpose now.
+    h kt = tape_transpose(k);
     h scores = tape_matmul(q, kt);
 
-    # Subtract alpha * geodesic_bias element-wise (as a const matrix).
-    h bias_matrix = prom_geodesic_bias_matrix(seq_len);
-    h neg_bias_scaled = [];
-    h i = 0;
-    while i < seq_len {
-        h row = arr_get(bias_matrix, i);
-        h new_row = [];
-        h j = 0;
-        while j < seq_len {
-            arr_push(new_row, 0.0 - alpha * arr_get(row, j));
-            j = j + 1;
+    # Optional geodesic bias subtracted pre-softmax.
+    if alpha != 0.0 {
+        h bias_matrix = prom_geodesic_bias_matrix(seq_len);
+        h neg_bias_scaled = [];
+        h i = 0;
+        while i < seq_len {
+            h row = arr_get(bias_matrix, i);
+            h new_row = [];
+            h j = 0;
+            while j < seq_len {
+                arr_push(new_row, 0.0 - alpha * arr_get(row, j));
+                j = j + 1;
+            }
+            arr_push(neg_bias_scaled, new_row);
+            i = i + 1;
         }
-        arr_push(neg_bias_scaled, new_row);
-        i = i + 1;
+        h bias_node = tape_const(neg_bias_scaled);
+        scores = tape_add(scores, bias_node);
     }
-    h bias_node = tape_const(neg_bias_scaled);
-    h biased = tape_add(scores, bias_node);
 
-    h attn = tape_softmax(biased);
+    h attn = tape_softmax(scores);
     return tape_matmul(attn, v);
+}
+
+# ---------------------------------------------------------------------------
+# Substrate-attention variants (L1, L2, L3).
+#
+# L0: K, Q, V all learned matrices (prom_attention_forward above).
+# L1: K replaced by CRT-PE position memory (no learnable K params).
+# L2: K + Q both replaced by substrate-derived projections (only V learned).
+# L3: K + Q + V all substrate-derived (parameter-free attention block).
+#
+# Each tests a stronger version of the hypothesis that OMC's substrate
+# can REPLACE learned attention rather than just augment it.
+# ---------------------------------------------------------------------------
+
+# L1: substrate-K attention. K is fixed at CRT-PE; Q, V trained.
+fn prom_attention_substrate_k_new(d_model, seq_len, rng_state) {
+    h Q = _prom_random_matrix(d_model, d_model, 0.3, rng_state);
+    h V = _prom_random_matrix(d_model, d_model, 0.3, dict_get(Q, "state"));
+    h layer = dict_new();
+    dict_set(layer, "kind", "attention");           # reuse for param-collect
+    dict_set(layer, "variant", "substrate_k");
+    dict_set(layer, "d_model", d_model);
+    dict_set(layer, "seq_len", seq_len);
+    dict_set(layer, "Q", dict_get(Q, "node"));
+    dict_set(layer, "V", dict_get(V, "node"));
+    # K is precomputed as a [seq_len, d_model] CRT-PE table — no tape_var.
+    dict_set(layer, "K_const", prom_crt_pe_matrix(seq_len, d_model));
+    dict_set(layer, "alpha", 0.0);
+    dict_set(layer, "rng_state", dict_get(V, "state"));
+    return layer;
+}
+
+fn prom_attention_substrate_k_forward(layer, x_id) {
+    h Q_w = dict_get(layer, "Q");
+    h V_w = dict_get(layer, "V");
+    h K_const = dict_get(layer, "K_const");
+
+    h q = tape_matmul(x_id, Q_w);
+    h v = tape_matmul(x_id, V_w);
+
+    # K is the substrate (CRT-PE table). No learnable params on K side.
+    h k = tape_const(K_const);
+    h kt = tape_transpose(k);
+    h scores = tape_matmul(q, kt);
+
+    h attn = tape_softmax(scores);
+    return tape_matmul(attn, v);
+}
+
+# L2: substrate K + Q. Only V is learned.
+# Q is derived as: x_pos_concat * fixed projection (use CRT-PE directly).
+# In the simplest form: Q = CRT-PE (same as K) so each position queries
+# its own substrate address. The attention reduces to "soft positional
+# self-similarity" — diagonal-biased by construction.
+fn prom_attention_substrate_kq_new(d_model, seq_len, rng_state) {
+    h V = _prom_random_matrix(d_model, d_model, 0.3, rng_state);
+    h layer = dict_new();
+    dict_set(layer, "kind", "attention");
+    dict_set(layer, "variant", "substrate_kq");
+    dict_set(layer, "d_model", d_model);
+    dict_set(layer, "seq_len", seq_len);
+    dict_set(layer, "V", dict_get(V, "node"));
+    h pe = prom_crt_pe_matrix(seq_len, d_model);
+    dict_set(layer, "K_const", pe);
+    dict_set(layer, "Q_const", pe);
+    dict_set(layer, "alpha", 0.0);
+    dict_set(layer, "rng_state", dict_get(V, "state"));
+    return layer;
+}
+
+fn prom_attention_substrate_kq_forward(layer, x_id) {
+    h V_w = dict_get(layer, "V");
+    h K_const = dict_get(layer, "K_const");
+    h Q_const = dict_get(layer, "Q_const");
+    h v = tape_matmul(x_id, V_w);
+    h q = tape_const(Q_const);
+    h k = tape_const(K_const);
+    h kt = tape_transpose(k);
+    h scores = tape_matmul(q, kt);
+    h attn = tape_softmax(scores);
+    return tape_matmul(attn, v);
+}
+
+# L3: fully substrate attention. Zero learnable params in the layer.
+# Q = K = CRT-PE; V = identity transform on x (the input passes
+# through unchanged, weighted by substrate-determined attention).
+fn prom_attention_substrate_full_new(d_model, seq_len) {
+    h layer = dict_new();
+    dict_set(layer, "kind", "attention_substrate_full");
+    dict_set(layer, "variant", "substrate_full");
+    dict_set(layer, "d_model", d_model);
+    dict_set(layer, "seq_len", seq_len);
+    h pe = prom_crt_pe_matrix(seq_len, d_model);
+    dict_set(layer, "K_const", pe);
+    dict_set(layer, "Q_const", pe);
+    dict_set(layer, "alpha", 0.0);
+    return layer;
+}
+
+fn prom_attention_substrate_full_forward(layer, x_id) {
+    h K_const = dict_get(layer, "K_const");
+    h Q_const = dict_get(layer, "Q_const");
+    h q = tape_const(Q_const);
+    h k = tape_const(K_const);
+    h kt = tape_transpose(k);
+    h scores = tape_matmul(q, kt);
+    h attn = tape_softmax(scores);
+    # V is x itself — no transformation. The block weights x by
+    # substrate-determined attention.
+    return tape_matmul(attn, x_id);
+}
+
+# Param collectors per variant.
+fn prom_attention_substrate_k_params(layer) {
+    return [dict_get(layer, "Q"), dict_get(layer, "V")];
+}
+fn prom_attention_substrate_kq_params(layer) {
+    return [dict_get(layer, "V")];
+}
+fn prom_attention_substrate_full_params(layer) {
+    return [];
 }
 
 fn prom_attention_params(layer) {
