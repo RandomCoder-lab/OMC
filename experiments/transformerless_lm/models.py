@@ -103,6 +103,39 @@ def hbit_tension_gate(keys: torch.Tensor, scale: float = 1.0) -> torch.Tensor:
     return 1.0 / (1.0 + scale * attractor_distance(keys))
 
 
+# Same Fibonacci moduli as CRT-PE. The geodesic distance is computed
+# in the same lattice the positional encoding lives in — that's the
+# architectural coherence that the previous gate formulations lacked.
+_GEODESIC_MODULI = _FIB_MODULI
+
+
+def geodesic_distance_table(seq_len: int) -> torch.Tensor:
+    """Precompute a [seq_len, seq_len] table of CRT-Fibonacci
+    geodesic distances. For each pair (i, j) and each modulus m,
+    take the circular distance between residues (i % m) and (j % m)
+    — `min(d, m - d)` so positions on a ring of size m wrap.
+    Sum over moduli, normalize by m so each modulus contributes
+    bounded magnitude.
+
+    Returned table is normalized so its mean over i ≠ j is ≈ 1.0,
+    giving the learned α-bias scalar interpretable units.
+    """
+    table = torch.zeros(seq_len, seq_len, dtype=torch.float32)
+    pos = torch.arange(seq_len)
+    for m in _GEODESIC_MODULI:
+        ri = (pos % m).unsqueeze(1)             # [T, 1]
+        rj = (pos % m).unsqueeze(0)             # [1, T]
+        d = (ri - rj).abs() % m                  # [T, T]
+        d_circ = torch.minimum(d, m - d)         # circular distance
+        table = table + d_circ.float() / float(m)
+    # Normalize so mean of off-diagonal ≈ 1.0.
+    n_offdiag = seq_len * seq_len - seq_len
+    mean_offdiag = (table.sum() - torch.diagonal(table).sum()) / max(n_offdiag, 1)
+    if mean_offdiag.item() > 0:
+        table = table / mean_offdiag
+    return table
+
+
 # ---------------------------------------------------------------------------
 # Attention block
 # ---------------------------------------------------------------------------
@@ -125,9 +158,10 @@ class Attention(nn.Module):
                    substrate distance is a useful signal for the task.
     """
 
-    def __init__(self, d_model: int, gate_mode: str = "none", dropout: float = 0.0):
+    def __init__(self, d_model: int, gate_mode: str = "none",
+                 seq_len: int = 128, dropout: float = 0.0):
         super().__init__()
-        if gate_mode not in ("none", "key", "score", "learned"):
+        if gate_mode not in ("none", "key", "score", "learned", "geodesic"):
             raise ValueError(f"unknown gate_mode: {gate_mode}")
         self.d_model = d_model
         self.qkv = nn.Linear(d_model, 3 * d_model)
@@ -135,11 +169,21 @@ class Attention(nn.Module):
         self.gate_mode = gate_mode
         self.dropout = dropout
         if gate_mode == "learned":
-            # Initialize so sigmoid(W*d + b) ≈ 1/(1 + d) near d ≈ 0:
-            # picking W = -1, b = 0 gives sigmoid(-d) ∈ (0, 0.5], a
-            # softer version of the falsified gate. Both are learnable.
             self.gate_w = nn.Parameter(torch.tensor(-1.0))
             self.gate_b = nn.Parameter(torch.tensor(0.0))
+        if gate_mode == "geodesic":
+            # ALiBi-style additive position bias, but using CRT-Fibonacci
+            # geodesic distance instead of plain |i-j|. Precomputed once
+            # at construction so the forward pass adds a [T,T] tensor
+            # to scores — no per-batch substrate compute.
+            self.register_buffer(
+                "geodesic_bias", geodesic_distance_table(seq_len)
+            )
+            # α scalar — initialized to 0 so the model starts as pure
+            # crt_only and must DISCOVER the bias is useful from
+            # gradient signal alone. Same fairness condition as
+            # gate_mode="learned".
+            self.alpha = nn.Parameter(torch.tensor(0.0))
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         B, T, D = x.shape
@@ -149,17 +193,18 @@ class Attention(nn.Module):
         scores = (q @ k.transpose(-2, -1)) * scale  # [B, T, T]
 
         if self.gate_mode == "score":
-            # Gate on score VALUES (pre-mask). attractor_distance of
-            # raw scores tells us whether the (q·k) magnitude lands
-            # on a substrate attractor. Off-attractor scores get
-            # additively penalized in log-space, so softmax handles
-            # normalization natively.
-            d = attractor_distance(scores * 10.0)  # [B, T, T]
+            d = attractor_distance(scores * 10.0)
             log_gate = -torch.log1p(d)
             scores = scores + log_gate
+        elif self.gate_mode == "geodesic":
+            # Subtract α * geodesic(i, j). Larger distance → more
+            # negative bias → softmax attenuates that pair. α<0 would
+            # invert (favor distant pairs), so the sign of α is
+            # itself a learnable architectural choice.
+            scores = scores - self.alpha * self.geodesic_bias[:T, :T].unsqueeze(0)
 
         scores = scores.masked_fill(mask == 0, float('-inf'))
-        attn = F.softmax(scores, dim=-1)  # [B, T, T]
+        attn = F.softmax(scores, dim=-1)
 
         if self.gate_mode == "key":
             key_mag = k.abs().mean(dim=-1)
@@ -168,7 +213,7 @@ class Attention(nn.Module):
             attn = attn / (attn.sum(dim=-1, keepdim=True) + 1e-9)
         elif self.gate_mode == "learned":
             key_mag = k.abs().mean(dim=-1)
-            d = attractor_distance(key_mag * 100.0)  # [B, T]
+            d = attractor_distance(key_mag * 100.0)
             gate = torch.sigmoid(self.gate_w * d + self.gate_b)
             attn = attn * gate.unsqueeze(1)
             attn = attn / (attn.sum(dim=-1, keepdim=True) + 1e-9)
@@ -198,9 +243,9 @@ class FeedForward(nn.Module):
 
 
 class Block(nn.Module):
-    def __init__(self, d_model: int, gate_mode: str = "none"):
+    def __init__(self, d_model: int, gate_mode: str = "none", seq_len: int = 128):
         super().__init__()
-        self.attn = Attention(d_model, gate_mode=gate_mode)
+        self.attn = Attention(d_model, gate_mode=gate_mode, seq_len=seq_len)
         self.ff = FeedForward(d_model)
         self.ln1 = nn.LayerNorm(d_model)
         self.ln2 = nn.LayerNorm(d_model)
@@ -234,7 +279,7 @@ class TinyLM(nn.Module):
             raise ValueError(f"unknown pe_kind: {pe_kind}")
         self.register_buffer("pe", pe)
         self.blocks = nn.ModuleList([
-            Block(d_model, gate_mode=gate_mode) for _ in range(n_blocks)
+            Block(d_model, gate_mode=gate_mode, seq_len=seq_len) for _ in range(n_blocks)
         ])
         self.ln_f = nn.LayerNorm(d_model)
         self.head = nn.Linear(d_model, vocab_size, bias=False)
@@ -282,4 +327,10 @@ def make_model(
         return TinyLM(**common, pe_kind="crt", gate_mode="score")
     if arch == "hybrid_learned":
         return TinyLM(**common, pe_kind="crt", gate_mode="learned")
+    if arch == "hybrid_geodesic":
+        # CRT-PE + ALiBi-style additive position bias in CRT-Fibonacci
+        # geodesic distance. Substrate signal applied to POSITIONS
+        # (integer, native to the substrate's basis) instead of
+        # activations (continuous, no substrate structure).
+        return TinyLM(**common, pe_kind="crt", gate_mode="geodesic")
     raise ValueError(f"unknown arch: {arch}")
