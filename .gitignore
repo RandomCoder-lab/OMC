@@ -40,3 +40,7 @@ examples/recommend/sample_100k.csv
 
 # Gdextension built artifacts (rebuild from src/)
 omnimcode-gdextension/bin/
+
+# Local-only WIP examples (not ready for the public repo yet)
+examples/agent-decision-evolution/
+examples/game-ai-demo/Assets/Editor/OMNIcode/
