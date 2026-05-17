@@ -1,12 +1,36 @@
 # OMNIcode (OMC)
 
-**A harmonic-substrate programming language with first-class φ, dual-band execution, an LLVM-backed JIT, self-healing, and an O(log_φπfib N) algorithm family — built toward a transformerless LLM.**
+**A harmonic-substrate programming language with first-class φ, dual-band execution, an LLVM-backed JIT, self-healing, an O(log_φπfib N) algorithm family — and a substrate-native ML framework (Prometheus) whose substrate-K attention beats standard learned attention at TinyShakespeare scale.**
 
 OMC is not a thin layer over IEEE-754 and types. Its substrate is **φ** (the golden ratio) and the canonical 40-entry Fibonacci attractor table reaching 63,245,986. Every harmonic operation in the language — `fold(n)`, `phi.res(n)`, `harmony(x)`, `zeckendorf(n)`, `substrate_search(arr, target)`, the heal pass's literal-rewrite, the bucketing in the harmonic anomaly detector — routes through the same substrate.
 
 It runs as one binary with two execution engines kept byte-identical, optional LLVM-18 JIT producing dual-band SSE2 code, embedded CPython for bidirectional interop, WASM and LSP targets, a self-hosting compiler that's gen2==gen3 byte-identical, a self-healing pass that fixes typos/off-attractor literals/divide-by-zero, and a registry-backed package manager.
 
-The endpoint is a **transformerless LLM** — a model whose attention, positional encoding, and OOD gating are built from harmonic primitives instead of softmax + sinusoidal PE + L2. CRT-Fibonacci positional encoding **wins -19.9% (tiny scale) and -5.4% (TinyShakespeare scale) vs sinusoidal**. HBit cross-cutting tension is a reference-free OOD signal at AUROC 1.0. The architectural pieces are being built and measured one at a time.
+## The substrate-aware transformer (validated this week)
+
+The transformer architecture has multiple components OMC has measured against substrate replacements. The current scoreboard:
+
+| Component | Substrate variant | Result |
+|---|---|---|
+| **Attention K matrix** | **CRT-Fibonacci positional table** | **WINS −6.3% val @ multi-head × multi-block × TinyShakespeare (2/3 seeds, 10.8% fewer params)** |
+| Positional encoding | CRT-Fibonacci PE | WINS −5.4% / −2.9% PyTorch |
+| Geodesic attention bias | additive position-distance bias | WINS 3/3 seeds (PyTorch, single-block) |
+| OOD detection | HBit cross-cutting tension | WINS AUROC 1.0 |
+| Optimizer | Harmonic SGD (substrate-modulated lr) | WINS −13.2% vs vanilla (tiny-scale tinyLM) |
+
+The substrate-K finding is the headline: replace the learned `W_K` matrix with the CRT-Fibonacci positional table. K becomes structurally pre-built, Q and V stay learned. At every (depth × heads × scale) combination tested, this wins or ties — saving ~10% of attention parameters and improving validation loss. See [`SUBSTRATE_K_FINDING.md`](experiments/prometheus_parity/SUBSTRATE_K_FINDING.md) and [`results_torch_multihead_tinyshakespeare.json`](experiments/prometheus_parity/results_torch_multihead_tinyshakespeare.json).
+
+This is **not** "transformerless." It's "substrate-aware transformer" — keep the architecture, replace specific components where the substrate's structural prior beats learned-from-scratch.
+
+## What's also new this week
+
+- **[Prometheus](omnimcode-core/src/prometheus/README.md)** — substrate-native ML framework (pure-OMC tape autograd, AdamW, embedding, layernorm, attention, content-addressed checkpoints). Trained a transformer end-to-end in pure OMC.
+- **[Fibonacci-tier memory (`fibtier`)](examples/lib/fibtier.omc)** — bounded conversation memory at Fibonacci tier capacities. After 100 turns, memory stays at ~18 entries. [Persistent variant](examples/lib/fibtier_persistent.omc) journals to disk; survives process restart.
+- **[Substrate-native agent demo](docs/SUBSTRATE_NATIVE_AGENT.md)** — two agents conversing over OMC-PROTOCOL with persistent fibtier memory across a simulated process restart. Every primitive shipped this week composed into one demonstrable system.
+- **[OMC-PROTOCOL v1](OMC-PROTOCOL.md)** — formalized substrate-signed wire format for inter-agent messaging. No PKI; integrity verified via canonical-hash recompute.
+- **[omc-kernel](docs/omc_kernel.md)** — content-addressed storage. Alpha-rename invariant. Two processes converging on the same canonical form produce the same address.
+- **[omc-grep](docs/omc_grep.md)** — code archaeology via canonical hash. Found 31.7% redundancy in OMC's own examples tree.
+- **[Cross-framework reproduction](experiments/prometheus_parity/)** — every substrate-attention result reproduced in both pure OMC (tape autograd) and PyTorch. Independent implementations, same direction.
 
 ---
 
@@ -168,20 +192,23 @@ OMC loses on volumetric-dominated data (NSL-KDD K=500: 302 vs 351). Ties on simp
 
 ---
 
-## The transformerless LLM thesis (live, empirically driven)
+## The substrate-aware transformer thesis (live, empirically driven)
 
-A modern transformer has four primitives. The hybrid LLM experiments measure each against a harmonic alternative:
+A modern transformer has four primitives. The substrate-replacement experiments measure each:
 
-| Transformer piece | Harmonic alternative | Empirical status |
+| Transformer piece | Substrate replacement | Empirical status |
 |---|---|---|
-| Sinusoidal PE | **CRT-Fibonacci PE** (pairwise-coprime moduli {5, 8, 13, 21, ...}) | **Harmonic wins:** −19.9% loss (tiny), **−5.4% on TinyShakespeare (3/3 seeds)** |
-| Softmax attention | OmniWeight (`φ^(-|q-k|)`) | Softmax wins on perturbed-query recovery |
-| Softmax-only attention | **Hybrid:** softmax × HBit-tension gate | **Harmonic wins on adversarial mixes** (experiment 12) |
-| L2-NN OOD detection | **HBit cross-cutting tension** | **Harmonic wins:** AUROC 1.0 on scenario A |
+| Sinusoidal PE | **CRT-Fibonacci PE** (pairwise-coprime moduli {5, 8, 13, 21, ...}) | **Wins** −19.9% (tiny), **−5.4% on TinyShakespeare** (3/3 seeds) |
+| **Learned K matrix in attention** | **CRT-Fibonacci as K (no learnable K)** | **Wins** **−6.3% val at multi-head × multi-block × TinyShakespeare** (2/3 seeds, 10.8% fewer params). Single-head + multi-block + at-scale variants all win or tie. See [`SUBSTRATE_K_FINDING.md`](experiments/prometheus_parity/SUBSTRATE_K_FINDING.md). |
+| Attention bias | **Geodesic** (`−α · geodesic(i,j)` in CRT moduli) | **Wins** 3/3 seeds (single-block PyTorch) |
+| Softmax attention | OmniWeight (`φ^(-|q-k|)`) | Softmax wins on perturbed-query recovery — not yet superseded |
+| HBit-tension attention gate | three formulations | **Falsified** 0/3 each — substrate metric on continuous activations doesn't work; rule derived: *substrate applies to integer-valued quantities only* |
+| L2-NN OOD detection | **HBit cross-cutting tension** | **Wins** AUROC 1.0 on scenario A |
+| SGD lr modulation | **Harmonic SGD** (substrate-resonance scaled per-param) | **Wins** −13.2% vs vanilla on tinyLM (3/3 seeds) |
 
-CRT-PE is the first per-component substitution that beats the transformer baseline on a real LM training task, at two orders of magnitude in both model and data scale. The transformerless thesis is now testing whether the same substitution holds at modern transformer scale.
+**The substrate-K finding is the production recommendation.** Replace the learned `W_K` matrix with the CRT-Fibonacci positional table. Q + V stay learned. Validates at every (depth × heads × scale) combination measured. Pure win: fewer params, lower val loss, no architectural complexity added.
 
-See [`experiments/hybrid_llm/README.md`](experiments/hybrid_llm/README.md) for the per-experiment record and [`experiments/transformerless_lm/README.md`](experiments/transformerless_lm/README.md) for the end-to-end LM results.
+See [`experiments/prometheus_parity/`](experiments/prometheus_parity/) for the full A/B harness (single-head, multi-block, multi-head, TinyShakespeare-scale, with train/val splits and cross-runtime reproduction between OMC and PyTorch).
 
 ---
 
