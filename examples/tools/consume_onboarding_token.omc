@@ -1,0 +1,78 @@
+# Consume an OMC onboarding token.
+#
+# This is the receiver-side flow for a new-to-OMC LLM (or any agent
+# that wasn't pre-loaded with the language).
+#
+# Steps:
+#   1. Read the substrate-signed envelope from docs/onboarding_token.json
+#   2. Verify the substrate signature (content_hash must equal the
+#      recomputed canonical hash of the inner content — defends
+#      against bundle tampering, no shared key needed)
+#   3. Parse the inner bundle
+#   4. Print a summary so a downstream LLM knows what's available
+#   5. Demonstrate one round-trip: pick a fn from the manifest,
+#      fetch its full source via the registry / kernel
+#
+# Run from the OMC repo root:
+#   omnimcode-standalone examples/tools/consume_onboarding_token.omc
+
+fn main() {
+    h wire = read_file("docs/onboarding_token.json");
+    h envelope = omc_msg_deserialize(wire);
+
+    # Step 1: verify the substrate signature.
+    h check = omc_msg_verify(envelope);
+    h valid = dict_get(check, "valid");
+    if valid != 1 {
+        print("FAIL: envelope signature invalid — bundle was tampered with.");
+        print(concat_many("  expected_hash = ", to_string(dict_get(check, "expected_hash"))));
+        print(concat_many("  actual_hash   = ", to_string(dict_get(check, "actual_hash"))));
+        return;
+    }
+    print("[OK] substrate envelope signature verified");
+    print(concat_many("     content_hash = ", to_string(dict_get(envelope, "content_hash"))));
+    print(concat_many("     attractor    = ", to_string(dict_get(envelope, "attractor"))));
+
+    # Step 2: parse the inner bundle.
+    h content = dict_get(check, "content");
+    h bundle = json_parse(content);
+    print("");
+    print(concat_many("Bundle version  : ", dict_get(bundle, "version")));
+    print(concat_many("Bootstrap pack  : ", to_string(dict_get(bundle, "bootstrap_bytes")), " bytes"));
+    print(concat_many("Library fns     : ", to_string(dict_get(bundle, "fn_count"))));
+
+    # Step 3: show a sample of the manifest.
+    h manifest = dict_get(bundle, "lib_manifest");
+    print("");
+    print("Sample manifest entries (first 5):");
+    h i = 0;
+    while i < 5 && i < arr_len(manifest) {
+        h entry = arr_get(manifest, i);
+        print(concat_many(
+            "  ", dict_get(entry, "lib"),
+            "  ", dict_get(entry, "signature"),
+            "  hash=", to_string(dict_get(entry, "canonical_hash"))
+        ));
+        i = i + 1;
+    }
+
+    # Step 4: show that the LLM can now ask "do you have fns returning float[]?"
+    print("");
+    print("LLM discovery query: omc_find_by_signature(\"-> float[]\", 3)");
+    h hits = omc_find_by_signature("-> float[]", 3);
+    i = 0;
+    while i < arr_len(hits) {
+        h r = arr_get(hits, i);
+        print(concat_many("  ", dict_get(r, "name"), " :: ", dict_get(r, "signature")));
+        i = i + 1;
+    }
+
+    print("");
+    print("Onboarding complete. A downstream LLM now knows:");
+    print("  * the language's bootstrap pack (categories, idioms, gotchas)");
+    print("  * every standard-library fn's canonical address");
+    print("  * how to discover builtins by signature");
+    print("  * how to verify the bundle came from the expected substrate");
+}
+
+main();

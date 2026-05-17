@@ -1138,6 +1138,13 @@ pub const BUILTINS: &[BuiltinDoc] = &[
         unique_to_omc: true,
     },
     BuiltinDoc {
+        name: "omc_find_by_signature", category: "code_intel",
+        signature: "(pattern: string, max?: int) -> [{name, signature, category, description}, ...]",
+        description: "Discover builtins by signature substring instead of name. Useful for LLM iteration: `omc_find_by_signature(\"-> float[]\")` finds fns returning a float array; `omc_find_by_signature(\"string, int\")` for those taking a string + int. Case-insensitive substring on the literal signature string. Default max = 20.",
+        example: "omc_find_by_signature(\"-> int\")  // every builtin returning int",
+        unique_to_omc: true,
+    },
+    BuiltinDoc {
         name: "omc_registry_codec_library", category: "messaging",
         signature: "() -> string[]",
         description: "Scan omc_modules/ for installed registry packages and return every top-level fn definition as a separate string. Suitable as the library arg to omc_codec_decode_lookup / omc_msg_recover_compressed. Empty array if omc_modules/ doesn't exist.",

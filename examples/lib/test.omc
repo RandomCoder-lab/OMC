@@ -1,0 +1,102 @@
+# std/test — canonical assertion helpers for OMC test suites.
+#
+# Before this library, every test file under examples/tests/ defined
+# its own assert_eq / assert_true. omc-grep counted 64 copies of
+# assert_eq alone (the largest cluster in the codebase).
+#
+# To use:
+#   from "lib/test.omc" import assert_eq, assert_true, assert_near, assert_throws
+#
+# Or import the whole module:
+#   import "lib/test.omc"
+#
+# Conventions:
+#   - msg is the diagnostic shown when an assertion fails
+#   - test_record_failure is the OMC test-runner hook that flags a fail
+#   - assertions short-circuit (return) after recording so a single
+#     bad assertion doesn't cascade into noise
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_ne(actual, unexpected, msg) {
+    if actual == unexpected {
+        test_record_failure(msg + ": expected != " + to_string(unexpected) + " but got equal");
+    }
+}
+
+fn assert_true(cond, msg) {
+    if !cond {
+        test_record_failure(msg);
+    }
+}
+
+fn assert_false(cond, msg) {
+    if cond {
+        test_record_failure(msg + ": expected false, got true");
+    }
+}
+
+# Float equality within an epsilon tolerance. Default eps = 1e-9
+# (tight for typical FP work; pass a looser eps for ML/stats tests).
+fn assert_near(actual, expected, eps, msg) {
+    h diff = actual - expected;
+    h abs_diff = diff;
+    if abs_diff < 0.0 { abs_diff = 0.0 - abs_diff; }
+    if abs_diff > eps {
+        test_record_failure(msg + ": expected ~" + to_string(expected) + " (eps=" + to_string(eps) + ") got " + to_string(actual));
+    }
+}
+
+# Assertion: invoking nullary fn body_fn raises ANY error.
+# Use for "this should fail" tests without coupling to the exact
+# error message.
+fn assert_throws(body_fn, msg) {
+    h threw = false;
+    try {
+        body_fn();
+    } catch e {
+        threw = true;
+    }
+    if !threw {
+        test_record_failure(msg + ": expected to throw, completed normally");
+    }
+}
+
+# Like assert_throws but also requires the error message to contain
+# a given substring. Use to assert a specific failure mode.
+fn assert_throws_with(body_fn, expected_substr, msg) {
+    h threw = false;
+    h err_text = "";
+    try {
+        body_fn();
+    } catch e {
+        threw = true;
+        err_text = e;
+    }
+    if !threw {
+        test_record_failure(msg + ": expected to throw, completed normally");
+        return;
+    }
+    if re_match(expected_substr, err_text) != 1 {
+        test_record_failure(msg + ": error did not contain `" + expected_substr + "`; got: " + err_text);
+    }
+}
+
+# Convenience: assert string contains substring.
+fn assert_contains(haystack, needle, msg) {
+    if re_match(needle, haystack) != 1 {
+        test_record_failure(msg + ": expected `" + needle + "` in `" + haystack + "`");
+    }
+}
+
+# Convenience: assert array length.
+fn assert_len(arr, expected_len, msg) {
+    h actual = arr_len(arr);
+    if actual != expected_len {
+        test_record_failure(msg + ": expected len " + to_string(expected_len) + " got " + to_string(actual));
+    }
+}

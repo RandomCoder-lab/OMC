@@ -7014,6 +7014,38 @@ impl Interpreter {
                     .collect();
                 Ok(Value::Array(HArray::from_vec(out)))
             }
+            // omc_find_by_signature(pattern: string) -> [{name, signature, category}, ...]
+            //   Substring-match `pattern` against every builtin's signature
+            //   field. Lets LLMs discover by intent — e.g.
+            //     omc_find_by_signature("-> float[]") to find fns
+            //     returning a float array, or
+            //     omc_find_by_signature("string, int") for those taking
+            //     a string and an int.
+            //   Match is case-insensitive substring on the literal signature
+            //   string. Optional 2nd arg: max results (default 20).
+            "omc_find_by_signature" => {
+                if args.is_empty() {
+                    return Err("omc_find_by_signature requires (pattern: string, max?: int)".to_string());
+                }
+                let pattern = self.eval_expr(&args[0])?.to_display_string();
+                let max = if args.len() >= 2 {
+                    self.eval_expr(&args[1])?.to_int().max(1) as usize
+                } else { 20 };
+                let pat_lc = pattern.to_lowercase();
+                let mut hits: Vec<Value> = Vec::new();
+                for doc in crate::docs::BUILTINS {
+                    if doc.signature.to_lowercase().contains(&pat_lc) {
+                        let mut map = std::collections::BTreeMap::new();
+                        map.insert("name".to_string(), Value::String(doc.name.to_string()));
+                        map.insert("signature".to_string(), Value::String(doc.signature.to_string()));
+                        map.insert("category".to_string(), Value::String(doc.category.to_string()));
+                        map.insert("description".to_string(), Value::String(doc.description.to_string()));
+                        hits.push(Value::dict_from(map));
+                        if hits.len() >= max { break; }
+                    }
+                }
+                Ok(Value::Array(HArray::from_vec(hits)))
+            }
             "omc_categories" => {
                 let cats = crate::docs::categories();
                 let out: Vec<Value> = cats.iter()

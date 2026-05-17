@@ -557,10 +557,24 @@ impl Lexer {
                 }
                 Some('&') => {
                     self.advance();
+                    // `&&` is the C-family logical-AND every LLM reaches for.
+                    // Map to the same Token::And as the `and` keyword so
+                    // either form works. Single `&` stays as bit-AND.
+                    if self.current() == Some('&') {
+                        self.advance();
+                        return Token::And;
+                    }
                     return Token::BitAnd;
                 }
                 Some('|') => {
                     self.advance();
+                    // `||` is the C-family logical-OR every LLM reaches for.
+                    // Map to the same Token::Or as the `or` keyword so
+                    // either form works. Single `|` stays as bit-OR.
+                    if self.current() == Some('|') {
+                        self.advance();
+                        return Token::Or;
+                    }
                     return Token::BitOr;
                 }
                 Some('^') => {

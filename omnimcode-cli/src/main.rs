@@ -15,6 +15,7 @@ fn main() {
     // (or the install spec when --install is set).
     let mut mode = "run";
     let mut file_arg: Option<&str> = None;
+    let mut json_output = false;
     for a in args.iter().skip(1) {
         match a.as_str() {
             "--check" | "-c" => mode = "check",
@@ -23,9 +24,11 @@ fn main() {
             "--list" | "-l" => mode = "list",
             "--init" => mode = "init",
             "--test" | "-t" => mode = "test",
+            "--test-all" => mode = "test-all",
             "--bench" | "-b" => mode = "bench",
             "--audit" | "-a" => mode = "audit",
             "--gen-docs" => mode = "gen-docs",
+            "--json" => json_output = true,
             "--help" | "-h" => mode = "help",
             other if !other.starts_with('-') => file_arg = Some(other),
             other => {
@@ -60,8 +63,10 @@ fn main() {
         ("install", spec) => install_command(spec),
         ("list", _) => list_command(),
         ("init", _) => init_command(),
-        ("test", Some(path)) => test_command(path),
+        ("test", Some(path)) => test_command(path, json_output),
         ("test", None) => { eprintln!("--test requires a file argument."); 2 }
+        ("test-all", Some(dir)) => test_all_command(dir, json_output),
+        ("test-all", None) => test_all_command("examples/tests", json_output),
         ("bench", Some(path)) => bench_command(path),
         ("bench", None) => { eprintln!("--bench requires a file argument."); 2 }
         ("audit", Some(path)) => audit_command(path),
@@ -425,9 +430,12 @@ fn install_command(_spec: Option<&str>) -> i32 {
 /// and a final summary. A test PASSES if it returns without raising;
 /// FAILS if it errors. Exit code = number of failures (clamped to 1).
 ///
+/// With `--json`, emits one JSONL line per test result and a final
+/// summary line, suitable for LLM iteration loops or CI.
+///
 /// Convention: test fns take no args, return anything (return value
 /// ignored). Use OMC's `error("msg")` to assert failure.
-fn test_command(path: &str) -> i32 {
+fn test_command(path: &str, json: bool) -> i32 {
     let source = match fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => { eprintln!("test: read {}: {}", path, e); return 2; }
@@ -437,30 +445,217 @@ fn test_command(path: &str) -> i32 {
         Err(e) => { eprintln!("test: parse {}: {}", path, e); return 2; }
     };
     if test_names.is_empty() {
-        println!("test: no `fn test_*()` functions in {}", path);
+        if !json {
+            println!("test: no `fn test_*()` functions in {}", path);
+        }
         return 0;
     }
-    println!("running {} test(s) from {}", test_names.len(), path);
+    if !json {
+        println!("running {} test(s) from {}", test_names.len(), path);
+    }
     let mut passed = 0;
     let mut failed: Vec<(String, String)> = Vec::new();
     for name in &test_names {
-        // Re-parse + re-execute per-test so each gets a fresh state.
-        // Slower than reusing the interpreter, but means one test's
-        // mutations can't leak into the next.
         match run_named_fn(&source, name) {
-            Ok(()) => { passed += 1; println!("  ok    {}", name); }
+            Ok(()) => {
+                passed += 1;
+                if json {
+                    println!(
+                        r#"{{"file":{},"test":{},"status":"pass"}}"#,
+                        json_str(path),
+                        json_str(name)
+                    );
+                } else {
+                    println!("  ok    {}", name);
+                }
+            }
             Err(e) => {
                 failed.push((name.clone(), e.clone()));
-                println!("  FAIL  {}", name);
+                if json {
+                    println!(
+                        r#"{{"file":{},"test":{},"status":"fail","error":{}}}"#,
+                        json_str(path),
+                        json_str(name),
+                        json_str(e.lines().next().unwrap_or(&e))
+                    );
+                } else {
+                    println!("  FAIL  {}", name);
+                }
             }
         }
     }
-    println!("");
-    println!("result: {} passed, {} failed", passed, failed.len());
-    for (name, err) in &failed {
-        println!("  {}: {}", name, err.lines().next().unwrap_or(err));
+    if json {
+        println!(
+            r#"{{"summary":true,"file":{},"tests":{},"passed":{},"failed":{}}}"#,
+            json_str(path),
+            test_names.len(),
+            passed,
+            failed.len()
+        );
+    } else {
+        println!("");
+        println!("result: {} passed, {} failed", passed, failed.len());
+        for (name, err) in &failed {
+            println!("  {}: {}", name, err.lines().next().unwrap_or(err));
+        }
     }
     if failed.is_empty() { 0 } else { 1 }
+}
+
+/// `--test-all DIR`: recursively scan DIR for `test_*.omc` files,
+/// run `--test` on each, report a one-line-per-file summary.
+/// Default DIR is `examples/tests` (run from the OMC repo root).
+/// With `--json`, emits per-test JSONL plus per-file + overall
+/// summary lines.
+fn test_all_command(dir: &str, json: bool) -> i32 {
+    let root = std::path::Path::new(dir);
+    if !root.is_dir() {
+        eprintln!("test-all: not a directory: {}", dir);
+        return 2;
+    }
+    // Walk recursively, only files matching test_*.omc.
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    let mut stack: Vec<std::path::PathBuf> = vec![root.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+        for ent in rd.flatten() {
+            let p = ent.path();
+            let n = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if matches!(n, "target" | "node_modules" | ".git" | "omc_modules") {
+                continue;
+            }
+            if p.is_dir() {
+                stack.push(p);
+            } else if n.starts_with("test_") && p.extension().and_then(|s| s.to_str()) == Some("omc") {
+                files.push(p);
+            }
+        }
+    }
+    files.sort();
+    if files.is_empty() {
+        if json {
+            println!(r#"{{"summary":true,"dir":{},"files":0,"tests":0,"passed":0,"failed":0}}"#, json_str(dir));
+        } else {
+            println!("test-all: no test_*.omc files found in {}", dir);
+        }
+        return 0;
+    }
+    let t_start = std::time::Instant::now();
+    let mut total_tests = 0usize;
+    let mut total_passed = 0usize;
+    let mut total_failed = 0usize;
+    let mut failed_files: Vec<String> = Vec::new();
+    if !json {
+        println!("test-all: {} file(s) under {}", files.len(), dir);
+        println!("{:<60} {:>6} {:>6} {:>8}", "file", "pass", "fail", "ms");
+    }
+    for f in &files {
+        let path_str = f.display().to_string();
+        let source = match fs::read_to_string(f) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let test_names = match scan_fn_prefix(&source, "test_") {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+        if test_names.is_empty() {
+            continue;
+        }
+        let f_start = std::time::Instant::now();
+        let mut f_passed = 0usize;
+        let mut f_failed: Vec<(String, String)> = Vec::new();
+        for name in &test_names {
+            match run_named_fn(&source, name) {
+                Ok(()) => {
+                    f_passed += 1;
+                    if json {
+                        println!(
+                            r#"{{"file":{},"test":{},"status":"pass"}}"#,
+                            json_str(&path_str), json_str(name),
+                        );
+                    }
+                }
+                Err(e) => {
+                    f_failed.push((name.clone(), e.clone()));
+                    if json {
+                        println!(
+                            r#"{{"file":{},"test":{},"status":"fail","error":{}}}"#,
+                            json_str(&path_str), json_str(name),
+                            json_str(e.lines().next().unwrap_or(&e)),
+                        );
+                    }
+                }
+            }
+        }
+        let f_ms = f_start.elapsed().as_millis() as u64;
+        total_tests += test_names.len();
+        total_passed += f_passed;
+        total_failed += f_failed.len();
+        if !f_failed.is_empty() {
+            failed_files.push(path_str.clone());
+        }
+        if json {
+            println!(
+                r#"{{"file":{},"summary":true,"tests":{},"passed":{},"failed":{},"ms":{}}}"#,
+                json_str(&path_str), test_names.len(), f_passed, f_failed.len(), f_ms
+            );
+        } else {
+            // Truncate file path for display
+            let short = if path_str.len() > 58 {
+                format!("...{}", &path_str[path_str.len() - 55..])
+            } else { path_str.clone() };
+            println!(
+                "{:<60} {:>6} {:>6} {:>8}",
+                short, f_passed, f_failed.len(), f_ms
+            );
+            for (name, err) in &f_failed {
+                println!("    FAIL {}: {}", name, err.lines().next().unwrap_or(err));
+            }
+        }
+    }
+    let total_ms = t_start.elapsed().as_millis() as u64;
+    if json {
+        println!(
+            r#"{{"summary":true,"dir":{},"files":{},"tests":{},"passed":{},"failed":{},"ms":{}}}"#,
+            json_str(dir), files.len(), total_tests, total_passed, total_failed, total_ms
+        );
+    } else {
+        println!();
+        println!(
+            "OVERALL: {} file(s), {} test(s)  →  {} passed, {} failed  ({} ms)",
+            files.len(), total_tests, total_passed, total_failed, total_ms
+        );
+        if !failed_files.is_empty() {
+            println!("\nFailed files:");
+            for ff in &failed_files {
+                println!("  {}", ff);
+            }
+        }
+    }
+    if total_failed == 0 { 0 } else { 1 }
+}
+
+/// Minimal JSON-string escaper — escape `"` and `\` and control chars.
+/// Returns the value already wrapped in double quotes, ready to embed
+/// in a JSON object. Avoids pulling in serde_json just for this CLI
+/// path.
+fn json_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// `--bench FILE`: load FILE, find every top-level `fn bench_*()`,

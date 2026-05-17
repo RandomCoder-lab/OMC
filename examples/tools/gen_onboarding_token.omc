@@ -1,0 +1,146 @@
+# Generate the OMC onboarding bundle.
+#
+# Output: a single JSON file an LLM can ingest cold and immediately
+# be productive in OMC. The bundle is substrate-signed (integrity
+# verifiable without a shared key) and references registry/library
+# functions by canonical hash (alpha-rename invariant).
+#
+# Contents:
+#   * version            — build identifier
+#   * bootstrap_pack     — the ~20KB markdown intro from omc_bootstrap_pack()
+#   * lib_manifest       — for every fn in examples/lib/ :
+#                          {name, canonical_hash, attractor, signature_first_line}
+#   * substrate_envelope — substrate-signed wrapper over the above
+#                          (sender=0 = kernel-level signing)
+#
+# Run from the OMC repo root:
+#   omnimcode-standalone examples/tools/gen_onboarding_token.omc > docs/onboarding_token.json
+#
+# Or pipe directly into another tool. The output is one line of JSON.
+
+fn extract_fns_from_file(path) {
+    h src = read_file(path);
+    h fns = [];
+    h i = 0;
+    h n = str_len(src);
+    while i < n {
+        # Look for "fn " at line start or after whitespace.
+        if str_slice(src, i, i + 3) == "fn " && (i == 0 || str_slice(src, i - 1, i) == "\n" || str_slice(src, i - 1, i) == " ") {
+            # Find the opening brace.
+            h j = i;
+            while j < n && str_slice(src, j, j + 1) != "{" { j = j + 1; }
+            if j >= n { i = i + 1; }
+            else {
+                # Track brace depth.
+                h depth = 0;
+                h k = j;
+                while k < n {
+                    h c = str_slice(src, k, k + 1);
+                    if c == "{" { depth = depth + 1; }
+                    elif c == "}" {
+                        depth = depth - 1;
+                        if depth == 0 { k = k + 1; break; }
+                    }
+                    k = k + 1;
+                }
+                if depth == 0 {
+                    arr_push(fns, str_slice(src, i, k));
+                    i = k;
+                } else {
+                    i = i + 1;
+                }
+            }
+        } else {
+            i = i + 1;
+        }
+    }
+    return fns;
+}
+
+fn fn_name_of(src) {
+    # Pull NAME from "fn NAME(...)". skip "fn " (3 chars).
+    h after = str_slice(src, 3, str_len(src));
+    h i = 0;
+    while i < str_len(after) {
+        h c = str_slice(after, i, i + 1);
+        if c == "(" || c == " " { break; }
+        i = i + 1;
+    }
+    return str_slice(after, 0, i);
+}
+
+fn signature_first_line(src) {
+    # Return the "fn NAME(...)" signature only.
+    h i = 0;
+    while i < str_len(src) && str_slice(src, i, i + 1) != "{" { i = i + 1; }
+    return str_trim(str_slice(src, 0, i));
+}
+
+fn build_lib_manifest() {
+    h libs = [
+        "examples/lib/np.omc",
+        "examples/lib/pd.omc",
+        "examples/lib/sklearn.omc",
+        "examples/lib/torch.omc",
+        "examples/lib/requests.omc",
+        "examples/lib/sqlite.omc",
+        "examples/lib/substrate.omc",
+        "examples/lib/harmonic_anomaly.omc",
+        "examples/lib/harmonic_clustering.omc",
+        "examples/lib/harmonic_recommend.omc",
+        "examples/lib/test.omc",
+    ];
+    h manifest = [];
+    h i = 0;
+    while i < arr_len(libs) {
+        h path = arr_get(libs, i);
+        h fns = extract_fns_from_file(path);
+        h j = 0;
+        while j < arr_len(fns) {
+            h fn_src = arr_get(fns, j);
+            h entry = dict_new();
+            dict_set(entry, "lib", path);
+            dict_set(entry, "name", fn_name_of(fn_src));
+            try {
+                h hash_dict = omc_canonical_hash(fn_src);
+                dict_set(entry, "canonical_hash", dict_get(hash_dict, "raw"));
+                dict_set(entry, "attractor", dict_get(hash_dict, "attractor"));
+            } catch e {
+                # Some fns use library-specific syntax that doesn't parse
+                # in isolation (e.g. closures referencing the module's
+                # imports). Skip the hash for these; the name + sig still
+                # serve as a discovery hint.
+                dict_set(entry, "canonical_hash", 0);
+                dict_set(entry, "attractor", 0);
+            }
+            dict_set(entry, "signature", signature_first_line(fn_src));
+            arr_push(manifest, entry);
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return manifest;
+}
+
+fn main() {
+    h pack = omc_bootstrap_pack();
+    h manifest = build_lib_manifest();
+    h bundle = dict_new();
+    dict_set(bundle, "kind", "omc_onboarding_token_v1");
+    dict_set(bundle, "version", "2026.05.16");
+    dict_set(bundle, "bootstrap_pack", pack);
+    dict_set(bundle, "lib_manifest", manifest);
+    dict_set(bundle, "fn_count", arr_len(manifest));
+    dict_set(bundle, "bootstrap_bytes", str_len(pack));
+
+    # Substrate-sign the entire bundle so receivers can verify integrity.
+    h bundle_json = json_stringify(bundle);
+    h envelope = omc_msg_sign(bundle_json, 0, 7);  # sender=0, kind=7 (onboarding)
+    h envelope_json = omc_msg_serialize(envelope);
+
+    # Emit one JSON line: the substrate-signed envelope. The receiver
+    # verifies with omc_msg_verify and then json_parse the content.
+    print(envelope_json);
+}
+
+main();

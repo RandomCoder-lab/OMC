@@ -1,0 +1,52 @@
+# Tests for examples/lib/test.omc — the canonical assertion helpers.
+# (Meta-test: tests that the test library does what it says.)
+
+from "examples/lib/test.omc" import assert_eq, assert_ne, assert_true, assert_false, assert_near, assert_throws, assert_throws_with, assert_contains, assert_len;
+
+fn test_assert_eq_pass() {
+    assert_eq(1 + 1, 2, "math");
+    assert_eq("hi", "hi", "string");
+    assert_eq(arr_len([1, 2, 3]), 3, "len");
+}
+
+fn test_assert_ne_pass() {
+    assert_ne(1, 2, "diff");
+    assert_ne("a", "b", "str diff");
+}
+
+fn test_assert_true_pass() {
+    assert_true(true, "literal true");
+    assert_true(1 == 1, "eq result");
+    assert_true(arr_len([1]) > 0, "nonempty");
+}
+
+fn test_assert_false_pass() {
+    assert_false(false, "literal false");
+    assert_false(1 == 2, "neq result");
+}
+
+fn test_assert_near_pass() {
+    assert_near(0.1 + 0.2, 0.3, 1e-9, "fp drift");
+    assert_near(1.0, 1.0001, 0.001, "loose eps");
+}
+
+fn test_assert_throws_pass() {
+    assert_throws(fn() { h _ = error("boom"); }, "should throw");
+}
+
+fn test_assert_throws_with_pass() {
+    assert_throws_with(
+        fn() { h _ = error("specific failure mode"); },
+        "specific",
+        "matches substring"
+    );
+}
+
+fn test_assert_contains_pass() {
+    assert_contains("hello world", "world", "substring");
+}
+
+fn test_assert_len_pass() {
+    assert_len([1, 2, 3], 3, "array len");
+    assert_len([], 0, "empty");
+}
