@@ -1,0 +1,109 @@
+# Prometheus text generation — autoregressive greedy decoding.
+#
+# Train the tinyLM on the abc cycle, then GENERATE a string of length
+# N starting from a seed character. The trained model should produce
+# the expected cyclic continuation "abcabcabc..." because that's the
+# only bigram pattern in the training data.
+#
+# Stop condition: generated output of length 20 must contain the
+# expected cyclic pattern.
+
+import "examples/lib/prometheus.omc";
+
+fn make_corpus() {
+    h chars = ["a", "b", "c"];
+    h text = "abcabcabcabcabcabcabcabcabc";
+    h ids = [];
+    h i = 0;
+    while i < str_len(text) {
+        h ch = str_slice(text, i, i + 1);
+        h idx = 0;
+        if ch == "a" { idx = 0; }
+        elif ch == "b" { idx = 1; }
+        elif ch == "c" { idx = 2; }
+        arr_push(ids, idx);
+        i = i + 1;
+    }
+    h corpus = dict_new();
+    dict_set(corpus, "chars", chars);
+    dict_set(corpus, "vocab", 3);
+    dict_set(corpus, "ids", ids);
+    return corpus;
+}
+
+fn build_model(vocab, hidden, seed) {
+    h L1 = prom_linear_new(vocab, hidden, seed);
+    h L2 = prom_linear_new(hidden, vocab, dict_get(L1, "rng_state"));
+    h model = dict_new();
+    dict_set(model, "L1", L1);
+    dict_set(model, "L2", L2);
+    return model;
+}
+
+fn forward(model, x_id) {
+    h L1 = dict_get(model, "L1");
+    h L2 = dict_get(model, "L2");
+    return prom_linear_forward(L2, prom_relu(prom_linear_forward(L1, x_id)));
+}
+
+fn main() {
+    print("=== Prometheus text generation ===");
+    h corpus = make_corpus();
+    h vocab = dict_get(corpus, "vocab");
+    h chars = dict_get(corpus, "chars");
+    h ids = dict_get(corpus, "ids");
+
+    # Train.
+    tape_reset();
+    h model = build_model(vocab, 8, 42);
+    h params = prom_collect_params([dict_get(model, "L1"), dict_get(model, "L2")]);
+    h n_pairs = arr_len(ids) - 1;
+    h step = 0;
+    while step < 200 {
+        h k = step % n_pairs;
+        h x = prom_one_hot(arr_get(ids, k), vocab);
+        h target = prom_one_hot(arr_get(ids, k + 1), vocab);
+        h pred = forward(model, x);
+        h loss = prom_mse_loss(pred, target);
+        tape_backward(loss);
+        prom_sgd_step(params, 0.05);
+        step = step + 1;
+    }
+    print("[trained]");
+
+    # Generate from each seed.
+    h seed = 0;
+    h all_correct = true;
+    while seed < vocab {
+        h generated = prom_generate_greedy(forward, model, seed, 19, vocab);
+        h text = prom_decode_indices(generated, chars);
+        # Expected: "abcabcabcabcabcabcab" starting at seed.
+        # Build expected for this seed.
+        h expected = "";
+        h k = 0;
+        while k < 20 {
+            h idx = (seed + k) % 3;
+            expected = concat_many(expected, arr_get(chars, idx));
+            k = k + 1;
+        }
+        h ok = text == expected;
+        if !ok { all_correct = false; }
+        h tag = "x";
+        if ok { tag = "ok"; }
+        print(concat_many("  seed=", arr_get(chars, seed),
+                          "  generated=\"", text, "\"  expected=\"", expected, "\" ", tag));
+        seed = seed + 1;
+    }
+
+    print("");
+    if all_correct {
+        print("[OK] Prometheus generates the trained cyclic pattern from every seed.");
+        print("     The model didn't just learn one-step prediction — autoregressive");
+        print("     decoding produces coherent multi-token output.");
+    } else {
+        print("[PARTIAL] Some seeds produced wrong output. Either training did not");
+        print("          converge fully or the decoding has a bug.");
+    }
+}
+
+main();

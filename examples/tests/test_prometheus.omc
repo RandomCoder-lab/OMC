@@ -1,0 +1,182 @@
+# Prometheus regression suite.
+#
+# Locks in the behaviors verified in today's MVP + checkpoint +
+# geodesic + harmonic SGD + cache demos so future refactors can't
+# silently break them.
+
+import "examples/lib/prometheus.omc";
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+fn approx_eq(a, b, tol) {
+    h d = a - b;
+    if d < 0.0 { d = 0.0 - d; }
+    return d <= tol;
+}
+
+# ---- Linear layer wires up correctly ----
+
+fn test_linear_constructs_with_params() {
+    tape_reset();
+    h L = prom_linear_new(4, 8, 42);
+    assert_eq(dict_get(L, "kind"), "linear", "kind");
+    assert_eq(dict_get(L, "in_dim"), 4, "in_dim");
+    assert_eq(dict_get(L, "out_dim"), 8, "out_dim");
+    h ps = prom_linear_params(L);
+    assert_eq(arr_len(ps), 2, "two params (W + b)");
+}
+
+fn test_linear_forward_runs() {
+    tape_reset();
+    h L = prom_linear_new(3, 2, 42);
+    h x = tape_const([[1.0, 2.0, 3.0]]);
+    h y = prom_linear_forward(L, x);
+    h yv = tape_value(y);
+    assert_eq(type_of(yv), "array", "forward produced array");
+    # Output should be a 1x2 (flattens to 2 floats).
+    assert_eq(arr_len(yv), 2, "out_dim=2");
+}
+
+# ---- MSE loss drives convergence ----
+
+fn test_mse_loss_decreases_under_sgd() {
+    tape_reset();
+    h L = prom_linear_new(2, 2, 7);
+    h params = prom_linear_params(L);
+    h x = tape_const([[1.0, 2.0]]);
+    h target = tape_const([[0.0, 0.0]]);
+    h loss_first = 0.0;
+    h loss_last = 0.0;
+    h step = 0;
+    while step < 30 {
+        h pred = prom_linear_forward(L, x);
+        h loss = prom_mse_loss(pred, target);
+        tape_backward(loss);
+        prom_sgd_step(params, 0.05);
+        if step == 0 { loss_first = tape_value(loss); }
+        if step == 29 { loss_last = tape_value(loss); }
+        step = step + 1;
+    }
+    assert_true(loss_last < loss_first, "loss decreased over 30 SGD steps");
+}
+
+# ---- Checkpoint round-trip ----
+
+fn test_checkpoint_round_trip_preserves_predictions() {
+    tape_reset();
+    h L1 = prom_linear_new(3, 4, 11);
+    h L2 = prom_linear_new(4, 3, dict_get(L1, "rng_state"));
+    h model_a = dict_new();
+    dict_set(model_a, "L1", L1);
+    dict_set(model_a, "L2", L2);
+    h bundle = prom_serialize_model(model_a, ["L1", "L2"]);
+    h hash_a = prom_model_hash(bundle);
+
+    # Make a prediction.
+    h x = prom_one_hot(1, 3);
+    h pred_a_id = prom_linear_forward(L2, prom_relu(prom_linear_forward(L1, x)));
+    h pred_a = tape_value(pred_a_id);
+
+    # Wipe + reload.
+    tape_reset();
+    h model_b = prom_load_model(bundle);
+    h hash_b = prom_model_hash(bundle);
+    assert_eq(hash_a, hash_b, "canonical hash invariant across reload");
+
+    h L1_b = dict_get(model_b, "L1");
+    h L2_b = dict_get(model_b, "L2");
+    h x_b = prom_one_hot(1, 3);
+    h pred_b_id = prom_linear_forward(L2_b, prom_relu(prom_linear_forward(L1_b, x_b)));
+    h pred_b = tape_value(pred_b_id);
+
+    # Bit-identical predictions.
+    h i = 0;
+    while i < arr_len(pred_a) {
+        assert_true(approx_eq(arr_get(pred_a, i), arr_get(pred_b, i), 1e-12),
+                    "pred elem " + to_string(i) + " matches");
+        i = i + 1;
+    }
+}
+
+# ---- Geodesic bias is well-formed ----
+
+fn test_geodesic_bias_diagonal_zero() {
+    h bias = prom_geodesic_bias_matrix(8);
+    h i = 0;
+    while i < 8 {
+        h d = arr_get(arr_get(bias, i), i);
+        assert_eq(d, 0.0, "diag[" + to_string(i) + "] = 0");
+        i = i + 1;
+    }
+}
+
+fn test_geodesic_bias_symmetric() {
+    h bias = prom_geodesic_bias_matrix(8);
+    h i = 0;
+    while i < 8 {
+        h j = 0;
+        while j < 8 {
+            h a = arr_get(arr_get(bias, i), j);
+            h b = arr_get(arr_get(bias, j), i);
+            assert_true(approx_eq(a, b, 1e-9), "bias[" + to_string(i) + "][" + to_string(j) + "] symmetric");
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+}
+
+fn test_geodesic_bias_normalized_mean() {
+    h bias = prom_geodesic_bias_matrix(8);
+    h sum = 0.0;
+    h count = 0;
+    h i = 0;
+    while i < 8 {
+        h j = 0;
+        while j < 8 {
+            if i != j {
+                sum = sum + arr_get(arr_get(bias, i), j);
+                count = count + 1;
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    h mean = sum / count;
+    assert_true(approx_eq(mean, 1.0, 0.01), "mean off-diagonal ~ 1.0");
+}
+
+# ---- Cache hits when same input+model ----
+
+fn test_cache_hit_returns_stored_value() {
+    h cache = prom_cache_new();
+    h key = prom_cache_key("a", 12345);
+    assert_eq(prom_cache_get(cache, key), null, "miss before put");
+    prom_cache_put(cache, key, 42);
+    assert_eq(prom_cache_get(cache, key), 42, "hit after put");
+}
+
+fn test_cache_key_differs_by_input_or_model() {
+    h k1 = prom_cache_key("a", 100);
+    h k2 = prom_cache_key("b", 100);
+    h k3 = prom_cache_key("a", 200);
+    assert_true(k1 != k2, "different input → different key");
+    assert_true(k1 != k3, "different model → different key");
+}
+
+# ---- Harmonic scale stays in [1-alpha, 1+alpha] ----
+
+fn test_harmonic_scale_bounded() {
+    h alpha = 0.3;
+    h k = 0;
+    while k < 20 {
+        h mag = (k * 1.0) / 5.0;     # 0.0, 0.2, 0.4, ...
+        h scale = _prom_harmonic_scale(mag, alpha);
+        assert_true(scale >= 1.0 - alpha, "scale >= 1-alpha");
+        assert_true(scale <= 1.0 + alpha, "scale <= 1+alpha");
+        k = k + 1;
+    }
+}

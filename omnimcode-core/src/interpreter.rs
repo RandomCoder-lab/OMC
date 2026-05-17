@@ -6456,7 +6456,7 @@ impl Interpreter {
                 self.autograd_tape.push(TapeNode { op: TapeOp::PowInt(a, n), value: out, grad });
                 Ok(Value::HInt(HInt::new(id as i64)))
             }
-            "tape_exp" | "tape_sin" | "tape_cos"
+            "tape_exp" | "tape_log" | "tape_sin" | "tape_cos"
             | "tape_relu" | "tape_sigmoid" | "tape_tanh" => {
                 if args.is_empty() {
                     return Err(format!("{} requires (a_id)", name));
@@ -6468,6 +6468,7 @@ impl Interpreter {
                     let x = av.data[k];
                     out.data[k] = match name {
                         "tape_exp"     => x.exp(),
+                        "tape_log"     => if x > 0.0 { x.ln() } else { f64::NEG_INFINITY },
                         "tape_sin"     => x.sin(),
                         "tape_cos"     => x.cos(),
                         "tape_relu"    => if x > 0.0 { x } else { 0.0 },
@@ -6478,6 +6479,7 @@ impl Interpreter {
                 }
                 let op = match name {
                     "tape_exp"     => TapeOp::Exp(a),
+                    "tape_log"     => TapeOp::Log(a),
                     "tape_sin"     => TapeOp::Sin(a),
                     "tape_cos"     => TapeOp::Cos(a),
                     "tape_relu"    => TapeOp::Relu(a),
@@ -6488,6 +6490,41 @@ impl Interpreter {
                 let grad = TapeMat::zeros(av.rows, av.cols);
                 let id = self.autograd_tape.len();
                 self.autograd_tape.push(TapeNode { op, value: out, grad });
+                Ok(Value::HInt(HInt::new(id as i64)))
+            }
+            "tape_softmax" => {
+                // Per-row softmax: each row of A becomes prob distribution.
+                // Stable form: subtract row-max before exp.
+                if args.is_empty() {
+                    return Err("tape_softmax requires (a_id)".to_string());
+                }
+                let a = self.eval_expr(&args[0])?.to_int() as usize;
+                let av = self.autograd_tape[a].value.clone();
+                let mut out = TapeMat::zeros(av.rows, av.cols);
+                for r in 0..av.rows {
+                    // Row max for numerical stability.
+                    let mut mx = f64::NEG_INFINITY;
+                    for c in 0..av.cols {
+                        let v = av.data[r * av.cols + c];
+                        if v > mx { mx = v; }
+                    }
+                    let mut sum = 0.0;
+                    for c in 0..av.cols {
+                        let e = (av.data[r * av.cols + c] - mx).exp();
+                        out.data[r * av.cols + c] = e;
+                        sum += e;
+                    }
+                    if sum > 0.0 {
+                        for c in 0..av.cols {
+                            out.data[r * av.cols + c] /= sum;
+                        }
+                    }
+                }
+                let grad = TapeMat::zeros(av.rows, av.cols);
+                let id = self.autograd_tape.len();
+                self.autograd_tape.push(TapeNode {
+                    op: TapeOp::Softmax(a), value: out, grad,
+                });
                 Ok(Value::HInt(HInt::new(id as i64)))
             }
             "tape_matmul" => {
@@ -6635,6 +6672,39 @@ impl Interpreter {
                             for k in 0..av.data.len() {
                                 let coeff = (n as f64) * av.data[k].powi(n - 1);
                                 da.data[k] = dy.data[k.min(dy.data.len() - 1)] * coeff;
+                            }
+                            self.autograd_tape[a].grad.add(&da);
+                        }
+                        TapeOp::Log(a) => {
+                            // d/dx log(x) = 1/x
+                            let av = self.autograd_tape[a].value.clone();
+                            let mut da = TapeMat::zeros(av.rows, av.cols);
+                            for k in 0..av.data.len() {
+                                let x = av.data[k];
+                                let g = if x != 0.0 { dy.data[k] / x } else { 0.0 };
+                                da.data[k] = g;
+                            }
+                            self.autograd_tape[a].grad.add(&da);
+                        }
+                        TapeOp::Softmax(a) => {
+                            // For row-wise softmax y = softmax(x):
+                            //   dL/dx_i = y_i * (dL/dy_i - sum_j(dL/dy_j * y_j))
+                            // per row. The cached forward `out` is y, stored
+                            // in self.autograd_tape[i].value.
+                            let y_clone = self.autograd_tape[i].value.clone();
+                            let av_shape = (y_clone.rows, y_clone.cols);
+                            let mut da = TapeMat::zeros(av_shape.0, av_shape.1);
+                            for r in 0..av_shape.0 {
+                                let mut s_row = 0.0;
+                                for c in 0..av_shape.1 {
+                                    s_row += dy.data[r * av_shape.1 + c]
+                                          * y_clone.data[r * av_shape.1 + c];
+                                }
+                                for c in 0..av_shape.1 {
+                                    let yi = y_clone.data[r * av_shape.1 + c];
+                                    let gi = yi * (dy.data[r * av_shape.1 + c] - s_row);
+                                    da.data[r * av_shape.1 + c] = gi;
+                                }
                             }
                             self.autograd_tape[a].grad.add(&da);
                         }
@@ -11063,11 +11133,15 @@ pub(crate) enum TapeOp {
     Neg(usize),
     PowInt(usize, i32),
     Exp(usize),
+    Log(usize),
     Sin(usize),
     Cos(usize),
     Relu(usize),
     Sigmoid(usize),
     Tanh(usize),
+    /// Per-row softmax: each row of the input becomes a probability vector
+    /// summing to 1.0. Needed for LM cross-entropy loss.
+    Softmax(usize),
     /// True matrix multiplication, A@B.
     MatMul(usize, usize),
     /// Sum every cell to a scalar — needed because loss must be scalar

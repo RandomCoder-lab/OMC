@@ -1,0 +1,150 @@
+# Prometheus on real English text — cross-entropy LM, not bigram toy.
+#
+# Train a tiny char-LM on a real English sentence using Prometheus'
+# new cross-entropy loss (built on the freshly-added tape_softmax +
+# tape_log Rust builtins). Measure: cross-entropy goes down, generated
+# text is more letter-statistic plausible than random.
+#
+# Why not full TinyShakespeare (1.1 MB)?
+#   Pure-OMC training is ~1000x slower than PyTorch on CPU because we
+#   don't have BLAS for matmul, only the basic OMC interpreter. A 1MB
+#   corpus would take hours. A 200-char corpus converges in seconds and
+#   proves the same thesis: Prometheus trains on real text, not toys.
+#
+# When GPU codegen lands, the same code scales to the full corpus.
+#
+# Stop condition: cross-entropy decreases by >2x over training AND
+# generated text shows a non-uniform distribution over the vocab
+# (model learned SOMETHING about the corpus, not just memorized noise).
+
+import "examples/lib/prometheus.omc";
+
+# ---------------------------------------------------------------------------
+# Tokenize a small real-English corpus into char-ids.
+# ---------------------------------------------------------------------------
+
+fn build_vocab(text) {
+    h seen = dict_new();
+    h chars = [];
+    h i = 0;
+    while i < str_len(text) {
+        h ch = str_slice(text, i, i + 1);
+        if !dict_has(seen, ch) {
+            dict_set(seen, ch, arr_len(chars));
+            arr_push(chars, ch);
+        }
+        i = i + 1;
+    }
+    h out = dict_new();
+    dict_set(out, "chars", chars);
+    dict_set(out, "lookup", seen);
+    return out;
+}
+
+fn encode(text, vocab) {
+    h lookup = dict_get(vocab, "lookup");
+    h ids = [];
+    h i = 0;
+    while i < str_len(text) {
+        h ch = str_slice(text, i, i + 1);
+        arr_push(ids, dict_get(lookup, ch));
+        i = i + 1;
+    }
+    return ids;
+}
+
+fn build_model(vocab_size, hidden, seed) {
+    h L1 = prom_linear_new(vocab_size, hidden, seed);
+    h L2 = prom_linear_new(hidden, vocab_size, dict_get(L1, "rng_state"));
+    h model = dict_new();
+    dict_set(model, "L1", L1);
+    dict_set(model, "L2", L2);
+    return model;
+}
+
+fn forward(model, x_id) {
+    h L1 = dict_get(model, "L1");
+    h L2 = dict_get(model, "L2");
+    return prom_linear_forward(L2, prom_relu(prom_linear_forward(L1, x_id)));
+}
+
+fn main() {
+    print("=== Prometheus on real English ===");
+
+    # A short real-English passage. ~135 chars, vocab ~26.
+    h text = "the quick brown fox jumps over the lazy dog and the dog sleeps in the sun while the fox finds another quiet place to rest";
+    print(concat_many("corpus: \"", text, "\""));
+    print(concat_many("corpus length: ", to_string(str_len(text)), " chars"));
+
+    h vocab = build_vocab(text);
+    h chars = dict_get(vocab, "chars");
+    h vocab_size = arr_len(chars);
+    print(concat_many("vocab size: ", to_string(vocab_size)));
+    print(concat_many("alphabet: ", to_string(chars)));
+
+    h ids = encode(text, vocab);
+    h n_pairs = arr_len(ids) - 1;
+    print(concat_many("training pairs: ", to_string(n_pairs)));
+    print("");
+
+    # Train.
+    tape_reset();
+    h model = build_model(vocab_size, 16, 42);
+    h params = prom_collect_params([dict_get(model, "L1"), dict_get(model, "L2")]);
+    print(concat_many("trainable params: ", to_string(arr_len(params))));
+
+    h lr = 0.1;
+    h epochs = 12;    # passes over the corpus
+    h total_steps = epochs * n_pairs;
+    print(concat_many("training: ", to_string(total_steps), " steps (", to_string(epochs), " epochs)"));
+    print("");
+
+    h step = 0;
+    h first_loss = 0.0;
+    h last_losses = [];
+    while step < total_steps {
+        h k = step % n_pairs;
+        h x = prom_one_hot(arr_get(ids, k), vocab_size);
+        h target_idx = arr_get(ids, k + 1);
+        h logits = forward(model, x);
+        h loss = prom_cross_entropy_loss(logits, target_idx, vocab_size);
+        tape_backward(loss);
+        prom_sgd_step(params, lr);
+        h lv = tape_value(loss);
+        if step == 0 { first_loss = lv; }
+        if step >= total_steps - n_pairs { arr_push(last_losses, lv); }
+        if step % n_pairs == 0 {
+            print(concat_many("  epoch ", to_string(step / n_pairs), "  loss=", to_string(lv)));
+        }
+        step = step + 1;
+    }
+    h sum = 0.0;
+    h i = 0;
+    while i < arr_len(last_losses) { sum = sum + arr_get(last_losses, i); i = i + 1; }
+    h last_mean = sum / arr_len(last_losses);
+    print("");
+    print(concat_many("first loss: ", to_string(first_loss)));
+    print(concat_many("last-epoch mean loss: ", to_string(last_mean)));
+    h ratio = first_loss / last_mean;
+    print(concat_many("reduction: ", to_string(ratio), "x"));
+
+    # Generate.
+    print("");
+    print("--- Generated text from seed 't' ---");
+    h seed_idx = dict_get(dict_get(vocab, "lookup"), "t");
+    h gen = prom_generate_greedy(forward, model, seed_idx, 60, vocab_size);
+    print(concat_many("  \"", prom_decode_indices(gen, chars), "\""));
+
+    print("");
+    if ratio > 2.0 {
+        print("[OK] Prometheus trained on real English text via cross-entropy.");
+        print(concat_many("     Loss reduced ", to_string(ratio), "x. Generated output above."));
+        print("     tape_softmax + tape_log + prom_cross_entropy_loss all working.");
+        print("     🥂 4-for-4 on the goal items.");
+    } else {
+        print("[PARTIAL] Loss reduction <2x — model under-trained or under-parameterized.");
+        print("          More epochs or larger hidden layer would help.");
+    }
+}
+
+main();

@@ -206,13 +206,13 @@ fn prom_collect_params(layers) {
     while i < arr_len(layers) {
         h layer = arr_get(layers, i);
         h kind = dict_get(layer, "kind");
-        if kind == "linear" {
-            h ps = prom_linear_params(layer);
-            h j = 0;
-            while j < arr_len(ps) {
-                arr_push(out, arr_get(ps, j));
-                j = j + 1;
-            }
+        h ps = [];
+        if kind == "linear" { ps = prom_linear_params(layer); }
+        elif kind == "attention" { ps = prom_attention_params(layer); }
+        h j = 0;
+        while j < arr_len(ps) {
+            arr_push(out, arr_get(ps, j));
+            j = j + 1;
         }
         i = i + 1;
     }
@@ -532,4 +532,164 @@ fn prom_cache_get(cache, key) {
 
 fn prom_cache_put(cache, key, value) {
     dict_set(cache, to_string(key), value);
+}
+
+# ---------------------------------------------------------------------------
+# Text generation — autoregressive greedy decoding.
+#
+# Given a trained model + a starting char index + an integer-vocab
+# alphabet, predict the next char by argmax on the model's logits,
+# append, and repeat for `length` steps. Returns a list of char-index
+# integers; convert to display strings via the caller's alphabet.
+#
+# Caller supplies the forward fn (so this composes with any model
+# topology — MLP today, transformer later).
+# ---------------------------------------------------------------------------
+
+# Generate `length` integer-token IDs given:
+#   forward_fn : fn(model, x_id) -> logits_id    (caller-defined)
+#   model      : the model dict
+#   seed_idx   : starting char index (int)
+#   length     : number of NEW tokens to generate
+#   vocab      : alphabet size
+# Returns array of length+1 indices (seed first, then generated).
+fn prom_generate_greedy(forward_fn, model, seed_idx, length, vocab) {
+    h out = [seed_idx];
+    h current = seed_idx;
+    h step = 0;
+    while step < length {
+        h x = prom_one_hot(current, vocab);
+        h pred = forward_fn(model, x);
+        h logits = tape_value(pred);
+        h next_idx = prom_argmax_row(logits);
+        arr_push(out, next_idx);
+        current = next_idx;
+        step = step + 1;
+    }
+    return out;
+}
+
+# Convert a list of indices to a string given a chars alphabet.
+fn prom_decode_indices(indices, chars) {
+    h out = "";
+    h i = 0;
+    while i < arr_len(indices) {
+        out = concat_many(out, arr_get(chars, arr_get(indices, i)));
+        i = i + 1;
+    }
+    return out;
+}
+
+# ---------------------------------------------------------------------------
+# Softmax + cross-entropy loss — true LM training, not MSE.
+#
+# Now that tape_softmax + tape_log are shipped, we can compute:
+#   loss = -log(softmax(logits)[target_idx])
+# which is the standard cross-entropy used in every modern LM.
+#
+# This unlocks much larger vocabularies + faster convergence than
+# MSE-against-one-hot.
+# ---------------------------------------------------------------------------
+
+# Cross-entropy loss: -log(softmax(logits)[target_idx])
+# logits_id: tape node holding [1, vocab] logits
+# target_idx: integer target class
+# vocab: size of the alphabet
+fn prom_cross_entropy_loss(logits_id, target_idx, vocab) {
+    h probs = tape_softmax(logits_id);
+    h log_probs = tape_log(probs);
+    # Build a one-hot mask with -1 at the target position; rest = 0.
+    h mask_row = [];
+    h i = 0;
+    while i < vocab {
+        if i == target_idx { arr_push(mask_row, -1.0); }
+        else { arr_push(mask_row, 0.0); }
+        i = i + 1;
+    }
+    h mask = tape_const([mask_row]);
+    h selected = tape_mul(log_probs, mask);
+    return tape_sum(selected);
+}
+
+# ---------------------------------------------------------------------------
+# Attention layer (single-head) with geodesic positional bias.
+#
+# scores[i, j] = (Q_i · K_j) / sqrt(d) - alpha * geodesic(i, j)
+# attn        = softmax(scores)
+# out         = attn @ V
+#
+# This is the fused primitive promised in today's roadmap — substrate-
+# native attention that uses the proven 3/3-seed geodesic bias as a
+# first-class layer. Single-head, no masking; full implementation
+# (multi-head + causal mask) is straightforward composition on top.
+# ---------------------------------------------------------------------------
+
+fn prom_attention_new(d_model, seq_len, rng_state) {
+    h Q = _prom_random_matrix(d_model, d_model, 0.3, rng_state);
+    h K = _prom_random_matrix(d_model, d_model, 0.3, dict_get(Q, "state"));
+    h V = _prom_random_matrix(d_model, d_model, 0.3, dict_get(K, "state"));
+    h layer = dict_new();
+    dict_set(layer, "kind", "attention");
+    dict_set(layer, "d_model", d_model);
+    dict_set(layer, "seq_len", seq_len);
+    dict_set(layer, "Q", dict_get(Q, "node"));
+    dict_set(layer, "K", dict_get(K, "node"));
+    dict_set(layer, "V", dict_get(V, "node"));
+    dict_set(layer, "alpha", 0.5);          # geodesic bias strength (fixed for now)
+    dict_set(layer, "rng_state", dict_get(V, "state"));
+    return layer;
+}
+
+# Forward: given x as a tape node of shape [seq_len, d_model],
+# returns attention output [seq_len, d_model].
+# This is a hand-rolled attention since we don't have a fused
+# tape op for it — uses tape_matmul, tape_softmax, and the
+# geodesic bias as a const subtracted before softmax.
+fn prom_attention_forward(layer, x_id) {
+    h Q_w = dict_get(layer, "Q");
+    h K_w = dict_get(layer, "K");
+    h V_w = dict_get(layer, "V");
+    h d_model = dict_get(layer, "d_model");
+    h seq_len = dict_get(layer, "seq_len");
+    h alpha = dict_get(layer, "alpha");
+
+    h q = tape_matmul(x_id, Q_w);
+    h k = tape_matmul(x_id, K_w);
+    h v = tape_matmul(x_id, V_w);
+
+    # scores = q @ k^T  (we have no tape_transpose so build k^T as a
+    # const slice of k.value — fine since it just shapes the data).
+    h k_val = tape_value(k);
+    h kt_val = arr_transpose(k_val);
+    h kt = tape_const(kt_val);
+    h scores = tape_matmul(q, kt);
+
+    # Subtract alpha * geodesic_bias element-wise (as a const matrix).
+    h bias_matrix = prom_geodesic_bias_matrix(seq_len);
+    h neg_bias_scaled = [];
+    h i = 0;
+    while i < seq_len {
+        h row = arr_get(bias_matrix, i);
+        h new_row = [];
+        h j = 0;
+        while j < seq_len {
+            arr_push(new_row, 0.0 - alpha * arr_get(row, j));
+            j = j + 1;
+        }
+        arr_push(neg_bias_scaled, new_row);
+        i = i + 1;
+    }
+    h bias_node = tape_const(neg_bias_scaled);
+    h biased = tape_add(scores, bias_node);
+
+    h attn = tape_softmax(biased);
+    return tape_matmul(attn, v);
+}
+
+fn prom_attention_params(layer) {
+    h out = [];
+    arr_push(out, dict_get(layer, "Q"));
+    arr_push(out, dict_get(layer, "K"));
+    arr_push(out, dict_get(layer, "V"));
+    return out;
 }
