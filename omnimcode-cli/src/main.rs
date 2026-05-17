@@ -1360,8 +1360,37 @@ fn install_gpu_matmul_accelerator() {
                 // Registered backend is CPU — no point converting f64↔f32.
                 return None;
             }
-            let af: Vec<f32> = a.iter().map(|&x| x as f32).collect();
-            let bf: Vec<f32> = b.iter().map(|&x| x as f32).collect();
+            // v0.8.7 #10 try: simulate f16 precision by truncating f32 mantissa
+            // to 10 bits when OMC_GPU_SIMULATE_F16=1. Verifies training math
+            // tolerates f16 before we invest in a real f16 WGSL kernel.
+            //
+            // v0.8.7 #7 try: when OMC_GPU_SUBSTRATE_QUANT=1, snap each cell to
+            // its nearest Fibonacci attractor scaled by 1/scale_factor before
+            // f32 conversion. Tests whether substrate quantization preserves
+            // training math. The actual bandwidth-saving u16/u8 storage is a
+            // future chapter; this proves out the on-attractor accuracy first.
+            let f16_sim = std::env::var("OMC_GPU_SIMULATE_F16").as_deref() == Ok("1");
+            let substrate_quant = std::env::var("OMC_GPU_SUBSTRATE_QUANT").as_deref() == Ok("1");
+            let quant_scale: f64 = std::env::var("OMC_GPU_SUBSTRATE_QUANT_SCALE")
+                .ok().and_then(|s| s.parse().ok()).unwrap_or(64.0);
+            let trunc = |x: f64| -> f32 {
+                let mut v = x;
+                if substrate_quant {
+                    // Scale to integer-ish range, snap to nearest Fibonacci
+                    // attractor, scale back. Off-attractor values move; on-
+                    // attractor values are fixed points.
+                    let n = (v * quant_scale).round() as i64;
+                    let (a, _) = omnimcode_core::phi_pi_fib::nearest_attractor_with_dist(n);
+                    v = (a as f64) / quant_scale;
+                }
+                let f = v as f32;
+                if f16_sim {
+                    let bits = f.to_bits();
+                    f32::from_bits(bits & 0xFFFFE000)
+                } else { f }
+            };
+            let af: Vec<f32> = a.iter().map(|&x| trunc(x)).collect();
+            let bf: Vec<f32> = b.iter().map(|&x| trunc(x)).collect();
             let am = omnimcode_gpu::Matrix::new(m, k, af);
             let bm = omnimcode_gpu::Matrix::new(k, n, bf);
             match backend.matmul(&am, &bm) {
