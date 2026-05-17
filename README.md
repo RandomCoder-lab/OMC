@@ -1,365 +1,335 @@
 # OMNIcode (OMC)
 
-**A harmonic-substrate programming language with first-class φ, dual-band execution, an LLVM-backed JIT, self-healing, an O(log_φπfib N) algorithm family — and a substrate-native ML framework (Prometheus) whose substrate-K attention beats standard learned attention at TinyShakespeare scale.**
+> A harmonic-substrate programming language with first-class φ, dual-band execution, an LLVM-backed JIT, a self-healing compiler, an O(log_φπfib N) algorithm family, and a substrate-native ML framework whose substrate-aware transformer attention wins at TinyShakespeare scale.
 
-OMC is not a thin layer over IEEE-754 and types. Its substrate is **φ** (the golden ratio) and the canonical 40-entry Fibonacci attractor table reaching 63,245,986. Every harmonic operation in the language — `fold(n)`, `phi.res(n)`, `harmony(x)`, `zeckendorf(n)`, `substrate_search(arr, target)`, the heal pass's literal-rewrite, the bucketing in the harmonic anomaly detector — routes through the same substrate.
+OMC is built around **φ** (the golden ratio) and a canonical 40-entry Fibonacci attractor table reaching 63,245,986. Every harmonic operation in the language — `fold`, `phi.res`, `substrate_search`, the heal pass's literal-rewrite, attention layers in the Prometheus ML framework, the bucketing in the anomaly detector — routes through the same substrate. The substrate is a primitive of the language type system, not a library on top.
 
-It runs as one binary with two execution engines kept byte-identical, optional LLVM-18 JIT producing dual-band SSE2 code, embedded CPython for bidirectional interop, WASM and LSP targets, a self-hosting compiler that's gen2==gen3 byte-identical, a self-healing pass that fixes typos/off-attractor literals/divide-by-zero, and a registry-backed package manager.
-
-## Reading order
-
-If you're trying to understand how OMC got here, **read the [CHANGELOG](CHANGELOG.md) top-to-bottom**. Each release tag is a chapter — `git show v0.X-name` (or click the linked sections in CHANGELOG) gives a self-contained summary of what changed in that chapter, why it matters, and what's now possible that wasn't before. The titles, in chronological order:
-
-| Tag | One-line |
-|---|---|
-| [v0.0.1](CHANGELOG.md#100---2026-05-02) | Genesis: circuit evolution engine + FFI bindings (pre-language) |
-| [v0.0.2-language-core](CHANGELOG.md#v002-language-core--2026-04-25) | The language exists — parser, two-engine interpreter, HInt, self-hosting fixpoint |
-| [v0.0.3-substrate-and-stdlib](CHANGELOG.md#v003-substrate-and-stdlib--2026-05-08) | Self-healing heal pass + substrate-routed search family + closures + `--check`/`--fmt` |
-| [v0.0.4-jit-and-dual-band](CHANGELOG.md#v004-jit-and-dual-band--2026-05-13) | LLVM JIT, dual-band SSE2 codegen, harmony-gated branch elision |
-| [v0.0.5-codec-kernel-protocol](CHANGELOG.md#v005-codec-kernel-protocol--2026-05-15) | Substrate codec, content-addressed `omc-kernel`, OMC-PROTOCOL v1 wire format |
-| [v0.0.6-prometheus](CHANGELOG.md#v006-prometheus--2026-05-16) | Pure-OMC ML framework, multi-block transformer, first substrate-K (L1) wins |
-| [v0.1-substrate-attention](CHANGELOG.md#v01-substrate-attention--2026-05-17) | Three substrate components (K, S-MOD, V) stack inside attention for −8.94% val |
-| [v0.2-ergonomics](CHANGELOG.md#v02-ergonomics--2026-05-17) | OMC becomes forgiving: Python-idiom builtins, `+=`, traced errors, 11 heal classes |
-
-The headline scoreboard below is the **state as of v0.2** — the chapters above are how it got there.
-
-## The substrate-aware transformer (validated this week)
-
-The transformer architecture has multiple components OMC has measured against substrate replacements. The current scoreboard:
-
-| Component | Substrate variant | Result |
-|---|---|---|
-| **Attention K matrix** | **CRT-Fibonacci positional table** | **WINS −6.3% val @ multi-head × multi-block × TinyShakespeare (2/3 seeds, 10.8% fewer params)** |
-| **Attention softmax** | **S-MOD: softmax × harmonic-modulation, renormalize** | **WINS −4.27% val (stacks with substrate-K for −10.3% cumulative)** |
-| Positional encoding | CRT-Fibonacci PE | WINS −5.4% / −2.9% PyTorch |
-| Geodesic attention bias | additive position-distance bias | WINS 3/3 seeds (PyTorch, single-block) |
-| OOD detection | HBit cross-cutting tension | WINS AUROC 1.0 |
-| Optimizer | Harmonic SGD (substrate-modulated lr) | WINS −13.2% vs vanilla (tiny-scale tinyLM) |
-
-The substrate-K finding is the headline: replace the learned `W_K` matrix with the CRT-Fibonacci positional table. K becomes structurally pre-built, Q and V stay learned. At every (depth × heads × scale) combination tested, this wins or ties — saving ~10% of attention parameters and improving validation loss. See [`SUBSTRATE_K_FINDING.md`](experiments/prometheus_parity/SUBSTRATE_K_FINDING.md) and [`results_torch_multihead_tinyshakespeare.json`](experiments/prometheus_parity/results_torch_multihead_tinyshakespeare.json).
-
-This is **not** "transformerless." It's "substrate-aware transformer" — keep the architecture, replace specific components where the substrate's structural prior beats learned-from-scratch.
-
-## What's also new this week
-
-- **[Prometheus](omnimcode-core/src/prometheus/README.md)** — substrate-native ML framework (pure-OMC tape autograd, AdamW, embedding, layernorm, attention, content-addressed checkpoints). Trained a transformer end-to-end in pure OMC.
-- **[Fibonacci-tier memory (`fibtier`)](examples/lib/fibtier.omc)** — bounded conversation memory at Fibonacci tier capacities. After 100 turns, memory stays at ~18 entries. [Persistent variant](examples/lib/fibtier_persistent.omc) journals to disk; survives process restart.
-- **[Substrate-native agent demo](docs/SUBSTRATE_NATIVE_AGENT.md)** — two agents conversing over OMC-PROTOCOL with persistent fibtier memory across a simulated process restart. Every primitive shipped this week composed into one demonstrable system.
-- **[OMC-PROTOCOL v1](OMC-PROTOCOL.md)** — formalized substrate-signed wire format for inter-agent messaging. No PKI; integrity verified via canonical-hash recompute.
-- **[omc-kernel](docs/omc_kernel.md)** — content-addressed storage. Alpha-rename invariant. Two processes converging on the same canonical form produce the same address.
-- **[omc-grep](docs/omc_grep.md)** — code archaeology via canonical hash. Found 31.7% redundancy in OMC's own examples tree.
-- **[Cross-framework reproduction](experiments/prometheus_parity/)** — every substrate-attention result reproduced in both pure OMC (tape autograd) and PyTorch. Independent implementations, same direction.
+[![Latest release](https://img.shields.io/github/v/release/RandomCoder-lab/OMC?label=latest&color=blue)](https://github.com/RandomCoder-lab/OMC/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 ---
 
-## What's unique to OMC (nothing else has these)
+## Table of contents
 
-These are concrete, present-in-the-code features, not aspirations:
-
-- **The substrate is a primitive, not a library.** `HInt`, OMC's integer type, carries a φ-resonance and HIM score computed at construction. Every `Value::HInt(_)` ever created has been routed through `compute_resonance` and `nearest_attractor_with_dist`. This is at the type level, not at the user-code level.
-
-- **Dual-band executable code.** OMC values have a classical α-band and a harmonic shadow β-band, packed into LLVM `<2 x i64>` SSE2 vectors inside JIT'd functions. `phi_shadow(x)` makes β diverge; `harmony(x)` reads the substrate-routed coherence between the bands. **Branch elision based on harmony** is shipped: high-coherence inputs skip entire conditional blocks at native code speed.
-
-- **O(log_phi_pi_fibonacci N) algorithm family.** The `phi_pi_fib_search_v2` algorithm uses F(k)/φ^(π·k) split-points — each iteration shrinks the live range by **φ^π ≈ 4.534**, not 2. The substrate-canonical iteration bound is `log_phi_pi_fibonacci(n) ≈ 0.459 · log₂ n`. Exposed as a complete primitive family: `substrate_search`, `substrate_lower_bound`, `substrate_upper_bound`, `substrate_rank`, `substrate_count_range`, `substrate_slice_range`, `substrate_intersect`, `substrate_difference`, `substrate_insert`, `substrate_quantile`, `substrate_select_k`, `substrate_nearest`, `substrate_min_distance`, `substrate_hash`.
-
-- **Zeckendorf as first-class integer encoding.** Every positive integer has a unique sum of non-consecutive Fibonaccis (Zeckendorf 1972). OMC exposes the canonical encoder/decoder: `zeckendorf(n) -> [indices]`, `from_zeckendorf(idxs) -> n`, plus `zeckendorf_weight`, `zeckendorf_bit`, `is_zeckendorf_valid`, and `substrate_hash` (Zeckendorf-mixed avalanche). The iteration count is bounded by `log_phi_pi_fibonacci(n)`.
-
-- **CRT-Fibonacci positional encoding wins on a real LM training task.** Pairs of `(sin(2π·pos%m_i/m_i), cos(2π·pos%m_i/m_i))` with Fibonacci moduli `{5, 8, 13, 21, ...}`. Validation loss **−19.9% at toy scale (4/5 seeds) and −5.4% at TinyShakespeare scale (3/3 seeds)** vs Vaswani sinusoidal. See [`experiments/transformerless_lm/README.md`](experiments/transformerless_lm/README.md) for the full numbers.
-
-- **Self-healing compiler.** A 5-class heal pass runs at the AST level: typo correction (Levenshtein over the symbol table), off-attractor literal snap, divide-by-zero rescue, arity correction, parser-error recovery. Enabled with `OMC_HEAL=1`.
-
-- **Two-engine byte-identical parity.** A tree-walking interpreter AND a bytecode VM, kept lockstep. 44 of 45 functional examples produce byte-identical output between engines (the diverger is a timing-only benchmark). Verified by `--audit FILE`.
-
-- **Self-hosting compiler V.9b.** Compiles itself; **gen2 == gen3 byte-identical**. See `examples/self_hosting_v9b.omc`.
-
-- **`@harmony` and `@predict` JIT pragmas.** Mark a function or branch as harmony-eligible; the JIT compounds these with `@hbit` for layered speedups (270× alone; 95% additional branch reduction with `@harmony` + `@predict`).
-
-- **Substrate-routed harmonic libraries.** `harmonic_anomaly` beats scikit-learn's IsolationForest **10/10 vs 7/10** on multi-dim credential-stuffing detection (the structural-anomaly regime).
-
-- **`omc-grep`: alpha-rename-invariant duplicate finder.** A standalone CLI ([`docs/omc_grep.md`](docs/omc_grep.md)) that walks a tree, extracts every top-level fn, canonicalizes, and clusters by canonical hash. `--body-only` mode strips the fn signature so duplicates with *different names* surface — something text-grep, ast-grep, and tree-sitter queries can't do. On OMC's own examples tree (151 files / 2388 fns): **31.7%** redundancy with name-sensitive hashing, **33.0%** with body-only — surfacing renamed-but-identical fns like `_bucket_discrete` ≡ `endpoint_bucket` ≡ `status_bucket` that share no token in their names.
-
-- **`omc-kernel`: content-addressed code DAG keyed by canonical hash.** A persistence layer for distributed-agent code exchange ([`docs/omc_kernel.md`](docs/omc_kernel.md)). Every fn gets stored at `~/.omc/kernel/store/<hex_hash>.omc`. `omc-kernel sign FILE` emits a substrate-signed wire message; `omc-kernel verify` (stdin) recovers the original canonical form from the store — proven end-to-end with alpha-rename: sender's `fn commit(handle)` recovers as store's `fn commit(conn)`. Code becomes a content-addressed Merkle DAG over substrate addresses; version it the way IPFS versions files, except the addressing is semantic.
-
-- **Substrate-keyed code codec + compressed substrate-signed messaging.** `omc_codec_encode` produces a sampled-token payload addressed by the canonical AST hash (invariant under whitespace, comments, alpha-rename). `omc_codec_decode_lookup` returns the exact library entry on hash match. `omc_msg_sign_compressed` / `omc_msg_recover_compressed` carry the codec payload inside the substrate-signed wire format with lossless library recovery and full signature integrity. **Wire-byte sizing is honest**: token-count compression is ~N×, but wire-byte savings only appear at payloads ≳500 B with N≥8 (single-message). The always-on value is **library-lookup recovery** — alpha-rename invariant content addressing on the receiver, no shared key. 13 tests pass ([`test_codec.omc`](examples/tests/test_codec.omc), [`test_compressed_messaging.omc`](examples/tests/test_compressed_messaging.omc)). See [`experiments/seed_expansion/FINDINGS.md`](experiments/seed_expansion/FINDINGS.md).
+- [Why OMC](#why-omc)
+- [Installation](#installation)
+- [Quick start](#quick-start)
+- [Capabilities](#capabilities)
+- [Use cases](#use-cases)
+- [LLM integration](#llm-integration)
+- [Documentation map](#documentation-map)
+- [Reading the project's history](#reading-the-projects-history)
+- [Repository layout](#repository-layout)
+- [CLI reference](#cli-reference)
+- [Status](#status)
+- [Contributing](#contributing)
+- [License](#license)
 
 ---
 
-## 30-second hello
+## Why OMC
+
+These are concrete language features, not aspirations:
+
+- **The substrate is a primitive, not a library.** `HInt`, OMC's integer type, carries a φ-resonance and HIM score computed at construction. Every `Value::HInt(_)` ever created has been routed through `compute_resonance` and `nearest_attractor_with_dist`. Substrate-ness is at the type level.
+
+- **Dual-band executable code.** OMC values have a classical α-band and a harmonic shadow β-band, packed into LLVM `<2 x i64>` SSE2 vectors inside JIT'd functions. `phi_shadow(x)` makes β diverge; `harmony(x)` reads the substrate-routed coherence. **Branch elision based on harmony** is shipped: high-coherence inputs skip entire conditional blocks at native code speed (95.2% reduction on high-harmony inputs).
+
+- **O(log_φπfib N) algorithm family.** `substrate_search` and friends use F(k)/φ^(π·k) split-points — each iteration shrinks the live range by **φ^π ≈ 4.534**, not 2. The canonical iteration bound is `log_φπfib(n) ≈ 0.459 · log₂ n`. A complete primitive family is exposed: `substrate_lower_bound`, `substrate_upper_bound`, `substrate_rank`, `substrate_count_range`, `substrate_slice_range`, `substrate_intersect`, `substrate_difference`, `substrate_insert`, `substrate_quantile`, `substrate_select_k`, `substrate_nearest`, `substrate_min_distance`, `substrate_hash`.
+
+- **Zeckendorf as first-class integer encoding.** Every positive integer has a unique sum of non-consecutive Fibonaccis. OMC exposes the canonical encoder/decoder: `zeckendorf(n)`, `from_zeckendorf(idxs)`, `zeckendorf_weight`, `zeckendorf_bit`, `is_zeckendorf_valid`.
+
+- **Substrate-aware ML framework (Prometheus).** Pure-OMC tape autograd, AdamW, Embedding, LayerNorm, CRT-Fibonacci PE, multi-head/multi-block attention, content-addressed checkpoints. Three substrate-attention component swaps (K, S-MOD softmax, V) stack inside one transformer block for **−8.94% val on TinyShakespeare**. Every result cross-validated in PyTorch.
+
+- **Self-healing compiler** with 11 heal classes: typo correction (call-site + variable-position, substrate-bucketed), arity pad/truncate, divide/mod by zero, harmonic-index snap, missing-return, str-concat coercion, null-arithmetic coercion, if-numeric diagnostic. Pragma opt-outs available.
+
+- **Content-addressed code storage.** `omc-kernel` stores OMC source by canonical hash (alpha-rename-invariant); two processes converging on the same canonical form produce the same address. `omc-grep` finds renamed-but-identical functions across the codebase. `omc_codec_encode/decode_lookup` compresses code 10–50× via library-lookup.
+
+- **Substrate-signed messaging.** `OMC-PROTOCOL v1` is a wire format where integrity is verified by canonical-hash recompute. No PKI, no shared keys — agents trust messages because the substrate trusts them.
+
+- **Two execution engines kept byte-identical.** Tree-walk interpreter + bytecode VM; `--audit FILE` verifies divergence-free output. Optional LLVM-18 JIT on top.
+
+- **Forgiving by default.** Python users can sit down and write OMC reaching for familiar intuitions — `len(d)`, `range(0, 10, 2)`, `x += 1`, `xs[-1]`, `for key in dict` — and have it Just Work. Runtime errors include call-stack traces and did-you-mean hints.
+
+---
+
+## Installation
+
+### Prerequisites
+
+- **Rust** 1.75+
+- **Python 3** (for embedded CPython interop — optional but enabled by default; use `OMC_NO_PYTHON=1` to skip)
+- **LLVM 18 + libpolly-18 + libzstd** (only for the JIT path — optional)
+
+### From source
 
 ```bash
 git clone https://github.com/RandomCoder-lab/OMC.git
 cd OMC
 PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 cargo build --release -p omnimcode-cli
-./target/release/omnimcode-standalone --init
+./target/release/omnimcode-standalone --version
+```
+
+The binary is `target/release/omnimcode-standalone`. Symlink it into your `PATH` as `omc` if you'd like.
+
+### With the LLVM JIT enabled
+
+```bash
+sudo apt install llvm-18-dev libpolly-18-dev libzstd-dev   # Debian/Ubuntu
+# Or equivalent for your platform.
+
+PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 \
+LLVM_SYS_180_PREFIX=/usr/lib/llvm-18 \
+    cargo build --release -p omnimcode-cli --features llvm-jit
+```
+
+Run with the JIT path:
+
+```bash
+OMC_HBIT_JIT=1 OMC_HBIT_JIT_VERBOSE=1 \
+    ./target/release/omnimcode-standalone your_program.omc
+```
+
+Eligible user functions get compiled to dual-band native code. Documented benchmarks: **272× on factorial(12)**, 115× on array-sum hot loops, 10.6× on substrate-heavy mixed workloads vs the tree-walk path.
+
+### Other targets
+
+| Target | Crate | Build command |
+|---|---|---|
+| WebAssembly (browser) | `omnimcode-wasm` | `wasm-pack build omnimcode-wasm --target web` |
+| LSP server (editors) | `omnimcode-lsp` | `cargo build --release -p omnimcode-lsp` |
+| Godot 4 plugin | `omnimcode-gdextension` | `cargo build --release -p omnimcode-gdextension` |
+| Python bindings | `omnimcode-python` | `cargo build --release -p omnimcode-python` |
+
+### Editor support
+
+- VS Code: install from `omnimcode-lsp/vscode-extension/`
+- Any LSP-aware editor: point at `target/release/omnimcode-lsp`
+
+---
+
+## Quick start
+
+A first program — `hello.omc`:
+
+```omc
+fn main() {
+    h items = ["apple", "banana", "cherry"];
+    for i in range(len(items)) {
+        print("item " + to_string(i) + ": " + items[i]);
+    }
+
+    # Python-style negative indexing
+    print("last: " + items[0 - 1]);
+
+    # Built-in substrate primitives
+    print("89 is Fibonacci → resonance: " + to_string(phi.res(89)));
+}
+main();
+```
+
+```bash
+./target/release/omnimcode-standalone hello.omc
+```
+
+Or start the REPL:
+
+```bash
+./target/release/omnimcode-standalone
+> h x = 89;
+> phi.res(x)
+1.0
+> substrate_search([1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144], 89)
+9
+> ^D
+```
+
+Scaffold a new project:
+
+```bash
+./target/release/omnimcode-standalone --init my_project
+cd my_project
 ./target/release/omnimcode-standalone main.omc
 ```
 
-For the JIT path (LLVM-backed, dual-band native code):
+---
 
-```bash
-sudo apt install llvm-18-dev libpolly-18-dev libzstd-dev
-PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 LLVM_SYS_180_PREFIX=/usr/lib/llvm-18 \
-    cargo build --release -p omnimcode-cli --features llvm-jit
-PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 OMC_HBIT_JIT=1 OMC_HBIT_JIT_VERBOSE=1 \
-    ./target/release/omnimcode-standalone main.omc
-```
+## Capabilities
 
-Eligible user fns get compiled to dual-band native code. 272× over tree-walk, 119× over the bytecode VM on factorial(12); see [`docs/jit_benchmark.md`](docs/jit_benchmark.md).
+A high-level map of what OMC ships. Detailed claims in `docs/` and the per-release chapter notes.
+
+### Language
+
+- Two execution engines (tree-walk + bytecode VM), byte-identical via `--audit`
+- Optional LLVM-18 JIT with dual-band SSE2 codegen, harmony-gated branch elision
+- Self-hosting compiler — `gen2 == gen3` byte-identical
+- Self-healing pass with 11 heal classes (typo, arity, div-zero, mod-zero, harmonic-index, missing-return, str-concat, null-arith, if-numeric, var-typo, plus substrate-bucketed lookup)
+- Python-idiom builtins (`len`, `range`, `getenv`, `to_hex`, `parse_int`, `+=`, negative indexing)
+- f-strings, generators, classes with inheritance, typed exceptions, closures
+- Pragmas for per-fn optimization (`@hbit`, `@harmony`, `@predict`, `@no_heal`, …)
+
+### Substrate primitives
+
+- 40-entry Fibonacci attractor table reaching 63,245,986
+- Substrate-routed search family (`substrate_search`, `_lower_bound`, `_quantile`, `_select_k`, …)
+- Zeckendorf encoding (`zeckendorf`, `from_zeckendorf`, …)
+- Substrate hashing (`substrate_hash`, `attractor_bucket`)
+- Substrate analytics (`harmonic_align`, `harmonic_score`, `resonance_band_histogram`, `phi_pi_log_distance`)
+
+### ML framework (Prometheus)
+
+- Tape-based reverse-mode autograd in pure OMC (20+ tape ops)
+- Optimizers (SGD, AdamW), Embedding, LayerNorm, Linear, ReLU, Softmax, MSE/CE loss
+- Multi-head attention, multi-block transformer composition
+- CRT-Fibonacci positional encoding
+- **Substrate-K attention** (CRT-Fibonacci as K), **S-MOD softmax**, **substrate-V resample** — three substrate components that stack to −8.94% val on TinyShakespeare
+- Content-addressed model checkpoints, substrate-cached inference
+- Cross-framework parity: every result reproduced in both pure-OMC and PyTorch
+
+### Infrastructure
+
+- Content-addressed kernel (`omc-kernel`) with alpha-rename-invariant storage
+- Code archaeology CLI (`omc-grep`) — finds renamed-but-identical functions
+- Substrate codec (`omc_codec_encode/decode_lookup`) for 10–50× compressed code transport
+- Substrate-signed wire format (OMC-PROTOCOL v1)
+- MCP server (`omnimcode-mcp`) exposing OMC as a runtime to LLM clients
+- Package manager (`--install`, sha256-verified registry or arbitrary URL)
+- Embedded CPython for ML interop (`py_import`, `py_call`, `py_callback`)
+- WASM target with no LLVM/Python dependencies
 
 ---
 
-## The architecture, bottom-up
+## Use cases
 
-OMC ships one binary. Six layers, each validated:
+Things people actually build with OMC:
 
-### 1. The substrate (`omnimcode-core/src/phi_pi_fib.rs`)
+- **Substrate-aware ML research.** Prometheus is a pure-OMC ML framework with built-in PyTorch parity for cross-validation. Substrate-K attention, S-MOD softmax, and substrate-V resample are production defaults. See `examples/lib/prometheus.omc` and `experiments/prometheus_parity/`.
+- **Anomaly detection with structural signal.** `harmonic_anomaly` beats scikit-learn's IsolationForest on multi-dim credential-stuffing patterns (10/10 vs 7/10 at K=10). The substrate is a **structural detector**, not a primary computation replacement. See `examples/datascience/multidim_anomaly.omc`.
+- **Code archaeology + dedupe.** `omc-grep` finds renamed-but-identical functions via canonical hash; on OMC's own examples tree, surfaced 31.7% redundancy that text-grep and ast-grep couldn't catch.
+- **Multi-agent systems with cryptographic integrity but no PKI.** OMC-PROTOCOL v1 lets agents verify each other's messages by recomputing canonical hashes — no shared keys, no certificate authority. See `OMC-PROTOCOL.md` and `docs/SUBSTRATE_NATIVE_AGENT.md`.
+- **Substrate-keyed compressed code transport.** `omc-codec` + `omc-kernel` together enable LLM-context-efficient code exchange: ship a 50-byte hash + lookup table reference instead of the full function body. Receiver recovers the original (alpha-rename-invariant) via library lookup.
+- **Substrate-routed search on integer-keyed data.** When your data is already substrate-indexed (attractor-aligned IDs, Fibonacci-spaced keys), `substrate_search` uses fewer probes than binary search and the probe sequence carries substrate metadata.
+- **Self-healing tooling.** `--check` reports diagnostics; `OMC_HEAL=1` auto-applies the fixes; `OMC_HEAL_RETRY=1` retries after runtime errors. Useful in CI and lint workflows.
+- **Embedded scripting with Python interop.** Drive numpy, pandas, scikit-learn from inside OMC. The substrate primitives compose with `py_call` so substrate-routed pre/post-processing can wrap arbitrary Python workloads. See `examples/datascience/titanic.omc`.
 
-A 40-entry FIBONACCI table reaching 63,245,986 and a single canonical search algorithm:
+---
 
-- `nearest_attractor_with_dist(value)` — closest Fibonacci attractor + distance, `#[inline]`
-- `phi_pi_fib_search_v2` — F(k)/φ^(π·k) split-point search with binary-search fallback when offset rounds to zero
-- `log_phi_pi_fibonacci(n) = ln(n) / (π · ln(φ))` — the substrate's iteration-count bound
-- `zeckendorf_indices` / `from_zeckendorf_indices` — canonical sparse decomposition
-- `substrate_search_i64` / `substrate_lower_bound` / `substrate_upper_bound` — O(log_φπfib N) primitives backing the OMC builtins
-- `attractor_bucket` — FIBONACCI-table index of nearest attractor; used for substrate-aligned hash bucketing
+## LLM integration
 
-Every harmonic operation in the language routes through these. 16 of 17 duplicate Fibonacci arrays were deleted across the codebase; the substrate is single-source. See [`SUBSTRATE_CHANGES.md`](SUBSTRATE_CHANGES.md) for the audit.
+OMC is designed to be a runtime LLM clients can drive, not just an authoring target for humans:
 
-### 2. HBit dual-band
+- **MCP server** (`omnimcode-mcp`) — exposes OMC over the Model Context Protocol. An LLM client gets `omc_run`, `omc_eval`, `omc_check`, plus substrate primitives as MCP tools.
+- **`did_you_mean` baked into runtime errors** — `Undefined function: fbi (did you mean: fib? — signature: fn fib(n) -> int)`. The error includes the suggestion AND its call shape so the LLM doesn't need a follow-up `omc_help` round-trip.
+- **Substrate-bucketed typo lookup** — `~10×` faster than naive closest-name scan on projects with hundreds of names. Surfaces close matches even when the LLM produces a near-miss identifier.
+- **Inline signature hints** in error messages reduce the "I generated wrong code → ask for signature → regenerate" loop to a single iteration.
+- **Substrate codec** (`omc_codec_encode`) for compressed code context: when an LLM needs to reference a function it's seen before, the canonical hash is a 50-byte stand-in for the whole body.
+- **Substrate-aware tokenizer** with 285+ builtins and 113 phrase-level dict entries. Tokens carry CRT-packed `(kind, vocab_id, position_class)` IDs, so the LLM can reason about token structure (`omc_token_distance` exposes the substrate metric).
+- **`omc_explain_error`** — a curated catalog of 702 error patterns, each with a natural-language explanation and suggested fix.
+- **`omc_find_by_signature`** + `omc_did_you_mean` — substring search over the builtin documentation surface.
+- **LLM onboarding compression token** — a full-library codec dump as a single artifact, suitable for prepending to an LLM context window. See `docs/llm_onboarding.md`.
 
-Values carry α (classical) and β (harmonic shadow). Inside JIT'd code, they're packed into `<2 x i64>` LLVM vectors so harmonic ops execute as SIMD on both lanes.
+The MCP server + substrate codec are the entry points designed for LLM agents driving OMC programmatically; the heal pass and inline hints are what an LLM gets even when it's just authoring `.omc` files.
 
-- `phi_shadow(x)` — makes β diverge from α
-- `harmony(x)` — substrate-routed coherence: `1 / (1 + attractor_distance(|α-β|))`
-- `@hbit`, `@harmony`, `@predict` function-level pragmas
-- Branch elision on harmony: 95.2% reduction on high-harmony inputs with 5–8% break-even fraction
+---
 
-### 3. The LLVM-backed JIT (`omnimcode-codegen`)
+## Documentation map
 
-- LLVM 18 via inkwell, feature-gated as `llvm-jit`
-- **77 codegen tests pass**: locals via allocas, CFG branches, loops, recursion, comparisons, floats, arrays (read + write), cross-fn calls, **L1.6 array bridges (both directions)**, **22 harmonic-primitive intrinsics**
-- Dual-band lowerer produces packed `<2 x i64>` for `phi_shadow` and `harmony`
-- Cascade-cleanup: failed-to-lower fns get `unreachable` trap stubs (not raw deletion), plus a fixpoint marks dependent fns as failed
-- `OMC_HBIT_JIT_VERIFY=1`, `OMC_HBIT_JIT_DUMP_IR=1` for diagnostics
-- Empirical: 272× on factorial(12), **115× on array-sum hot loop, 10.6× on substrate-heavy mixed workload**
-
-**L1.6 Array↔JIT bridge** (both directions): `Value::Array(int_only)` marshals to a length-prefixed `Box<[i64]>` for arg-passing; the `@jit_returns_array_int` pragma triggers `omc_arr_heapify` so a JIT'd fn can return a `Value::Array` it built internally. Same layout both ways, no codegen changes needed at the lowerer.
-
-**JIT'd harmonic primitives** (table-driven `HARMONIC_INTRINSICS` in `dual_band.rs`, 3 lines per new entry):
-| Arity | Primitives |
+| Doc | Subject |
 |---|---|
-| `i64 → i64` | `nth_fibonacci`, `is_attractor`, `attractor_distance`, `hbit_tension`, `fibonacci_index`, `attractor_bucket`, `substrate_hash`, `zeckendorf_weight`, `bit_count`, `bit_length`, `digit_sum`, `digit_count`, `harmonic_align`, `harmonic_unalign` |
-| `i64, i64 → i64` | `gcd`, `lcm`, `safe_mod` |
-| `i64, i64, i64 → i64` | `mod_pow` |
-| `array_ptr → i64` | `arr_sum_int`, `arr_product`, `arr_min_int`, `arr_max_int` |
-| `array_ptr, i64 → i64` | `int_binary_search`, `int_lower_bound`, `substrate_search` |
+| [`docs/jit_benchmark.md`](docs/jit_benchmark.md) | LLVM JIT measured speedups |
+| [`docs/anomaly_detection.md`](docs/anomaly_detection.md) | Harmonic anomaly vs IsolationForest on real datasets |
+| [`docs/heal_pass.md`](docs/heal_pass.md) | Heal classes, substrate-bucketed typo bench, per-class pragmas |
+| [`docs/omc_kernel.md`](docs/omc_kernel.md) | Content-addressed code storage |
+| [`docs/omc_grep.md`](docs/omc_grep.md) | Code archaeology via canonical hash |
+| [`OMC-PROTOCOL.md`](OMC-PROTOCOL.md) | Substrate-signed wire format spec |
+| [`omnimcode-core/src/prometheus/README.md`](omnimcode-core/src/prometheus/README.md) | Substrate-native ML framework |
+| [`experiments/prometheus_parity/`](experiments/prometheus_parity/) | Substrate-attention findings (K, S-MOD, V), each with a `FINDING.md` |
+| [`docs/SUBSTRATE_NATIVE_AGENT.md`](docs/SUBSTRATE_NATIVE_AGENT.md) | Two-agent demo composing every substrate primitive |
+| [`CHANGELOG.md`](CHANGELOG.md) | Chapter-by-chapter project history (mirrors the release notes) |
+| [`ROADMAP.md`](ROADMAP.md) | What's planned next |
 
-### 4. The O(log_phi_pi_fibonacci N) primitive family
+---
 
-A first-class API surface (50+ builtins this session alone):
+## Reading the project's history
 
-| Substrate-routed (probe count: log_φπfib N) | Native baseline (probe count: log₂ N) |
+If you're trying to understand how OMC got here, **read the [GitHub Releases](https://github.com/RandomCoder-lab/OMC/releases) top-to-bottom**, or equivalently the [CHANGELOG](CHANGELOG.md). Each release is a chapter — `git show v0.X-name` (or click the linked Release page) gives a self-contained summary of what changed in that chapter, why it matters, and what's now possible that wasn't before.
+
+| Tag | One-line |
 |---|---|
-| `substrate_search(arr, t)` | `int_binary_search(arr, t)` |
-| `substrate_lower_bound(arr, t)` | `int_lower_bound(arr, t)` |
-| `substrate_upper_bound(arr, t)` | `int_upper_bound(arr, t)` |
-| `substrate_rank`, `substrate_count_range`, `substrate_slice_range` | — |
-| `substrate_intersect`, `substrate_difference` | `sorted_merge`, `sorted_union`, `sorted_dedupe` |
-| `substrate_insert`, `substrate_quantile`, `substrate_select_k` | — |
-| `substrate_nearest`, `substrate_min_distance` | — |
-| `substrate_hash`, `attractor_bucket` | `fnv1a_hash` |
-
-Plus Zeckendorf encoding (`zeckendorf`, `from_zeckendorf`, `zeckendorf_weight`, `zeckendorf_bit`, `is_zeckendorf_valid`), substrate analytics (`harmonic_align`, `harmonic_unalign`, `harmonic_score`, `harmonic_resample`, `resonance_band_histogram`, `is_phi_resonant`, `phi_pi_log_distance`), and phi primitives (`phi_pow`, `phi_pi_pow`, `nth_fibonacci`, `attractor_table`, `fib_chunks`).
-
-The architectural trade-off: substrate ops use fewer probes (7.3 vs 16 at N=65536) but each probe pays for F(k)/φ^(π·k) floating-point math. Native int-binary wins on raw throughput against uniform data; substrate ops win when probe sequence coherence matters (substrate-indexed data, attractor-aligned queries). Both paths coexist so callers pick. See [`experiments/substrate_primitives/bench_substrate_search.omc`](experiments/substrate_primitives/bench_substrate_search.omc).
-
-### 5. The harmonic libraries (`examples/lib/`)
-
-Substrate-routed end-to-end. `harmonic_anomaly` (+ **v2 with substrate-routed lookup**), `harmonic_clustering`, `harmonic_recommend`. Plus the high-level [`examples/lib/substrate.omc`](examples/lib/substrate.omc) wrapper exposing `s_*` (substrate-routed), `i_*` (int-binary), `h_*` (harmonic) naming.
-
-Anomaly detection vs scikit-learn IsolationForest (full results in [`docs/anomaly_detection.md`](docs/anomaly_detection.md)):
-
-| Workload | OMC harmonic | IsolationForest |
-|---|:---:|:---:|
-| **Multi-dim credential stuffing, K=10** | **10/10** | 7/10 |
-| Multi-dim K=25 | **24/25** | 17/25 |
-| Multi-dim K=50 | **49/50** | 40/50 |
-
-OMC loses on volumetric-dominated data (NSL-KDD K=500: 302 vs 351). Ties on simple time-series. The pattern: harmonic substrate is a **structural detector**, not a primary computation replacement.
-
-**JIT integration impact on NSL-KDD harmonic_anomaly fit (5000 rows, 6 dims):**
-
-| Configuration | fit + score | Speedup vs tree-walk |
-|---|--:|--:|
-| Tree-walk | 363 ms | 1× |
-| JIT pre-L1.6 (arrays in dispatch → tree-walk) | 363 ms | 1× (no JIT actually used) |
-| JIT + L1.6 input bridge | 191 ms | 1.9× |
-| JIT + L1.6 + harmonic-primitive intrinsics | 107 ms | 3.4× |
-| **JIT + L1.6 + intrinsics + harmonic_anomaly_v2 (substrate_search)** | **271 ms total fit+score** | **substrate-routed lookup keeps recall byte-identical** ([`nsl_kdd_v1_vs_v2.omc`](examples/datascience/nsl_kdd_v1_vs_v2.omc)) |
-
-### 6. Infrastructure
-
-- Self-hosting compiler V.9b (gen2 == gen3 byte-identical)
-- **Self-healing pass — 7 classes** of automatic correction (typo, arity-pad, arity-truncate, div-zero → safe_divide, mod-zero → safe_mod, harmonic-index snap, missing-return). **Substrate-routed typo lookup** uses 32-bucket `substrate_hash_name` index for ~10× speedup on projects with hundreds of names ([`docs/heal_pass.md`](docs/heal_pass.md) has the bench table). Per-class disable pragmas (`@no_heal_typo`, etc.) + per-pass heal budget.
-- Two-engine parity verified by `--audit FILE`
-- Embedded CPython via PyO3: `py_import`, `py_call`, `py_callback("omc_fn")` for callbacks
-- WASM target (`omnimcode-wasm`, no LLVM/Python deps)
-- LSP server (`omnimcode-lsp`) + VS Code extension
-- Package manager (`--install` from registry, sha256-verified, or arbitrary URL)
-- **161 OMC tests + 77 codegen tests + cargo unit tests** — all green
+| [V0.0.1](https://github.com/RandomCoder-lab/OMC/releases/tag/V0.0.1) | Genesis: circuit evolution engine + FFI bindings (pre-language) |
+| [v0.0.2-language-core](https://github.com/RandomCoder-lab/OMC/releases/tag/v0.0.2-language-core) | The language exists — parser, two-engine interpreter, HInt, self-hosting fixpoint |
+| [v0.0.3-substrate-and-stdlib](https://github.com/RandomCoder-lab/OMC/releases/tag/v0.0.3-substrate-and-stdlib) | Self-healing heal pass + substrate-routed search family + closures + `--check`/`--fmt` |
+| [v0.0.4-jit-and-dual-band](https://github.com/RandomCoder-lab/OMC/releases/tag/v0.0.4-jit-and-dual-band) | LLVM JIT, dual-band SSE2 codegen, harmony-gated branch elision |
+| [v0.0.5-codec-kernel-protocol](https://github.com/RandomCoder-lab/OMC/releases/tag/v0.0.5-codec-kernel-protocol) | Substrate codec, content-addressed `omc-kernel`, OMC-PROTOCOL v1 wire format |
+| [v0.0.6-prometheus](https://github.com/RandomCoder-lab/OMC/releases/tag/v0.0.6-prometheus) | Pure-OMC ML framework, multi-block transformer, first substrate-K (L1) wins |
+| [v0.1-substrate-attention](https://github.com/RandomCoder-lab/OMC/releases/tag/v0.1-substrate-attention) | Three substrate components (K, S-MOD, V) stack inside attention for −8.94% val |
+| [v0.2-ergonomics](https://github.com/RandomCoder-lab/OMC/releases/tag/v0.2-ergonomics) | OMC becomes forgiving: Python-idiom builtins, `+=`, traced errors, 11 heal classes |
 
 ---
 
-## The substrate-aware transformer thesis (live, empirically driven)
-
-A modern transformer has four primitives. The substrate-replacement experiments measure each:
-
-| Transformer piece | Substrate replacement | Empirical status |
-|---|---|---|
-| Sinusoidal PE | **CRT-Fibonacci PE** (pairwise-coprime moduli {5, 8, 13, 21, ...}) | **Wins** −19.9% (tiny), **−5.4% on TinyShakespeare** (3/3 seeds) |
-| **Learned K matrix in attention** | **CRT-Fibonacci as K (no learnable K)** | **Wins** **−6.3% val at multi-head × multi-block × TinyShakespeare** (2/3 seeds, 10.8% fewer params). Single-head + multi-block + at-scale variants all win or tie. See [`SUBSTRATE_K_FINDING.md`](experiments/prometheus_parity/SUBSTRATE_K_FINDING.md). |
-| Attention bias | **Geodesic** (`−α · geodesic(i,j)` in CRT moduli) | **Wins** 3/3 seeds (single-block PyTorch) |
-| Softmax attention | OmniWeight (`φ^(-|q-k|)`) | Softmax wins on perturbed-query recovery — not yet superseded |
-| HBit-tension attention gate | three formulations | **Falsified** 0/3 each — substrate metric on continuous activations doesn't work; rule derived: *substrate applies to integer-valued quantities only* |
-| L2-NN OOD detection | **HBit cross-cutting tension** | **Wins** AUROC 1.0 on scenario A |
-| SGD lr modulation | **Harmonic SGD** (substrate-resonance scaled per-param) | **Wins** −13.2% vs vanilla on tinyLM (3/3 seeds) |
-
-**The substrate-K finding is the production recommendation.** Replace the learned `W_K` matrix with the CRT-Fibonacci positional table. Q + V stay learned. Validates at every (depth × heads × scale) combination measured. Pure win: fewer params, lower val loss, no architectural complexity added.
-
-See [`experiments/prometheus_parity/`](experiments/prometheus_parity/) for the full A/B harness (single-head, multi-block, multi-head, TinyShakespeare-scale, with train/val splits and cross-runtime reproduction between OMC and PyTorch).
-
----
-
-## A flavor of the language
-
-```omc
-# φ-resonance is built into the integer type. No imports needed.
-h x = 89;                           # FIBONACCI[11], on-attractor
-println(phi.res(x));                # high resonance
-
-# Substrate-routed O(log_phi_pi_fibonacci N) search:
-h sorted = arr_range(0, 1000000);
-println(substrate_search(sorted, 524287));  # 524287
-
-# Zeckendorf decomposition: every int is a unique sum of non-consecutive Fibonaccis
-h z = zeckendorf(100);              # [11, 6, 4]  (89 + 8 + 3)
-println(from_zeckendorf(z));        # 100  (round-trip)
-
-# Substrate-coherence diagnostic — how Fibonacci-aligned is this data?
-println(harmonic_score([89, 1, 1, 2, 3, 5, 8]));  # 1.0
-println(harmonic_score([100, 7, 42, 99]));        # 0.0
-
-# Self-healing: typo + off-attractor literal both auto-corrected by `--check`
-fn near_attractor(x) {
-    return fold(x);                 # snap to nearest substrate attractor
-}
-
-# Dual-band JIT: harmony(x) reads coherence at native code speed
-@harmony
-fn coherent_loop(n) {
-    h i = 0;
-    while i < n {
-        if harmony(i) > 0.5 {       # branch eliminable on high-harmony inputs
-            i = i + 1;
-        } else {
-            i = i + 2;
-        }
-    }
-    return i;
-}
-```
-
----
-
-## What's NOT shipped (honest limits)
-
-- **The transformerless LLM itself.** CRT-PE wins at the per-component level; the hybrid attention gate as currently formulated lost the distractor-mix test 0/3 ([`experiments/transformerless_lm/distractor_mix_README.md`](experiments/transformerless_lm/distractor_mix_README.md)). Two concrete follow-on architectures documented (score-level gate, learned-threshold gate). Building a harmonic-only architecture top-to-bottom and training it competitively is the next step.
-- **AVX-512 widening.** Dual-band uses `<2 x i64>` (SSE2). Wider lanes need array-processing OMC fns to fill them.
-- **JIT for float-returning harmonic primitives.** `harmony_value` / `value_danger` shims exist as extern Rust fns; the dispatch boundary needs a `returns_float` flag mirroring `returns_array_int` to materialize their f64-bit-pattern returns correctly. Nothing in current hot paths needs it.
-- **JIT for string/dict ops.** Pure JIT operates on i64 only; strings and dicts stay tree-walk by design. The harmonic libraries' L1 rewrite to array-of-hashed-int eliminated this constraint for the hot path (now 3.4× faster end-to-end).
-
----
-
-## Demos worth running
-
-| File | Story |
-|---|---|
-| [`experiments/transformerless_lm/`](experiments/transformerless_lm/) | CRT-PE wins on real LM training, two scales, 3-of-3 + 4-of-5 seeds |
-| [`experiments/transformerless_lm/distractor_mix_README.md`](experiments/transformerless_lm/distractor_mix_README.md) | Adversarial-mix scaling test: CRT-PE generalizes, hybrid gate falsified |
-| [`experiments/hybrid_llm/experiment_5_hbit_combined.omc`](experiments/hybrid_llm/experiment_5_hbit_combined.omc) | HBit cross-cutting tension as reference-free OOD: AUROC 1.0 |
-| [`experiments/hybrid_llm/experiment_12_hybrid_attention.omc`](experiments/hybrid_llm/experiment_12_hybrid_attention.omc) | Hybrid softmax × HBit-gate attention beats softmax on adversarial mixes |
-| [`experiments/substrate_primitives/bench_substrate_search.omc`](experiments/substrate_primitives/bench_substrate_search.omc) | 4-way bench: linear vs OMC binary vs substrate vs native int-binary |
-| [`examples/datascience/nsl_kdd_v1_vs_v2.omc`](examples/datascience/nsl_kdd_v1_vs_v2.omc) | A/B: harmonic_anomaly v1 (linear) vs v2 (substrate_search) — 10.3% speedup, identical recall |
-| [`examples/datascience/multidim_anomaly.omc`](examples/datascience/multidim_anomaly.omc) | Credential stuffing: harmonic 10/10 vs IsolationForest 7/10 @ K=10 |
-| [`examples/datascience/nsl_kdd_validation.omc`](examples/datascience/nsl_kdd_validation.omc) | NSL-KDD intrusion detection — honest mixed result, JIT 3.4× via L1.6 + intrinsics |
-| [`examples/self_hosting_v9b.omc`](examples/self_hosting_v9b.omc) | Self-hosting compiler, gen2 == gen3 byte-identical |
-| [`examples/lisp.omc`](examples/lisp.omc) | Mini Scheme interpreter in OMC |
-| [`examples/datascience/titanic.omc`](examples/datascience/titanic.omc) | Kaggle Titanic via embedded Python pipeline |
-| [`examples/lib/substrate.omc`](examples/lib/substrate.omc) | High-level wrappers around the substrate primitives |
-| [`examples/tests/test_heal_pass.omc`](examples/tests/test_heal_pass.omc) | 16 tests for the self-healing compiler's heal classes + per-class pragmas |
-| [`examples/tests/test_codec.omc`](examples/tests/test_codec.omc) | 7 tests for `omc_codec_encode/decode_lookup` — alpha-rename invariant library recovery + inline error-hint UX check |
-| [`examples/tests/test_compressed_messaging.omc`](examples/tests/test_compressed_messaging.omc) | 6 tests: substrate-signed wire payloads carrying codec output, alpha-equivalent recovery, JSON round-trip |
-| [`examples/tests/test_codec_registry.omc`](examples/tests/test_codec_registry.omc) | 3 tests: `omc_registry_codec_library` + `omc_msg_recover_from_registry` graceful no-op when omc_modules/ doesn't exist |
-| [`examples/demos/llm_tandem_registry.omc`](examples/demos/llm_tandem_registry.omc) | End-to-end: synthetic package in omc_modules/, signs renamed copy, recovers via registry — alpha-rename invariant |
-| [`experiments/seed_expansion/FINDINGS.md`](experiments/seed_expansion/FINDINGS.md) | Empirical writeup: substrate-keyed codec works (lossless on in-library content); open-set ML stays data-budget bound at 40 samples — honest |
-
----
-
-## Repo layout
+## Repository layout
 
 | Path | What |
 |---|---|
-| `omnimcode-core/` | Parser, AST, interpreter, bytecode VM, substrate (`phi_pi_fib`), HBit, harmonic types, 50+ substrate builtins, substrate-routed heal pass |
-| `omnimcode-codegen/` | LLVM-backed JIT, dual-band lowerer, L1.6 array bridges, 22 harmonic-primitive intrinsics (table-driven) |
+| `omnimcode-core/` | Parser, AST, tree-walk interpreter, bytecode VM, substrate (`phi_pi_fib`), HBit, harmonic types, ~500 builtins, substrate-routed heal pass |
+| `omnimcode-codegen/` | LLVM-backed JIT, dual-band lowerer, L1.6 array bridges, harmonic-primitive intrinsics |
 | `omnimcode-cli/` | Standalone binary (`omnimcode-standalone`) + `omc-bench` + `omc-grep` + `omc-kernel` |
+| `omnimcode-mcp/` | MCP server exposing OMC to LLM clients |
 | `omnimcode-wasm/` | WebAssembly target (no LLVM, no Python) |
-| `omnimcode-lsp/` | LSP server for editor integration |
+| `omnimcode-lsp/` | LSP server + VS Code extension |
 | `omnimcode-gdextension/` | Godot 4 GDExtension binding |
-| `experiments/transformerless_lm/` | PyTorch end-to-end CRT-PE vs sinusoidal training, two scales |
-| `experiments/hybrid_llm/` | 12 pure-OMC per-component substitution experiments |
-| `experiments/substrate_primitives/` | Empirical comparison of substrate vs native vs OMC search |
-| `examples/lib/` | `substrate.omc`, `harmonic_anomaly`, `harmonic_clustering`, `harmonic_recommend`, np/pd/sklearn/torch/requests/sqlite |
-| `examples/datascience/` | Real-data demos with honest numbers |
-| `examples/tests/` | `test_substrate_primitives.omc` (57), `test_new_builtins.omc` (70), `test_harmonic_libs.omc` (18), `test_heal_pass.omc` (16), `test_codec.omc` (7), `test_compressed_messaging.omc` (6), `test_codec_registry.omc` (3) — **177 total** |
-| `docs/` | Substrate audit, JIT benchmarks, anomaly-detection comparisons |
+| `omnimcode-python/` | Python bindings via PyO3 |
+| `experiments/prometheus_parity/` | Substrate-attention A/B harness — pure OMC vs PyTorch |
+| `experiments/transformerless_lm/` | PyTorch CRT-PE vs sinusoidal training |
+| `experiments/hybrid_llm/` | Per-component substrate substitution experiments |
+| `experiments/substrate_primitives/` | Substrate vs native vs OMC search benchmarks |
+| `examples/lib/` | `prometheus.omc`, `fibtier.omc`, `substrate.omc`, `harmonic_anomaly`, np/pd/sklearn/torch interop wrappers |
+| `examples/tests/` | OMC test suite (1076 tests across 71 files) |
+| `examples/datascience/` | Real-data demos: Titanic, NSL-KDD, multi-dim anomaly detection |
+| `docs/` | Substrate audit, JIT benchmarks, anomaly comparisons, heal-pass docs |
 | `registry/` | Central package registry (sha256-verified) |
 
 ---
 
-## Quick reference
+## CLI reference
 
 ```bash
 omnimcode-standalone FILE                 # run a program
 omnimcode-standalone                      # REPL
-omnimcode-standalone --init               # scaffold project
+omnimcode-standalone --init [DIR]         # scaffold a project
 omnimcode-standalone --install [SPEC]     # package install
-omnimcode-standalone --check FILE         # heal-pass diagnostics
-omnimcode-standalone --fmt FILE           # pretty-print
+omnimcode-standalone --check FILE         # heal-pass diagnostics (no exec)
+omnimcode-standalone --fmt FILE           # pretty-print canonical OMC
 omnimcode-standalone --test FILE          # run fn test_*() suite
+omnimcode-standalone --test-all DIR       # run every test file under DIR
 omnimcode-standalone --bench FILE         # run fn bench_*() suite
 omnimcode-standalone --audit FILE         # tree-walk vs VM divergence check
+omnimcode-standalone --version            # version info
 omnimcode-standalone --help               # all flags + env vars
+```
 
+Environment variables:
+
+```
 OMC_HBIT_JIT=1            # JIT-compile eligible user fns via omnimcode-codegen
 OMC_HBIT_JIT_VERBOSE=1    # report which fns got JIT'd
 OMC_HBIT_JIT_VERIFY=1     # LLVM module verification (debug)
 OMC_HBIT_JIT_DUMP_IR=1    # dump LLVM IR for inspection
 OMC_VM=1                  # use bytecode VM (default: tree-walk)
-OMC_HEAL=1                # auto-heal AST iteratively
-OMC_HEAL_RETRY=1          # retry after runtime errors
+OMC_HEAL=1                # auto-heal AST iteratively before execution
+OMC_HEAL_RETRY=1          # retry once with heal pass after a runtime error
 OMC_NO_PYTHON=1           # skip embedded Python init
 OMC_REGISTRY=<url>        # alternative package registry
+OMC_KERNEL_ROOT=<dir>     # alternative omc-kernel storage root
 ```
 
----
-
-## Package manager
+### Package manager
 
 ```bash
-omnimcode-standalone --install harmonic_anomaly      # registry name (sha256-verified)
-omnimcode-standalone --install                       # everything in omc.toml
-omnimcode-standalone --install https://example.com/raw/lib.omc   # explicit URL
-omnimcode-standalone --list                          # what's installed
+omnimcode-standalone --install harmonic_anomaly                      # registry name (sha256-verified)
+omnimcode-standalone --install                                       # everything in omc.toml
+omnimcode-standalone --install https://example.com/raw/lib.omc       # arbitrary URL
+omnimcode-standalone --list                                          # what's installed
 ```
 
 `omc.toml` example:
@@ -370,10 +340,10 @@ name = "my-omc-project"
 version = "0.1.0"
 
 [dependencies]
-np      = "np"
-sklearn = "sklearn"
-substrate = "substrate"
-custom  = "https://example.com/raw/my_lib.omc"
+np         = "np"
+sklearn    = "sklearn"
+substrate  = "substrate"
+custom     = "https://example.com/raw/my_lib.omc"
 ```
 
 Submit a package: PR an entry to [`registry/index.json`](registry/index.json).
@@ -382,43 +352,39 @@ Submit a package: PR an entry to [`registry/index.json`](registry/index.json).
 
 ## Status
 
-| Layer | Status |
-|---|---|
-| Substrate (`log_phi_pi_fibonacci` everywhere) | shipped, audited |
-| O(log_phi_pi_fibonacci N) primitive family | shipped, 50+ builtins, 57 tests |
-| HBit dual-band executable | shipped (`OMC_HBIT_JIT=1`) |
-| LLVM JIT for pure-int/array/float | shipped, **77 codegen tests**, 272× factorial(12), **3.4× harmonic_anomaly NSL-KDD** |
-| **L1.6 Array↔JIT bridges (both directions)** | **shipped, 11 codegen tests; 115× synthetic, 1.9× real-world harmonic_anomaly** |
-| **22 harmonic-primitive JIT intrinsics** | **shipped, table-driven, 10.6× substrate-heavy hot loop** |
-| Zeckendorf encoding + substrate hash | shipped |
-| **harmonic_anomaly v2 (substrate_search lookup)** | **shipped, 10.3% speedup, byte-identical recall to v1** |
-| Harmonic libraries on real data | shipped, mixed-honest results |
-| Hybrid LLM experiments (12 experiments) | shipped, 1 perfect AUROC, 1 architectural negative, 1 CRT-PE win |
-| End-to-end transformerless LM (PyTorch) | CRT-PE wins -19.9% (tiny), **-5.4% (TinyShakespeare, 3/3 seeds), -2.9% (distractor mix, 3/3)** |
-| Hybrid HBit-gate distractor-mix test | **falsified across THREE gate formulations** (0/3 wins each, +3–4% consistent loss): KEY-magnitude gate, SCORE-level gate, LEARNED-threshold gate. The architectural pivot per [`GATE_REFORMULATION_RESULTS.md`](experiments/transformerless_lm/GATE_REFORMULATION_RESULTS.md): substrate's home is positional + distributional, not as an attention-score shaper. |
-| **Geodesic attention bias (substrate on positions, not activations)** | **WINS 3/3 seeds, −0.4% vs crt_only.** ALiBi-style additive bias `−α · geodesic(i, j)` using CRT-Fibonacci moduli. First attention-side substrate validation. Rule derived: *substrate metric applies to integer quantities only*. See [`GEODESIC_RESULT.md`](experiments/transformerless_lm/GEODESIC_RESULT.md). |
-| **Prometheus: substrate-native ML framework** | **MVP shipped + 4 substrate-moat features verified** ([docs](omnimcode-core/src/prometheus/README.md)) — pure-OMC training (no PyTorch in the loop), content-addressed checkpoints, geodesic bias primitive, **harmonic SGD WINS 3/3 seeds at -13.2% vs vanilla SGD on tinyLM**, canonical-hash inference cache surviving model reload. |
-| **Parameter-free substrate attention WINS 3/3 (−21.5%)** | Four-way A/B: standard QKV → substrate-K → substrate-K+Q → fully substrate. Monotonic improvement at every step *down* the substrate ladder; the variant with ZERO learnable attention params (CRT-PE as K and Q, identity V) beats standard learned attention by 21.5% on 3/3 seeds. See [`SUBSTRATE_ATTENTION_4WAY.md`](experiments/prometheus_parity/SUBSTRATE_ATTENTION_4WAY.md). |
-| **Substrate-K attention WINS −8% val on TinyShakespeare** | The architectural sweet spot. K = CRT-Fibonacci positional table (no learnable K); Q and V stay learned. On 1.1MB corpus with 90/10 train/val split: L1 val=0.104 vs L0 val=0.113, **−8.0% with ~9% fewer params**. Fully-substrate (L3) catastrophically fails at scale; L1 is the architectural recommendation. See [`SUBSTRATE_K_FINDING.md`](experiments/prometheus_parity/SUBSTRATE_K_FINDING.md). |
-| **End-to-end substrate-native agent** | Two agents conversing over OMC-PROTOCOL with persistent fibtier memory across a simulated process restart. Every primitive shipped this week composed into one demonstrable system. 15 conversation turns → 7 bounded entries per agent; restart preserves state; memory query surfaces as fallback knowledge. See [`SUBSTRATE_NATIVE_AGENT.md`](docs/SUBSTRATE_NATIVE_AGENT.md). |
-| Self-hosting compiler V.9b | shipped, gen2 == gen3 byte-identical |
-| **Self-healing pass (7 classes, substrate-routed typo)** | shipped, `OMC_HEAL=1`, **10× typo lookup**, 16 tests, per-class pragmas |
-| **Substrate-keyed code codec + compressed messaging** | **shipped**, `omc_codec_encode/decode_lookup` + `omc_msg_sign_compressed/recover`, alpha-rename invariant, token-count ~N× (wire-byte breaks even at ≥500 B + N≥8); always-on win is library-lookup recovery; 13 tests, lossless on in-library content |
-| **Inline error-fix hints** | **shipped**, `Undefined function` errors now carry the suggested fn's signature inline (eliminates a separate `omc_help` round-trip after a typo) |
-| **`omc-grep`: alpha-rename-invariant code archaeology** | **shipped** ([docs/omc_grep.md](docs/omc_grep.md)) — standalone CLI; on OMC's examples: 31.7% redundancy (name-sensitive), 33.0% (body-only); surfaces renamed-but-identical fns that text-grep and ast-grep can't catch |
-| **`omc-kernel`: content-addressed code DAG** | **shipped** ([docs/omc_kernel.md](docs/omc_kernel.md)) — store at ~/.omc/kernel/store/<hash>.omc; alpha-rename invariant sign/verify proven end-to-end; the persistence layer for the codec wire format |
-| Two-engine parity (tree-walk + VM) | shipped, 44/45 byte-identical |
-| Embedded CPython + callbacks | shipped, 6 wrapper libs |
-| WASM + LSP + GDExtension targets | shipped |
-| Package manager + registry | shipped |
-| Per-component harmonic wins on PE | **shipped (CRT-PE), validated under noise** |
-| Per-component harmonic wins on attention | hybrid only — clean softmax still wins; gate reformulation pending |
-| End-to-end transformerless model | not yet — building blocks validated, integration is the open work |
+Production-quality across the core surface:
 
-Build dependencies for the JIT path: `llvm-18-dev`, `libpolly-18-dev`, `libzstd-dev`. For the no-JIT build, just Rust + (optionally) Python 3.
+- **Tests**: 213 Rust pass, 1073/1076 OMC end-to-end pass (3 pre-existing test_heal_pass.omc failures from `--test` bypassing heal)
+- **Two-engine parity**: tree-walk and bytecode VM byte-identical, auditable via `--audit`
+- **Self-hosting compiler**: `gen2 == gen3` byte-identical
+- **JIT path**: 77 codegen tests pass, measured 272× factorial(12), 3.4× on real-world harmonic_anomaly (NSL-KDD 5000 rows)
+- **Substrate-attention scoreboard**: three component swaps (K + S-MOD + V) stack for −8.94% val on TinyShakespeare; cross-validated in PyTorch
+- **Substrate algorithms**: substrate_search wins on substrate-indexed data, ties or loses on uniform data — both code paths coexist so callers can pick
+- **Anomaly detection**: wins multi-dim credential-stuffing 10/10 vs IsolationForest 7/10; loses on volumetric-dominated NSL-KDD K=500
+- **Embedded CPython**: numpy/pandas/sklearn/torch all driveable from OMC
+- **WASM + LSP + Godot + Python bindings**: all shipped
+
+What's still open is documented per-chapter in the release notes (each chapter has a "what's now possible" section). The transformerless LLM as a top-to-bottom system isn't here yet — substrate-attention components win individually and stack inside attention, but a full harmonic-only architecture trained competitively at scale is the open work.
 
 ---
 
-License: MIT.
+## Contributing
 
-**Built around φ (1.6180339887…). The substrate is the architecture.** The transformerless LLM is what the substrate is for.
+PRs welcome. Before submitting:
+
+1. `cargo test --release` should pass cleanly (use `PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1` if your Python is newer than 3.13).
+2. `omnimcode-standalone --test-all examples/tests/` should pass (modulo the 3 known `test_heal_pass.omc` failures).
+3. For changes to the language surface, add a test in `examples/tests/` and a Rust unit test where relevant.
+4. For substrate experiments, follow the `experiments/prometheus_parity/` template: `FINDING.md` describing the hypothesis, raw `results_*.json`, and a `torch_*.py` harness for cross-validation if applicable.
+
+For substantial new features, consider whether they fit a new chapter — see [CHANGELOG.md](CHANGELOG.md) for the chapter-summary structure.
+
+---
+
+## License
+
+MIT. See [LICENSE](LICENSE).
+
+---
+
+**Built around φ (1.6180339887…). The substrate is the architecture.**
