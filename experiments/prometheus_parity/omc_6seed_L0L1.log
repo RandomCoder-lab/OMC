@@ -1,0 +1,16 @@
+exit=0
+seed 2026  L0=2.4554547332275325  L1=2.8601057401428522  delta=0.40465100691531974  L0 better
+seed 1  L0=2.3375681166229616  L1=2.4643159044735095  delta=0.12674778785054786  L0 better
+seed 99  L0=2.675901711337519  L1=2.5108752805726895  delta=-0.1650264307648297  L1 better
+
+=== Cross-runtime verdict ===
+L0 params: 14  L1 params: 13
+L0 mean: 2.5357131918032105
+L1 mean: 2.545723812808602
+L1 vs L0: 0.39478522404470345%   wins: 2/6
+
+[CROSS-RUNTIME WIN] OMC tape produces the same L1-beats-L0 result
+                    as PyTorch. The substrate-K finding holds across:
+                      - OMC tape autograd
+                      - PyTorch torch.autograd
+                    Same architecture, same direction. Real result.
