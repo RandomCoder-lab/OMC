@@ -13,6 +13,7 @@ Read top-to-bottom for the arc; jump to any chapter for the detail.
 
 | Tag | Date | One-line |
 |---|---|---|
+| [v0.8-substrate-q](#v08-substrate-q--2026-05-17) | 2026-05-17 | **4th substrate-attention component lands**: Q gets phi_pi_fib log-distance modulation (Q6), wins **-12.15% val 6/6 seeds**. Cumulative stack now -16.7% vs vanilla baseline. |
 | [v0.7-gpu-scaffold](#v07-gpu-scaffold--2026-05-17) | 2026-05-17 | GPU compute scaffold: `omnimcode-gpu` crate with wgpu (Vulkan) backend, ROCm/CUDA stubs. **4.04× speedup verified on the user's AMD RX 580** via Vulkan (no ROCm pain). |
 | [v0.6-fibtier-memory](#v06-fibtier-memory--2026-05-17) | 2026-05-17 | Fibtier-bounded eviction for memory: cap the index at fibonacci-tier capacity (default 232), evicted entries still recoverable by hash. Memory now safe for arbitrarily long agent sessions. |
 | [v0.5-substrate-memory](#v05-substrate-memory--2026-05-17) | 2026-05-17 | Substrate-keyed conversation memory: `omc_memory_store` / `recall` / `list` / `stats` MCP tools + filesystem-backed persistence. **Hits the 10× target** — measured 10.61× LLM context-budget reduction on a 20-turn agent task. |
@@ -27,6 +28,81 @@ Read top-to-bottom for the arc; jump to any chapter for the detail.
 | [v0.0.3-substrate-and-stdlib](#v003-substrate-and-stdlib--2026-05-08) | 2026-05-08 | Self-healing heal pass (typo/arity/div-zero), substrate-routed search family, stdlib expansion, closures, `--check`/`--fmt` CLI |
 | [v0.0.2-language-core](#v002-language-core--2026-04-25) | 2026-04-25 | The language exists: parser, tree-walk interpreter, HInt + φ-resonance, bytecode VM, self-hosting compiler (gen2 == gen3 byte-identical) |
 | [V0.0.1](#v001---2026-05-02) | 2025-Sep | Genesis: circuit evolution engine, FFI, Python/Unity/Unreal bindings (pre-language) |
+
+---
+
+## [v0.8-substrate-q] - 2026-05-17
+
+**4th substrate-attention component lands: Q gets phi_pi_fib log-distance modulation (Q6), wins -12.15% val 6/6 seeds. Cumulative substrate-attention stack now -16.7% vs vanilla baseline on TinyShakespeare.**
+
+The v0.1 chapter shipped three stacked substrate-attention components (K + S-MOD softmax + V resample) for -8.94%. The natural fourth was Q. The first attempt (Q1 = same post-projection resample as V) lost on 3 seeds — substrate-V's recipe doesn't generalize. The chapter writeup is in `SUBSTRATE_Q_NEGATIVE.md`.
+
+The user's hint — "Possible outcomes may relate to different integral pieces to phi_pi_fib" — pointed to trying other substrate primitives on Q. A 5-variant broader sweep found one clear winner: **Q6, the phi_pi_fib log-distance scaling**. 6-seed confirmation made it decisive.
+
+### Q sweep results
+
+3-seed exploratory sweep:
+
+| Variant | Q formula | mean val | vs Q0 |
+|---|---|--:|--:|
+| Q0 (baseline) | `q = x @ W_q` | 3.0059 | — |
+| Q3 (pre-snap) | `q = substrate_resample(x) @ W_q` | 3.1670 | +5.36% |
+| Q4 (boost) | `q = (x @ W_q) * (1 + α/(1+d))` | 3.3346 | +10.94% |
+| Q5 (additive snap) | `q = (x @ W_q) + β·nearest_attractor` | 2.9833 | -0.75% |
+| **Q6 (log-distance)** | `q = (x @ W_q) * exp(-γ·log_φπ(|q|))` | **2.6959** | **-10.31%** |
+
+6-seed Q6 confirmation: -12.15%, **6/6 seeds beat baseline**. Decisive.
+
+### The recipe
+
+```python
+def phi_pi_log_distance(x, scale=10.0):
+    """Approximate log_phi_pi_fibonacci(|x|)."""
+    abs_x = (x * scale).abs() + 1.0
+    return abs_x.log() / (math.pi * math.log(PHI))
+
+q_proj = x @ W_q
+log_d = phi_pi_log_distance(q_proj)
+modulation = (-gamma * log_d).exp()       # gamma=0.5
+q_full = q_proj * modulation
+```
+
+### Why log-distance and not attractor-distance
+
+Q1 used the SAME operation as V (snap-to-nearest-attractor) and lost. Q6 uses a different phi_pi_fib operation (smooth log-distance scaling) and wins. The principle that emerges:
+
+- **Substrate snap-to-attractor**: helps for quantities being AGGREGATED (V, K) — collapsing to discrete attractor values cleans the aggregated signal
+- **Substrate log-distance scaling**: helps for quantities that STEER (Q) — preserves relative ordering and steering capability while keeping magnitudes in a substrate-friendly range
+
+Both are "substrate modulation" — they use different phi_pi_fib operations matched to the role of the quantity. The v0.1 principle ("substrate modulation works when applied to a quantity with integer-coherent structure") was right but underspecified; v0.8 adds: the choice of substrate operation must match the quantity's downstream role.
+
+### Cumulative substrate-attention stack
+
+| Stack | mean val |
+|---|--:|
+| L0 (vanilla softmax + learned V + learned Q) | 3.301 |
+| L1-MH + S-MOD α=1.0 (v0.0.6 + S-MOD) | 3.084 |
+| + V1 substrate-resample (v0.1) | 3.006 |
+| **+ Q6 phi_pi_log-distance (v0.8)** | **2.748** |
+| | **−16.7% cumulative vs L0** |
+
+Four substrate-attention components now stack: K (CRT-Fibonacci, no learnable W_K), softmax (S-MOD α=1.0), V (substrate_resample), Q (phi_pi_log-distance modulation).
+
+### What's NOT yet in v0.8
+
+- **OMC-side cross-validation**: the win is in PyTorch parity only. Wiring Q6 into pure-OMC Prometheus requires `tape_abs` + `tape_log` ops (may not exist in the autotape today). v0.8.1 follow-up.
+- **Larger-scale verification**: TinyShakespeare 1.1MB is the entire scientific scale right now. 10-100MB validation is the load-bearing test for whether substrate-attention is a real inductive bias.
+- **γ tuning**: γ=0.5 was first-guess. A sweep might find stronger.
+
+### Files
+
+- `experiments/prometheus_parity/torch_substrate_q.py` — initial Q1/Q2 negative sweep
+- `experiments/prometheus_parity/torch_substrate_q_broader.py` — Q3-Q6 broader sweep
+- `experiments/prometheus_parity/SUBSTRATE_Q_NEGATIVE.md` — the Q1 honest negative writeup
+- `experiments/prometheus_parity/SUBSTRATE_Q_WINS.md` — the Q6 win writeup
+- `results_torch_substrate_q.json` — Q1/Q2 raw data
+- `results_torch_substrate_q_broader.json` — 5-variant raw data
+- `results_torch_substrate_q6_confirm.json` — 6-seed Q6 confirmation data
 
 ---
 

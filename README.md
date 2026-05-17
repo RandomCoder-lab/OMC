@@ -270,6 +270,7 @@ If you're trying to understand how OMC got here, **read the [GitHub Releases](ht
 | [v0.5-substrate-memory](https://github.com/RandomCoder-lab/OMC/releases/tag/v0.5-substrate-memory) | Substrate-keyed conversation memory: `omc_memory_store` / `recall` / `list` / `stats` + filesystem persistence. **10.61× LLM context-budget reduction** on a 20-turn agent task. |
 | [v0.6-fibtier-memory](https://github.com/RandomCoder-lab/OMC/releases/tag/v0.6-fibtier-memory) | Fibtier-bounded eviction for memory: cap the index at fibonacci-tier capacity (default 232); evicted entries still recoverable by hash. Memory now safe for arbitrarily long agent sessions. |
 | [v0.7-gpu-scaffold](https://github.com/RandomCoder-lab/OMC/releases/tag/v0.7-gpu-scaffold) | GPU compute scaffold: `omnimcode-gpu` crate with wgpu (Vulkan) backend, ROCm/CUDA stubs. **4.04× speedup measured on AMD RX 580** via Vulkan, no ROCm pain. |
+| [v0.8-substrate-q](https://github.com/RandomCoder-lab/OMC/releases/tag/v0.8-substrate-q) | **4th substrate-attention component** lands: Q gets phi_pi_fib log-distance modulation (Q6), wins -12.15% val 6/6 seeds. Cumulative stack now **-16.7%** vs vanilla on TinyShakespeare. |
 
 ---
 
