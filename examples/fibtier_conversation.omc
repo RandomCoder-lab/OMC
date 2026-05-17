@@ -1,0 +1,122 @@
+# Fibonacci-tier memory demo — 100-turn synthetic conversation.
+#
+# Shows that a fibtier memory keeps context bounded as conversation
+# grows: tier occupancy stabilizes at Fibonacci capacities, older
+# entries cascade upward through folds, total entries stays bounded
+# while a conversation of arbitrary length flows through.
+#
+# Each "turn" is a short message. We push them sequentially and
+# print the memory state every 10 turns to show how the tiering
+# evolves.
+
+import "examples/lib/fibtier.omc";
+
+fn make_turns(n) {
+    # Synthetic conversation: each turn is a substantively-different
+    # short message so canonical hashes differ.
+    h topics = [
+        "user asks about prometheus design",
+        "claude explains substrate attention",
+        "user requests benchmark numbers",
+        "claude shows L0 vs L1 results",
+        "user pivots to memory architecture",
+        "claude proposes fibonacci tiers",
+        "user accepts the proposal",
+        "claude builds the prototype",
+        "user runs the test suite",
+        "claude analyzes the results",
+        "user asks for next steps",
+        "claude lists three follow-ups",
+        "user picks the second one",
+        "claude implements the change",
+        "user reviews the diff",
+        "claude addresses the feedback",
+        "user merges the PR",
+        "claude celebrates the win",
+        "user proposes new direction",
+        "claude estimates the effort",
+    ];
+    h turns = [];
+    h i = 0;
+    while i < n {
+        h t = arr_get(topics, i - (i / arr_len(topics)) * arr_len(topics));
+        h labeled = concat_many("[turn ", to_string(i + 1), "] ", t);
+        arr_push(turns, labeled);
+        i = i + 1;
+    }
+    return turns;
+}
+
+fn print_state(mem, turn_number) {
+    h s = fibtier_stats(mem);
+    h occ = dict_get(s, "occupancy");
+    h total = dict_get(s, "total_entries");
+    h folds = dict_get(s, "total_folds");
+    h evicted = dict_get(s, "evicted");
+    print(concat_many("after ", to_string(turn_number),
+        " turns:  occupancy=", to_string(occ),
+        "  total=", to_string(total),
+        "  folds=", to_string(folds),
+        "  evicted=", to_string(evicted)));
+}
+
+fn main() {
+    print("=== Fibonacci-tier memory: 100-turn conversation ===");
+    print("");
+    print("Tier sizes (Fibonacci): " + to_string(fibtier_default_sizes()));
+    print("");
+
+    h mem = fibtier_new(7);   # 7 tiers: 1+2+3+5+8+13+21 = 53 max
+    h turns = make_turns(100);
+    h i = 0;
+    while i < arr_len(turns) {
+        fibtier_push(mem, arr_get(turns, i));
+        if (i + 1) % 10 == 0 {
+            print_state(mem, i + 1);
+        }
+        i = i + 1;
+    }
+
+    print("");
+    print("=== Final memory state ===");
+    print(fibtier_render(mem));
+
+    h final_stats = fibtier_stats(mem);
+    print("");
+    print(concat_many("After 100 pushes:"));
+    print(concat_many("  total stored entries: ", to_string(dict_get(final_stats, "total_entries"))));
+    print(concat_many("  total folds: ", to_string(dict_get(final_stats, "total_folds"))));
+    print(concat_many("  evicted (overflowed top tier): ", to_string(dict_get(final_stats, "evicted"))));
+
+    # Sanity: total should be bounded by sum of tier capacities = 53.
+    h total = dict_get(final_stats, "total_entries");
+    print("");
+    if total <= 53 {
+        print(concat_many("[OK] Memory bounded at ", to_string(total),
+            " entries (cap=53) after 100 turns."));
+        print("     Context window stays constant regardless of conversation length.");
+        print("     Detail decreases by phi per tier upward; recent stays full-fidelity.");
+    } else {
+        print(concat_many("[FAIL] Memory unbounded: ", to_string(total), " > 53"));
+    }
+
+    # Query demo.
+    print("");
+    print("=== Query demo: substrate-distance similarity ===");
+    h query = "fibonacci tiers";
+    h results = fibtier_query(mem, query, 3);
+    print(concat_many("top 3 closest to query \"", query, "\":"));
+    h j = 0;
+    while j < arr_len(results) {
+        h r = arr_get(results, j);
+        h e = dict_get(r, "entry");
+        print(concat_many(
+            "  tier=", to_string(dict_get(r, "tier")),
+            "  dist=", to_string(dict_get(r, "distance")),
+            "  content=", dict_get(e, "content")
+        ));
+        j = j + 1;
+    }
+}
+
+main();

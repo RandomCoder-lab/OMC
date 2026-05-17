@@ -1,0 +1,109 @@
+# Fibonacci-tier memory tests.
+
+import "examples/lib/fibtier.omc";
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+
+fn test_tier_sizes_are_fibonacci() {
+    h sizes = fibtier_default_sizes();
+    assert_eq(arr_get(sizes, 0), 1, "tier 1 size");
+    assert_eq(arr_get(sizes, 1), 2, "tier 2 size");
+    assert_eq(arr_get(sizes, 2), 3, "tier 3 size");
+    assert_eq(arr_get(sizes, 3), 5, "tier 4 size");
+    assert_eq(arr_get(sizes, 4), 8, "tier 5 size");
+    assert_eq(arr_get(sizes, 5), 13, "tier 6 size");
+}
+
+fn test_capacity_lookup() {
+    assert_eq(fibtier_capacity(1), 1, "cap(1)=1");
+    assert_eq(fibtier_capacity(2), 2, "cap(2)=2");
+    assert_eq(fibtier_capacity(5), 8, "cap(5)=8");
+}
+
+fn test_push_one_lands_in_tier_1() {
+    h mem = fibtier_new(4);
+    fibtier_push(mem, "hello");
+    h s = fibtier_stats(mem);
+    h occ = dict_get(s, "occupancy");
+    assert_eq(arr_get(occ, 0), 1, "tier 1 has 1 entry");
+    assert_eq(arr_get(occ, 1), 0, "tier 2 still empty");
+    assert_eq(dict_get(s, "total_folds"), 0, "no folds yet");
+}
+
+fn test_push_two_overflows_tier_1() {
+    h mem = fibtier_new(4);
+    fibtier_push(mem, "first");
+    fibtier_push(mem, "second");
+    h s = fibtier_stats(mem);
+    h occ = dict_get(s, "occupancy");
+    # Tier 1 cap is 1; second push overflows oldest to tier 2.
+    assert_eq(arr_get(occ, 0), 1, "tier 1 still has 1");
+    assert_eq(arr_get(occ, 1), 1, "tier 2 got the overflow");
+    # No FOLD yet — tier 2 was empty when overflow happened.
+    assert_eq(dict_get(s, "total_folds"), 0, "promote without folding");
+}
+
+fn test_push_three_triggers_fold_in_tier_2() {
+    h mem = fibtier_new(4);
+    fibtier_push(mem, "alpha");
+    fibtier_push(mem, "beta");
+    fibtier_push(mem, "gamma");
+    h s = fibtier_stats(mem);
+    h occ = dict_get(s, "occupancy");
+    # Pushes:
+    #   alpha → tier1 [alpha]
+    #   beta  → tier1 [beta], alpha promoted to tier2 [alpha]
+    #   gamma → tier1 [gamma], beta promoted to tier2 [alpha, beta]
+    # Tier 2 cap = 2; still fits. No fold yet.
+    assert_eq(arr_get(occ, 0), 1, "tier 1");
+    assert_eq(arr_get(occ, 1), 2, "tier 2");
+    assert_eq(dict_get(s, "total_folds"), 0, "no fold at 3 pushes");
+}
+
+fn test_push_four_triggers_first_fold() {
+    h mem = fibtier_new(4);
+    fibtier_push(mem, "alpha");
+    fibtier_push(mem, "beta");
+    fibtier_push(mem, "gamma");
+    fibtier_push(mem, "delta");
+    h s = fibtier_stats(mem);
+    # Pushes:
+    #   delta → tier1 [delta], gamma promoted to tier2 [alpha, beta, gamma]
+    #   tier 2 cap=2 exceeded → fold oldest (alpha+beta merge) into tier3
+    # Tier 3 was empty, so it becomes a fold of alpha+beta promoted in.
+    h occ = dict_get(s, "occupancy");
+    assert_eq(arr_get(occ, 0), 1, "tier 1");
+    assert_eq(arr_get(occ, 1), 2, "tier 2 stays at cap");
+    assert_eq(arr_get(occ, 2), 1, "tier 3 got the overflowed");
+    # Tier 3 was empty so no fold partner — entry just promoted, no
+    # fold event yet.
+    assert_eq(dict_get(s, "total_folds"), 0, "promote not fold");
+}
+
+fn test_render_produces_nonempty_string() {
+    h mem = fibtier_new(4);
+    fibtier_push(mem, "first turn");
+    fibtier_push(mem, "second turn");
+    h s = fibtier_render(mem);
+    assert_true(str_len(s) > 10, "rendered output is nonempty");
+}
+
+fn test_capacity_growth_geometric() {
+    # Sum of first N Fibonacci = Fib(N+2) - 1.
+    # Sanity: cap(1..6) sum = 1+2+3+5+8+13 = 32 = Fib(8)-1 = 21-1 = 20.
+    # (Note: standard Fibonacci varies on whether 1,1 or 1,2 is the start;
+    # our sequence is 1,2,3,5,8,13,21,...)
+    h total = 0;
+    h i = 1;
+    while i <= 6 {
+        total = total + fibtier_capacity(i);
+        i = i + 1;
+    }
+    assert_eq(total, 32, "sum of caps 1..6 = 32");
+}

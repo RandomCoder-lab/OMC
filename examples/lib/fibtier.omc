@@ -1,0 +1,317 @@
+# Fibonacci-tier memory — substrate-native context buffer.
+#
+# Context grows linearly in time but its IMPORTANCE is power-law.
+# Recent entries matter at full detail; older entries matter as
+# abstractions. Fibonacci-tier memory encodes both axes:
+#
+#   Tier 1: 1 slot   (current focus)
+#   Tier 2: 2 slots  (active sub-themes)
+#   Tier 3: 3 slots  (recent decisions)
+#   Tier 4: 5 slots  (session arc)
+#   Tier 5: 8 slots  (session history)
+#   Tier 6: 13 slots (multi-session themes)
+#   Tier 7: 21 slots (long-term patterns)
+#   ...
+#
+# When tier N fills, its oldest entry FOLDS into tier N+1, combining
+# with whatever's already there to form a more abstract representation.
+# Total capacity is bounded; information density decreases by phi
+# at each tier upward.
+#
+# The fold operation is the interesting primitive:
+#   - new_content = concat of folded entries (or summary)
+#   - new_canonical_hash = fnv1a(combined canonical form)
+#   - tracks source hashes so the lineage is content-addressed
+#
+# Composes with everything OMC already ships:
+#   - canonical_hash: identity (dedupe across tiers)
+#   - geodesic_distance: which entries to fold first (closest pair)
+#   - Fibonacci attractor table: the tier sizes themselves
+#   - omc_codec_encode: compress entries before folding
+#   - omc-kernel: persistent store for folded representations
+
+# ---------------------------------------------------------------------------
+# Tier sizing — explicit Fibonacci sequence
+# ---------------------------------------------------------------------------
+
+fn fibtier_default_sizes() {
+    # Standard Fibonacci sequence (skipping the leading 1 since tier 1 = 1).
+    # 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144 = ~280 total slots if all full.
+    return [1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144];
+}
+
+# Capacity of a tier (1-indexed).
+fn fibtier_capacity(tier_idx) {
+    h sizes = fibtier_default_sizes();
+    if tier_idx < 1 || tier_idx > arr_len(sizes) { return 0; }
+    return arr_get(sizes, tier_idx - 1);
+}
+
+# ---------------------------------------------------------------------------
+# Memory construction
+# ---------------------------------------------------------------------------
+
+fn fibtier_new(max_tiers) {
+    h tiers = [];
+    h i = 0;
+    while i < max_tiers {
+        arr_push(tiers, []);     # each tier is an array of entries
+        i = i + 1;
+    }
+    h mem = dict_new();
+    dict_set(mem, "tiers", tiers);
+    dict_set(mem, "max_tiers", max_tiers);
+    dict_set(mem, "total_pushes", 0);
+    dict_set(mem, "total_folds", 0);
+    dict_set(mem, "evicted", 0);       # entries that fell off the top tier
+    return mem;
+}
+
+# ---------------------------------------------------------------------------
+# Entry creation
+# ---------------------------------------------------------------------------
+
+fn _fibtier_make_entry(content, sources) {
+    h hash = fnv1a_hash(content);
+    h entry = dict_new();
+    dict_set(entry, "content", content);
+    dict_set(entry, "canonical_hash", hash);
+    dict_set(entry, "attractor_distance", attractor_distance(hash));
+    dict_set(entry, "sources", sources);    # canonical hashes that folded into this
+    dict_set(entry, "size", str_len(content));
+    return entry;
+}
+
+# ---------------------------------------------------------------------------
+# Fold operation — collapse two entries into one in the next tier
+# ---------------------------------------------------------------------------
+
+# Default fold: concatenate canonical forms, mark as a fold.
+# For prose, this is the most lossless. Smarter folds (LLM summarization
+# via py_callback) can replace this when wired through Python.
+fn fibtier_fold_default(entry_a, entry_b) {
+    h combined = concat_many(
+        "[FOLD ", to_string(dict_get(entry_a, "canonical_hash")),
+        "+", to_string(dict_get(entry_b, "canonical_hash")), "] ",
+        dict_get(entry_a, "content"),
+        " || ",
+        dict_get(entry_b, "content")
+    );
+    h sources_a = dict_get(entry_a, "sources");
+    h sources_b = dict_get(entry_b, "sources");
+    h all_sources = [];
+    h i = 0;
+    while i < arr_len(sources_a) {
+        arr_push(all_sources, arr_get(sources_a, i));
+        i = i + 1;
+    }
+    i = 0;
+    while i < arr_len(sources_b) {
+        arr_push(all_sources, arr_get(sources_b, i));
+        i = i + 1;
+    }
+    return _fibtier_make_entry(combined, all_sources);
+}
+
+# ---------------------------------------------------------------------------
+# Cascade fold — when tier N overflows, fold its oldest entry into N+1
+# ---------------------------------------------------------------------------
+
+fn _fibtier_cascade_overflow(mem, tier_idx) {
+    h tiers = dict_get(mem, "tiers");
+    h max_tiers = dict_get(mem, "max_tiers");
+    if tier_idx > max_tiers { return mem; }
+    h tier = arr_get(tiers, tier_idx - 1);
+    h capacity = fibtier_capacity(tier_idx);
+    while arr_len(tier) > capacity {
+        # Pull the oldest entry off this tier.
+        h oldest = arr_get(tier, 0);
+        h new_tier = [];
+        h k = 1;
+        while k < arr_len(tier) { arr_push(new_tier, arr_get(tier, k)); k = k + 1; }
+        arr_set(tiers, tier_idx - 1, new_tier);
+        tier = new_tier;
+
+        if tier_idx == max_tiers {
+            # Top tier overflow → entry is evicted.
+            dict_set(mem, "evicted", dict_get(mem, "evicted") + 1);
+        } else {
+            # Promote (append) into the next tier as a fresh entry.
+            # Folding happens ONLY when that tier subsequently exceeds
+            # its own cap — handled by the recursive cascade below.
+            h next_tier = arr_get(tiers, tier_idx);
+            arr_push(next_tier, oldest);
+            arr_set(tiers, tier_idx, next_tier);
+            # If the next tier is now over cap, recurse: it will fold
+            # its OWN oldest pair when promoting upward.
+            if arr_len(next_tier) > fibtier_capacity(tier_idx + 1) {
+                _fibtier_cascade_overflow_with_fold(mem, tier_idx + 1);
+            }
+        }
+    }
+    return mem;
+}
+
+# When a tier overflows AND is being asked to promote, we fold its
+# oldest TWO entries together first, then push the folded result
+# upward (instead of promoting one raw entry).
+fn _fibtier_cascade_overflow_with_fold(mem, tier_idx) {
+    h tiers = dict_get(mem, "tiers");
+    h max_tiers = dict_get(mem, "max_tiers");
+    if tier_idx > max_tiers { return mem; }
+    h tier = arr_get(tiers, tier_idx - 1);
+    h capacity = fibtier_capacity(tier_idx);
+    while arr_len(tier) > capacity {
+        # Take the oldest TWO entries and fold them.
+        if arr_len(tier) < 2 {
+            # Edge: 1 entry but already over cap (cap=0 only) — just evict.
+            h new_tier = [];
+            h k = 1;
+            while k < arr_len(tier) { arr_push(new_tier, arr_get(tier, k)); k = k + 1; }
+            arr_set(tiers, tier_idx - 1, new_tier);
+            tier = new_tier;
+            dict_set(mem, "evicted", dict_get(mem, "evicted") + 1);
+        } else {
+            h a = arr_get(tier, 0);
+            h b = arr_get(tier, 1);
+            h folded = fibtier_fold_default(a, b);
+            dict_set(mem, "total_folds", dict_get(mem, "total_folds") + 1);
+            # Rebuild tier without those two.
+            h new_tier = [];
+            h k = 2;
+            while k < arr_len(tier) { arr_push(new_tier, arr_get(tier, k)); k = k + 1; }
+            arr_set(tiers, tier_idx - 1, new_tier);
+            tier = new_tier;
+            # Promote the folded entry upward.
+            if tier_idx == max_tiers {
+                dict_set(mem, "evicted", dict_get(mem, "evicted") + 1);
+            } else {
+                h next_tier = arr_get(tiers, tier_idx);
+                arr_push(next_tier, folded);
+                arr_set(tiers, tier_idx, next_tier);
+                if arr_len(next_tier) > fibtier_capacity(tier_idx + 1) {
+                    _fibtier_cascade_overflow_with_fold(mem, tier_idx + 1);
+                }
+            }
+        }
+    }
+    return mem;
+}
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+# Push an entry. Returns the memory (for chaining).
+fn fibtier_push(mem, content) {
+    h tiers = dict_get(mem, "tiers");
+    h entry = _fibtier_make_entry(content, [fnv1a_hash(content)]);
+    h tier1 = arr_get(tiers, 0);
+    arr_push(tier1, entry);
+    arr_set(tiers, 0, tier1);
+    dict_set(mem, "total_pushes", dict_get(mem, "total_pushes") + 1);
+    _fibtier_cascade_overflow(mem, 1);
+    return mem;
+}
+
+# Stats snapshot.
+fn fibtier_stats(mem) {
+    h tiers = dict_get(mem, "tiers");
+    h occupancy = [];
+    h total = 0;
+    h i = 0;
+    while i < arr_len(tiers) {
+        h n = arr_len(arr_get(tiers, i));
+        arr_push(occupancy, n);
+        total = total + n;
+        i = i + 1;
+    }
+    h s = dict_new();
+    dict_set(s, "occupancy", occupancy);
+    dict_set(s, "total_entries", total);
+    dict_set(s, "total_pushes", dict_get(mem, "total_pushes"));
+    dict_set(s, "total_folds", dict_get(mem, "total_folds"));
+    dict_set(s, "evicted", dict_get(mem, "evicted"));
+    return s;
+}
+
+# Render the memory as an LLM-readable context prompt.
+# Most-detailed (tier 1) first; abstractions higher up.
+fn fibtier_render(mem) {
+    h tiers = dict_get(mem, "tiers");
+    h out = "";
+    h i = 0;
+    while i < arr_len(tiers) {
+        h tier = arr_get(tiers, i);
+        if arr_len(tier) > 0 {
+            out = concat_many(out, "\n[tier ", to_string(i + 1),
+                " — cap=", to_string(fibtier_capacity(i + 1)),
+                ", filled=", to_string(arr_len(tier)), "]\n");
+            h j = 0;
+            while j < arr_len(tier) {
+                h entry = arr_get(tier, j);
+                out = concat_many(out, "  - ", dict_get(entry, "content"), "\n");
+                j = j + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+# Substrate-distance query: rank all entries by attractor-distance
+# to the query's canonical hash; return top-k.
+fn fibtier_query(mem, query_text, top_k) {
+    h q_hash = fnv1a_hash(query_text);
+    h tiers = dict_get(mem, "tiers");
+    h scored = [];
+    h i = 0;
+    while i < arr_len(tiers) {
+        h tier = arr_get(tiers, i);
+        h j = 0;
+        while j < arr_len(tier) {
+            h entry = arr_get(tier, j);
+            h dist = q_hash - dict_get(entry, "canonical_hash");
+            if dist < 0 { dist = 0 - dist; }
+            h r = dict_new();
+            dict_set(r, "tier", i + 1);
+            dict_set(r, "entry", entry);
+            dict_set(r, "distance", dist);
+            arr_push(scored, r);
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    # Sort by distance ascending — return top_k closest.
+    # Pure-OMC sort: simple selection sort (corpus is small).
+    h sorted = [];
+    h taken = dict_new();
+    h k = 0;
+    while k < top_k && k < arr_len(scored) {
+        h best_idx = -1;
+        # Initialize best_idx by first unclaimed entry instead of a
+        # large-int sentinel — i64 distances can exceed any literal
+        # we'd write and the comparison was failing silently.
+        h best_dist = 0;
+        h ii = 0;
+        while ii < arr_len(scored) {
+            if !dict_has(taken, to_string(ii)) {
+                h d = dict_get(arr_get(scored, ii), "distance");
+                if best_idx == -1 {
+                    best_idx = ii;
+                    best_dist = d;
+                } elif d < best_dist {
+                    best_dist = d;
+                    best_idx = ii;
+                }
+            }
+            ii = ii + 1;
+        }
+        if best_idx >= 0 {
+            arr_push(sorted, arr_get(scored, best_idx));
+            dict_set(taken, to_string(best_idx), true);
+        }
+        k = k + 1;
+    }
+    return sorted;
+}
