@@ -1,0 +1,184 @@
+# Prometheus checkpoint demo — content-addressed model weights.
+#
+# Demonstrates the substrate-moat property: a trained model's weights
+# get a canonical hash that is invariant under in-memory representation.
+# Two training runs that converge to the same weights → same hash.
+# Two processes loading the same .omcs bundle → same hash → identical
+# inference outputs.
+#
+# Flow:
+#   1. Train tiny LM on "abc..." bigram (same as prometheus_tinylm)
+#   2. Serialize trained weights via prom_serialize_model
+#   3. Compute canonical hash of the bundle
+#   4. Stringify to JSON; write to disk; also store in the kernel
+#   5. SIMULATE A FRESH PROCESS: tape_reset(), discard model dict
+#   6. Read JSON from disk, json_parse, prom_load_model
+#   7. Verify predictions are IDENTICAL to step 1's trained model
+#
+# Stop condition: post-load predictions match pre-save predictions
+# byte-for-byte; canonical hash before == canonical hash after.
+
+import "examples/lib/prometheus.omc";
+
+# ---------------------------------------------------------------------------
+# Reuse the same model architecture + training loop as
+# examples/prometheus_tinylm.omc
+# ---------------------------------------------------------------------------
+
+fn make_corpus() {
+    h chars = ["a", "b", "c"];
+    h text = "abcabcabcabcabcabcabcabcabc";
+    h ids = [];
+    h i = 0;
+    while i < str_len(text) {
+        h ch = str_slice(text, i, i + 1);
+        h idx = 0;
+        if ch == "a" { idx = 0; }
+        elif ch == "b" { idx = 1; }
+        elif ch == "c" { idx = 2; }
+        arr_push(ids, idx);
+        i = i + 1;
+    }
+    h corpus = dict_new();
+    dict_set(corpus, "chars", chars);
+    dict_set(corpus, "vocab", 3);
+    dict_set(corpus, "ids", ids);
+    return corpus;
+}
+
+fn build_model(vocab, hidden, rng_state) {
+    h L1 = prom_linear_new(vocab, hidden, rng_state);
+    h L2 = prom_linear_new(hidden, vocab, dict_get(L1, "rng_state"));
+    h model = dict_new();
+    dict_set(model, "L1", L1);
+    dict_set(model, "L2", L2);
+    return model;
+}
+
+fn forward(model, x_id) {
+    h L1 = dict_get(model, "L1");
+    h L2 = dict_get(model, "L2");
+    h h_pre = prom_linear_forward(L1, x_id);
+    h h_post = prom_relu(h_pre);
+    h logits = prom_linear_forward(L2, h_post);
+    return logits;
+}
+
+fn predict_all(model, vocab, chars) {
+    h preds = [];
+    h c = 0;
+    while c < vocab {
+        h x = prom_one_hot(c, vocab);
+        h pred_id = forward(model, x);
+        h logits = tape_value(pred_id);
+        h idx = prom_argmax_row(logits);
+        arr_push(preds, arr_get(chars, idx));
+        c = c + 1;
+    }
+    return preds;
+}
+
+fn train_model(model, corpus, steps, lr) {
+    h ids = dict_get(corpus, "ids");
+    h vocab = dict_get(corpus, "vocab");
+    h n_pairs = arr_len(ids) - 1;
+    h params = prom_collect_params([dict_get(model, "L1"), dict_get(model, "L2")]);
+    h step = 0;
+    while step < steps {
+        h k = step % n_pairs;
+        h x = prom_one_hot(arr_get(ids, k), vocab);
+        h target = prom_one_hot(arr_get(ids, k + 1), vocab);
+        h pred = forward(model, x);
+        h loss = prom_mse_loss(pred, target);
+        tape_backward(loss);
+        prom_sgd_step(params, lr);
+        step = step + 1;
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Main: train → save → wipe → load → verify
+# ---------------------------------------------------------------------------
+
+fn main() {
+    print("=== Prometheus checkpoint round-trip ===");
+    h corpus = make_corpus();
+    h vocab = dict_get(corpus, "vocab");
+    h chars = dict_get(corpus, "chars");
+
+    # ---- Phase 1: train ----
+    print("\n[phase 1] training fresh model ...");
+    tape_reset();
+    h model_a = build_model(vocab, 8, 42);
+    train_model(model_a, corpus, 200, 0.05);
+    h preds_a = predict_all(model_a, vocab, chars);
+    print(concat_many("  predictions: ", to_string(preds_a)));
+
+    # ---- Phase 2: serialize + hash ----
+    print("\n[phase 2] serializing + hashing ...");
+    h bundle_a = prom_serialize_model(model_a, ["L1", "L2"]);
+    h hash_a = prom_model_hash(bundle_a);
+    print(concat_many("  canonical_hash = ", to_string(hash_a)));
+    h json_a = json_stringify(bundle_a);
+    print(concat_many("  serialized bytes = ", to_string(str_len(json_a))));
+
+    # ---- Phase 3: write to disk ----
+    h ckpt_path = "/tmp/prometheus_tinylm.json";
+    write_file(ckpt_path, json_a);
+    print(concat_many("  wrote ", ckpt_path));
+
+    # ---- Phase 4: SIMULATE FRESH PROCESS ----
+    # Reset the tape (drops every node from phase 1) and discard the
+    # model reference. From the language's perspective we're now in
+    # a fresh state — model_a is gone, only the JSON on disk remains.
+    print("\n[phase 4] simulating fresh process — tape_reset() ...");
+    tape_reset();
+    # model_a's tape vars are now invalid. Confirm we can't use them:
+    h confirm_wiped = false;
+    try {
+        h _ = tape_value(dict_get(dict_get(model_a, "L1"), "W"));
+    } catch e {
+        confirm_wiped = true;
+    }
+    print(concat_many("  pre-load tape access raises error: ", to_string(confirm_wiped)));
+
+    # ---- Phase 5: load from disk ----
+    print("\n[phase 5] reading + loading ...");
+    h json_b = read_file(ckpt_path);
+    h bundle_b = json_parse(json_b);
+    h model_b = prom_load_model(bundle_b);
+    h preds_b = predict_all(model_b, vocab, chars);
+    print(concat_many("  predictions: ", to_string(preds_b)));
+
+    # ---- Phase 6: verify hash + predictions match ----
+    print("\n[phase 6] verifying ...");
+    h hash_b = prom_model_hash(bundle_b);
+    print(concat_many("  hash before save: ", to_string(hash_a)));
+    print(concat_many("  hash after load:  ", to_string(hash_b)));
+    h hash_match = hash_a == hash_b;
+    print(concat_many("  hash match: ", to_string(hash_match)));
+
+    h preds_match = true;
+    h i = 0;
+    while i < arr_len(preds_a) {
+        if arr_get(preds_a, i) != arr_get(preds_b, i) {
+            preds_match = false;
+        }
+        i = i + 1;
+    }
+    print(concat_many("  predictions match: ", to_string(preds_match)));
+
+    # ---- Verdict ----
+    print("");
+    if hash_match && preds_match {
+        print("[OK] Content-addressed checkpoint round-trip verified.");
+        print("     Same canonical hash + bit-identical predictions");
+        print("     across a simulated process boundary.");
+    } else {
+        print("[FAIL] Round-trip broken.");
+        if !hash_match { print("       Hash mismatch."); }
+        if !preds_match { print("       Predictions differ."); }
+    }
+}
+
+main();

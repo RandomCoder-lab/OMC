@@ -218,3 +218,104 @@ fn prom_collect_params(layers) {
     }
     return out;
 }
+
+# ---------------------------------------------------------------------------
+# Checkpoint I/O — content-addressed model weights via canonical hash.
+#
+# Save: serialize every layer's (W, b) tape values to a JSON blob,
+# canonicalize via key-sort (the standard "json" kind in omc-kernel),
+# return the canonical hex hash. The blob can be written to disk,
+# shipped over OMC-PROTOCOL, or stored in the kernel — the hash IS
+# the identity.
+#
+# Load: take a JSON blob; reconstruct each layer's params as fresh
+# tape vars holding the saved values; return a new model dict that
+# threads through the same forward() function the original used.
+#
+# The substrate moat: two trained models with IDENTICAL weights but
+# different in-memory representations (different tape IDs, different
+# session order) collapse to the SAME canonical hash. Dedup, ship,
+# verify integrity all become substrate-native operations.
+# ---------------------------------------------------------------------------
+
+fn _prom_serialize_linear(layer) {
+    h W_id = dict_get(layer, "W");
+    h b_id = dict_get(layer, "b");
+    h W_vals = tape_value(W_id);
+    h b_vals = tape_value(b_id);
+    h entry = dict_new();
+    dict_set(entry, "kind", "linear");
+    dict_set(entry, "in_dim", dict_get(layer, "in_dim"));
+    dict_set(entry, "out_dim", dict_get(layer, "out_dim"));
+    dict_set(entry, "W", W_vals);
+    dict_set(entry, "b", b_vals);
+    return entry;
+}
+
+# Serialize an arbitrary model dict that names its layers via
+# string keys to layer dicts. Returns a {layers: [{name, entry}],
+# meta: {...}} struct ready for json_stringify.
+fn prom_serialize_model(model, layer_names) {
+    h out_layers = [];
+    h i = 0;
+    while i < arr_len(layer_names) {
+        h name = arr_get(layer_names, i);
+        h layer = dict_get(model, name);
+        h entry = dict_new();
+        dict_set(entry, "name", name);
+        dict_set(entry, "data", _prom_serialize_linear(layer));
+        arr_push(out_layers, entry);
+        i = i + 1;
+    }
+    h bundle = dict_new();
+    dict_set(bundle, "format", "prometheus_model_v1");
+    dict_set(bundle, "layers", out_layers);
+    return bundle;
+}
+
+# Compute the canonical hash that addresses a serialized model.
+# Two models with the same weights (in canonical-JSON form) collapse
+# to the same hash regardless of session or insertion order.
+#
+# Strategy: re-parse + re-serialize via OMC's deterministic json
+# round-trip (sorts dict keys, normalizes float format), then fnv1a
+# the canonical string. Two models with identical weights but
+# different in-memory ordering land on the same hash.
+fn prom_model_hash(bundle) {
+    h j = json_stringify(bundle);
+    h reparsed = json_parse(j);
+    h canon = json_stringify(reparsed);
+    return fnv1a_hash(canon);
+}
+
+# Reconstruct one Linear layer from a serialized entry. Creates
+# fresh tape_var nodes — caller is responsible for calling
+# tape_reset() first if they want a clean slate.
+fn _prom_load_linear(entry) {
+    h data = dict_get(entry, "data");
+    h W_node = tape_var(dict_get(data, "W"));
+    h b_node = tape_var(dict_get(data, "b"));
+    h layer = dict_new();
+    dict_set(layer, "kind", "linear");
+    dict_set(layer, "in_dim", dict_get(data, "in_dim"));
+    dict_set(layer, "out_dim", dict_get(data, "out_dim"));
+    dict_set(layer, "W", W_node);
+    dict_set(layer, "b", b_node);
+    return layer;
+}
+
+# Reconstruct a model from a serialized bundle. Returns a dict keyed
+# by layer name, suitable for the same forward() the caller used
+# during training.
+fn prom_load_model(bundle) {
+    h layers = dict_get(bundle, "layers");
+    h model = dict_new();
+    h i = 0;
+    while i < arr_len(layers) {
+        h entry = arr_get(layers, i);
+        h name = dict_get(entry, "name");
+        dict_set(model, name, _prom_load_linear(entry));
+        i = i + 1;
+    }
+    return model;
+}
