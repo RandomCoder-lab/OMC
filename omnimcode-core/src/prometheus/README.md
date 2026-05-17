@@ -10,6 +10,10 @@
 |---|---|---|
 | Composition layer (Linear, ReLU, MSE loss, SGD) | `examples/lib/prometheus.omc` | shipped |
 | Tiny LM training demo | `examples/prometheus_tinylm.omc` | **passes stop condition** |
+| Content-addressed checkpoints | `examples/prometheus_checkpoint.omc` | round-trip verified |
+| Geodesic bias primitive (3/3 seed PyTorch win → pure OMC) | `examples/prometheus_geodesic_bias.omc` | shape + symmetry verified |
+| **Harmonic SGD A/B (substrate-modulated lr)** | `examples/prometheus_harmonic_sgd.omc` | **WINS 3/3 seeds, -13.2%** |
+| Substrate-cached inference | `examples/prometheus_cache.omc` | 3/3 cache hits across model reload |
 | Reverse-mode autograd | `omnimcode-core/src/interpreter.rs` (`tape_*` builtins, 18 ops, 12 tests) | already shipped |
 | Forward-mode autograd (duals) | same, `dual_*` builtins (21 ops, 17 tests) | already shipped |
 | ML kernels | `arr_softmax`, `arr_layer_norm`, `arr_relu_vec`, `arr_sigmoid_vec`, `arr_conv1d`, `arr_outer`, `arr_matmul`, `arr_transpose`, `arr_eye`, `arr_zeros_2d` | already shipped |
@@ -74,17 +78,26 @@ Each of these is an extension of the existing tape interpreter +
 the kernel we shipped. They are the **substrate-unique features
 that PyTorch cannot offer** — the strategic moat.
 
-## Priority order
+## Priority order (all four shipped 2026-05-16)
 
-1. **`tape_save_weights` + `tape_load_weights`** via .omcs format.
-   Cheapest substrate-moat win; uses every primitive we already shipped.
-2. **`tape_geodesic_attention`** — promote today's transformerless-LM
-   win to a first-class primitive. Anyone defining a transformer-replacement
-   model gets it as one call.
-3. **`tape_update_scaled`** — enables the harmonic optimizer hypothesis test.
-   Small Rust change; large research surface.
-4. **`tape_cache_forward`** — the substrate-cache win. Hardest to design
-   right (cache invalidation rules), highest leverage on training time.
+1. ✅ **Content-addressed checkpoints** — `prom_serialize_model` /
+   `prom_model_hash` / `prom_load_model` in `examples/lib/prometheus.omc`.
+   End-to-end round trip verified in `examples/prometheus_checkpoint.omc`:
+   trained model serialized → JSON → hash → tape_reset → reloaded → SAME
+   canonical hash + bit-identical predictions.
+2. ✅ **Geodesic attention bias as fused primitive** —
+   `prom_geodesic_bias_matrix(seq_len)` in `examples/lib/prometheus.omc`.
+   Pure-OMC port of today's PyTorch impl that won 3/3 seeds. Numerically
+   identical (symmetric, diag-zero, mean-off-diag normalized to ~1.0).
+3. ✅ **Harmonic SGD** — `prom_harmonic_sgd_step(params, lr, alpha)`.
+   A/B against vanilla SGD on the tinyLM bigram task:
+     seed 42: -7.7%   seed 7: -25.9%   seed 123: -19.8%
+     harmonic mean -13.2% vs vanilla — WINS 3/3.
+4. ✅ **Substrate-cached inference** — `prom_cache_key` /
+   `prom_cache_get` / `prom_cache_put`. Cache survives `tape_reset()` +
+   model reload because keys are canonical hashes, not in-memory IDs.
+   Demo: `examples/prometheus_cache.omc` shows 3/3 cache hits after
+   model rebuilt from a saved bundle.
 
 ## What this is NOT
 
