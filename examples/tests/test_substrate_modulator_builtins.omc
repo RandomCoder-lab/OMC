@@ -1,0 +1,118 @@
+# Tests for the v0.8.4 substrate-modulator Rust builtins.
+#
+# substrate_smod_matrix(scores, alpha) and substrate_resample_matrix(v, scale)
+# are Rust-native ports of the inner-loop helpers that lived in
+# prometheus.omc as `_prom_smod_matrix` / `_prom_substrate_resample_matrix`.
+#
+# The math must be identical — both helpers in prometheus.omc now just
+# wrap the corresponding builtin, so any divergence here would be a
+# semantics regression.
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+
+fn approx_eq(a, b, tol) {
+    h d = a - b;
+    if d < 0.0 { d = 0.0 - d; }
+    return d <= tol;
+}
+
+# -----------------------------------------------------------------
+# substrate_smod_matrix
+# -----------------------------------------------------------------
+
+fn test_smod_alpha_zero_is_identity() {
+    # alpha=0 → 1/(1+0·d) = 1 for every cell, regardless of value.
+    h m = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]];
+    h out = substrate_smod_matrix(m, 0.0);
+    h r0 = arr_get(out, 0);
+    h r1 = arr_get(out, 1);
+    assert_true(approx_eq(arr_get(r0, 0), 1.0, 1e-9), "[0][0]=1");
+    assert_true(approx_eq(arr_get(r0, 2), 1.0, 1e-9), "[0][2]=1");
+    assert_true(approx_eq(arr_get(r1, 1), 1.0, 1e-9), "[1][1]=1");
+}
+
+fn test_smod_on_attractor_cell_is_one() {
+    # 8 IS a Fibonacci attractor, so attractor_distance(8)=0, modulator=1
+    # regardless of alpha.
+    h m = [[8.0, 13.0], [21.0, 34.0]];
+    h out = substrate_smod_matrix(m, 2.0);
+    h r0 = arr_get(out, 0);
+    h r1 = arr_get(out, 1);
+    assert_true(approx_eq(arr_get(r0, 0), 1.0, 1e-9), "8 attractor");
+    assert_true(approx_eq(arr_get(r0, 1), 1.0, 1e-9), "13 attractor");
+    assert_true(approx_eq(arr_get(r1, 0), 1.0, 1e-9), "21 attractor");
+}
+
+fn test_smod_off_attractor_dampens() {
+    # 7 is 1 away from 8 (attractor). With alpha=1.0 → 1/(1+1·1) = 0.5
+    h m = [[7.0]];
+    h out = substrate_smod_matrix(m, 1.0);
+    # 1×1 with two-dim input is auto-unwrapped to a 1×1 inner row, so
+    # arr_get(out, 0) returns the row [0.5].
+    h row = arr_get(out, 0);
+    assert_true(approx_eq(arr_get(row, 0), 0.5, 1e-9), "7→0.5 at α=1");
+}
+
+fn test_smod_one_d_array_returns_one_d() {
+    # 1D input → 1D output, same shape semantics as `tape_value` of a
+    # 1-row matrix.
+    h v = [0.0, 1.0, 2.0, 3.0];   # all attractors; modulator=1 everywhere
+    h out = substrate_smod_matrix(v, 1.0);
+    assert_true(arr_len(out) == 4, "1D out length matches input");
+    assert_true(approx_eq(arr_get(out, 0), 1.0, 1e-9), "0 attractor");
+    assert_true(approx_eq(arr_get(out, 3), 1.0, 1e-9), "3 attractor");
+}
+
+# -----------------------------------------------------------------
+# substrate_resample_matrix
+# -----------------------------------------------------------------
+
+fn test_resample_on_attractor_stays_one() {
+    # cell * scale = 8*1 = 8 IS attractor → d=0 → modulator=1
+    h m = [[8.0, 13.0]];
+    h out = substrate_resample_matrix(m, 1.0);
+    h row = arr_get(out, 0);
+    assert_true(approx_eq(arr_get(row, 0), 1.0, 1e-9), "8 on attractor");
+    assert_true(approx_eq(arr_get(row, 1), 1.0, 1e-9), "13 on attractor");
+}
+
+fn test_resample_off_attractor_dampens() {
+    # cell 0.7 with scale 10 → 7. d(7)=1. modulator = 1/(1+1/10) = 0.909...
+    h m = [[0.7]];
+    h out = substrate_resample_matrix(m, 10.0);
+    h row = arr_get(out, 0);
+    h expected = 1.0 / (1.0 + 1.0 / 10.0);   # 0.90909...
+    assert_true(approx_eq(arr_get(row, 0), expected, 1e-6),
+                "0.7@10 off-attractor dampens");
+}
+
+# scale=0 rejection lives in the Rust builtin; it would raise. We don't
+# have try/catch in OMC, so we rely on the builtin error message via
+# a separate exit-code test if needed. (Skipped here — Rust unit tests
+# could cover it; the OMC-side won't exercise that path in practice.)
+
+# -----------------------------------------------------------------
+# Regression: existing OMC helpers (now wrappers) still work
+# -----------------------------------------------------------------
+
+import "examples/lib/prometheus.omc";
+
+fn test_wrapper_smod_matches_builtin() {
+    h scores = [[3.0, 7.0], [8.0, 12.0]];
+    h via_wrapper = _prom_smod_matrix(scores, 1.0);
+    h via_builtin = substrate_smod_matrix(scores, 1.0);
+    h r0_w = arr_get(via_wrapper, 0);
+    h r0_b = arr_get(via_builtin, 0);
+    assert_true(approx_eq(arr_get(r0_w, 0), arr_get(r0_b, 0), 1e-12), "[0][0]");
+    assert_true(approx_eq(arr_get(r0_w, 1), arr_get(r0_b, 1), 1e-12), "[0][1]");
+}
+
+fn test_wrapper_resample_matches_builtin() {
+    h v = [[0.2, 0.5], [0.8, 1.3]];
+    h via_wrapper = _prom_substrate_resample_matrix(v, 10.0);
+    h via_builtin = substrate_resample_matrix(v, 10.0);
+    h r0_w = arr_get(via_wrapper, 0);
+    h r0_b = arr_get(via_builtin, 0);
+    assert_true(approx_eq(arr_get(r0_w, 0), arr_get(r0_b, 0), 1e-12), "[0][0]");
+    assert_true(approx_eq(arr_get(r0_w, 1), arr_get(r0_b, 1), 1e-12), "[0][1]");
+}

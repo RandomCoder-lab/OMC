@@ -700,24 +700,14 @@ fn prom_attention_forward(layer, x_id) {
 # Compute the per-cell S-MOD modulation matrix from a [N, T] scores
 # value snapshot. Each cell: 1 / (1 + alpha * attractor_distance(cell)).
 # Used as a non-differentiable const inside the tape's S-MOD path.
+#
+# v0.8.4 — defers to the Rust builtin `substrate_smod_matrix`. The
+# OMC-side inner loop over N×N scores was the v0.8.2 wall-clock
+# bottleneck (single-digit ms matmul drowned by tens of seconds in
+# this iteration). Wrapping the native call here keeps the public
+# signature stable; any caller of this helper picks up the speedup.
 fn _prom_smod_matrix(scores_val, alpha) {
-    h rows = arr_len(scores_val);
-    h out = [];
-    h i = 0;
-    while i < rows {
-        h row = arr_get(scores_val, i);
-        h new_row = [];
-        h j = 0;
-        while j < arr_len(row) {
-            h s = arr_get(row, j);
-            h d = attractor_distance(s);
-            arr_push(new_row, 1.0 / (1.0 + alpha * d));
-            j = j + 1;
-        }
-        arr_push(out, new_row);
-        i = i + 1;
-    }
-    return out;
+    return substrate_smod_matrix(scores_val, alpha);
 }
 
 # Per-cell substrate-resample modulation matrix from a [N, D] value
@@ -726,25 +716,10 @@ fn _prom_smod_matrix(scores_val, alpha) {
 # when already on-attractor. Used as a non-differentiable const inside
 # the tape graph, same pattern as _prom_smod_matrix. Won -2.52% val on
 # top of L1-MH + S-MOD α=1.0 when applied to V (3/3 seeds).
+#
+# v0.8.4 — defers to the Rust builtin `substrate_resample_matrix`.
 fn _prom_substrate_resample_matrix(v_val, scale) {
-    h rows = arr_len(v_val);
-    h out = [];
-    h i = 0;
-    while i < rows {
-        h row = arr_get(v_val, i);
-        h new_row = [];
-        h j = 0;
-        while j < arr_len(row) {
-            h x = arr_get(row, j);
-            h scaled = x * scale;
-            h d = attractor_distance(scaled);
-            arr_push(new_row, 1.0 / (1.0 + d / scale));
-            j = j + 1;
-        }
-        arr_push(out, new_row);
-        i = i + 1;
-    }
-    return out;
+    return substrate_resample_matrix(v_val, scale);
 }
 
 # Apply post-projection substrate resampling to a tape node. Returns
@@ -1108,38 +1083,22 @@ fn prom_adamw_step(state) {
     h bias1 = 1.0 - pow(b1, step * 1.0);
     h bias2 = 1.0 - pow(b2, step * 1.0);
 
+    # v0.8.4 fused inner update: substrate_adamw_update is a Rust builtin
+    # that replaces ~15 OMC-side elementwise loops per parameter with one
+    # tight Rust loop. The m / v OMC arrays are Rc-shared, so the builtin
+    # mutates them in place; the returned value is the new parameter.
+    # See ADAMW_BUILTIN.md for the wall-clock reasoning. bias1/bias2 are
+    # computed inside the builtin from (b1, b2, step) — no need to pass.
     h i = 0;
     while i < arr_len(params) {
         h p = arr_get(params, i);
         h g = tape_grad(p);
-
-        # m_t = b1*m + (1-b1)*g
         h m_old = arr_get(m, i);
-        h m_new = _prom_zip(_prom_scale(m_old, b1, "mul"),
-                            _prom_scale(g, 1.0 - b1, "mul"), "add");
-        arr_set(m, i, m_new);
-
-        # v_t = b2*v + (1-b2)*g²
         h v_old = arr_get(v, i);
-        h gsq = _prom_zip(g, g, "mul");
-        h v_new = _prom_zip(_prom_scale(v_old, b2, "mul"),
-                            _prom_scale(gsq, 1.0 - b2, "mul"), "add");
-        arr_set(v, i, v_new);
-
-        # m_hat = m_t / bias1; v_hat = v_t / bias2
-        h m_hat = _prom_scale(m_new, 1.0 / bias1, "mul");
-        h v_hat = _prom_scale(v_new, 1.0 / bias2, "mul");
-        h denom = _prom_sqrt_eps(v_hat, eps);
-        h adam_step = _prom_zip(m_hat, denom, "div");
-
-        # θ ← θ − lr*adam_step − lr*wd*θ
         h cur = tape_value(p);
-        h wd_term = _prom_scale(cur, lr * wd, "mul");
-        h main_term = _prom_scale(adam_step, lr, "mul");
-        h decayed = _prom_zip(cur, wd_term, "sub");
-        h new_val = _prom_zip(decayed, main_term, "sub");
+        h new_val = substrate_adamw_update(cur, g, m_old, v_old,
+                                            lr, b1, b2, eps, wd, step);
         tape_set_value(p, new_val);
-
         i = i + 1;
     }
 }

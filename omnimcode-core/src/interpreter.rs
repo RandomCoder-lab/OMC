@@ -5294,6 +5294,73 @@ impl Interpreter {
                 };
                 Ok(Value::HInt(HInt::new(band)))
             }
+            // substrate_adamw_update(cur, grad, m, v, lr, b1, b2, eps, wd, step)
+            // Fused AdamW per-parameter update. Lifted from prom_adamw_step
+            // in prometheus.omc — the inner block called ~15 OMC-side
+            // elementwise loops per parameter (_prom_zip / _prom_scale /
+            // _prom_sqrt_eps), which dominated end-to-end Prometheus
+            // wall-clock until v0.8.4 (see ADAMW_BUILTIN.md).
+            //
+            // Mutates `m` and `v` in place (OMC arrays are Rc-shared, so
+            // the caller sees the update). Returns the new parameter value
+            // as a fresh OMC array of the same shape as `cur`.
+            //
+            // Math:
+            //   m ← b1·m + (1−b1)·g
+            //   v ← b2·v + (1−b2)·g²
+            //   m̂ = m / (1 − b1^step)
+            //   v̂ = v / (1 − b2^step)
+            //   p ← cur − lr·wd·cur − lr · m̂ / (√v̂ + eps)
+            "substrate_adamw_update" => {
+                if args.len() < 10 {
+                    return Err("substrate_adamw_update requires (cur, grad, m, v, lr, b1, b2, eps, wd, step)".to_string());
+                }
+                let cur = self.eval_expr(&args[0])?;
+                let grad = self.eval_expr(&args[1])?;
+                let m_arr = self.eval_expr(&args[2])?;
+                let v_arr = self.eval_expr(&args[3])?;
+                let lr = self.eval_expr(&args[4])?.to_float();
+                let b1 = self.eval_expr(&args[5])?.to_float();
+                let b2 = self.eval_expr(&args[6])?.to_float();
+                let eps = self.eval_expr(&args[7])?.to_float();
+                let wd = self.eval_expr(&args[8])?.to_float();
+                let step = self.eval_expr(&args[9])?.to_int() as i32;
+                substrate_adamw_update(&cur, &grad, &m_arr, &v_arr,
+                                       lr, b1, b2, eps, wd, step)
+                    .map_err(|e| format!("substrate_adamw_update: {}", e))
+            }
+            // substrate_smod_matrix(scores, alpha) — Rust-native S-MOD
+            // modulator. Per cell: 1 / (1 + alpha · attractor_distance(int(s))).
+            // Lifted from `_prom_smod_matrix` in prometheus.omc; the OMC
+            // version is a tight inner loop over an N×N scores matrix
+            // calling attractor_distance per cell, which at N=64 burns
+            // hundreds of milliseconds in the tree-walk interpreter
+            // before this builtin landed. The substrate-math is unchanged.
+            "substrate_smod_matrix" => {
+                if args.len() < 2 {
+                    return Err("substrate_smod_matrix requires (scores_2d, alpha)".to_string());
+                }
+                let scores_v = self.eval_expr(&args[0])?;
+                let alpha = self.eval_expr(&args[1])?.to_float();
+                build_substrate_modulator_matrix(&scores_v, alpha, ModulatorKind::SMod)
+                    .map_err(|e| format!("substrate_smod_matrix: {}", e))
+            }
+            // substrate_resample_matrix(v, scale) — Rust-native substrate-V
+            // resample modulator. Per cell: 1 / (1 + attractor_distance(int(v·scale)) / scale).
+            // Same speedup story as substrate_smod_matrix; lifted from
+            // `_prom_substrate_resample_matrix` in prometheus.omc.
+            "substrate_resample_matrix" => {
+                if args.len() < 2 {
+                    return Err("substrate_resample_matrix requires (v_2d, scale)".to_string());
+                }
+                let v_val = self.eval_expr(&args[0])?;
+                let scale = self.eval_expr(&args[1])?.to_float();
+                if scale == 0.0 {
+                    return Err("substrate_resample_matrix: scale must be != 0".to_string());
+                }
+                build_substrate_modulator_matrix(&v_val, scale, ModulatorKind::Resample)
+                    .map_err(|e| format!("substrate_resample_matrix: {}", e))
+            }
             // crt_recover: inverse of crt_residues for the same standard
             // pairwise-coprime moduli {5, 8, 13, 21}. Given residues
             // [r5, r8, r13, r21] returns the unique value in [0, 10920)
@@ -11758,6 +11825,210 @@ pub(crate) fn pattern_matches(
             actual == tag
         }
     }
+}
+
+/// AdamW per-parameter update fully in Rust. Replaces ~15 OMC-side
+/// element-wise loops with one tight Rust loop. Accepts 1D or 2D
+/// OMC arrays for `cur`, `grad`, `m`, `v` (same shape across all four).
+/// Mutates `m` and `v` in place — they're Rc-shared so the caller picks
+/// up the new state. Returns a freshly-allocated OMC array with the new
+/// parameter value.
+fn substrate_adamw_update(
+    cur: &Value, grad: &Value, m_arr: &Value, v_arr: &Value,
+    lr: f64, b1: f64, b2: f64, eps: f64, wd: f64, step: i32,
+) -> Result<Value, String> {
+    let (cur_rows, cur_cols, cur_flat) = flatten_2d_or_1d(cur, "cur")?;
+    let (g_rows, g_cols, g_flat) = flatten_2d_or_1d(grad, "grad")?;
+    let (m_rows, m_cols, mut m_flat) = flatten_2d_or_1d(m_arr, "m")?;
+    let (v_rows, v_cols, mut v_flat) = flatten_2d_or_1d(v_arr, "v")?;
+    if (cur_rows, cur_cols) != (g_rows, g_cols)
+        || (cur_rows, cur_cols) != (m_rows, m_cols)
+        || (cur_rows, cur_cols) != (v_rows, v_cols)
+    {
+        return Err(format!(
+            "shape mismatch: cur={}×{}, grad={}×{}, m={}×{}, v={}×{}",
+            cur_rows, cur_cols, g_rows, g_cols, m_rows, m_cols, v_rows, v_cols
+        ));
+    }
+    let bias1 = 1.0 - b1.powi(step);
+    let bias2 = 1.0 - b2.powi(step);
+    let mut out_flat: Vec<f64> = Vec::with_capacity(cur_flat.len());
+    for k in 0..cur_flat.len() {
+        let g = g_flat[k];
+        let m_new = b1 * m_flat[k] + (1.0 - b1) * g;
+        let v_new = b2 * v_flat[k] + (1.0 - b2) * g * g;
+        m_flat[k] = m_new;
+        v_flat[k] = v_new;
+        let m_hat = m_new / bias1;
+        let v_hat = v_new / bias2;
+        let denom = v_hat.sqrt() + eps;
+        let adam_step = m_hat / denom;
+        let theta = cur_flat[k] - lr * wd * cur_flat[k] - lr * adam_step;
+        out_flat.push(theta);
+    }
+    // Write m and v back through the Rc-shared OMC arrays so caller sees update.
+    write_back_1d_or_2d(m_arr, m_rows, m_cols, &m_flat, "m")?;
+    write_back_1d_or_2d(v_arr, v_rows, v_cols, &v_flat, "v")?;
+    Ok(rebuild_omc_array(cur_rows, cur_cols, &out_flat, was_2d(cur)))
+}
+
+fn was_2d(v: &Value) -> bool {
+    if let Value::Array(a) = v {
+        let items = a.items.borrow();
+        if !items.is_empty() {
+            return matches!(&items[0], Value::Array(_));
+        }
+    }
+    false
+}
+
+fn flatten_2d_or_1d(v: &Value, label: &str) -> Result<(usize, usize, Vec<f64>), String> {
+    let arr = match v {
+        Value::Array(a) => a,
+        _ => return Err(format!("{}: expected array", label)),
+    };
+    let items = arr.items.borrow();
+    if items.is_empty() {
+        return Ok((0, 0, vec![]));
+    }
+    if matches!(&items[0], Value::Array(_)) {
+        let cols = if let Value::Array(r) = &items[0] { r.items.borrow().len() } else { 0 };
+        let mut flat = Vec::with_capacity(items.len() * cols);
+        for row in items.iter() {
+            let row_arr = match row {
+                Value::Array(a) => a,
+                _ => return Err(format!("{}: mixed 1D/2D rows", label)),
+            };
+            let row_items = row_arr.items.borrow();
+            if row_items.len() != cols {
+                return Err(format!("{}: ragged 2D array", label));
+            }
+            for cell in row_items.iter() {
+                flat.push(cell.to_float());
+            }
+        }
+        Ok((items.len(), cols, flat))
+    } else {
+        let flat: Vec<f64> = items.iter().map(|c| c.to_float()).collect();
+        Ok((1, flat.len(), flat))
+    }
+}
+
+fn write_back_1d_or_2d(
+    target: &Value, rows: usize, cols: usize, flat: &[f64], label: &str,
+) -> Result<(), String> {
+    let arr = match target {
+        Value::Array(a) => a,
+        _ => return Err(format!("{}: not an array", label)),
+    };
+    let mut items = arr.items.borrow_mut();
+    if rows == 1 && !items.is_empty() && !matches!(&items[0], Value::Array(_)) {
+        // 1D shape: overwrite cells in place
+        for k in 0..cols {
+            items[k] = Value::HFloat(flat[k]);
+        }
+        return Ok(());
+    }
+    if items.len() != rows {
+        return Err(format!("{}: shape change during write-back ({} → {})",
+                           label, items.len(), rows));
+    }
+    for r in 0..rows {
+        let row_arr = match &items[r] {
+            Value::Array(a) => a.clone(),
+            _ => return Err(format!("{}: row {} not an array", label, r)),
+        };
+        let mut row_items = row_arr.items.borrow_mut();
+        for c in 0..cols {
+            row_items[c] = Value::HFloat(flat[r * cols + c]);
+        }
+    }
+    Ok(())
+}
+
+fn rebuild_omc_array(rows: usize, cols: usize, flat: &[f64], as_2d: bool) -> Value {
+    if !as_2d {
+        let row: Vec<Value> = flat.iter().map(|&x| Value::HFloat(x)).collect();
+        return Value::Array(HArray::from_vec(row));
+    }
+    let mut out_rows: Vec<Value> = Vec::with_capacity(rows);
+    for r in 0..rows {
+        let row: Vec<Value> = (0..cols)
+            .map(|c| Value::HFloat(flat[r * cols + c]))
+            .collect();
+        out_rows.push(Value::Array(HArray::from_vec(row)));
+    }
+    Value::Array(HArray::from_vec(out_rows))
+}
+
+/// Which Prometheus substrate-modulator we're computing. Both are
+/// element-wise "1 / (1 + something · attractor_distance)" formulas;
+/// they differ in whether the cell is treated as a raw score (S-MOD)
+/// or pre-scaled value (resample).
+#[derive(Copy, Clone, Debug)]
+enum ModulatorKind {
+    /// `1 / (1 + alpha · attractor_distance(int(x)))`. Used by
+    /// `prom_substrate_softmax(alpha > 0)`.
+    SMod,
+    /// `1 / (1 + attractor_distance(int(x · scale)) / scale)`. Used by
+    /// `prom_substrate_resample(scale > 0)`.
+    Resample,
+}
+
+/// Per-cell substrate modulator over a matrix-shaped OMC Value. Accepts
+/// either 2D arrays (the typical [N, D]/[N, T] case) or 1D arrays (the
+/// 1-row case returned by `tape_value` for single-row matrices). The
+/// returned shape mirrors the input shape exactly.
+///
+/// Rust-side replacement for OMC `_prom_smod_matrix` / `_prom_substrate
+/// _resample_matrix` (which were the v0.8.2 wall-clock bottleneck — see
+/// `experiments/prometheus_parity/GPU_INTEGRATION.md`).
+fn build_substrate_modulator_matrix(
+    input: &Value, param: f64, kind: ModulatorKind,
+) -> Result<Value, String> {
+    let one_cell = |x: f64| -> f64 {
+        match kind {
+            ModulatorKind::SMod => {
+                let n = x as i64;
+                let (_, d) = crate::phi_pi_fib::nearest_attractor_with_dist(n);
+                1.0 / (1.0 + param * (d as f64))
+            }
+            ModulatorKind::Resample => {
+                let n = (x * param) as i64;
+                let (_, d) = crate::phi_pi_fib::nearest_attractor_with_dist(n);
+                1.0 / (1.0 + (d as f64) / param)
+            }
+        }
+    };
+    let arr = match input {
+        Value::Array(a) => a,
+        _ => return Err("expected a 1D or 2D array".to_string()),
+    };
+    let rows = arr.items.borrow();
+    if rows.is_empty() {
+        return Ok(Value::Array(HArray::from_vec(vec![])));
+    }
+    // 1D array (single-row matrix): emit a 1D array back out.
+    if !matches!(&rows[0], Value::Array(_)) {
+        let out: Vec<Value> = rows.iter()
+            .map(|cell| Value::HFloat(one_cell(cell.to_float())))
+            .collect();
+        return Ok(Value::Array(HArray::from_vec(out)));
+    }
+    // 2D array: emit a 2D array of equal shape.
+    let mut out_rows: Vec<Value> = Vec::with_capacity(rows.len());
+    for row in rows.iter() {
+        let row_arr = match row {
+            Value::Array(a) => a,
+            _ => return Err("ragged input: rows must all be arrays".to_string()),
+        };
+        let cells = row_arr.items.borrow();
+        let new_row: Vec<Value> = cells.iter()
+            .map(|cell| Value::HFloat(one_cell(cell.to_float())))
+            .collect();
+        out_rows.push(Value::Array(HArray::from_vec(new_row)));
+    }
+    Ok(Value::Array(HArray::from_vec(out_rows)))
 }
 
 /// One value on the reverse-mode tape. Scalar (1×1) or 2D matrix —

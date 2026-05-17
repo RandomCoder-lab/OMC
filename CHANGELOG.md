@@ -13,6 +13,7 @@ Read top-to-bottom for the arc; jump to any chapter for the detail.
 
 | Tag | Date | One-line |
 |---|---|---|
+| [v0.8.4-substrate-builtins](#v084-substrate-builtins--2026-05-17) | 2026-05-17 | **40× CPU / 96× GPU end-to-end speedup on Prometheus**. Fused `substrate_adamw_update` Rust builtin replaces ~15 OMC-side element-wise loops per parameter — what was 25.81 s/step at d_model=256 is now 0.65 s (CPU) / 0.27 s (GPU). The v0.8.2 GPU integration and v0.8.3 substrate-tile win finally pay out end-to-end. Identical training trajectory. |
 | [v0.8.3-substrate-gpu](#v083-substrate-gpu--2026-05-17) | 2026-05-17 | **Substrate-shaped GPU matmul wins +38% vs conventional 16×16**. Anisotropic 8×32 tile (Fib short dim, wavefront-divisor long dim) hits 114 GFLOPS at 1024² vs 71 for the standard tile. Pure-square Fib tiles (13×13, 21×21) still lose; the win comes from substrate suggesting "8 first" + hardware demanding wavefront alignment. New default tile baked into the CLI integration. |
 | [v0.8.2-gpu-prometheus](#v082-gpu-prometheus--2026-05-17) | 2026-05-17 | **GPU wired into Prometheus** via a MatmulAccelerator hook. **13× speedup on synthetic chained matmul** (512², CPU 3.47s → GPU 0.27s). End-to-end Prometheus training at d_model=256: wall-clock unchanged — OMC tree-walk overhead in substrate-shaping helpers (smod, resample, Q6) is the next bottleneck, not matmul. Integration is load-bearing for the substrate-native GPU kernels coming next. |
 | [v0.8.1-tape-primitives](#v081-tape-primitives--2026-05-17) | 2026-05-17 | **Substrate-native tape primitive precedent**: `tape_phi_log` fuses Q6's log-distance into one tape node, with `tape_abs` as the boring companion. Composed vs fused trains to within ~1e-7 — fused abstraction is free. **Pre-existing tape_div/tape_mul broadcast-backward bug fixed**, which unblocks OMC-side cross-validation of S-MOD + substrate-K. First Q6 OMC replication: −0.63% 2/3 seeds at small scale, directionally matching PyTorch's −12.15%. |
@@ -31,6 +32,62 @@ Read top-to-bottom for the arc; jump to any chapter for the detail.
 | [v0.0.3-substrate-and-stdlib](#v003-substrate-and-stdlib--2026-05-08) | 2026-05-08 | Self-healing heal pass (typo/arity/div-zero), substrate-routed search family, stdlib expansion, closures, `--check`/`--fmt` CLI |
 | [v0.0.2-language-core](#v002-language-core--2026-04-25) | 2026-04-25 | The language exists: parser, tree-walk interpreter, HInt + φ-resonance, bytecode VM, self-hosting compiler (gen2 == gen3 byte-identical) |
 | [V0.0.1](#v001---2026-05-02) | 2025-Sep | Genesis: circuit evolution engine, FFI, Python/Unity/Unreal bindings (pre-language) |
+
+---
+
+## [v0.8.4-substrate-builtins] - 2026-05-17
+
+**40× CPU / 96× GPU end-to-end speedup on Prometheus training. The v0.8.2 wall-clock bottleneck (OMC tree-walk overhead in the training loop) is dissolved by three Rust builtins. The v0.8.2 GPU integration and v0.8.3 substrate-shaped 8×32 tile finally pay out end-to-end. The three chapters compound.**
+
+### What got built
+
+Three Rust builtins:
+
+- **`substrate_smod_matrix(scores, alpha)`** — Rust port of `_prom_smod_matrix`. Per-cell `1 / (1 + α · attractor_distance(int(s)))`. Wrapped by the OMC helper for backward compatibility.
+- **`substrate_resample_matrix(v, scale)`** — Rust port of `_prom_substrate_resample_matrix`. Per-cell `1 / (1 + attractor_distance(int(v · scale)) / scale)`.
+- **`substrate_adamw_update(cur, grad, m, v, lr, b1, b2, eps, wd, step)`** — Fused AdamW per-parameter update. **The actual bottleneck killer.** Replaces ~15 OMC-side element-wise loops per parameter with one tight Rust loop. Mutates `m` and `v` in place via Rc-shared OMC arrays.
+
+### The honest story: first round was the wrong hypothesis
+
+Initial guess from v0.8.2 was that the modulator-matrix construction (`_prom_smod_matrix`, `_prom_substrate_resample_matrix`) was the bottleneck. Both got ported to Rust first — and end-to-end wall-clock **did not move**:
+
+| | CPU s/step | GPU s/step |
+|---|--:|--:|
+| v0.8.2 baseline | 25.81 | 25.88 |
+| v0.8.4 (modulators only) | 26.38 | 26.28 ← no change |
+
+Profiling-by-fixing found the real bottleneck: `prom_adamw_step`. It walks every parameter (6 of them at d_model=256, sizes up to 256×256) doing **15 element-wise loops per parameter** in OMC: `_prom_zip(_prom_scale(...), _prom_scale(...), "add")` chained through several stages. ~6M OMC ops per training step. Replacing the inner block with one Rust builtin:
+
+| | CPU s/step | GPU s/step | vs v0.8.2 |
+|---|--:|--:|--:|
+| **v0.8.4 (+ fused AdamW)** | **0.65** | **0.27** | **40× / 96×** |
+
+Loss agreement with v0.8.2: 6.95930 vs 6.95932 (f32 GPU roundtrip noise). Same training trajectory.
+
+### Why this matters for the chapters that came before
+
+- **v0.8.2** wired GPU into the tape autograd. End-to-end null result because OMC overhead dominated.
+- **v0.8.3** found the substrate-shaped 8×32 tile (114 GFLOPS vs 71 at 1024²). Kernel-level win, no end-to-end change for the same reason.
+- **v0.8.4** removes the OMC overhead. **Both prior chapters finally pay out**:
+  - The GPU/CPU split is now 2.4× (the actual matmul speedup at d_model=256)
+  - The 8×32 tile is doing real work in production training
+
+The three chapters are now compositional. Future scale-ups (d_model=512, batched inference, multi-block, longer sequences) get *both* the OMC-overhead-gone benefit AND the substrate-GPU acceleration.
+
+### What this unlocks immediately
+
+- **L1-MH + S-MOD α=1.0 in pure-OMC Prometheus** (task #264) — was unblocked by v0.8.1's broadcast-backward fix; *now practical to run* (seconds per step rather than minutes).
+- **Larger-scale substrate-attention** (task #265) — d_model=512+, longer sequences, multi-block stacking.
+- **Q6 cross-validation at real training length** — v0.8.1's OMC-side Q6 result was at 80 steps (slowest we could afford). Can now run 5000+ step training and properly cross-validate the PyTorch −12.15% finding.
+
+### Files
+
+- `omnimcode-core/src/interpreter.rs` — three new builtins + helpers (`flatten_2d_or_1d`, `write_back_1d_or_2d`, `rebuild_omc_array`, `build_substrate_modulator_matrix`, `ModulatorKind`, `substrate_adamw_update`)
+- `examples/lib/prometheus.omc` — `_prom_smod_matrix` / `_prom_substrate_resample_matrix` become thin wrappers; `prom_adamw_step` inner block calls the fused builtin
+- `examples/tests/test_substrate_modulator_builtins.omc` — 8 unit tests
+- `experiments/prometheus_parity/SUBSTRATE_BUILTINS_WIN.md` — full writeup
+
+Test suite: **1111/1111 OMC tests pass**.
 
 ---
 
