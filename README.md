@@ -350,7 +350,7 @@ Submit a package: PR an entry to [`registry/index.json`](registry/index.json).
 | Harmonic libraries on real data | shipped, mixed-honest results |
 | Hybrid LLM experiments (12 experiments) | shipped, 1 perfect AUROC, 1 architectural negative, 1 CRT-PE win |
 | End-to-end transformerless LM (PyTorch) | CRT-PE wins -19.9% (tiny), **-5.4% (TinyShakespeare, 3/3 seeds), -2.9% (distractor mix, 3/3)** |
-| Hybrid HBit-gate distractor-mix test | **falsified at current gate formulation (0/3 wins)**, score-level / learned-threshold reformulations documented |
+| Hybrid HBit-gate distractor-mix test | **falsified across THREE gate formulations** (0/3 wins each, +3–4% consistent loss): KEY-magnitude gate, SCORE-level gate, LEARNED-threshold gate. The architectural pivot per [`GATE_REFORMULATION_RESULTS.md`](experiments/transformerless_lm/GATE_REFORMULATION_RESULTS.md): substrate's home is positional + distributional, not as an attention-score shaper. |
 | Self-hosting compiler V.9b | shipped, gen2 == gen3 byte-identical |
 | **Self-healing pass (7 classes, substrate-routed typo)** | shipped, `OMC_HEAL=1`, **10× typo lookup**, 16 tests, per-class pragmas |
 | **Substrate-keyed code codec + compressed messaging** | **shipped**, `omc_codec_encode/decode_lookup` + `omc_msg_sign_compressed/recover`, alpha-rename invariant, token-count ~N× (wire-byte breaks even at ≥500 B + N≥8); always-on win is library-lookup recovery; 13 tests, lossless on in-library content |

@@ -109,47 +109,73 @@ def hbit_tension_gate(keys: torch.Tensor, scale: float = 1.0) -> torch.Tensor:
 
 
 class Attention(nn.Module):
-    """Single-head attention. Optionally wraps softmax with an HBit
-    tension gate computed from the (post-projection) key magnitudes.
+    """Single-head attention. The gate_mode parameter selects how (if
+    at all) the HBit-tension signal modulates attention:
 
-    The gate is computed on per-key SCALAR summary (mean over d_head).
-    This is the architectural mapping from our 1-D HBit-tension
-    experiment to a real attention layer. More sophisticated gates
-    (per-channel, learned threshold) are possible but the simplest
-    match to experiment 12 is per-key.
+      "none"     : pure softmax (standard / crt_only).
+      "key"      : fixed gate on per-key magnitude (the falsified
+                   distractor-mix formulation; kept for reference).
+      "score"    : ADDITIVE log-gate on the score tensor pre-softmax.
+                   Substrate-distance of the raw score values dampens
+                   off-attractor logits before softmax normalizes. No
+                   post-hoc renormalization needed.
+      "learned"  : per-head learnable scalar (W, b) gate on per-key
+                   magnitude. Initialized to approximate the fixed
+                   1/(1+d) formula; trains to discover whether
+                   substrate distance is a useful signal for the task.
     """
 
-    def __init__(self, d_model: int, use_hbit_gate: bool, dropout: float = 0.0):
+    def __init__(self, d_model: int, gate_mode: str = "none", dropout: float = 0.0):
         super().__init__()
+        if gate_mode not in ("none", "key", "score", "learned"):
+            raise ValueError(f"unknown gate_mode: {gate_mode}")
         self.d_model = d_model
         self.qkv = nn.Linear(d_model, 3 * d_model)
         self.out = nn.Linear(d_model, d_model)
-        self.use_hbit_gate = use_hbit_gate
+        self.gate_mode = gate_mode
         self.dropout = dropout
+        if gate_mode == "learned":
+            # Initialize so sigmoid(W*d + b) ≈ 1/(1 + d) near d ≈ 0:
+            # picking W = -1, b = 0 gives sigmoid(-d) ∈ (0, 0.5], a
+            # softer version of the falsified gate. Both are learnable.
+            self.gate_w = nn.Parameter(torch.tensor(-1.0))
+            self.gate_b = nn.Parameter(torch.tensor(0.0))
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        # x: [B, T, D]
         B, T, D = x.shape
         qkv = self.qkv(x)
-        q, k, v = qkv.chunk(3, dim=-1)  # each [B, T, D]
+        q, k, v = qkv.chunk(3, dim=-1)
         scale = 1.0 / math.sqrt(D)
         scores = (q @ k.transpose(-2, -1)) * scale  # [B, T, T]
+
+        if self.gate_mode == "score":
+            # Gate on score VALUES (pre-mask). attractor_distance of
+            # raw scores tells us whether the (q·k) magnitude lands
+            # on a substrate attractor. Off-attractor scores get
+            # additively penalized in log-space, so softmax handles
+            # normalization natively.
+            d = attractor_distance(scores * 10.0)  # [B, T, T]
+            log_gate = -torch.log1p(d)
+            scores = scores + log_gate
+
         scores = scores.masked_fill(mask == 0, float('-inf'))
         attn = F.softmax(scores, dim=-1)  # [B, T, T]
 
-        if self.use_hbit_gate:
-            # gate per key: 1 scalar per key position (mean of |k|).
-            # Shape [B, T]. Apply along the key axis.
-            key_mag = k.abs().mean(dim=-1)  # [B, T]
-            gate = hbit_tension_gate(key_mag * 100.0)  # scale up so attractor_distance is meaningful
-            # broadcast gate over the query axis: [B, 1, T]
+        if self.gate_mode == "key":
+            key_mag = k.abs().mean(dim=-1)
+            gate = hbit_tension_gate(key_mag * 100.0)
             attn = attn * gate.unsqueeze(1)
-            # renormalize so attn rows still sum to ~1
+            attn = attn / (attn.sum(dim=-1, keepdim=True) + 1e-9)
+        elif self.gate_mode == "learned":
+            key_mag = k.abs().mean(dim=-1)
+            d = attractor_distance(key_mag * 100.0)  # [B, T]
+            gate = torch.sigmoid(self.gate_w * d + self.gate_b)
+            attn = attn * gate.unsqueeze(1)
             attn = attn / (attn.sum(dim=-1, keepdim=True) + 1e-9)
 
         if self.dropout > 0 and self.training:
             attn = F.dropout(attn, p=self.dropout)
-        out = attn @ v  # [B, T, D]
+        out = attn @ v
         return self.out(out)
 
 
@@ -172,9 +198,9 @@ class FeedForward(nn.Module):
 
 
 class Block(nn.Module):
-    def __init__(self, d_model: int, use_hbit_gate: bool):
+    def __init__(self, d_model: int, gate_mode: str = "none"):
         super().__init__()
-        self.attn = Attention(d_model, use_hbit_gate=use_hbit_gate)
+        self.attn = Attention(d_model, gate_mode=gate_mode)
         self.ff = FeedForward(d_model)
         self.ln1 = nn.LayerNorm(d_model)
         self.ln2 = nn.LayerNorm(d_model)
@@ -186,8 +212,7 @@ class Block(nn.Module):
 
 
 class TinyLM(nn.Module):
-    """Tiny char-level LM. Three architectures behind one class via
-    constructor flags."""
+    """Tiny char-level LM. Architecture selected via constructor flags."""
 
     def __init__(
         self,
@@ -196,7 +221,7 @@ class TinyLM(nn.Module):
         n_blocks: int,
         seq_len: int,
         pe_kind: str,             # "sinusoidal" or "crt"
-        use_hbit_gate: bool,
+        gate_mode: str,           # "none" | "key" | "score" | "learned"
     ):
         super().__init__()
         self.seq_len = seq_len
@@ -207,27 +232,24 @@ class TinyLM(nn.Module):
             pe = crt_pe(seq_len, d_model)
         else:
             raise ValueError(f"unknown pe_kind: {pe_kind}")
-        self.register_buffer("pe", pe)  # [seq_len, d_model]
+        self.register_buffer("pe", pe)
         self.blocks = nn.ModuleList([
-            Block(d_model, use_hbit_gate=use_hbit_gate) for _ in range(n_blocks)
+            Block(d_model, gate_mode=gate_mode) for _ in range(n_blocks)
         ])
         self.ln_f = nn.LayerNorm(d_model)
         self.head = nn.Linear(d_model, vocab_size, bias=False)
-        # tie head weights to embedding
         self.head.weight = self.embed.weight
-        # causal mask
         mask = torch.tril(torch.ones(seq_len, seq_len))
         self.register_buffer("mask", mask)
 
     def forward(self, x):
-        # x: [B, T]
         B, T = x.shape
         h = self.embed(x) + self.pe[:T]
         mask = self.mask[:T, :T]
         for block in self.blocks:
             h = block(h, mask)
         h = self.ln_f(h)
-        return self.head(h)  # [B, T, vocab]
+        return self.head(h)
 
 
 def make_model(
@@ -237,9 +259,13 @@ def make_model(
     d_model: int = 64,
     n_blocks: int = 2,
 ) -> TinyLM:
-    """Convenience: build one of the three benchmarked architectures.
-    Defaults match the original tiny-bench (d_model=64, n_blocks=2).
-    The scale experiment uses d_model=128, n_blocks=4."""
+    """Five architectures:
+      standard       : sinusoidal PE + pure softmax
+      crt_only       : CRT-Fib PE   + pure softmax
+      hybrid         : CRT-Fib PE   + KEY-magnitude gate (falsified)
+      hybrid_score   : CRT-Fib PE   + SCORE-level pre-softmax gate
+      hybrid_learned : CRT-Fib PE   + LEARNED per-head gate on key magnitude
+    """
     common = dict(
         vocab_size=vocab_size,
         d_model=d_model,
@@ -247,9 +273,13 @@ def make_model(
         seq_len=seq_len,
     )
     if arch == "standard":
-        return TinyLM(**common, pe_kind="sinusoidal", use_hbit_gate=False)
+        return TinyLM(**common, pe_kind="sinusoidal", gate_mode="none")
     if arch == "crt_only":
-        return TinyLM(**common, pe_kind="crt", use_hbit_gate=False)
+        return TinyLM(**common, pe_kind="crt", gate_mode="none")
     if arch == "hybrid":
-        return TinyLM(**common, pe_kind="crt", use_hbit_gate=True)
+        return TinyLM(**common, pe_kind="crt", gate_mode="key")
+    if arch == "hybrid_score":
+        return TinyLM(**common, pe_kind="crt", gate_mode="score")
+    if arch == "hybrid_learned":
+        return TinyLM(**common, pe_kind="crt", gate_mode="learned")
     raise ValueError(f"unknown arch: {arch}")
