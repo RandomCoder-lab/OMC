@@ -1,0 +1,173 @@
+# Harmonic SGD A/B — substrate-modulated gradient steps vs vanilla SGD.
+#
+# Hypothesis: gradients whose magnitude lands near a Fibonacci attractor
+# represent substrate-coherent direction; amplifying their step (and
+# damping off-attractor ones) speeds convergence and/or improves final
+# loss. The architectural rule from today (substrate metric on
+# integer-aggregated quantities) is honored: we hash + quantize the
+# gradient magnitude to an integer before applying attractor_distance,
+# we don't apply substrate to raw float activations.
+#
+# Setup: train the same tiny LM (bigram next-char prediction on
+# "abcabc...") 3 times with different RNG seeds. Each seed runs
+# both vanilla SGD and harmonic SGD; compare final loss.
+#
+# Stop condition: either harmonic wins on majority of seeds (≥2/3 lower
+# final loss → log + celebrate), OR it loses cleanly (≥2/3 higher loss
+# → fail-forward writeup explaining what we learned).
+
+import "examples/lib/prometheus.omc";
+
+fn make_corpus() {
+    h chars = ["a", "b", "c"];
+    h text = "abcabcabcabcabcabcabcabcabc";
+    h ids = [];
+    h i = 0;
+    while i < str_len(text) {
+        h ch = str_slice(text, i, i + 1);
+        h idx = 0;
+        if ch == "a" { idx = 0; }
+        elif ch == "b" { idx = 1; }
+        elif ch == "c" { idx = 2; }
+        arr_push(ids, idx);
+        i = i + 1;
+    }
+    h corpus = dict_new();
+    dict_set(corpus, "vocab", 3);
+    dict_set(corpus, "ids", ids);
+    return corpus;
+}
+
+fn build_model(vocab, hidden, rng_state) {
+    h L1 = prom_linear_new(vocab, hidden, rng_state);
+    h L2 = prom_linear_new(hidden, vocab, dict_get(L1, "rng_state"));
+    h model = dict_new();
+    dict_set(model, "L1", L1);
+    dict_set(model, "L2", L2);
+    return model;
+}
+
+fn forward(model, x_id) {
+    h L1 = dict_get(model, "L1");
+    h L2 = dict_get(model, "L2");
+    h h_pre = prom_linear_forward(L1, x_id);
+    h h_post = prom_relu(h_pre);
+    h logits = prom_linear_forward(L2, h_post);
+    return logits;
+}
+
+# Returns final-loss-average over last 20 steps (smoother signal than
+# the noisy single-step final value).
+fn train_run(seed, optimizer_kind, alpha) {
+    h corpus = make_corpus();
+    h vocab = dict_get(corpus, "vocab");
+    h ids = dict_get(corpus, "ids");
+    h n_pairs = arr_len(ids) - 1;
+
+    tape_reset();
+    h model = build_model(vocab, 8, seed);
+    h params = prom_collect_params([dict_get(model, "L1"), dict_get(model, "L2")]);
+
+    h lr = 0.05;
+    h steps = 200;
+    h tail_losses = [];
+    h step = 0;
+    while step < steps {
+        h k = step % n_pairs;
+        h x = prom_one_hot(arr_get(ids, k), vocab);
+        h target = prom_one_hot(arr_get(ids, k + 1), vocab);
+        h pred = forward(model, x);
+        h loss = prom_mse_loss(pred, target);
+        tape_backward(loss);
+        if optimizer_kind == "harmonic" {
+            prom_harmonic_sgd_step(params, lr, alpha);
+        } else {
+            prom_sgd_step(params, lr);
+        }
+        if step >= steps - 20 {
+            arr_push(tail_losses, tape_value(loss));
+        }
+        step = step + 1;
+    }
+    h sum = 0.0;
+    h i = 0;
+    while i < arr_len(tail_losses) {
+        sum = sum + arr_get(tail_losses, i);
+        i = i + 1;
+    }
+    return sum / arr_len(tail_losses);
+}
+
+fn main() {
+    print("=== Harmonic SGD vs Vanilla SGD ===");
+    print("3 seeds × 2 optimizers, tinyLM bigram task, 200 steps each");
+    print("");
+
+    h seeds = [42, 7, 123];
+    h alpha = 0.3;   # harmonic strength: ±30% lr modulation per param
+
+    print(concat_many("harmonic alpha: ", to_string(alpha)));
+    print("");
+
+    h vanilla_results = [];
+    h harmonic_results = [];
+    h s = 0;
+    while s < arr_len(seeds) {
+        h seed = arr_get(seeds, s);
+        h v = train_run(seed, "vanilla", 0.0);
+        h hv = train_run(seed, "harmonic", alpha);
+        arr_push(vanilla_results, v);
+        arr_push(harmonic_results, hv);
+        h delta = hv - v;
+        h marker = "(harmonic worse)";
+        if hv < v { marker = "(harmonic better)"; }
+        print(concat_many("seed ", to_string(seed),
+            "  vanilla=", to_string(v),
+            "  harmonic=", to_string(hv),
+            "  delta=", to_string(delta), "  ", marker));
+        s = s + 1;
+    }
+    print("");
+
+    # Tally.
+    h v_mean = 0.0;
+    h h_mean = 0.0;
+    h wins = 0;
+    h i = 0;
+    while i < arr_len(seeds) {
+        v_mean = v_mean + arr_get(vanilla_results, i);
+        h_mean = h_mean + arr_get(harmonic_results, i);
+        if arr_get(harmonic_results, i) < arr_get(vanilla_results, i) {
+            wins = wins + 1;
+        }
+        i = i + 1;
+    }
+    v_mean = v_mean / arr_len(seeds);
+    h_mean = h_mean / arr_len(seeds);
+    print(concat_many("vanilla   mean: ", to_string(v_mean)));
+    print(concat_many("harmonic  mean: ", to_string(h_mean)));
+    h rel = (h_mean - v_mean) / v_mean * 100.0;
+    print(concat_many("harmonic vs vanilla: ", to_string(rel), "%"));
+    print(concat_many("harmonic wins: ", to_string(wins), "/", to_string(arr_len(seeds))));
+
+    print("");
+    if wins >= 2 {
+        print("[WIN] Harmonic SGD beats vanilla on majority of seeds.");
+        print("      Substrate-modulated gradients earn their keep on this task.");
+        print("      🥂 Champagne uncorked.");
+    } elif wins == 0 {
+        print("[FAIL-FORWARD] Harmonic loses 0/3.");
+        print("               What we learned: substrate modulation of per-param");
+        print("               lr based on grad-magnitude→attractor distance does");
+        print("               not help on the tinyLM bigram task. Possible reasons:");
+        print("                 - signal-to-noise too low at this model scale");
+        print("                 - grad magnitudes don't naturally land near attractors");
+        print("                 - alpha may need different sign or magnitude");
+        print("               Next attempt: alpha sweep, or per-layer modulation.");
+    } else {
+        print("[INCONCLUSIVE] 1/3 wins — within noise.");
+        print("               Need more seeds or larger model to call.");
+    }
+}
+
+main();

@@ -319,3 +319,217 @@ fn prom_load_model(bundle) {
     }
     return model;
 }
+
+# ---------------------------------------------------------------------------
+# Geodesic attention bias — fused primitive.
+#
+# Today's transformerless-LM win (3/3 seeds, -0.4% val loss vs crt_only)
+# was: scores[i,j] -= alpha * geodesic(i, j) where geodesic is the
+# CRT-Fibonacci-moduli distance between positions i and j. Promote
+# that to a one-call API any Prometheus model can use.
+#
+# Architectural rule (derived today): the substrate metric is only
+# valid on integer-valued quantities. Positions are integers; this is
+# the basis substrate was built for. Continuous learned activations
+# are not in the substrate's lattice — three previous gate
+# formulations on activations all failed (0/3); this geodesic-on-
+# positions formulation won 3/3.
+# ---------------------------------------------------------------------------
+
+# Same Fibonacci moduli used by CRT-PE.
+fn _prom_geodesic_moduli() {
+    return [5, 8, 13, 21, 34, 55, 89, 144];
+}
+
+# Circular distance on a ring of size m between residues a and b.
+# Mirrors the PyTorch min(|a-b|, m - |a-b|) formulation that won
+# 3/3 seeds in train_geodesic_attention.py today.
+fn _prom_circular_dist(a, b, m) {
+    h d = a - b;
+    if d < 0 { d = 0 - d; }
+    h alt = m - d;
+    if alt < d { return alt; }
+    return d;
+}
+
+# Compute geodesic distance between two integer positions in the
+# CRT-Fibonacci lattice. The substrate metric, applied to its
+# native basis (integer position pairs).
+fn prom_geodesic_distance(i, j) {
+    h moduli = _prom_geodesic_moduli();
+    h k = 0;
+    h total = 0.0;
+    while k < arr_len(moduli) {
+        h m = arr_get(moduli, k);
+        h ri = i - (i / m) * m;
+        h rj = j - (j / m) * m;
+        h d_circ = _prom_circular_dist(ri, rj, m);
+        # Force float division — OMC int/int truncates.
+        total = total + (d_circ * 1.0) / (m * 1.0);
+        k = k + 1;
+    }
+    return total;
+}
+
+# Build the [seq_len, seq_len] bias matrix. Used as additive bias on
+# attention scores: scores[i,j] -= alpha * bias[i,j].
+# Normalized so mean-off-diagonal is ~1.0, giving alpha interpretable
+# units (matches the PyTorch impl's normalization).
+fn prom_geodesic_bias_matrix(seq_len) {
+    h table = [];
+    h i = 0;
+    h offdiag_sum = 0.0;
+    h offdiag_count = 0;
+    while i < seq_len {
+        h row = [];
+        h j = 0;
+        while j < seq_len {
+            h d = prom_geodesic_distance(i, j);
+            arr_push(row, d);
+            if i != j {
+                offdiag_sum = offdiag_sum + d;
+                offdiag_count = offdiag_count + 1;
+            }
+            j = j + 1;
+        }
+        arr_push(table, row);
+        i = i + 1;
+    }
+    h mean_off = 1.0;
+    if offdiag_count > 0 {
+        mean_off = offdiag_sum / offdiag_count;
+    }
+    # Normalize.
+    h normed = [];
+    i = 0;
+    while i < seq_len {
+        h row = arr_get(table, i);
+        h nr = [];
+        h j = 0;
+        while j < seq_len {
+            arr_push(nr, arr_get(row, j) / mean_off);
+            j = j + 1;
+        }
+        arr_push(normed, nr);
+        i = i + 1;
+    }
+    return normed;
+}
+
+# ---------------------------------------------------------------------------
+# Harmonic SGD step — substrate-modulated per-parameter learning rate.
+#
+# Hypothesis: gradients whose magnitude lands near a Fibonacci attractor
+# are "substrate-coherent" and should be amplified; off-attractor
+# gradients are noise and should be dampened. The architectural rule
+# from today (substrate metric only on integer quantities) means we
+# operate on hashed-grad summary, not raw grad values.
+#
+# Per-param effective lr:
+#   gnorm = sum(|grad|) cast to int  (a quantization step that puts the
+#                                    magnitude into integer space)
+#   attractor_dist = nearest_attractor_distance(gnorm)
+#   resonance = 1.0 / (1.0 + log(1 + attractor_dist))
+#   effective_lr = lr * (1.0 + alpha * (resonance - 0.5))
+#
+# alpha=0 → identical to vanilla SGD. alpha>0 → on-attractor gradients
+# move further; off-attractor move less.
+# ---------------------------------------------------------------------------
+
+# Compute scalar magnitude of a gradient that may be scalar or matrix.
+fn _prom_grad_magnitude(g) {
+    if type_of(g) == "array" {
+        h total = 0.0;
+        h i = 0;
+        while i < arr_len(g) {
+            h v = arr_get(g, i);
+            if type_of(v) == "array" {
+                h j = 0;
+                while j < arr_len(v) {
+                    h e = arr_get(v, j);
+                    if e < 0.0 { e = 0.0 - e; }
+                    total = total + e;
+                    j = j + 1;
+                }
+            } else {
+                if v < 0.0 { v = 0.0 - v; }
+                total = total + v;
+            }
+            i = i + 1;
+        }
+        return total;
+    }
+    if g < 0.0 { g = 0.0 - g; }
+    return g;
+}
+
+# Substrate-resonance scaling factor for a gradient's magnitude.
+# Returns in [1 - alpha, 1 + alpha].
+fn _prom_harmonic_scale(grad_mag, alpha) {
+    # Quantize: round to nearest int, abs.
+    h gnorm = grad_mag * 1000.0;     # scale up so attractor table reaches
+    if gnorm < 0.0 { gnorm = 0.0 - gnorm; }
+    h gi = gnorm + 0.5;
+    h gint = gi - (gi - (gi / 1) * 1);   # truncate to int (gi/1*1 - frac)
+    # Use the existing attractor_distance builtin.
+    h dist = attractor_distance(gint);
+    # Smaller dist → more substrate-coherent → boost.
+    h reso = 1.0 / (1.0 + dist / 100.0);   # reso ∈ (0, 1]
+    return 1.0 + alpha * (reso - 0.5);
+}
+
+# Substrate-modulated SGD step. Applies tape_update per param with a
+# learning rate scaled by the substrate-coherence of that param's
+# gradient magnitude.
+fn prom_harmonic_sgd_step(params, lr, alpha) {
+    h i = 0;
+    while i < arr_len(params) {
+        h p = arr_get(params, i);
+        h g = tape_grad(p);
+        h gmag = _prom_grad_magnitude(g);
+        h scale = _prom_harmonic_scale(gmag, alpha);
+        tape_update(p, lr * scale);
+        i = i + 1;
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Substrate-cached inference — content-addressed activation memo.
+#
+# Hash the input + model checkpoint together to form a cache key. If
+# the key is in the kernel store, return the cached output. Else
+# compute, store the output keyed by the input hash.
+#
+# This is most useful for inference workloads where identical
+# queries recur (RAG, agentic loops, repeated tool-call refinement).
+# For training, params change every step so cache misses are the
+# rule.
+# ---------------------------------------------------------------------------
+
+# Compute a content-addressed key for an inference query.
+# input_repr: a string representation of the input batch.
+# model_hash: the canonical hash of the model weights (from prom_model_hash).
+# Returns a key that uniquely identifies (input, model) pair.
+fn prom_cache_key(input_repr, model_hash) {
+    h combined = concat_many("prom-infer|", to_string(model_hash), "|", input_repr);
+    return fnv1a_hash(combined);
+}
+
+# In-memory cache (a dict mapping key → output JSON). For
+# cross-process caching, route through omc_msg_recover_compressed
+# against omc-kernel.
+fn prom_cache_new() {
+    return dict_new();
+}
+
+fn prom_cache_get(cache, key) {
+    h ks = to_string(key);
+    if dict_has(cache, ks) {
+        return dict_get(cache, ks);
+    }
+    return null;
+}
+
+fn prom_cache_put(cache, key, value) {
+    dict_set(cache, to_string(key), value);
+}

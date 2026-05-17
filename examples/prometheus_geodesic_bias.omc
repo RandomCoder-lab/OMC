@@ -1,0 +1,98 @@
+# Prometheus geodesic bias — verify the fused primitive matches the
+# PyTorch impl that won 3/3 seeds today (train_geodesic_attention.py).
+#
+# Stop condition: prom_geodesic_bias_matrix(16) has the same shape +
+# structure as the PyTorch geodesic_distance_table(16) (diagonal 0,
+# symmetric, mean-off-diag normalized to ~1.0).
+
+import "examples/lib/prometheus.omc";
+
+fn main() {
+    print("=== Prometheus geodesic bias (fused primitive) ===");
+    h seq_len = 16;
+    h bias = prom_geodesic_bias_matrix(seq_len);
+
+    print(concat_many("shape: ", to_string(seq_len), " x ", to_string(seq_len)));
+    print("");
+    print("diagonal (should all be 0):");
+    h diag = [];
+    h i = 0;
+    while i < 5 {
+        arr_push(diag, arr_get(arr_get(bias, i), i));
+        i = i + 1;
+    }
+    print(concat_many("  ", to_string(diag)));
+
+    print("");
+    print("row 0 (first 8):");
+    h r0 = arr_get(bias, 0);
+    h trim0 = [];
+    i = 0;
+    while i < 8 { arr_push(trim0, arr_get(r0, i)); i = i + 1; }
+    print(concat_many("  ", to_string(trim0)));
+
+    print("");
+    print("row 5 (first 8 — should be symmetric around position 5):");
+    h r5 = arr_get(bias, 5);
+    h trim5 = [];
+    i = 0;
+    while i < 8 { arr_push(trim5, arr_get(r5, i)); i = i + 1; }
+    print(concat_many("  ", to_string(trim5)));
+
+    # Mean off-diagonal should be ~1.0 (normalization target).
+    h sum = 0.0;
+    h count = 0;
+    i = 0;
+    while i < seq_len {
+        h j = 0;
+        while j < seq_len {
+            if i != j {
+                sum = sum + arr_get(arr_get(bias, i), j);
+                count = count + 1;
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    h mean = sum / count;
+    print("");
+    print(concat_many("mean off-diagonal: ", to_string(mean), " (target ~1.0)"));
+
+    # Symmetry check: bias[i,j] == bias[j,i]
+    h sym_ok = true;
+    i = 0;
+    while i < seq_len {
+        h j = 0;
+        while j < seq_len {
+            h a = arr_get(arr_get(bias, i), j);
+            h b = arr_get(arr_get(bias, j), i);
+            h diff = a - b;
+            if diff < 0.0 { diff = 0.0 - diff; }
+            if diff > 0.00001 { sym_ok = false; }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    print(concat_many("symmetric: ", to_string(sym_ok)));
+
+    # Diagonal-zero check.
+    h diag_ok = true;
+    i = 0;
+    while i < seq_len {
+        h d = arr_get(arr_get(bias, i), i);
+        if d != 0.0 { diag_ok = false; }
+        i = i + 1;
+    }
+    print(concat_many("diagonal all zero: ", to_string(diag_ok)));
+
+    print("");
+    if sym_ok && diag_ok && mean > 0.95 && mean < 1.05 {
+        print("[OK] Geodesic bias primitive matches PyTorch impl structure.");
+        print("     Ready for use as one-call positional bias in any Prometheus");
+        print("     model with attention. Today's 3/3-seed win is now native OMC.");
+    } else {
+        print("[FAIL] Structure check did not pass.");
+    }
+}
+
+main();

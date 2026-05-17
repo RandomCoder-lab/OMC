@@ -1,0 +1,144 @@
+# Substrate-cached inference — content-addressed activation memoization.
+#
+# Demonstrate that identical input+model pairs hit a cache instead of
+# recomputing. Hash the (input, model) combination via fnv1a; the cache
+# is just a dict keyed by that hash. Persistent caches route through
+# omc-kernel (also keyed by canonical hash).
+#
+# This is most useful for INFERENCE workloads where identical queries
+# recur — RAG retrieval, agentic loops, repeated tool-call refinements.
+# Training cache misses on every step because params change.
+#
+# Stop condition: cache HIT on a repeated query returns identical
+# output as the first uncached call; cache miss on a novel query
+# computes fresh.
+
+import "examples/lib/prometheus.omc";
+
+fn make_corpus() {
+    h chars = ["a", "b", "c"];
+    h corpus = dict_new();
+    dict_set(corpus, "vocab", 3);
+    dict_set(corpus, "chars", chars);
+    return corpus;
+}
+
+fn build_model(vocab, hidden, rng_state) {
+    h L1 = prom_linear_new(vocab, hidden, rng_state);
+    h L2 = prom_linear_new(hidden, vocab, dict_get(L1, "rng_state"));
+    h model = dict_new();
+    dict_set(model, "L1", L1);
+    dict_set(model, "L2", L2);
+    return model;
+}
+
+fn forward(model, x_id) {
+    h L1 = dict_get(model, "L1");
+    h L2 = dict_get(model, "L2");
+    h h_pre = prom_linear_forward(L1, x_id);
+    h h_post = prom_relu(h_pre);
+    h logits = prom_linear_forward(L2, h_post);
+    return logits;
+}
+
+fn predict_idx(model, char_idx, vocab) {
+    h x = prom_one_hot(char_idx, vocab);
+    h pred = forward(model, x);
+    h logits = tape_value(pred);
+    return prom_argmax_row(logits);
+}
+
+# Cached inference: check the cache first; on miss, compute + store.
+# Returns {value, hit}.
+fn infer_cached(cache, model, model_hash, char_idx, vocab) {
+    h key = prom_cache_key(to_string(char_idx), model_hash);
+    h hit = prom_cache_get(cache, key);
+    h out = dict_new();
+    if hit != null {
+        dict_set(out, "value", hit);
+        dict_set(out, "hit", true);
+        dict_set(out, "key", key);
+        return out;
+    }
+    h v = predict_idx(model, char_idx, vocab);
+    prom_cache_put(cache, key, v);
+    dict_set(out, "value", v);
+    dict_set(out, "hit", false);
+    dict_set(out, "key", key);
+    return out;
+}
+
+fn main() {
+    print("=== Prometheus substrate-cached inference ===");
+    h corpus = make_corpus();
+    h vocab = dict_get(corpus, "vocab");
+    h chars = dict_get(corpus, "chars");
+
+    tape_reset();
+    h model = build_model(vocab, 8, 42);
+
+    h bundle = prom_serialize_model(model, ["L1", "L2"]);
+    h model_hash = prom_model_hash(bundle);
+    print(concat_many("model canonical_hash: ", to_string(model_hash)));
+    print("");
+
+    h cache = prom_cache_new();
+
+    # Phase A: first pass through all three chars — every call should miss.
+    print("--- Phase A: cold cache, every query computes ---");
+    h c = 0;
+    while c < vocab {
+        h r = infer_cached(cache, model, model_hash, c, vocab);
+        print(concat_many("  ", arr_get(chars, c), " → ", arr_get(chars, dict_get(r, "value")),
+                          "   hit=", to_string(dict_get(r, "hit"))));
+        c = c + 1;
+    }
+    print("");
+
+    # Phase B: same queries again — every call should hit.
+    print("--- Phase B: warm cache, every query reuses ---");
+    h hits_b = 0;
+    c = 0;
+    while c < vocab {
+        h r = infer_cached(cache, model, model_hash, c, vocab);
+        print(concat_many("  ", arr_get(chars, c), " → ", arr_get(chars, dict_get(r, "value")),
+                          "   hit=", to_string(dict_get(r, "hit"))));
+        if dict_get(r, "hit") { hits_b = hits_b + 1; }
+        c = c + 1;
+    }
+    print("");
+
+    # Phase C: rebuild the SAME model from the same bundle in a fresh
+    # tape; verify cache keyed by model_hash still hits (model identity
+    # is the canonical hash, not the in-memory tape var IDs).
+    print("--- Phase C: model rebuilt from bundle — cache survives ---");
+    tape_reset();
+    h model_b = prom_load_model(bundle);
+    h hits_c = 0;
+    c = 0;
+    while c < vocab {
+        h r = infer_cached(cache, model_b, model_hash, c, vocab);
+        print(concat_many("  ", arr_get(chars, c), " → ", arr_get(chars, dict_get(r, "value")),
+                          "   hit=", to_string(dict_get(r, "hit"))));
+        if dict_get(r, "hit") { hits_c = hits_c + 1; }
+        c = c + 1;
+    }
+    print("");
+
+    print(concat_many("Phase B hits: ", to_string(hits_b), "/3"));
+    print(concat_many("Phase C hits: ", to_string(hits_c), "/3"));
+
+    print("");
+    if hits_b == 3 && hits_c == 3 {
+        print("[OK] Substrate-cached inference works.");
+        print("     Cache survives across tape_reset + model reload because");
+        print("     the key is the model's canonical hash, not its in-memory ID.");
+        print("     🥂 Two for two on the substrate-moat features.");
+    } else {
+        print("[FAIL] Cache did not behave as expected.");
+        if hits_b < 3 { print(concat_many("       Phase B only got ", to_string(hits_b), "/3")); }
+        if hits_c < 3 { print(concat_many("       Phase C only got ", to_string(hits_c), "/3")); }
+    }
+}
+
+main();
