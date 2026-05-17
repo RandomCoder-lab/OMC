@@ -107,6 +107,98 @@ fn parse_hex_hash(s: &str) -> Option<i64> {
 // Subcommands
 // --------------------------------------------------------------------
 
+/// Canonicalize a JSON string: parse, recursively sort dict keys,
+/// re-serialize. Used by `put` with --kind json so two semantically-
+/// equal JSON blobs (different key order) collapse to the same hash.
+fn canonicalize_json(s: &str) -> Option<String> {
+    use serde_json::Value;
+    fn sort_keys(v: Value) -> Value {
+        match v {
+            Value::Object(m) => {
+                let mut entries: Vec<(String, Value)> = m.into_iter().collect();
+                entries.sort_by(|a, b| a.0.cmp(&b.0));
+                let mapped: serde_json::Map<String, Value> = entries
+                    .into_iter()
+                    .map(|(k, v)| (k, sort_keys(v)))
+                    .collect();
+                Value::Object(mapped)
+            }
+            Value::Array(a) => Value::Array(a.into_iter().map(sort_keys).collect()),
+            other => other,
+        }
+    }
+    serde_json::from_str::<Value>(s)
+        .ok()
+        .map(sort_keys)
+        .and_then(|v| serde_json::to_string(&v).ok())
+}
+
+/// Store an arbitrary content blob keyed by canonical hash.
+/// `kind` selects the canonicalizer:
+///   * "omc_fn"  : canonicalize as OMC source (the default, same as ingest)
+///   * "json"    : sort-keys + re-serialize
+///   * "prose"   : raw bytes (fnv1a of content), no canonicalization
+///   * "blob"    : alias for "prose"
+fn cmd_put(path: &str, kind: &str) -> ExitCode {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        eprintln!("put: cannot read: {}", path);
+        return ExitCode::from(1);
+    };
+    if let Err(e) = ensure_store() {
+        eprintln!("put: cannot create store: {}", e);
+        return ExitCode::from(1);
+    }
+    let (canonical_form, addressing) = match kind {
+        "omc_fn" => {
+            let canon = canonical::canonicalize(&content).unwrap_or_else(|_| content.clone());
+            (canon, "alpha-rename-invariant OMC canonical form")
+        }
+        "json" => match canonicalize_json(&content) {
+            Some(c) => (c, "key-sorted JSON canonical form"),
+            None => {
+                eprintln!("put: --kind json but content does not parse as JSON");
+                return ExitCode::from(2);
+            }
+        },
+        "prose" | "blob" => (content.clone(), "raw bytes (no canonicalization)"),
+        other => {
+            eprintln!("put: unknown --kind {} (use omc_fn, json, prose, blob)", other);
+            return ExitCode::from(2);
+        }
+    };
+    let hash = tokenizer::fnv1a_64(canonical_form.as_bytes());
+    let store_path = store_path_for(hash);
+    let already_present = store_path.exists();
+    if !already_present {
+        if let Err(e) = std::fs::write(&store_path, &content) {
+            eprintln!("put: write failed for {}: {}", store_path.display(), e);
+            return ExitCode::from(1);
+        }
+        let (attractor, dist) = phi_pi_fib::nearest_attractor_with_dist(hash);
+        let meta = serde_json::json!({
+            "canonical_hash": hash.to_string(),
+            "attractor": attractor.to_string(),
+            "attractor_distance": dist.to_string(),
+            "source_bytes": content.len(),
+            "canonical_bytes": canonical_form.len(),
+            "kind": kind,
+            "addressing": addressing,
+            "origin_file": path,
+        });
+        let _ = std::fs::write(meta_path_for(hash), meta.to_string());
+    }
+    // Stdout = the canonical hash (hex) so callers can pipe.
+    println!("{:016x}", hash as u64);
+    eprintln!(
+        "put: {} ({} bytes, kind={}, addressing={})",
+        if already_present { "exists" } else { "stored" },
+        content.len(),
+        kind,
+        addressing
+    );
+    ExitCode::SUCCESS
+}
+
 fn cmd_ingest(dir: &str) -> ExitCode {
     let root = Path::new(dir);
     if !root.is_dir() {
@@ -160,6 +252,8 @@ fn cmd_ingest(dir: &str) -> ExitCode {
                     "attractor_distance": dist.to_string(),
                     "source_bytes": fn_src.len(),
                     "canonical_bytes": canon.len(),
+                    "kind": "omc_fn",
+                    "addressing": "alpha-rename-invariant OMC canonical form",
                     "fn_name": extract_fn_name(&fn_src),
                     "origin_file": p.display().to_string(),
                 });
@@ -379,13 +473,16 @@ fn print_usage() {
     eprintln!("omc-kernel — content-addressed store keyed by canonical hash");
     eprintln!();
     eprintln!("Usage:");
-    eprintln!("  omc-kernel ingest DIR       extract every fn from DIR's .omc files, store");
-    eprintln!("  omc-kernel fetch HASH       retrieve stored fn by canonical hash (hex)");
-    eprintln!("  omc-kernel stat HASH        substrate metadata for stored fn");
-    eprintln!("  omc-kernel ls               list stored hashes + fn names");
-    eprintln!("  omc-kernel sign FILE        sign OMC source to a substrate-signed wire msg");
-    eprintln!("  omc-kernel verify           verify a wire msg from stdin, recover via store");
-    eprintln!("  omc-kernel demo             ingest examples/lib/, alpha-rename recovery demo");
+    eprintln!("  omc-kernel ingest DIR             extract every fn from DIR's .omc files, store");
+    eprintln!("  omc-kernel put FILE [--kind K]    store arbitrary content (kinds: omc_fn,");
+    eprintln!("                                    json, prose, blob). Default: prose.");
+    eprintln!("                                    Stdout = canonical hash for piping.");
+    eprintln!("  omc-kernel fetch HASH             retrieve stored entry by canonical hash (hex)");
+    eprintln!("  omc-kernel stat HASH              substrate metadata (kind, attractor, bytes)");
+    eprintln!("  omc-kernel ls                     list stored hashes + first-line summary");
+    eprintln!("  omc-kernel sign FILE              sign OMC source to a substrate-signed wire msg");
+    eprintln!("  omc-kernel verify                 verify a wire msg from stdin, recover via store");
+    eprintln!("  omc-kernel demo                   ingest examples/lib/, alpha-rename recovery demo");
     eprintln!();
     eprintln!("Env:");
     eprintln!("  OMC_KERNEL_ROOT             override store location (default: ~/.omc/kernel)");
@@ -405,6 +502,27 @@ fn main() -> ExitCode {
                 return ExitCode::from(2);
             }
             cmd_ingest(&args[2])
+        }
+        "put" => {
+            // omc-kernel put FILE [--kind KIND]
+            // KIND ∈ {omc_fn, json, prose, blob}; default = prose (raw bytes).
+            if args.len() < 3 {
+                eprintln!("put: missing FILE");
+                return ExitCode::from(2);
+            }
+            let path = &args[2];
+            let mut kind = "prose";
+            let mut i = 3;
+            while i < args.len() {
+                if args[i] == "--kind" && i + 1 < args.len() {
+                    kind = args[i + 1].as_str();
+                    i += 2;
+                } else {
+                    eprintln!("put: unknown arg `{}`", args[i]);
+                    return ExitCode::from(2);
+                }
+            }
+            cmd_put(path, kind)
         }
         "fetch" => {
             if args.len() < 3 {
