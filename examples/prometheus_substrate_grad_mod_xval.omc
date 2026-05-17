@@ -1,0 +1,249 @@
+# Substrate-aware backward gradients A/B (task #284, v0.8.10 research item).
+#
+# Forward is identity; backward amplifies gradient components pulling params
+# toward Fibonacci attractors and dampens components pushing away. The
+# substrate as gradient-flow regularizer.
+#
+# Three arms at d_model=32, single-head, 250 steps, 3 seeds:
+#   A. baseline   plain L1+SMOD+V
+#   B. grad_mod   wrap Q and V projections with tape_substrate_grad_mod
+#                 before tape_matmul. Forward UNCHANGED; backward biased.
+#   C. + Q6       grad_mod + Q6 fused, to see if substrate-shaped backward
+#                 compounds with substrate-shaped forward modulation.
+#
+# Hypothesis: gradient bias toward attractors might regularize Q/V like
+# substrate-init was supposed to — but at TRAINING time instead of init,
+# which lets parameters drift if the loss landscape pulls hard.
+
+import "examples/lib/prometheus.omc";
+
+fn build_vocab(text) {
+    h seen = dict_new();
+    h chars = [];
+    h i = 0;
+    while i < str_len(text) {
+        h ch = str_slice(text, i, i + 1);
+        if !dict_has(seen, ch) { dict_set(seen, ch, arr_len(chars)); arr_push(chars, ch); }
+        i = i + 1;
+    }
+    h v = dict_new();
+    dict_set(v, "chars", chars);
+    dict_set(v, "lookup", seen);
+    return v;
+}
+
+fn encode(text, vocab) {
+    h lookup = dict_get(vocab, "lookup");
+    h ids = [];
+    h i = 0;
+    while i < str_len(text) {
+        h ch = str_slice(text, i, i + 1);
+        arr_push(ids, dict_get(lookup, ch));
+        i = i + 1;
+    }
+    return ids;
+}
+
+# Custom attention forward that wraps Q and V tape nodes in substrate_grad_mod
+# before they enter the matmul. This biases their gradients without changing
+# the forward computation.
+fn attn_forward_with_grad_mod(layer, x_id, gm_scale, gm_alpha, use_q6) {
+    h Q_w = dict_get(layer, "Q");
+    h V_w = dict_get(layer, "V");
+    h K_const = dict_get(layer, "K_const");
+    h smod_alpha = dict_get(layer, "smod_alpha");
+    h v_scale = dict_get(layer, "v_resample_scale");
+    if v_scale == null { v_scale = 0.0; }
+
+    # Wrap Q and V param tape nodes — biases backward flow into them.
+    h Q_mod = tape_substrate_grad_mod(Q_w, gm_scale, gm_alpha);
+    h V_mod = tape_substrate_grad_mod(V_w, gm_scale, gm_alpha);
+
+    h q = tape_matmul(x_id, Q_mod);
+    h q_mod = q;
+    if use_q6 {
+        q_mod = prom_q6_modulate(q, 10.0, 0.5, "fused");
+    }
+    h v_raw = tape_matmul(x_id, V_mod);
+    h v = prom_substrate_resample(v_raw, v_scale);
+
+    h k = tape_const(K_const);
+    h kt = tape_transpose(k);
+    h scores = tape_matmul(q_mod, kt);
+    h attn = prom_substrate_softmax(scores, smod_alpha);
+    return tape_matmul(attn, v);
+}
+
+fn build_model(arm, vocab_size, d_model, ff_dim, seq_len, seed) {
+    h emb = prom_embedding_new(vocab_size, d_model, seed);
+    h s1 = dict_get(emb, "rng_state");
+    h attn = prom_attention_substrate_k_new(d_model, seq_len, s1 + 11);
+    h s2 = dict_get(attn, "rng_state");
+    h ln1 = prom_layernorm_new(d_model, s2);
+    h ff_up = prom_linear_new(d_model, ff_dim, s2 + 13);
+    h s3 = dict_get(ff_up, "rng_state");
+    h ff_down = prom_linear_new(ff_dim, d_model, s3);
+    h s4 = dict_get(ff_down, "rng_state");
+    h ln2 = prom_layernorm_new(d_model, s4);
+    h head = prom_linear_new(d_model, vocab_size, s4 + 17);
+    h m = dict_new();
+    dict_set(m, "arm", arm);
+    dict_set(m, "emb", emb);
+    dict_set(m, "attn", attn);
+    dict_set(m, "ln1", ln1);
+    dict_set(m, "ff_up", ff_up);
+    dict_set(m, "ff_down", ff_down);
+    dict_set(m, "ln2", ln2);
+    dict_set(m, "head", head);
+    return m;
+}
+
+fn forward_window(model, token_ids, pe_table) {
+    h arm = dict_get(model, "arm");
+    h x = prom_embedding_batch(dict_get(model, "emb"), token_ids);
+    h pe_rows = [];
+    h i = 0;
+    while i < arr_len(token_ids) { arr_push(pe_rows, arr_get(pe_table, i)); i = i + 1; }
+    x = tape_add(x, tape_const(pe_rows));
+    h attn_out = null;
+    if arm == "baseline" {
+        attn_out = prom_attention_substrate_k_forward(dict_get(model, "attn"), x);
+    } elif arm == "gradmod" {
+        attn_out = attn_forward_with_grad_mod(dict_get(model, "attn"), x, 64.0, 0.5, false);
+    } else {
+        # gradmod_q6
+        attn_out = attn_forward_with_grad_mod(dict_get(model, "attn"), x, 64.0, 0.5, true);
+    }
+    h x_post = tape_add(x, attn_out);
+    h n1 = prom_layernorm_forward(dict_get(model, "ln1"), x_post);
+    h up = prom_linear_forward(dict_get(model, "ff_up"), n1);
+    h down = prom_linear_forward(dict_get(model, "ff_down"), prom_relu(up));
+    h x_ff = tape_add(x_post, down);
+    h n2 = prom_layernorm_forward(dict_get(model, "ln2"), x_ff);
+    return prom_linear_forward(dict_get(model, "head"), n2);
+}
+
+fn collect_all(model) {
+    h attn_p = prom_attention_substrate_k_params(dict_get(model, "attn"));
+    h other = prom_collect_params_v2([
+        dict_get(model, "emb"),
+        dict_get(model, "ln1"),
+        dict_get(model, "ff_up"),
+        dict_get(model, "ff_down"),
+        dict_get(model, "ln2"),
+        dict_get(model, "head"),
+    ]);
+    h out = [];
+    h i = 0;
+    while i < arr_len(attn_p) { arr_push(out, arr_get(attn_p, i)); i = i + 1; }
+    i = 0;
+    while i < arr_len(other) { arr_push(out, arr_get(other, i)); i = i + 1; }
+    return out;
+}
+
+fn train(arm, vocab_size, ids, seq_len, d_model, ff_dim, lr, steps, seed) {
+    tape_reset();
+    h model = build_model(arm, vocab_size, d_model, ff_dim, seq_len, seed);
+    h params = collect_all(model);
+    h opt = prom_adamw_new(params, lr, 0.9, 0.999, 1e-8, 0.0);
+    h pe_table = prom_crt_pe_matrix(seq_len, d_model);
+    h n_windows = arr_len(ids) - seq_len - 1;
+    h tail = [];
+    h step = 0;
+    while step < steps {
+        h start = step - (step / n_windows) * n_windows;
+        h window = [];
+        h targets = [];
+        h k = 0;
+        while k < seq_len {
+            arr_push(window, arr_get(ids, start + k));
+            arr_push(targets, arr_get(ids, start + k + 1));
+            k = k + 1;
+        }
+        h logits = forward_window(model, window, pe_table);
+        h loss = prom_cross_entropy_batch(logits, targets, vocab_size);
+        tape_backward(loss);
+        prom_adamw_step(opt);
+        if step >= steps - 30 { arr_push(tail, tape_value(loss)); }
+        step = step + 1;
+    }
+    h s = 0.0; h i = 0;
+    while i < arr_len(tail) { s = s + arr_get(tail, i); i = i + 1; }
+    return s / arr_len(tail);
+}
+
+fn mean_arr(xs) {
+    h s = 0.0; h i = 0;
+    while i < arr_len(xs) { s = s + arr_get(xs, i); i = i + 1; }
+    return s / arr_len(xs);
+}
+
+fn main() {
+    print("=== substrate-aware backward gradients A/B (task #284) ===");
+    h text = "the rain in spain falls mainly on the plain and the sun rises in the east while the moon hides behind the mountain peaks of distant lands";
+    h vocab = build_vocab(text);
+    h vocab_size = arr_len(dict_get(vocab, "chars"));
+    h ids = encode(text, vocab);
+    h seq_len = 16;
+    h d_model = 32;
+    h ff_dim = 64;
+    h lr = 0.005;
+    h steps = 250;
+    h seeds = [42, 7, 123];
+
+    print(concat_many("d_model=", to_string(d_model),
+        "  steps=", to_string(steps),
+        "  seeds=", to_string(arr_len(seeds))));
+    print("");
+
+    h arms = ["baseline", "gradmod", "gradmod_q6"];
+    h labels = dict_new();
+    dict_set(labels, "baseline",   "baseline (no gm)  ");
+    dict_set(labels, "gradmod",    "+ substrate gm   ");
+    dict_set(labels, "gradmod_q6", "+ substrate gm + Q6");
+
+    h results = dict_new();
+    h ai = 0;
+    while ai < arr_len(arms) {
+        h arm = arr_get(arms, ai);
+        h losses = [];
+        h si = 0;
+        while si < arr_len(seeds) {
+            h seed = arr_get(seeds, si);
+            h L = train(arm, vocab_size, ids, seq_len, d_model, ff_dim, lr, steps, seed);
+            arr_push(losses, L);
+            si = si + 1;
+        }
+        dict_set(results, arm, losses);
+        h mu = mean_arr(losses);
+        print(concat_many(dict_get(labels, arm), " mean=", to_string(mu)));
+        ai = ai + 1;
+    }
+
+    print("");
+    print("=== headline ===");
+    h base_mu = mean_arr(dict_get(results, "baseline"));
+    ai = 0;
+    while ai < arr_len(arms) {
+        h arm = arr_get(arms, ai);
+        h mu = mean_arr(dict_get(results, arm));
+        h delta = mu - base_mu;
+        h pct = (delta / base_mu) * 100.0;
+        h wins = 0;
+        h si = 0;
+        while si < arr_len(seeds) {
+            if arr_get(dict_get(results, arm), si) < arr_get(dict_get(results, "baseline"), si) {
+                wins = wins + 1;
+            }
+            si = si + 1;
+        }
+        print(concat_many(dict_get(labels, arm),
+            " mean=", to_string(mu),
+            "  Δ=", to_string(delta),
+            "  (", to_string(pct), "%)",
+            "  wins ", to_string(wins), "/", to_string(arr_len(seeds))));
+        ai = ai + 1;
+    }
+}
+
+main();

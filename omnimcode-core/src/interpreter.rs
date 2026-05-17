@@ -6961,6 +6961,38 @@ impl Interpreter {
                 });
                 Ok(Value::HInt(HInt::new(id as i64)))
             }
+            "tape_substrate_grad_mod" => {
+                // tape_substrate_grad_mod(x_id, scale=64, alpha=0.5)
+                //
+                // Forward: identity (out = x). Backward amplifies gradient
+                // components that pull the param TOWARD nearest Fibonacci
+                // attractor, dampens components that push AWAY.
+                //
+                // The substrate as gradient-flow regularizer — the forward
+                // computation is unchanged but optimization is biased
+                // toward substrate-aligned parameter values. Composes with
+                // any tape op (just wrap a node with it).
+                if args.is_empty() {
+                    return Err("tape_substrate_grad_mod requires (x_id, scale=64, alpha=0.5)".to_string());
+                }
+                let x_id = self.eval_expr(&args[0])?.to_int() as usize;
+                let scale = if args.len() >= 2 {
+                    self.eval_expr(&args[1])?.to_float()
+                } else { 64.0 };
+                let alpha = if args.len() >= 3 {
+                    self.eval_expr(&args[2])?.to_float()
+                } else { 0.5 };
+                let xv = self.autograd_tape[x_id].value.clone();
+                // Forward: identity (output is exactly the input).
+                let out = xv.clone();
+                let grad = TapeMat::zeros(xv.rows, xv.cols);
+                let id = self.autograd_tape.len();
+                self.autograd_tape.push(TapeNode {
+                    op: TapeOp::SubstrateGradMod(x_id, scale, alpha),
+                    value: out, grad,
+                });
+                Ok(Value::HInt(HInt::new(id as i64)))
+            }
             "tape_substrate_sparse_scores" => {
                 // tape_substrate_sparse_scores(q_id, k_id, threshold) → [N, M] scores
                 //
@@ -7503,6 +7535,56 @@ impl Interpreter {
                                 let x = av.data[k];
                                 let g = if x != 0.0 { dy.data[k] / x } else { 0.0 };
                                 da.data[k] = g;
+                            }
+                            self.autograd_tape[a].grad.add(&da);
+                        }
+                        TapeOp::SubstrateGradMod(a, scale, alpha) => {
+                            // Backward: per-cell substrate-attraction grad.
+                            //
+                            // For each cell x:
+                            //   let xs = x · scale (round to int)
+                            //   let attractor = nearest_attractor(xs)
+                            //   let dir_to_attractor = sign(attractor - xs)
+                            //   let on_attractor = (dist(xs) == 0)
+                            //
+                            // If on attractor: pass dy through (no modulation).
+                            // Else if dy's sign opposes dir_to_attractor:
+                            //     dx = dy * (1 + alpha)   ← amplify, because
+                            //     a NEGATIVE update of dy moves x toward the
+                            //     attractor (parameter update is θ ← θ - lr·dx).
+                            // Else: dx = dy * (1 / (1 + alpha))   ← dampen.
+                            //
+                            // Reasoning for the sign math: parameter update is
+                            // `θ ← θ − lr · grad`. We want updates that move θ
+                            // toward the nearest attractor amplified. So if
+                            // attractor > x (i.e. dir_to_attractor > 0), the
+                            // update must be NEGATIVE, which means grad must
+                            // be POSITIVE. Amplifying grad in that case = good.
+                            // If grad is already negative when attractor > x,
+                            // the update will move θ further from attractor →
+                            // dampen.
+                            let av = self.autograd_tape[a].value.clone();
+                            let amp = 1.0 + alpha;
+                            let damp = 1.0 / amp;
+                            let mut da = TapeMat::zeros(av.rows, av.cols);
+                            for k in 0..av.data.len() {
+                                let x = av.data[k];
+                                let g = dy.data[k];
+                                let xs = (x * scale).round() as i64;
+                                let (attractor, dist) =
+                                    crate::phi_pi_fib::nearest_attractor_with_dist(xs);
+                                if dist == 0 {
+                                    // Already on attractor — keep grad as-is.
+                                    da.data[k] = g;
+                                    continue;
+                                }
+                                let dir_to_attractor = attractor - xs;
+                                // grad direction that pulls θ toward attractor:
+                                //   if attractor > x, we want θ to increase →
+                                //     update -lr*g must be positive → g must be negative.
+                                //   so g·dir < 0 means grad pulls toward attractor.
+                                let pulls_toward = (g.signum() as i64) * dir_to_attractor.signum() < 0;
+                                da.data[k] = if pulls_toward { g * amp } else { g * damp };
                             }
                             self.autograd_tape[a].grad.add(&da);
                         }
@@ -12500,6 +12582,22 @@ pub(crate) enum TapeOp {
     /// matmul) with a direct copy. Backward scatters dL/dout rows back
     /// into the corresponding dL/dtable rows.
     EmbeddingLookup(usize, Vec<usize>),
+    /// v0.8.10 substrate-aware backward gradients. Forward is identity
+    /// (x passes through unchanged); backward multiplies dy by a per-cell
+    /// substrate-attraction factor:
+    ///
+    ///   sign = sign of (nearest_attractor(x·scale) - x·scale)
+    ///   amp  = 1 + alpha · (substrate_dist(x·scale) > 0 ? 1 : 0)
+    ///   dx   = dy · (amp when grad direction matches sign-to-attractor,
+    ///                 1/amp when grad would push x AWAY from attractor)
+    ///
+    /// The substrate becomes a gradient-flow regularizer: updates that
+    /// move parameters TOWARD Fibonacci attractors are amplified by amp,
+    /// updates that push AWAY are dampened by 1/amp. Forward output is
+    /// unchanged, so this composes cleanly with any existing tape op.
+    /// (Mathematically: substrate-shaped preconditioner on the gradient.)
+    /// Stores (scale, alpha) inline.
+    SubstrateGradMod(usize, f64, f64),
     /// Substrate-sparse attention output. Computes per-row scores ONLY for
     /// (i, j) cells where CRT substrate_dist(i, j) <= threshold, masks the
     /// rest to -inf so softmax assigns zero weight. Operates on q [N, D]
