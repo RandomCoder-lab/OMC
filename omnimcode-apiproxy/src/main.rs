@@ -49,7 +49,9 @@ use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 const PROXY_CACHE_NAMESPACE: &str = "_apiproxy_cache";
-const EXPAND_TOOL_NAME: &str = "omc_proxy_expand_ref";
+const EXPAND_TOOL_NAME:   &str = "omc_proxy_expand_ref";
+const REMEMBER_TOOL_NAME: &str = "omc_proxy_remember";
+const RECALL_TOOL_NAME:   &str = "omc_proxy_recall";
 
 #[derive(Parser, Debug, Clone)]
 #[command(name = "omnimcode-apiproxy", version = env!("CARGO_PKG_VERSION"))]
@@ -100,6 +102,10 @@ struct RewriteStats {
     /// Streaming requests pass through rewritten (request side) but
     /// the response is piped directly rather than buffered.
     streaming_passthrough: u64,
+    /// omc_proxy_remember calls resolved by the proxy.
+    remember_calls: u64,
+    /// omc_proxy_recall calls resolved by the proxy.
+    recall_calls: u64,
 }
 
 /// Per-conversation state the proxy remembers across turns. Key is a stable
@@ -128,6 +134,8 @@ struct AppState {
     delta_min_bytes: usize,
     http: reqwest::Client,
     store: Arc<MemoryStore>,
+    /// Named key→hash index for omc_proxy_remember / omc_proxy_recall.
+    named_refs: Arc<std::sync::Mutex<std::collections::HashMap<String, i64>>>,
     stats: Arc<std::sync::Mutex<RewriteStats>>,
     /// v0.14.6: per-conversation state, keyed by `conversation_id` (hash of
     /// system + tools + first user message). Bounded to ~256 conversations
@@ -174,6 +182,7 @@ async fn main() -> Result<()> {
             .build()?,
         store: Arc::new(MemoryStore::from_env()),
         stats: Arc::new(std::sync::Mutex::new(RewriteStats::default())),
+        named_refs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         conversations: Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new())),
         prefix_index: Arc::new(std::sync::Mutex::new(
@@ -305,16 +314,14 @@ async fn handle_with_expand_loop(
             Err(_) => return rebuild_response(status, &resp_headers, resp_body),
         };
 
-        // Look for an exclusive expand tool_use
-        let expand_calls = collect_sole_expand_tool_uses(&resp_json);
-        if expand_calls.is_empty() {
+        // Resolve any proxy-managed tool calls transparently
+        let proxy_calls = collect_proxy_tool_calls(&resp_json);
+        if proxy_calls.is_empty() {
             return rebuild_response(status, &resp_headers, resp_body);
         }
-        info!("round {}: auto-resolving {} expand tool_use(s)",
-            round + 1, expand_calls.len());
+        info!("round {}: auto-resolving {} proxy tool_call(s)",
+            round + 1, proxy_calls.len());
 
-        // Build follow-up request: previous messages + assistant response
-        // (rewritten through marker logic) + new user turn with tool_result
         let mut next_req: Value = match serde_json::from_slice(&current_body) {
             Ok(v) => v,
             Err(_) => return rebuild_response(status, &resp_headers, resp_body),
@@ -324,19 +331,47 @@ async fn handle_with_expand_loop(
         let Some(messages) = messages else {
             return rebuild_response(status, &resp_headers, resp_body);
         };
-        // Append the assistant turn (the upstream's response) verbatim
         if let Some(asst_content) = resp_json.get("content").cloned() {
             messages.push(json!({"role": "assistant", "content": asst_content}));
         }
-        // Append a user turn with one tool_result per expand call
+
         let mut tool_results: Vec<Value> = Vec::new();
-        for (tool_use_id, hash_str) in &expand_calls {
-            let body_text = lookup_expand(&hash_str, &state).unwrap_or_else(|e|
-                format!("[apiproxy: expand cache miss for {}: {}]", hash_str, e));
+        for call in &proxy_calls {
+            let (tool_use_id, result_text) = match call {
+                ProxyCall::ExpandRef { id, hash_str } => {
+                    let body_text = lookup_expand(hash_str, &state).unwrap_or_else(|e|
+                        format!("[apiproxy: expand miss for {}: {}]", hash_str, e));
+                    (id.clone(), body_text)
+                }
+                ProxyCall::Remember { id, key, value } => {
+                    let hash = state.store
+                        .store(PROXY_CACHE_NAMESPACE, value)
+                        .unwrap_or(-1);
+                    state.named_refs.lock().unwrap().insert(key.clone(), hash);
+                    state.stats.lock().unwrap().remember_calls += 1;
+                    info!("omc_proxy_remember: stored key={:?} hash={}", key, hash);
+                    (id.clone(), format!("Stored under key {:?} (hash {}).", key, hash))
+                }
+                ProxyCall::Recall { id, key } => {
+                    let result = {
+                        let map = state.named_refs.lock().unwrap();
+                        map.get(key.as_str()).copied()
+                    };
+                    let text = match result {
+                        Some(h) => state.store.recall(Some(PROXY_CACHE_NAMESPACE), h)
+                            .ok().flatten()
+                            .unwrap_or_else(|| format!("[apiproxy: recall cache miss for key {:?}]", key)),
+                        None => format!("[apiproxy: no memory stored under key {:?}]", key),
+                    };
+                    state.stats.lock().unwrap().recall_calls += 1;
+                    info!("omc_proxy_recall: key={:?}", key);
+                    (id.clone(), text)
+                }
+            };
             tool_results.push(json!({
                 "type": "tool_result",
                 "tool_use_id": tool_use_id,
-                "content": body_text,
+                "content": result_text,
             }));
         }
         messages.push(json!({"role": "user", "content": tool_results}));
@@ -348,35 +383,52 @@ async fn handle_with_expand_loop(
         "apiproxy: expand loop limit exceeded")
 }
 
-/// If the response's `content` array contains exactly one tool_use AND it
-/// is for `omc_proxy_expand_ref`, return its (id, hash_str). Returning
-/// multiple results means there were multiple expand calls in a row, which
-/// also auto-resolves. Returns empty Vec for mixed tool_use (skip
-/// interception, let client handle) or no tool_use at all.
-fn collect_sole_expand_tool_uses(resp: &Value) -> Vec<(String, String)> {
+/// If the response's `content` array contains only proxy-managed tool_uses
+/// (expand_ref / remember / recall), return them all. If there are any
+/// non-proxy tool_uses the client must handle, return empty vec so the
+/// response passes through unchanged.
+#[derive(Debug)]
+enum ProxyCall {
+    ExpandRef { id: String, hash_str: String },
+    Remember  { id: String, key: String, value: String },
+    Recall    { id: String, key: String },
+}
+
+fn collect_proxy_tool_calls(resp: &Value) -> Vec<ProxyCall> {
     let Some(content) = resp.get("content").and_then(Value::as_array) else {
         return vec![];
     };
-    let mut expand = Vec::new();
-    let mut has_other_tool_use = false;
+    let mut calls = Vec::new();
     for block in content {
-        if block.get("type").and_then(Value::as_str) == Some("tool_use") {
-            let name = block.get("name").and_then(Value::as_str).unwrap_or("");
-            if name == EXPAND_TOOL_NAME {
-                let id = block.get("id").and_then(Value::as_str)
+        if block.get("type").and_then(Value::as_str) != Some("tool_use") { continue; }
+        let name = block.get("name").and_then(Value::as_str).unwrap_or("");
+        let id   = block.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+        let inp  = block.get("input").cloned().unwrap_or(Value::Null);
+        match name {
+            n if n == EXPAND_TOOL_NAME => {
+                let hash_str = inp.get("hash_str").and_then(Value::as_str)
                     .unwrap_or("").to_string();
-                let hash = block.get("input")
-                    .and_then(|i| i.get("hash_str"))
-                    .and_then(Value::as_str).unwrap_or("").to_string();
-                if !id.is_empty() && !hash.is_empty() {
-                    expand.push((id, hash));
-                }
-            } else {
-                has_other_tool_use = true;
+                if !id.is_empty() && !hash_str.is_empty() {
+                    calls.push(ProxyCall::ExpandRef { id, hash_str });
+                } else { return vec![]; } // malformed — pass through
             }
+            n if n == REMEMBER_TOOL_NAME => {
+                let key   = inp.get("key").and_then(Value::as_str).unwrap_or("").to_string();
+                let value = inp.get("value").and_then(Value::as_str).unwrap_or("").to_string();
+                if !id.is_empty() && !key.is_empty() {
+                    calls.push(ProxyCall::Remember { id, key, value });
+                } else { return vec![]; }
+            }
+            n if n == RECALL_TOOL_NAME => {
+                let key = inp.get("key").and_then(Value::as_str).unwrap_or("").to_string();
+                if !id.is_empty() && !key.is_empty() {
+                    calls.push(ProxyCall::Recall { id, key });
+                } else { return vec![]; }
+            }
+            _ => return vec![], // non-proxy tool → client must handle
         }
     }
-    if has_other_tool_use { vec![] } else { expand }
+    calls
 }
 
 fn lookup_expand(hash_str: &str, state: &AppState) -> Result<String> {
@@ -523,6 +575,8 @@ async fn stats_endpoint(State(state): State<AppState>) -> Response {
         "conversations_seen": s.conversation_count,
         "delta_stores_attempted": s.delta_stores_attempted,
         "streaming_passthrough": s.streaming_passthrough,
+        "remember_calls": s.remember_calls,
+        "recall_calls": s.recall_calls,
     })).unwrap();
     (StatusCode::OK,
      [(axum::http::header::CONTENT_TYPE, HeaderValue::from_static("application/json"))],
@@ -1060,10 +1114,25 @@ fn try_delta_store(text: &str, state: &AppState) -> Option<i64> {
     Some(result)
 }
 
-/// Add the omc_proxy_expand_ref tool to the request's tools array so the
-/// LLM has a way to retrieve full bytes for any marker it cares about.
-fn inject_expand_tool(req: &mut Value) {
-    let tool = json!({
+/// Inject all proxy-owned tools into the request's tools array.
+/// Currently: omc_proxy_expand_ref, omc_proxy_remember, omc_proxy_recall.
+/// We avoid double-injection by checking for expand_ref (the sentinel tool).
+fn inject_proxy_tools(req: &mut Value) {
+    let tools_arr = match req.get_mut("tools") {
+        Some(Value::Array(a)) => {
+            if a.iter().any(|t| t.get("name").and_then(Value::as_str) == Some(EXPAND_TOOL_NAME)) {
+                return; // already injected
+            }
+            a
+        }
+        _ => {
+            req["tools"] = Value::Array(vec![]);
+            req["tools"].as_array_mut().unwrap()
+        }
+    };
+
+    // ── omc_proxy_expand_ref ──────────────────────────────────────────────
+    tools_arr.push(json!({
         "name": EXPAND_TOOL_NAME,
         "description": "Expand an <omc:ref/> marker back to its full text. \
                         The proxy replaced large content blocks in your context \
@@ -1080,19 +1149,48 @@ fn inject_expand_tool(req: &mut Value) {
             },
             "required": ["hash_str"]
         }
-    });
-    match req.get_mut("tools") {
-        Some(Value::Array(tools)) => {
-            // Don't double-inject if a previous turn already added it.
-            let exists = tools.iter().any(|t|
-                t.get("name").and_then(Value::as_str) == Some(EXPAND_TOOL_NAME));
-            if !exists { tools.push(tool); }
+    }));
+
+    // ── omc_proxy_remember ────────────────────────────────────────────────
+    tools_arr.push(json!({
+        "name": REMEMBER_TOOL_NAME,
+        "description": "Durably store an arbitrary string under a human-readable \
+                        key. The proxy persists it and you can retrieve it in any \
+                        future turn (including across sessions) via omc_proxy_recall. \
+                        Use this to save findings, summaries, or shared state that \
+                        another agent or future-you will need.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "key":   { "type": "string",
+                           "description": "Human-readable name (e.g. 'plan_v2', 'user_prefs')." },
+                "value": { "type": "string",
+                           "description": "Content to store (any UTF-8 text)." }
+            },
+            "required": ["key", "value"]
         }
-        _ => {
-            req["tools"] = Value::Array(vec![tool]);
+    }));
+
+    // ── omc_proxy_recall ──────────────────────────────────────────────────
+    tools_arr.push(json!({
+        "name": RECALL_TOOL_NAME,
+        "description": "Retrieve content previously stored with omc_proxy_remember. \
+                        Returns the stored text, or an error if the key has never \
+                        been set.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "key": { "type": "string",
+                         "description": "The key passed to a prior omc_proxy_remember call." }
+            },
+            "required": ["key"]
         }
-    }
+    }));
 }
+
+/// Compatibility shim — callers that used inject_expand_tool still work.
+#[allow(dead_code)]
+fn inject_expand_tool(req: &mut Value) { inject_proxy_tools(req); }
 
 #[cfg(test)]
 mod tests {
@@ -1118,6 +1216,7 @@ mod tests {
             http: reqwest::Client::new(),
             store: Arc::new(MemoryStore::from_env()),
             stats: Arc::new(std::sync::Mutex::new(RewriteStats::default())),
+            named_refs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             conversations: Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new())),
             prefix_index: Arc::new(std::sync::Mutex::new(
@@ -1762,5 +1861,74 @@ mod tests {
 
         assert!(state.stats.lock().unwrap().delta_stores_attempted > 0,
             "expected delta_stores_attempted > 0 with low delta_min_bytes");
+    }
+
+    // ── Feature: proxy tool call parsing (remember / recall) ─────────────────
+
+    /// collect_proxy_tool_calls parses remember and recall tool_use blocks
+    /// from a synthetic LLM response and returns the right ProxyCall variants.
+    #[test]
+    fn collect_proxy_calls_parses_remember_and_recall() {
+        let resp = json!({
+            "type": "message", "stop_reason": "tool_use",
+            "content": [
+                {"type": "tool_use", "id": "tu1", "name": "omc_proxy_remember",
+                 "input": {"key": "mykey", "value": "stored content"}},
+                {"type": "tool_use", "id": "tu2", "name": "omc_proxy_recall",
+                 "input": {"key": "mykey"}},
+            ]
+        });
+        let calls = collect_proxy_tool_calls(&resp);
+        assert_eq!(calls.len(), 2, "must parse both calls");
+        assert!(matches!(&calls[0], ProxyCall::Remember { key, .. } if key == "mykey"));
+        assert!(matches!(&calls[1], ProxyCall::Recall { key, .. } if key == "mykey"));
+    }
+
+    /// Non-proxy tool_uses (e.g. bash) cause collect_proxy_tool_calls to
+    /// return an empty vec so the response passes through to the client.
+    #[test]
+    fn non_proxy_tools_return_empty_vec() {
+        let resp = json!({
+            "type": "message", "stop_reason": "tool_use",
+            "content": [
+                {"type": "tool_use", "id": "tu1", "name": "bash",
+                 "input": {"command": "ls"}},
+            ]
+        });
+        assert!(collect_proxy_tool_calls(&resp).is_empty(),
+            "non-proxy tool must not be intercepted");
+    }
+
+    /// Mixed proxy + non-proxy: the non-proxy call poisons the batch so the
+    /// proxy passes the response through unchanged.
+    #[test]
+    fn mixed_proxy_and_non_proxy_tools_return_empty_vec() {
+        let resp = json!({
+            "type": "message", "stop_reason": "tool_use",
+            "content": [
+                {"type": "tool_use", "id": "tu1", "name": EXPAND_TOOL_NAME,
+                 "input": {"hash_str": "12345"}},
+                {"type": "tool_use", "id": "tu2", "name": "bash",
+                 "input": {"command": "ls"}},
+            ]
+        });
+        assert!(collect_proxy_tool_calls(&resp).is_empty(),
+            "mixed batch must pass through so the client handles bash");
+    }
+
+    /// All three proxy tools are injected into outbound requests.
+    #[test]
+    fn all_proxy_tools_are_injected() {
+        let mut req = json!({
+            "model": "test", "max_tokens": 10,
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        inject_proxy_tools(&mut req);
+        let tools = req["tools"].as_array().expect("tools array must exist");
+        let names: Vec<&str> = tools.iter()
+            .filter_map(|t| t["name"].as_str()).collect();
+        assert!(names.contains(&EXPAND_TOOL_NAME),   "expand_ref must be injected");
+        assert!(names.contains(&REMEMBER_TOOL_NAME), "remember must be injected");
+        assert!(names.contains(&RECALL_TOOL_NAME),   "recall must be injected");
     }
 }
