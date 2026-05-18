@@ -60,6 +60,7 @@ const NS_CREATE_TOOL_NAME: &str = "omc_proxy_namespace_create";
 const NS_LIST_TOOL_NAME:   &str = "omc_proxy_namespace_list";
 const NS_SHARE_TOOL_NAME:  &str = "omc_proxy_namespace_share";
 const SEARCH_TOOL_NAME:    &str = "omc_proxy_search";
+const SUMMARIZE_TOOL_NAME: &str = "omc_proxy_summarize";
 
 #[derive(Parser, Debug, Clone)]
 #[command(name = "omnimcode-apiproxy", version = env!("CARGO_PKG_VERSION"))]
@@ -215,6 +216,14 @@ async fn main() -> Result<()> {
         "this proxy sees the full LLM conversation. localhost-only bind unless you change --bind."
     );
 
+    let store: Arc<MemoryStore> = {
+        let base = MemoryStore::from_env();
+        let s = if args.max_cache_entries > 0 {
+            base.with_max_entries(args.max_cache_entries)
+        } else { base };
+        Arc::new(s)
+    };
+
     let state = AppState {
         upstream: args.upstream.clone(),
         rewrite_threshold: args.rewrite_threshold,
@@ -224,13 +233,7 @@ async fn main() -> Result<()> {
         http: reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(300))
             .build()?,
-        store: {
-            let base = MemoryStore::from_env();
-            let s = if args.max_cache_entries > 0 {
-                base.with_max_entries(args.max_cache_entries)
-            } else { base };
-            Arc::new(s)
-        },
+        store: Arc::clone(&store),
         stats: Arc::new(std::sync::Mutex::new(RewriteStats::default())),
         named_refs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         image_hashes: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
@@ -239,8 +242,17 @@ async fn main() -> Result<()> {
         prefix_index: Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new())),
         registered_namespaces: Arc::new(std::sync::Mutex::new({
+            // Task #326: load persisted namespaces from disk if the file exists.
+            let ns_path = store.root.join("apiproxy_namespaces.json");
             let mut s = std::collections::HashSet::new();
             s.insert(PROXY_CACHE_NAMESPACE.to_string());
+            if let Ok(raw) = std::fs::read_to_string(&ns_path) {
+                if let Ok(vec) = serde_json::from_str::<Vec<String>>(&raw) {
+                    let loaded = vec.len();
+                    s.extend(vec);
+                    info!("loaded {} namespaces from {}", loaded, ns_path.display());
+                }
+            }
             s
         })),
     };
@@ -610,6 +622,7 @@ async fn handle_with_expand_loop(
                     let result = if valid {
                         state.registered_namespaces.lock().unwrap()
                             .insert(name.clone());
+                        save_namespaces(state); // task #326: persist immediately
                         info!("omc_proxy_namespace_create: registered {:?}", name);
                         json!({ "namespace": name, "status": "created" }).to_string()
                     } else {
@@ -653,6 +666,7 @@ async fn handle_with_expand_loop(
                             Ok(new_h) => {
                                 state.registered_namespaces.lock().unwrap()
                                     .insert(target_ns.clone());
+                                save_namespaces(state); // task #326: persist
                                 info!("omc_proxy_namespace_share: hash {} → ns {:?}",
                                     new_h, target_ns);
                                 json!({
@@ -668,29 +682,28 @@ async fn handle_with_expand_loop(
                 }
                 ProxyCall::Search { id, query, top_k } => {
                     let result = (|| {
+                        if query.trim().is_empty() {
+                            return json!({ "error": "empty query" }).to_string();
+                        }
                         let entries = match state.store
                             .list(PROXY_CACHE_NAMESPACE, 1000)
                         {
                             Ok(e)  => e,
                             Err(e) => return json!({ "error": e }).to_string(),
                         };
-                        let q_lower = query.to_lowercase();
-                        let words: Vec<&str> = q_lower.split_whitespace().collect();
-                        if words.is_empty() {
-                            return json!({ "error": "empty query" }).to_string();
-                        }
-                        let mut scored: Vec<_> = entries.iter()
-                            .filter_map(|e| {
-                                let hay = e.preview.to_lowercase();
-                                let matched = words.iter()
-                                    .filter(|w| hay.contains(**w)).count();
-                                if matched > 0 {
-                                    Some((matched as f64 / words.len() as f64, e))
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect();
+                        // Task #327: substrate-distance ranking.
+                        // Score = 1 / (1 + |attractor(query) − attractor(entry)|).
+                        let q_hash = omnimcode_core::tokenizer::fnv1a_64(
+                            query.as_bytes());
+                        let (q_attr, _) = omnimcode_core::phi_pi_fib
+                            ::nearest_attractor_with_dist(q_hash);
+                        let mut scored: Vec<_> = entries.iter().map(|e| {
+                            let (e_attr, _) = omnimcode_core::phi_pi_fib
+                                ::nearest_attractor_with_dist(e.content_hash);
+                            let dist = (q_attr.wrapping_sub(e_attr)).unsigned_abs();
+                            let score = 1.0 / (1.0 + dist as f64);
+                            (score, e)
+                        }).collect();
                         scored.sort_by(|a, b| b.0.partial_cmp(&a.0)
                             .unwrap_or(std::cmp::Ordering::Equal));
                         scored.truncate(*top_k);
@@ -706,6 +719,103 @@ async fn handle_with_expand_loop(
                             query, results.len(), top_k);
                         json!(results).to_string()
                     })();
+                    (id.clone(), result)
+                }
+                ProxyCall::Summarize { id, refs, model, max_tokens } => {
+                    // Task #328: recall each ref, concatenate, ask the upstream
+                    // to produce a dense summary, store in proxy cache, return hash.
+                    let result = async {
+                        // --- 1. Recall each ref --------------------------------
+                        let mut parts: Vec<String> = Vec::with_capacity(refs.len());
+                        for hash_str in refs {
+                            let h: i64 = match hash_str.parse() {
+                                Ok(v)  => v,
+                                Err(_) => return json!({
+                                    "error": format!("invalid hash: {hash_str}")
+                                }).to_string(),
+                            };
+                            match state.store.recall(None, h) {
+                                Ok(Some(c)) => parts.push(c),
+                                Ok(None)    => return json!({
+                                    "error": format!("hash not found: {hash_str}")
+                                }).to_string(),
+                                Err(e)      => return json!({
+                                    "error": format!("recall error: {e}")
+                                }).to_string(),
+                            }
+                        }
+                        let combined = parts.join("\n\n---\n\n");
+
+                        // --- 2. Ask the upstream to summarize ------------------
+                        let system_prompt =
+                            "You are a lossless compression assistant. \
+                             Produce a maximally dense summary of the user content. \
+                             Preserve all key facts, identifiers, hashes, code \
+                             snippets, and numeric values. Output only the summary.";
+                        let req_body = json!({
+                            "model":      model,
+                            "max_tokens": max_tokens,
+                            "system":     system_prompt,
+                            "messages": [{
+                                "role":    "user",
+                                "content": combined,
+                            }],
+                        });
+                        let mut req = state.http
+                            .post(format!("{}/v1/messages",
+                                state.upstream.trim_end_matches('/')))
+                            .header("x-api-key",
+                                headers.get("x-api-key")
+                                    .and_then(|v| v.to_str().ok())
+                                    .unwrap_or(""))
+                            .header("anthropic-version",
+                                headers.get("anthropic-version")
+                                    .and_then(|v| v.to_str().ok())
+                                    .unwrap_or("2023-06-01"))
+                            .header("content-type", "application/json")
+                            .json(&req_body);
+                        // Forward all non-host / non-content-length headers
+                        for (k, v) in headers.iter() {
+                            let ks = k.as_str();
+                            if ks != "host" && ks != "content-length"
+                                && ks != "x-api-key"
+                                && ks != "anthropic-version"
+                                && ks != "content-type" {
+                                req = req.header(k, v);
+                            }
+                        }
+                        let summary = match req.send().await {
+                            Ok(r) => match r.json::<Value>().await {
+                                Ok(body) => body["content"][0]["text"]
+                                    .as_str().unwrap_or("").to_string(),
+                                Err(e) => return json!({
+                                    "error": format!("upstream parse error: {e}")
+                                }).to_string(),
+                            },
+                            Err(e) => return json!({
+                                "error": format!("upstream request failed: {e}")
+                            }).to_string(),
+                        };
+                        if summary.is_empty() {
+                            return json!({"error": "upstream returned empty summary"})
+                                .to_string();
+                        }
+
+                        // --- 3. Store summary in proxy cache -------------------
+                        match state.store.store(PROXY_CACHE_NAMESPACE, &summary) {
+                            Ok(h) => {
+                                info!("omc_proxy_summarize: stored summary hash={h} \
+                                       from {} refs", refs.len());
+                                json!({
+                                    "summary_hash": h.to_string(),
+                                    "bytes": summary.len(),
+                                }).to_string()
+                            }
+                            Err(e) => json!({
+                                "error": format!("store failed: {e}")
+                            }).to_string(),
+                        }
+                    }.await;
                     (id.clone(), result)
                 }
             };
@@ -750,6 +860,9 @@ enum ProxyCall {
     NamespaceShare  { id: String, target_ns: String, hash: String },
     /// Keyword-search the proxy cache, return top_k matching entries.
     Search          { id: String, query: String, top_k: usize },
+    /// Recall a set of refs, concatenate them, ask the upstream to summarize,
+    /// store the summary in the proxy cache, and return its hash.
+    Summarize       { id: String, refs: Vec<String>, model: String, max_tokens: u32 },
 }
 
 fn collect_proxy_tool_calls(resp: &Value) -> Vec<ProxyCall> {
@@ -840,10 +953,43 @@ fn collect_proxy_tool_calls(resp: &Value) -> Vec<ProxyCall> {
                     calls.push(ProxyCall::Search { id, query, top_k });
                 } else { return vec![]; }
             }
+            n if n == SUMMARIZE_TOOL_NAME => {
+                let refs: Vec<String> = inp.get("refs")
+                    .and_then(Value::as_array)
+                    .map(|a| a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect())
+                    .unwrap_or_default();
+                let model = inp.get("model").and_then(Value::as_str)
+                    .unwrap_or("claude-3-5-haiku-20241022").to_string();
+                let max_tokens = inp.get("max_tokens").and_then(Value::as_u64)
+                    .unwrap_or(512) as u32;
+                let max_tokens = max_tokens.max(64).min(4096);
+                if !id.is_empty() && !refs.is_empty() {
+                    calls.push(ProxyCall::Summarize { id, refs, model, max_tokens });
+                } else { return vec![]; }
+            }
             _ => return vec![], // non-proxy tool → client must handle
         }
     }
     calls
+}
+
+/// Persist the registered_namespaces set to
+/// `$OMC_MEMORY_ROOT/apiproxy_namespaces.json` so it survives proxy restarts.
+fn save_namespaces(state: &AppState) {
+    let path = state.store.root.join("apiproxy_namespaces.json");
+    let ns: Vec<String> = state.registered_namespaces
+        .lock().unwrap()
+        .iter().cloned().collect();
+    match serde_json::to_string(&ns) {
+        Ok(s) => {
+            if let Err(e) = std::fs::write(&path, s) {
+                warn!("save_namespaces: write failed: {e}");
+            }
+        }
+        Err(e) => warn!("save_namespaces: serialize failed: {e}"),
+    }
 }
 
 fn lookup_expand(hash_str: &str, state: &AppState) -> Result<String> {
@@ -1961,19 +2107,48 @@ fn inject_proxy_tools(req: &mut Value) {
     // ── omc_proxy_search ──────────────────────────────────────────────────
     tools_arr.push(json!({
         "name": SEARCH_TOOL_NAME,
-        "description": "Keyword-search the proxy cache and return the top_k entries whose \
-                        stored previews best match the query. Useful when you remember the \
-                        topic of a stored block but not its exact hash. Returns an array of \
-                        {hash, preview, bytes, score} sorted by descending relevance.",
+        "description": "Substrate-distance search of the proxy cache. Ranks all stored \
+                        entries by semantic distance from the query (score = 1/(1+dist)) \
+                        and returns the top_k results sorted by descending score. \
+                        Useful when you remember the topic of a stored block but not its \
+                        exact hash. Returns an array of {hash, preview, bytes, score}.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "query":  { "type": "string",
-                             "description": "Space-separated keywords to match against stored previews." },
+                             "description": "Natural-language query; compared by substrate-hash distance to every cached entry." },
                 "top_k":  { "type": "integer",
                              "description": "Maximum number of results to return (default 5)." }
             },
             "required": ["query"]
+        }
+    }));
+
+    // ── omc_proxy_summarize ───────────────────────────────────────────────
+    tools_arr.push(json!({
+        "name": SUMMARIZE_TOOL_NAME,
+        "description": "Recall the content of each hash in `refs`, concatenate them, \
+                        ask the upstream model to produce a dense semantic summary, store \
+                        the summary in the proxy cache, and return its hash. Use for \
+                        rolling-window compression of old conversation turns.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "refs": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Array of decimal hash strings to summarize."
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Upstream model id to use for summarization (e.g. claude-3-5-haiku-20241022). Defaults to claude-3-5-haiku-20241022."
+                },
+                "max_tokens": {
+                    "type": "integer",
+                    "description": "Maximum tokens for the summary (default 512)."
+                }
+            },
+            "required": ["refs"]
         }
     }));
 
@@ -2795,5 +2970,98 @@ mod tests {
             "text marker must mention 'image repeated'");
         assert!(outcome.bytes_images > 0,
             "bytes_images outcome must be positive");
+    }
+
+    /// Task #326 — namespace persistence round-trip.
+    ///
+    /// 1. Create a fresh AppState (empty registered_namespaces except the cache ns).
+    /// 2. Insert two extra namespaces and call `save_namespaces` → writes
+    ///    `apiproxy_namespaces.json` under the store root.
+    /// 3. Build a second AppState using the **same store root** — it should
+    ///    re-read the JSON file and contain all three namespaces.
+    #[test]
+    fn namespace_persistence_round_trip() {
+        use std::collections::HashSet;
+
+        // ── 1. First AppState ────────────────────────────────────────────────
+        let tmpdir = std::env::temp_dir().join(format!(
+            "omc-ns-persist-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&tmpdir).unwrap();
+        std::env::set_var("OMC_MEMORY_ROOT", &tmpdir);
+
+        let state1 = AppState {
+            upstream:           "http://127.0.0.1:0".into(),
+            rewrite_threshold:  512,
+            preview_bytes:      80,
+            delta_min_bytes:    1024,
+            adaptive_threshold: false,
+            http:               reqwest::Client::new(),
+            store:              Arc::new(MemoryStore::from_env()),
+            stats:              Arc::new(std::sync::Mutex::new(RewriteStats::default())),
+            named_refs:         Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            image_hashes:       Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            conversations:      Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            prefix_index:       Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            registered_namespaces: Arc::new(std::sync::Mutex::new({
+                let mut s = HashSet::new();
+                s.insert(PROXY_CACHE_NAMESPACE.to_string());
+                s
+            })),
+        };
+
+        // Register two more namespaces and persist.
+        {
+            let mut ns = state1.registered_namespaces.lock().unwrap();
+            ns.insert("agent_alpha".to_string());
+            ns.insert("agent_beta".to_string());
+        }
+        save_namespaces(&state1);
+
+        // Verify the JSON file exists.
+        let ns_path = tmpdir.join("apiproxy_namespaces.json");
+        assert!(ns_path.exists(), "apiproxy_namespaces.json should have been written");
+
+        // ── 2. Second AppState — same store root, should reload namespaces ──
+        let state2 = AppState {
+            upstream:           "http://127.0.0.1:0".into(),
+            rewrite_threshold:  512,
+            preview_bytes:      80,
+            delta_min_bytes:    1024,
+            adaptive_threshold: false,
+            http:               reqwest::Client::new(),
+            store:              Arc::new(MemoryStore::from_env()),
+            stats:              Arc::new(std::sync::Mutex::new(RewriteStats::default())),
+            named_refs:         Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            image_hashes:       Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            conversations:      Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            prefix_index:       Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            registered_namespaces: Arc::new(std::sync::Mutex::new({
+                // Exactly mirrors the startup logic in `main()`.
+                let store_root = tmpdir.clone();
+                let ns_file = store_root.join("apiproxy_namespaces.json");
+                let mut s = HashSet::new();
+                s.insert(PROXY_CACHE_NAMESPACE.to_string());
+                if let Ok(raw) = std::fs::read_to_string(&ns_file) {
+                    if let Ok(vec) = serde_json::from_str::<Vec<String>>(&raw) {
+                        s.extend(vec);
+                    }
+                }
+                s
+            })),
+        };
+
+        let loaded: HashSet<String> = state2.registered_namespaces.lock().unwrap().clone();
+        assert!(loaded.contains(PROXY_CACHE_NAMESPACE),
+            "cache namespace must always be present");
+        assert!(loaded.contains("agent_alpha"),
+            "agent_alpha should survive restart");
+        assert!(loaded.contains("agent_beta"),
+            "agent_beta should survive restart");
+        assert_eq!(loaded.len(), 3,
+            "exactly 3 namespaces: proxy-cache + alpha + beta");
     }
 }

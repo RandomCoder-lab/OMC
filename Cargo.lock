@@ -1620,6 +1620,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "omnimcode-js"
+version = "1.0.0"
+dependencies = [
+ "clap",
+ "omnimcode-core",
+]
+
+[[package]]
 name = "omnimcode-lsp"
 version = "1.0.0"
 dependencies = [

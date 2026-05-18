@@ -1,0 +1,19 @@
+[package]
+name = "omnimcode-js"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "OMCJ — OMC to JavaScript transpiler. Emits readable ES2020 modules with a small runtime library; runs without WebAssembly in browsers, Node, Deno, and edge workers."
+
+[[bin]]
+name = "omcj"
+path = "src/main.rs"
+
+[lib]
+name = "omnimcode_js"
+path = "src/lib.rs"
+
+[dependencies]
+omnimcode-core = { path = "../omnimcode-core", default-features = false }
+clap = { version = "4", features = ["derive"] }

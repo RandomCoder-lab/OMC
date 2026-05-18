@@ -9,6 +9,7 @@ members = [
     "omnimcode-mcp",
     "omnimcode-gpu",
     "omnimcode-apiproxy",
+    "omnimcode-js",
 ]
 # omnimcode-python kept around but excluded from the default workspace.
 # It was the "Python embeds OMC" wrapper (extension-module mode); now
@@ -20,7 +21,7 @@ exclude = ["omnimcode-python"]
 resolver = "2"
 
 [workspace.package]
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 authors = ["The Architect <architect@sovereign-lattice.io>"]
 license = "MIT"
