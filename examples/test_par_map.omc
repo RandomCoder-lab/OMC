@@ -1,0 +1,8 @@
+h squares = par_map(fn(x) { return x * x; }, [1, 2, 3, 4, 5]);
+print(squares);  # [1, 4, 9, 16, 25]
+
+h evens = par_filter(fn(x) { return x % 2 == 0; }, [1, 2, 3, 4, 5, 6]);
+print(evens);  # [2, 4, 6]
+
+h total = par_reduce(fn(acc, x) { return acc + x; }, [1, 2, 3, 4, 5], 0);
+print(total);  # 15

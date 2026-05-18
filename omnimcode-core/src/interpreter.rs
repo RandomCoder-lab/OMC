@@ -2328,7 +2328,7 @@ impl Interpreter {
             | "arr_zeros" | "arr_ones" | "arr_chunk" | "arr_flatten"
             | "arr_enumerate" | "arr_window"
             // Meta-evaluation
-            | "eval_omc" | "eval_omc_fresh" | "omc_source"
+            | "eval_omc" | "eval_omc_fresh" | "eval_omc_ctx" | "omc_source"
             // Native LLM builtins
             | "llm_call" | "llm_chat" | "llm_embed" | "llm_models"
         )
@@ -11781,6 +11781,27 @@ impl Interpreter {
                 fresh.execute(stmts)?;
                 Ok(fresh.last_expression_value.take().unwrap_or(Value::Null))
             }
+            // ---- eval_omc_ctx(source_str) ----------------------------------------
+            // Like eval_omc_fresh but seeds the fresh interpreter with a snapshot
+            // of the current interpreter's globals and user-defined functions.
+            // The evaluated code sees all variables / functions defined so far in
+            // the caller, but mutations inside the snippet do NOT propagate back.
+            "eval_omc_ctx" => {
+                if args.is_empty() {
+                    return Err("eval_omc_ctx requires (source_string)".to_string());
+                }
+                let src = self.eval_expr(&args[0])?.to_string();
+                let mut parser = crate::parser::Parser::new(&src);
+                let stmts = parser.parse().map_err(|e| format!("eval_omc_ctx parse error: {}", e))?;
+                let mut fresh = Interpreter::new();
+                // Seed the fresh interpreter with a snapshot of current globals
+                // and user-defined functions so the evaluated code can reference them.
+                fresh.globals = self.globals.clone();
+                fresh.functions = self.functions.clone();
+                fresh.register_user_functions(&stmts);
+                fresh.execute(stmts)?;
+                Ok(fresh.last_expression_value.take().unwrap_or(Value::Null))
+            }
             // ---- omc_source() ---------------------------------------------------
             // Returns the source text of the currently running program (set by
             // the CLI or MCP before execution via `set_source_code`).
@@ -14154,7 +14175,7 @@ pub(crate) const HEAL_BUILTIN_NAMES: &[&str] = &[
     "arr_zeros", "arr_ones", "arr_chunk", "arr_flatten",
     "arr_enumerate", "arr_window",
     // Meta-evaluation
-    "eval_omc", "eval_omc_fresh", "omc_source",
+    "eval_omc", "eval_omc_fresh", "eval_omc_ctx", "omc_source",
     // Dicts
     "dict_new", "dict_get", "dict_set", "dict_has", "dict_del",
     "dict_keys", "dict_values", "dict_len", "dict_merge",
