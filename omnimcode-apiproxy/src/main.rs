@@ -139,11 +139,17 @@ async fn handle_messages(State(state): State<AppState>, req: Request) -> Respons
     };
 
     let is_streaming = is_streaming_request(&body_bytes);
-    if is_streaming {
-        debug!("streaming request — bypassing rewriter (v0.14.2 work)");
-        return forward_to_upstream(&state, &parts.headers, body_bytes).await;
-    }
+    let model_name = serde_json::from_slice::<Value>(&body_bytes)
+        .ok().and_then(|v| v.get("model").and_then(Value::as_str).map(String::from))
+        .unwrap_or_else(|| "?".into());
+    info!("/v1/messages received: {} bytes, model={}, streaming={}",
+        body_bytes.len(), model_name, is_streaming);
 
+    // The REQUEST body is synchronous JSON even when the response will be streamed.
+    // We can always rewrite the body. The streaming flag only affects how the
+    // RESPONSE is delivered (SSE chunks). For streaming responses we skip the
+    // expand-tool-use interception loop (which requires parsing the full response)
+    // and just pass the SSE chunks straight through.
     let rewritten = match rewrite_request_body(&body_bytes, &state) {
         Ok(b) => b,
         Err(e) => {
@@ -158,7 +164,15 @@ async fn handle_messages(State(state): State<AppState>, req: Request) -> Respons
             body_bytes.len(), rewritten.len(), -saved);
     }
 
-    handle_with_expand_loop(&state, &parts.headers, rewritten).await
+    if is_streaming {
+        // SSE response: just pass through. The LLM can still emit the expand
+        // tool_use in the stream; the client will surface it. We accept this
+        // sharp edge in exchange for getting request-side compression on
+        // streaming sessions (the common case for Claude Code).
+        forward_to_upstream(&state, &parts.headers, rewritten).await
+    } else {
+        handle_with_expand_loop(&state, &parts.headers, rewritten).await
+    }
 }
 
 /// Upstream call + expand-tool auto-resolution loop. If the upstream's
@@ -367,16 +381,26 @@ fn is_streaming_request(body: &[u8]) -> bool {
 /// Walk `messages[].content[]` for text blocks above the threshold and
 /// replace each with a `<omc:ref/>` marker. Inject the expand tool into
 /// the request's `tools` array.
+///
+/// Safety rule: the LAST user message is never rewritten — that's the
+/// user's current intent, and replacing it with a marker would force the
+/// LLM to spend a round-trip expanding it just to know what was asked.
 fn rewrite_request_body(body: &[u8], state: &AppState) -> Result<Bytes> {
     let mut v: Value = serde_json::from_slice(body)?;
     let Some(messages) = v.get_mut("messages").and_then(Value::as_array_mut) else {
         anyhow::bail!("no 'messages' array in request");
     };
 
+    // Find the index of the last user message — protect it from rewriting.
+    let last_user_idx = messages.iter().enumerate().rev()
+        .find(|(_, m)| m.get("role").and_then(Value::as_str) == Some("user"))
+        .map(|(i, _)| i);
+
     let mut rewritten_count = 0usize;
     let mut bytes_replaced = 0usize;
 
-    for msg in messages.iter_mut() {
+    for (idx, msg) in messages.iter_mut().enumerate() {
+        if Some(idx) == last_user_idx { continue; }
         let content = msg.get_mut("content");
         match content {
             Some(Value::String(s)) => {
