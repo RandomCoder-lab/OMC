@@ -107,6 +107,8 @@ struct RewriteStats {
     remember_calls: u64,
     /// omc_proxy_recall calls resolved by the proxy.
     recall_calls: u64,
+    /// Bytes saved by replacing repeated base64 image blocks with text markers.
+    bytes_saved_images: u64,
 }
 
 /// Per-conversation state the proxy remembers across turns. Key is a stable
@@ -137,6 +139,10 @@ struct AppState {
     store: Arc<MemoryStore>,
     /// Named key→hash index for omc_proxy_remember / omc_proxy_recall.
     named_refs: Arc<std::sync::Mutex<std::collections::HashMap<String, i64>>>,
+    /// Hashes of base64 image blocks seen in previous turns; repeated images
+    /// are replaced with a compact text marker instead of re-sending the full
+    /// base64 payload (which can be hundreds of KB per image).
+    image_hashes: Arc<std::sync::Mutex<std::collections::HashSet<u64>>>,
     stats: Arc<std::sync::Mutex<RewriteStats>>,
     /// v0.14.6: per-conversation state, keyed by `conversation_id` (hash of
     /// system + tools + first user message). Bounded to ~256 conversations
@@ -184,6 +190,7 @@ async fn main() -> Result<()> {
         store: Arc::new(MemoryStore::from_env()),
         stats: Arc::new(std::sync::Mutex::new(RewriteStats::default())),
         named_refs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        image_hashes: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         conversations: Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new())),
         prefix_index: Arc::new(std::sync::Mutex::new(
@@ -251,6 +258,7 @@ async fn handle_messages(State(state): State<AppState>, req: Request) -> Respons
                 s.bytes_saved_system += outcome.bytes_system as u64;
                 s.bytes_saved_tool_use_input += outcome.bytes_tool_use_input as u64;
                 s.bytes_saved_tool_definitions += outcome.bytes_tool_definitions as u64;
+                s.bytes_saved_images += outcome.bytes_images as u64;
             }
             b
         }
@@ -606,6 +614,7 @@ struct RewriteOutcome {
     bytes_system: usize,
     bytes_tool_use_input: usize,
     bytes_tool_definitions: usize,
+    bytes_images: usize,
 }
 
 impl RewriteOutcome {
@@ -620,7 +629,7 @@ async fn stats_endpoint(State(state): State<AppState>) -> Response {
     } else { 0.0 };
     let total_saved = s.bytes_saved_messages + s.bytes_saved_tool_result
         + s.bytes_saved_system + s.bytes_saved_tool_use_input
-        + s.bytes_saved_tool_definitions;
+        + s.bytes_saved_tool_definitions + s.bytes_saved_images;
     let json = serde_json::to_string_pretty(&serde_json::json!({
         "requests_processed": s.requests,
         "bytes_in_total":  s.bytes_in,
@@ -634,6 +643,7 @@ async fn stats_endpoint(State(state): State<AppState>) -> Response {
             "system_prompt": s.bytes_saved_system,
             "tool_use_input": s.bytes_saved_tool_use_input,
             "tool_definitions": s.bytes_saved_tool_definitions,
+            "images": s.bytes_saved_images,
         },
         "cache_control_inserted_count": s.cache_control_inserted,
         "conversations_seen": s.conversation_count,
@@ -791,6 +801,39 @@ fn rewrite_request_body(body: &[u8], state: &AppState) -> Result<(Bytes, Rewrite
                             // when generating fresh tool calls in later turns.
                             if let Some(input) = block.get_mut("input") {
                                 rewrite_strings_recursive(input, state, &mut out, &mut seen);
+                            }
+                        }
+                        "image" => {
+                            // Repeated base64 images (same screenshot across turns) can be
+                            // hundreds of KB each. After the first occurrence — which the LLM
+                            // must see to understand the image — replace subsequent occurrences
+                            // with a compact text note. The LLM has already seen and processed
+                            // the image; the marker conveys that this slot was an image.
+                            if let Some(src) = block.get("source") {
+                                if src.get("type").and_then(Value::as_str) == Some("base64") {
+                                    let data = src.get("data").and_then(Value::as_str).unwrap_or("");
+                                    let media_type = src.get("media_type")
+                                        .and_then(Value::as_str).unwrap_or("image");
+                                    let byte_len = data.len();
+                                    // hash just the first 256 bytes of data (fast, collision-resistant enough)
+                                    let hash_key = omnimcode_core::tokenizer::fnv1a_64(
+                                        data.as_bytes().get(..256).unwrap_or(data.as_bytes())) as u64;
+                                    let already_seen = {
+                                        let mut set = state.image_hashes.lock().unwrap();
+                                        !set.insert(hash_key)
+                                    };
+                                    if already_seen {
+                                        // Replace the whole image block with a text note.
+                                        let note = format!(
+                                            "[image repeated from prior turn — {}, {} bytes, hash={:x}]",
+                                            media_type, byte_len, hash_key
+                                        );
+                                        out.bytes_images += byte_len;
+                                        out.rewritten_count += 1;
+                                        *block = json!({ "type": "text", "text": note });
+                                    }
+                                    // First occurrence: pass through so the LLM can see the image.
+                                }
                             }
                         }
                         _ => {}
@@ -1292,6 +1335,7 @@ mod tests {
             store: Arc::new(MemoryStore::from_env()),
             stats: Arc::new(std::sync::Mutex::new(RewriteStats::default())),
             named_refs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            image_hashes: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             conversations: Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new())),
             prefix_index: Arc::new(std::sync::Mutex::new(
@@ -2032,5 +2076,44 @@ mod tests {
             .filter_map(|m| m["hash"].as_str()).collect();
         assert!(hashes.contains(&"1234567"));
         assert!(hashes.contains(&"9999999"));
+    }
+
+    /// Repeated base64 image blocks in historical turns are replaced with a
+    /// compact text note. The first occurrence passes through untouched.
+    #[test]
+    fn image_dedup_second_occurrence_compressed() {
+        let state = test_state(64);
+        let img_data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ".repeat(20);
+        let img_block = json!({
+            "type": "image",
+            "source": { "type": "base64", "media_type": "image/png", "data": img_data }
+        });
+
+        // Turn 1: single assistant message with the image — first occurrence passes through.
+        let body1 = json!({"model":"m","messages":[
+            {"role":"user","content":"look at this"},
+            {"role":"assistant","content":[img_block.clone()]}
+        ]});
+        let (out1, _) = rewrite_request_body(&serde_json::to_vec(&body1).unwrap(), &state).unwrap();
+        let v1: serde_json::Value = serde_json::from_slice(&out1).unwrap();
+        let first_block = &v1["messages"][1]["content"][0];
+        assert_eq!(first_block["type"].as_str().unwrap(), "image",
+            "first occurrence must pass through as image block");
+
+        // Turn 2: same image recurs in history — must be replaced with a text note.
+        let body2 = json!({"model":"m","messages":[
+            {"role":"user","content":"look at this"},
+            {"role":"assistant","content":[img_block.clone()]},
+            {"role":"user","content":"and now?"},
+        ]});
+        let (out2, outcome) = rewrite_request_body(&serde_json::to_vec(&body2).unwrap(), &state).unwrap();
+        let v2: serde_json::Value = serde_json::from_slice(&out2).unwrap();
+        let second_block = &v2["messages"][1]["content"][0];
+        assert_eq!(second_block["type"].as_str().unwrap(), "text",
+            "second occurrence must be replaced with text marker");
+        assert!(second_block["text"].as_str().unwrap().contains("image repeated"),
+            "text marker must mention 'image repeated'");
+        assert!(outcome.bytes_images > 0,
+            "bytes_images outcome must be positive");
     }
 }
