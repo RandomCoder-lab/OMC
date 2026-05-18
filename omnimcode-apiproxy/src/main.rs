@@ -54,6 +54,7 @@ const REMEMBER_TOOL_NAME:  &str = "omc_proxy_remember";
 const RECALL_TOOL_NAME:    &str = "omc_proxy_recall";
 const LIST_REFS_TOOL_NAME: &str = "omc_proxy_list_refs";
 const FORWARD_TOOL_NAME:   &str = "omc_proxy_forward";
+const DIFF_TOOL_NAME:      &str = "omc_proxy_diff";
 
 #[derive(Parser, Debug, Clone)]
 #[command(name = "omnimcode-apiproxy", version = env!("CARGO_PKG_VERSION"))]
@@ -460,6 +461,11 @@ async fn handle_with_expand_loop(
                     dispatch_forward(id, endpoint, message, model, context_refs,
                                      headers, state).await
                 }
+                ProxyCall::Diff { id, hash_a, hash_b } => {
+                    let result = diff_marker_contents(hash_a, hash_b, state);
+                    info!("omc_proxy_diff: {} vs {}", hash_a, hash_b);
+                    (id.clone(), result)
+                }
             };
             tool_results.push(json!({
                 "type": "tool_result",
@@ -489,6 +495,8 @@ enum ProxyCall {
     /// Route a message to another LLM endpoint and return its compressed reply.
     Forward   { id: String, endpoint: String, message: String, model: String,
                  context_refs: Vec<String> },
+    /// Return a unified diff between two stored hashes.
+    Diff      { id: String, hash_a: String, hash_b: String },
 }
 
 fn collect_proxy_tool_calls(resp: &Value) -> Vec<ProxyCall> {
@@ -606,6 +614,28 @@ fn find_markers_rec(
         Value::Object(map) => { for (_, v) in map { find_markers_rec(v, seen, out); } }
         _ => {}
     }
+}
+
+/// Compute a simple line-level unified diff between two stored entries.
+fn diff_marker_contents(hash_a: &str, hash_b: &str, state: &AppState) -> String {
+    let parse = |h: &str| -> Option<String> {
+        let n: i64 = h.parse().ok()?;
+        state.store.recall(Some(PROXY_CACHE_NAMESPACE), n).ok()?.filter(|s| !s.is_empty())
+    };
+    let a = match parse(hash_a) { Some(s) => s, None => return format!("[diff: hash_a {} not found]", hash_a) };
+    let b = match parse(hash_b) { Some(s) => s, None => return format!("[diff: hash_b {} not found]", hash_b) };
+    if a == b { return "[diff: contents are identical]".into(); }
+    let lines_a: Vec<&str> = a.lines().collect();
+    let lines_b: Vec<&str> = b.lines().collect();
+    let mut out = format!("--- hash:{} ({} lines)\n+++ hash:{} ({} lines)\n",
+        hash_a, lines_a.len(), hash_b, lines_b.len());
+    // Simple line diff: removals then additions (no LCS for now — sufficient for context).
+    let only_a: Vec<&str> = lines_a.iter().filter(|l| !lines_b.contains(l)).copied().collect();
+    let only_b: Vec<&str> = lines_b.iter().filter(|l| !lines_a.contains(l)).copied().collect();
+    for l in &only_a { out.push('-'); out.push_str(l); out.push('\n'); }
+    for l in &only_b { out.push('+'); out.push_str(l); out.push('\n'); }
+    if out.len() > 4096 { out.truncate(4096); out.push_str("\n...[truncated]"); }
+    out
 }
 
 fn rebuild_response(status: StatusCode, headers: &HeaderMap, body: Bytes) -> Response {
@@ -1392,6 +1422,20 @@ fn inject_proxy_tools(req: &mut Value) {
     }));
 
     // ── omc_proxy_list_refs ─────────────────────────────────────────────────
+    tools_arr.push(json!({
+        "name": DIFF_TOOL_NAME,
+        "description": "Compute a line-level diff between two stored <omc:ref/> entries. \
+                        Returns a unified diff string. Useful for understanding what changed \
+                        between two near-edit versions without expanding both in full.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "hash_a": { "type": "string", "description": "Hash of the base content." },
+                "hash_b": { "type": "string", "description": "Hash of the changed content." }
+            },
+            "required": ["hash_a", "hash_b"]
+        }
+    }));
     tools_arr.push(json!({
         "name": LIST_REFS_TOOL_NAME,
         "description": "Return a JSON array describing every <omc:ref/> marker \
