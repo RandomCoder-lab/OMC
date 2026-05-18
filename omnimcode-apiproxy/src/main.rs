@@ -55,6 +55,7 @@ const RECALL_TOOL_NAME:    &str = "omc_proxy_recall";
 const LIST_REFS_TOOL_NAME: &str = "omc_proxy_list_refs";
 const FORWARD_TOOL_NAME:   &str = "omc_proxy_forward";
 const DIFF_TOOL_NAME:      &str = "omc_proxy_diff";
+const DELEGATE_TOOL_NAME:  &str = "omc_proxy_delegate";
 
 #[derive(Parser, Debug, Clone)]
 #[command(name = "omnimcode-apiproxy", version = env!("CARGO_PKG_VERSION"))]
@@ -113,6 +114,7 @@ struct RewriteStats {
     bytes_saved_images: u64,
     /// omc_proxy_forward calls resolved by the proxy.
     forward_calls: u64,
+    delegate_calls: u64,
 }
 
 /// Per-conversation state the proxy remembers across turns. Key is a stable
@@ -296,6 +298,56 @@ async fn handle_messages(State(state): State<AppState>, req: Request) -> Respons
 /// Dispatch an `omc_proxy_forward` call: send `message` (optionally with
 /// expanded `context_refs`) to `endpoint`/v1/messages and return the
 /// sub-LLM's reply text (compressed to a marker if large).
+/// Spawn a sub-agent: build a focused /v1/messages request containing only the
+/// specified context_refs (expanded inline), send to upstream, compress the reply.
+async fn dispatch_delegate(
+    id: &str, task: &str, context_refs: &[String], model: &str, max_tokens: u64,
+    headers: &HeaderMap, state: &AppState,
+) -> (String, String) {
+    // Expand requested refs into inline context
+    let mut context_blocks: Vec<String> = Vec::new();
+    for hash_str in context_refs {
+        if let Ok(h) = hash_str.parse::<i64>() {
+            if let Ok(Some(text)) = state.store.recall(Some(PROXY_CACHE_NAMESPACE), h) {
+                context_blocks.push(format!("<context hash=\"{}\">{}</context>", hash_str, text));
+            }
+        }
+    }
+    let user_msg = if context_blocks.is_empty() {
+        task.to_string()
+    } else {
+        format!("{context}\n\n{task}", context = context_blocks.join("\n"), task = task)
+    };
+    let target_url = format!("{}/v1/messages", state.upstream.trim_end_matches('/'));
+    let req_body = serde_json::json!({
+        "model": model,
+        "max_tokens": max_tokens,
+        "messages": [{"role": "user", "content": user_msg}]
+    });
+    let mut req = state.http.post(&target_url).json(&req_body);
+    for (k, v) in headers.iter() {
+        if k != "host" && k != "content-length" { req = req.header(k, v); }
+    }
+    let result = match req.send().await {
+        Ok(r) => match r.json::<serde_json::Value>().await {
+            Ok(body) => {
+                let reply = body["content"][0]["text"].as_str().unwrap_or("").to_string();
+                if reply.len() > state.rewrite_threshold {
+                    let hash = state.store.store(PROXY_CACHE_NAMESPACE, &reply).unwrap_or(-1);
+                    let preview: String = reply.chars().take(state.preview_bytes).collect();
+                    format!("<omc:ref h=\"{}\" b=\"{}\" preview={:?}/>", hash, reply.len(), preview)
+                } else { reply }
+            }
+            Err(e) => format!("[delegate error: {}]", e),
+        },
+        Err(e) => format!("[delegate network error: {}]", e),
+    };
+    state.stats.lock().unwrap().delegate_calls += 1;
+    info!("omc_proxy_delegate: task={:?} model={} refs={}", &task[..task.len().min(40)], model, context_refs.len());
+    (id.to_string(), result)
+}
+
+
 async fn dispatch_forward(
     id: &str, endpoint: &str, message: &str, model: &str,
     context_refs: &[String], headers: &HeaderMap, state: &AppState,
@@ -466,6 +518,10 @@ async fn handle_with_expand_loop(
                     info!("omc_proxy_diff: {} vs {}", hash_a, hash_b);
                     (id.clone(), result)
                 }
+                ProxyCall::Delegate { id, task, context_refs, model, max_tokens } => {
+                    dispatch_delegate(id, task, context_refs, model, *max_tokens,
+                                      headers, state).await
+                }
             };
             tool_results.push(json!({
                 "type": "tool_result",
@@ -495,6 +551,9 @@ enum ProxyCall {
     /// Route a message to another LLM endpoint and return its compressed reply.
     Forward   { id: String, endpoint: String, message: String, model: String,
                  context_refs: Vec<String> },
+    /// Spawn a focused sub-agent with explicit context refs decompressed inline.
+    Delegate  { id: String, task: String, context_refs: Vec<String>,
+                 model: String, max_tokens: u64 },
     /// Return a unified diff between two stored hashes.
     Diff      { id: String, hash_a: String, hash_b: String },
 }
@@ -551,6 +610,17 @@ fn collect_proxy_tool_calls(resp: &Value) -> Vec<ProxyCall> {
                 if !id.is_empty() && !message.is_empty() {
                     calls.push(ProxyCall::Forward { id, endpoint, message, model, context_refs });
                 }
+            }
+            n if n == DELEGATE_TOOL_NAME => {
+                let task    = inp.get("task").and_then(Value::as_str).unwrap_or("").to_string();
+                let model   = inp.get("model").and_then(Value::as_str).unwrap_or("claude-opus-4-5").to_string();
+                let max_tok = inp.get("max_tokens").and_then(Value::as_u64).unwrap_or(4096);
+                let crefs: Vec<String> = inp.get("context_refs").and_then(Value::as_array)
+                    .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                    .unwrap_or_default();
+                if !id.is_empty() && !task.is_empty() {
+                    calls.push(ProxyCall::Delegate { id, task, context_refs: crefs, model, max_tokens: max_tok });
+                } else { return vec![]; }
             }
             _ => return vec![], // non-proxy tool → client must handle
         }
@@ -778,6 +848,7 @@ async fn stats_endpoint(State(state): State<AppState>) -> Response {
         "remember_calls": s.remember_calls,
         "recall_calls": s.recall_calls,
         "forward_calls": s.forward_calls,
+        "delegate_calls": s.delegate_calls,
     })).unwrap();
     (StatusCode::OK,
      [(axum::http::header::CONTENT_TYPE, HeaderValue::from_static("application/json"))],
@@ -1469,8 +1540,28 @@ fn inject_proxy_tools(req: &mut Value) {
             "required": ["message"]
         }
     }));
-}
 
+    // ── omc_proxy_delegate ────────────────────────────────────────────────
+    tools_arr.push(json!({
+        "name": DELEGATE_TOOL_NAME,
+        "description": "Spawn a focused sub-agent with a specific task and only the                         context refs it needs. The proxy expands context_refs from                         MemoryStore, constructs a fresh /v1/messages request to upstream,                         and returns the sub-agent reply (compressed if large). Enables                         hierarchical orchestration without the supervisor paying the full                         context cost of the sub-agent working memory.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task":         { "type": "string",
+                                  "description": "The instruction to give the sub-agent." },
+                "context_refs": { "type": "array", "items": { "type": "string" },
+                                  "description": "Hashes (from MemoryStore) to expand and pass as inline context." },
+                "model":        { "type": "string",
+                                  "description": "Model to use (default: claude-opus-4-5)." },
+                "max_tokens":   { "type": "integer",
+                                  "description": "Token budget for the sub-agent (default: 2048)." }
+            },
+            "required": ["task"]
+        }
+    }));
+
+}
 /// Compatibility shim -- callers that used inject_expand_tool still work.
 #[allow(dead_code)]
 fn inject_expand_tool(req: &mut Value) { inject_proxy_tools(req); }
