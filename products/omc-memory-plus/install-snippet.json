@@ -1,0 +1,10 @@
+{
+  "_comment": "Paste the omc block into ~/.claude.json under mcpServers. Restart Claude Code to activate.",
+  "mcpServers": {
+    "omc": {
+      "command": "/usr/local/bin/omnimcode-mcp",
+      "args": [],
+      "env": {}
+    }
+  }
+}

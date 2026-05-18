@@ -173,8 +173,8 @@ fn main() {
     h d_model = 128;
     h ff_dim = 256;
     h lr = 0.003;
-    h steps = 400;
-    h seeds = [42, 7, 123];
+    h steps = 200;
+    h seeds = [42];
     print(concat_many("corpus=", to_string(str_len(text)),
         " chars  vocab=", to_string(vocab_size),
         "  seq_len=", to_string(seq_len),
