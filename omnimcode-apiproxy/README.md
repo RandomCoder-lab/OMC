@@ -2,7 +2,7 @@
 
 Substrate-rewriting reverse proxy for `api.anthropic.com`. Compresses large content blocks in the LLM's context window by replacing them with content-addressed `<omc:ref/>` markers, exposing a lossless expansion path via an injected tool.
 
-Status: **v0.14.0-alpha** — proof of concept. Measured 6.64× compression on a single 6.8 KB content block in smoke test. Known sharp edges below.
+Status: **v0.14.1** — request rewriting + transparent expand-tool resolution. Measured 6.64× wire-bandwidth compression on a single 6.8 KB content block; expand-tool round-trips are invisible to the client. Streaming + tool_use-block content + image content are still v0.14.2+ work.
 
 ## What it does
 
@@ -52,13 +52,14 @@ Smoke test against a mock upstream:
 
 Real-world LLM-token savings depend on how often the LLM resists calling `omc_proxy_expand_ref`. The tool's description tells the LLM to only expand when the preview isn't enough; in practice this should hold ~70-90% of the time on long contexts where most prior turns aren't load-bearing for the current response.
 
-## Known limitations (v0.14.0-alpha)
+## Known limitations (v0.14.1)
 
-1. **No streaming.** Requests with `"stream": true` pass through unchanged (no SSE rewriting yet).
-2. **The injected `omc_proxy_expand_ref` tool is not yet served by the proxy.** If the LLM actually emits a `tool_use` block calling it, the response flows back through Claude Code, which doesn't know the tool and will error. This means: in this alpha, the proxy works best in a "fire and forget" mode where the LLM responds without expanding markers. A v0.14.1 follow-up will catch tool_use for `omc_proxy_expand_ref` in the response stream, execute it locally from the cache, and inject the tool_result before returning to the client.
-3. **No image / tool_use / citation block rewriting.** Only `text` blocks and the `content` field of `tool_result` blocks (string or text-array form) are rewritten.
-4. **Response is forwarded unmodified.** Cache only fills on the request side, so the savings kick in on subsequent turns where prior big content reappears in conversation history.
+1. **No streaming.** Requests with `"stream": true` pass through unchanged (no SSE rewriting yet — v0.14.2 work).
+2. **Mixed tool_use passes through unchanged.** When the LLM emits the expand call alongside another tool call in the same response, the proxy doesn't intercept — it forwards the full response to the client (which will see the unknown expand tool). The auto-resolution only triggers when expand is the sole tool_use.
+3. **No image / `tool_use`-block / citation block rewriting.** Only `text` blocks and the `content` field of `tool_result` blocks (string or text-array form) are rewritten.
+4. **Response body is not cached for next-turn rewriting.** Cache only fills on the request side, so the savings kick in on subsequent turns where prior big content reappears in conversation history. A v0.15 follow-up will also index large assistant `text` blocks.
 5. **No batching API support.** `/v1/messages/batches` falls through to the generic passthrough.
+6. **Expand-loop bound at 8 rounds.** If the LLM keeps requesting expansion, the proxy gives up and returns 502 — protects against runaway tool-loop costs.
 
 ## Threat model
 
@@ -84,7 +85,8 @@ The proxy is a thin axum HTTP server. State lives in the existing OMC MemoryStor
 
 ## Roadmap
 
-- **v0.14.1**: catch `omc_proxy_expand_ref` tool_use in responses, execute locally
+- ~~**v0.14.1**: catch `omc_proxy_expand_ref` tool_use in responses, execute locally~~ ✅ shipped
 - **v0.14.2**: streaming SSE response rewriting
-- **v0.15.0**: tool_use / citation / image content support; batching API
+- **v0.14.3**: handle mixed tool_use (expand + other in same assistant turn)
+- **v0.15.0**: tool_use / citation / image content support; batching API; response-side caching for next-turn rewrites
 - **v0.16.0**: cache namespace per-conversation (use `x-conversation-id` or similar) so concurrent sessions don't collide
