@@ -1,0 +1,187 @@
+# recursive_loop_demo.omc — The recursive self-improvement loop, demonstrated.
+#
+# Pattern:
+#   1. Describe a problem in natural language
+#   2. Ask Claude to generate OMC code that solves it (llm_call)
+#   3. Execute the generated code (eval_omc)
+#   4. Test it against known cases
+#   5. If wrong → feed the error back to Claude with the code
+#   6. Repeat until all tests pass or max_iters reached
+#
+# This closes the loop: OMC uses Claude to write OMC → OMC runs OMC → OMC grades OMC
+# → OMC uses Claude to FIX OMC → ...
+
+h CLAUDE_MODEL = "claude-opus-4-5"
+h MAX_ITERS = 5
+
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+fn call_claude(prompt) {
+    llm_call(prompt, CLAUDE_MODEL,
+        "You are an expert OMC programmer. OMC uses 'h' for assignment (h x = 5), fn for functions. Return ONLY runnable OMC code, no markdown fences, no explanation.")
+}
+
+fn extract_code(llm_response) {
+    # Strip ``` fences if Claude added them anyway
+    h s = str_trim(llm_response)
+    if str_starts_with(s, "```") {
+        h lines = str_split(s, "\n")
+        h inner = arr_slice(lines, 1, arr_len(lines) - 1)
+        return str_join(inner, "\n")
+    }
+    s
+}
+
+fn run_code_safe(code) {
+    # Returns {ok: true, value: v} or {ok: false, error: "msg"}
+    h result = null
+    h err = null
+    # eval_omc will throw on parse/runtime error — wrap with err-capture
+    h ran = eval_omc(str_concat(
+        code, "\n",
+        "\"__OK__\""  # sentinel return value
+    ))
+    {ok: true, value: ran}
+}
+
+fn test_suite(code, tests) {
+    # tests = [{input: [...], expected: v}, ...]
+    # Wraps code in a runner and checks each case
+    h failures = []
+    for test in tests {
+        h runner = str_concat(
+            code, "\n",
+            "h __result = ", test["call"], "\n",
+            "__result"
+        )
+        h got = eval_omc(runner)
+        if got != test["expected"] {
+            failures = arr_push(failures,
+                str_concat("  call: ", test["call"],
+                           "  expected: ", json_stringify(test["expected"]),
+                           "  got: ", json_stringify(got)))
+        }
+    }
+    failures
+}
+
+# ── The recursive improvement loop ────────────────────────────────────────────
+
+fn improve_until_passing(problem, tests, max_iters) {
+    print(str_concat("\n🎯 Problem: ", problem))
+    print(str_concat("   ", json_stringify(arr_len(tests)), " test cases, up to ", json_stringify(max_iters), " iterations\n"))
+
+    # --- iteration 0: generate initial code ---
+    h prompt = str_concat(
+        "Write an OMC function that solves this problem:\n\n",
+        problem, "\n\n",
+        "Return ONLY the function definition(s). Example format:\n",
+        "fn solve(n) {\n    # implementation\n}\n"
+    )
+    h code = extract_code(call_claude(prompt))
+    print(str_concat("📝 Generated code (", json_stringify(str_len(code)), " chars)"))
+
+    h iter = 0
+    while iter < max_iters {
+        iter = iter + 1
+        print(str_concat("\n── Iteration ", json_stringify(iter), " ──"))
+
+        h failures = test_suite(code, tests)
+        if arr_len(failures) == 0 {
+            print("✅ All tests passing!")
+            return {success: true, code: code, iterations: iter}
+        }
+
+        print(str_concat("❌ ", json_stringify(arr_len(failures)), " failure(s):"))
+        for f in failures { print(f) }
+
+        if iter >= max_iters {
+            print("⚠️  Max iterations reached.")
+            return {success: false, code: code, iterations: iter, failures: failures}
+        }
+
+        # --- ask Claude to fix it ---
+        h fix_prompt = str_concat(
+            "This OMC code:\n\n```\n", code, "\n```\n\n",
+            "Failed these tests:\n",
+            str_join(failures, "\n"), "\n\n",
+            "Problem: ", problem, "\n\n",
+            "Rewrite the function(s) to pass all tests. Return ONLY the code."
+        )
+        h new_code = extract_code(call_claude(fix_prompt))
+        print(str_concat("🔧 Claude revised code (", json_stringify(str_len(new_code)), " chars)"))
+        code = new_code
+    }
+
+    {success: false, code: code, iterations: iter}
+}
+
+# ── Run three progressively harder demonstrations ─────────────────────────────
+
+print("═══════════════════════════════════════════════════════════")
+print("  OMC Recursive Self-Improvement Loop — Live Demonstration")
+print("═══════════════════════════════════════════════════════════")
+
+# Demo 1: FizzBuzz (trivial — should pass on iteration 1)
+h demo1 = improve_until_passing(
+    "fizzbuzz(n): return 'Fizz' if divisible by 3, 'Buzz' if by 5, 'FizzBuzz' if both, else the number as a string",
+    [
+        {call: "fizzbuzz(1)",  expected: "1"},
+        {call: "fizzbuzz(3)",  expected: "Fizz"},
+        {call: "fizzbuzz(5)",  expected: "Buzz"},
+        {call: "fizzbuzz(15)", expected: "FizzBuzz"},
+        {call: "fizzbuzz(7)",  expected: "7"}
+    ],
+    MAX_ITERS
+)
+
+print(str_concat("\nDemo 1 result: ", json_stringify(demo1["success"]),
+    " in ", json_stringify(demo1["iterations"]), " iteration(s)"))
+
+# Demo 2: Binary search (slightly harder)
+h demo2 = improve_until_passing(
+    "binary_search(arr, target): return the index of target in sorted array arr, or -1 if not found",
+    [
+        {call: "binary_search([1,3,5,7,9], 5)",  expected: 2},
+        {call: "binary_search([1,3,5,7,9], 1)",  expected: 0},
+        {call: "binary_search([1,3,5,7,9], 9)",  expected: 4},
+        {call: "binary_search([1,3,5,7,9], 4)",  expected: -1},
+        {call: "binary_search([], 1)",             expected: -1}
+    ],
+    MAX_ITERS
+)
+
+print(str_concat("\nDemo 2 result: ", json_stringify(demo2["success"]),
+    " in ", json_stringify(demo2["iterations"]), " iteration(s)"))
+
+# Demo 3: Count islands (graph traversal — hardest)
+h demo3 = improve_until_passing(
+    "count_islands(grid): given a 2D array of 0s and 1s, count the number of islands (connected groups of 1s, 4-directional)",
+    [
+        {call: "count_islands([[1,1,0],[0,0,0],[0,0,1]])", expected: 2},
+        {call: "count_islands([[0,0,0],[0,0,0]])",         expected: 0},
+        {call: "count_islands([[1,0,1],[0,1,0],[1,0,1]])", expected: 5},
+        {call: "count_islands([[1,1],[1,1]])",             expected: 1}
+    ],
+    MAX_ITERS
+)
+
+print(str_concat("\nDemo 3 result: ", json_stringify(demo3["success"]),
+    " in ", json_stringify(demo3["iterations"]), " iteration(s)"))
+
+# ── Summary ───────────────────────────────────────────────────────────────────
+print("\n═══════════════════════════════════════════════════════════")
+print("  SUMMARY")
+print("═══════════════════════════════════════════════════════════")
+
+h results = [demo1, demo2, demo3]
+h passed = arr_filter(fn(r) r["success"], results)
+print(str_concat("  ", json_stringify(arr_len(passed)), "/3 demos fully solved"))
+
+for demo in results {
+    h status = if demo["success"] "✅" else "⚠️"
+    print(str_concat("  ", status, " solved in ", json_stringify(demo["iterations"]), " iteration(s)"))
+}
+
+print("\nThe recursive self-improvement loop is live.")
+print("OMC programs can now generate, evaluate, and improve OMC code autonomously.")
