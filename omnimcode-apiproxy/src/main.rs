@@ -76,6 +76,18 @@ struct Args {
     preview_bytes: usize,
 }
 
+#[derive(Default, Debug, Clone)]
+struct RewriteStats {
+    requests: u64,
+    bytes_in: u64,
+    bytes_out: u64,
+    blocks_rewritten: u64,
+    bytes_saved_messages: u64,
+    bytes_saved_tool_result: u64,
+    bytes_saved_system: u64,
+    bytes_saved_tool_use_input: u64,
+}
+
 #[derive(Clone)]
 struct AppState {
     upstream: String,
@@ -83,6 +95,7 @@ struct AppState {
     preview_bytes: usize,
     http: reqwest::Client,
     store: Arc<MemoryStore>,
+    stats: Arc<std::sync::Mutex<RewriteStats>>,
 }
 
 #[tokio::main]
@@ -112,10 +125,12 @@ async fn main() -> Result<()> {
             .timeout(std::time::Duration::from_secs(300))
             .build()?,
         store: Arc::new(MemoryStore::from_env()),
+        stats: Arc::new(std::sync::Mutex::new(RewriteStats::default())),
     };
 
     let app = Router::new()
         .route("/v1/messages", post(handle_messages))
+        .route("/_stats", axum::routing::get(stats_endpoint))
         .fallback(any(passthrough))
         .with_state(state);
 
@@ -151,18 +166,36 @@ async fn handle_messages(State(state): State<AppState>, req: Request) -> Respons
     // expand-tool-use interception loop (which requires parsing the full response)
     // and just pass the SSE chunks straight through.
     let rewritten = match rewrite_request_body(&body_bytes, &state) {
-        Ok(b) => b,
+        Ok((b, outcome)) => {
+            if outcome.any() {
+                info!("rewrote request: {} → {} bytes ({:+} bytes saved across {} blocks) | \
+                       sys={}B msg={}B tool_result={}B tool_use_input={}B",
+                    body_bytes.len(), b.len(), -((body_bytes.len() - b.len()) as i64),
+                    outcome.rewritten_count,
+                    outcome.bytes_system, outcome.bytes_messages_text,
+                    outcome.bytes_tool_result, outcome.bytes_tool_use_input);
+            }
+            // Update cumulative stats
+            {
+                let mut s = state.stats.lock().unwrap();
+                s.requests += 1;
+                s.bytes_in += body_bytes.len() as u64;
+                s.bytes_out += b.len() as u64;
+                s.blocks_rewritten += outcome.rewritten_count as u64;
+                s.bytes_saved_messages += outcome.bytes_messages_text as u64;
+                s.bytes_saved_tool_result += outcome.bytes_tool_result as u64;
+                s.bytes_saved_system += outcome.bytes_system as u64;
+                s.bytes_saved_tool_use_input += outcome.bytes_tool_use_input as u64;
+            }
+            b
+        }
         Err(e) => {
             warn!("rewrite failed, passing original through: {}", e);
             body_bytes.clone()
         }
     };
 
-    let saved = body_bytes.len() as i64 - rewritten.len() as i64;
-    if saved > 0 {
-        info!("rewrote request: {} → {} bytes ({:+} bytes saved)",
-            body_bytes.len(), rewritten.len(), -saved);
-    }
+    let _saved_unused = body_bytes.len() as i64 - rewritten.len() as i64;
 
     if is_streaming {
         // SSE response: just pass through. The LLM can still emit the expand
@@ -378,60 +411,95 @@ fn is_streaming_request(body: &[u8]) -> bool {
         .unwrap_or(false)
 }
 
-/// Walk `messages[].content[]` for text blocks above the threshold and
-/// replace each with a `<omc:ref/>` marker. Inject the expand tool into
-/// the request's `tools` array.
+/// Per-request rewrite outcome — what was compressed and by how much, broken
+/// down by source so the operator can see at a glance whether system prompts,
+/// historical tool_results, or LLM tool_use inputs are the dominant savings.
+#[derive(Default, Debug)]
+struct RewriteOutcome {
+    rewritten_count: usize,
+    bytes_messages_text: usize,
+    bytes_tool_result: usize,
+    bytes_system: usize,
+    bytes_tool_use_input: usize,
+}
+
+impl RewriteOutcome {
+    fn total_saved(&self) -> usize {
+        self.bytes_messages_text + self.bytes_tool_result
+            + self.bytes_system + self.bytes_tool_use_input
+    }
+    fn any(&self) -> bool { self.rewritten_count > 0 }
+}
+
+/// v0.14.3 — live cumulative-stats endpoint. `curl http://localhost:8090/_stats`
+async fn stats_endpoint(State(state): State<AppState>) -> Response {
+    let s = state.stats.lock().unwrap().clone();
+    let ratio = if s.bytes_out > 0 {
+        s.bytes_in as f64 / s.bytes_out as f64
+    } else { 0.0 };
+    let total_saved = s.bytes_saved_messages + s.bytes_saved_tool_result
+        + s.bytes_saved_system + s.bytes_saved_tool_use_input;
+    let json = serde_json::to_string_pretty(&serde_json::json!({
+        "requests_processed": s.requests,
+        "bytes_in_total":  s.bytes_in,
+        "bytes_out_total": s.bytes_out,
+        "bytes_saved_total": total_saved,
+        "compression_ratio": ratio,
+        "blocks_rewritten": s.blocks_rewritten,
+        "bytes_saved_by_source": {
+            "messages_text": s.bytes_saved_messages,
+            "tool_result": s.bytes_saved_tool_result,
+            "system_prompt": s.bytes_saved_system,
+            "tool_use_input": s.bytes_saved_tool_use_input,
+        }
+    })).unwrap();
+    (StatusCode::OK,
+     [(axum::http::header::CONTENT_TYPE, HeaderValue::from_static("application/json"))],
+     json).into_response()
+}
+
+/// Walk the request body and rewrite every eligible large block.
+///
+/// What gets rewritten (each independently):
+///   - `messages[].content` — string form or array-of-blocks form, except
+///     the LAST user message (kept intact so the LLM sees the current ask)
+///   - `messages[].content[]` of type `tool_result` — the `content` field
+///   - `messages[].content[]` of type `tool_use` — the JSON-serialized
+///     `input` field when its serialized form exceeds threshold; this
+///     catches the LLM's own large tool arguments (e.g., Write file content)
+///   - `system` (top-level): if a string, rewrites it as a single block; if
+///     an array, walks each `{type: "text", text: ...}` element. Critically
+///     PRESERVES the `cache_control` field on each element so Anthropic's
+///     prompt-cache layer still works on the rewritten form.
 ///
 /// Safety rule: the LAST user message is never rewritten — that's the
-/// user's current intent, and replacing it with a marker would force the
-/// LLM to spend a round-trip expanding it just to know what was asked.
-fn rewrite_request_body(body: &[u8], state: &AppState) -> Result<Bytes> {
+/// user's current intent.
+fn rewrite_request_body(body: &[u8], state: &AppState) -> Result<(Bytes, RewriteOutcome)> {
     let mut v: Value = serde_json::from_slice(body)?;
-    let Some(messages) = v.get_mut("messages").and_then(Value::as_array_mut) else {
-        anyhow::bail!("no 'messages' array in request");
-    };
+    let mut out = RewriteOutcome::default();
 
-    // Find the index of the last user message — protect it from rewriting.
-    let last_user_idx = messages.iter().enumerate().rev()
-        .find(|(_, m)| m.get("role").and_then(Value::as_str) == Some("user"))
-        .map(|(i, _)| i);
-
-    let mut rewritten_count = 0usize;
-    let mut bytes_replaced = 0usize;
-
-    for (idx, msg) in messages.iter_mut().enumerate() {
-        if Some(idx) == last_user_idx { continue; }
-        let content = msg.get_mut("content");
-        match content {
-            Some(Value::String(s)) => {
+    // ---- system prompt (top-level field) ----
+    if let Some(system) = v.get_mut("system") {
+        match system {
+            Value::String(s) => {
                 if s.len() >= state.rewrite_threshold {
                     if let Ok(marker) = make_marker(s, state) {
-                        bytes_replaced += s.len();
-                        *content.unwrap() = Value::String(marker);
-                        rewritten_count += 1;
+                        out.bytes_system += s.len();
+                        out.rewritten_count += 1;
+                        *system = Value::String(marker);
                     }
                 }
             }
-            Some(Value::Array(blocks)) => {
+            Value::Array(blocks) => {
                 for block in blocks.iter_mut() {
                     if block.get("type").and_then(Value::as_str) == Some("text") {
-                        if let Some(text) = block.get("text").and_then(Value::as_str) {
-                            if text.len() >= state.rewrite_threshold {
-                                if let Ok(marker) = make_marker(text, state) {
-                                    bytes_replaced += text.len();
-                                    block["text"] = Value::String(marker);
-                                    rewritten_count += 1;
-                                }
-                            }
-                        }
-                    }
-                    // tool_result blocks carry a `content` field which can be a
-                    // string or an array of {type, text}. Same rewrite rule.
-                    if block.get("type").and_then(Value::as_str) == Some("tool_result") {
-                        if let Some(inner) = block.get_mut("content") {
-                            rewrite_tool_result_content(inner, state,
-                                &mut rewritten_count, &mut bytes_replaced);
-                        }
+                        let Some(text) = block.get("text").and_then(Value::as_str) else { continue };
+                        if text.len() < state.rewrite_threshold { continue; }
+                        let Ok(marker) = make_marker(text, state) else { continue };
+                        out.bytes_system += text.len();
+                        out.rewritten_count += 1;
+                        // Mutate ONLY the `text` field; preserve cache_control + everything else
+                        block["text"] = Value::String(marker);
                     }
                 }
             }
@@ -439,24 +507,90 @@ fn rewrite_request_body(body: &[u8], state: &AppState) -> Result<Bytes> {
         }
     }
 
-    if rewritten_count > 0 {
-        inject_expand_tool(&mut v);
-        debug!("rewrote {} blocks, replaced {} bytes", rewritten_count, bytes_replaced);
+    // ---- messages array ----
+    let Some(messages) = v.get_mut("messages").and_then(Value::as_array_mut) else {
+        // No messages? Just system rewriting may have happened — return what we have.
+        let bytes = Bytes::from(serde_json::to_vec(&v)?);
+        return Ok((bytes, out));
+    };
+    let last_user_idx = messages.iter().enumerate().rev()
+        .find(|(_, m)| m.get("role").and_then(Value::as_str) == Some("user"))
+        .map(|(i, _)| i);
+
+    for (idx, msg) in messages.iter_mut().enumerate() {
+        if Some(idx) == last_user_idx { continue; }
+        let Some(content) = msg.get_mut("content") else { continue };
+        match content {
+            Value::String(s) => {
+                if s.len() >= state.rewrite_threshold {
+                    if let Ok(marker) = make_marker(s, state) {
+                        out.bytes_messages_text += s.len();
+                        out.rewritten_count += 1;
+                        *content = Value::String(marker);
+                    }
+                }
+            }
+            Value::Array(blocks) => {
+                for block in blocks.iter_mut() {
+                    let block_type = block.get("type").and_then(Value::as_str).unwrap_or("");
+                    match block_type {
+                        "text" => {
+                            let Some(text) = block.get("text").and_then(Value::as_str) else { continue };
+                            if text.len() < state.rewrite_threshold { continue; }
+                            let Ok(marker) = make_marker(text, state) else { continue };
+                            out.bytes_messages_text += text.len();
+                            out.rewritten_count += 1;
+                            block["text"] = Value::String(marker);
+                        }
+                        "tool_result" => {
+                            if let Some(inner) = block.get_mut("content") {
+                                rewrite_tool_result_content(inner, state, &mut out);
+                            }
+                        }
+                        "tool_use" => {
+                            // Compress big `input` JSON (e.g., Write/Edit
+                            // calls where the LLM emitted file content).
+                            if let Some(input) = block.get_mut("input") {
+                                let serialized = serde_json::to_string(input)
+                                    .unwrap_or_default();
+                                if serialized.len() >= state.rewrite_threshold {
+                                    if let Ok(marker) = make_marker(&serialized, state) {
+                                        out.bytes_tool_use_input += serialized.len();
+                                        out.rewritten_count += 1;
+                                        // Wrap marker as an object so the JSON
+                                        // remains structurally an object — many
+                                        // LLM clients assume `input` is a dict.
+                                        *input = serde_json::json!({
+                                            "_omc_compressed_input_marker": marker
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
-    let out = serde_json::to_vec(&v)?;
-    Ok(Bytes::from(out))
+    if out.any() {
+        inject_expand_tool(&mut v);
+    }
+    let bytes = Bytes::from(serde_json::to_vec(&v)?);
+    Ok((bytes, out))
 }
 
 fn rewrite_tool_result_content(
-    inner: &mut Value, state: &AppState, count: &mut usize, bytes: &mut usize,
+    inner: &mut Value, state: &AppState, out: &mut RewriteOutcome,
 ) {
     match inner {
         Value::String(s) => {
             if s.len() >= state.rewrite_threshold {
                 if let Ok(marker) = make_marker(s, state) {
-                    *bytes += s.len();
-                    *count += 1;
+                    out.bytes_tool_result += s.len();
+                    out.rewritten_count += 1;
                     *inner = Value::String(marker);
                 }
             }
@@ -464,15 +598,12 @@ fn rewrite_tool_result_content(
         Value::Array(parts) => {
             for part in parts.iter_mut() {
                 if part.get("type").and_then(Value::as_str) == Some("text") {
-                    if let Some(text) = part.get("text").and_then(Value::as_str) {
-                        if text.len() >= state.rewrite_threshold {
-                            if let Ok(marker) = make_marker(text, state) {
-                                *bytes += text.len();
-                                *count += 1;
-                                part["text"] = Value::String(marker);
-                            }
-                        }
-                    }
+                    let Some(text) = part.get("text").and_then(Value::as_str) else { continue };
+                    if text.len() < state.rewrite_threshold { continue; }
+                    let Ok(marker) = make_marker(text, state) else { continue };
+                    out.bytes_tool_result += text.len();
+                    out.rewritten_count += 1;
+                    part["text"] = Value::String(marker);
                 }
             }
         }
