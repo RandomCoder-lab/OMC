@@ -116,14 +116,17 @@ fn handle(interp: &mut Interpreter, method: &str, params: &Json, id: Json) -> Rp
             let name = params.get("name").and_then(Json::as_str).unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
             match dispatch_tool(interp, name, &args) {
-                Ok(text) => RpcResponse {
-                    jsonrpc: "2.0",
-                    id,
-                    result: Some(json!({
-                        "content": [{ "type": "text", "text": text }],
-                        "isError": false
-                    })),
-                    error: None,
+                Ok(text) => {
+                    let final_text = maybe_auto_summarize(text);
+                    RpcResponse {
+                        jsonrpc: "2.0",
+                        id,
+                        result: Some(json!({
+                            "content": [{ "type": "text", "text": final_text }],
+                            "isError": false
+                        })),
+                        error: None,
+                    }
                 },
                 Err(msg) => RpcResponse {
                     jsonrpc: "2.0",
@@ -796,6 +799,62 @@ fn hash_fields(h: i64) -> serde_json::Map<String, Json> {
     m.insert("content_hash".to_string(), json!(h));
     m.insert("content_hash_str".to_string(), json!(h.to_string()));
     m
+}
+
+/// v0.13.0 Option-A — smart-response MCP.
+///
+/// Wraps a dispatched tool result. If `OMC_MCP_AUTO_SUMMARY=1` and the
+/// response carries a `text` field bigger than the threshold (default 1024
+/// bytes, override via `OMC_MCP_AUTO_SUMMARY_THRESHOLD`), the full text is
+/// cached in the MemoryStore (`_auto_summary_cache` namespace) and the
+/// LLM-facing response is rewritten to a tiny envelope with the
+/// `expand_with` instructions.
+///
+/// The LLM then decides: use the preview, or call
+/// `omc_memory_recall(content_hash_str=..., namespace=_auto_summary_cache)`
+/// to fetch the full body. For sessions where the LLM only needs the
+/// preview ~60-80% of the time, this is a real 2-5× LLM token saving on
+/// recall-heavy workflows. Lossless — the full body is always recoverable.
+fn maybe_auto_summarize(raw_response: String) -> String {
+    if std::env::var("OMC_MCP_AUTO_SUMMARY").ok().as_deref() != Some("1") {
+        return raw_response;
+    }
+    let threshold: usize = std::env::var("OMC_MCP_AUTO_SUMMARY_THRESHOLD")
+        .ok().and_then(|s| s.parse().ok()).unwrap_or(1024);
+    if raw_response.len() < threshold * 2 {
+        return raw_response;  // not worth the rewrite framing
+    }
+    let mut v: Json = match serde_json::from_str(&raw_response) {
+        Ok(v) => v,
+        Err(_) => return raw_response,
+    };
+    // Only trigger on responses carrying a long `text` field.
+    let text_len = v.get("text").and_then(Json::as_str)
+        .map(|s| s.len()).unwrap_or(0);
+    if text_len < threshold { return raw_response; }
+    let text = v.get("text").and_then(Json::as_str).unwrap().to_string();
+    let store = MemoryStore::from_env();
+    let hash = match store.store("_auto_summary_cache", &text) {
+        Ok(h) => h,
+        Err(_) => return raw_response,
+    };
+    let preview: String = text.chars()
+        .filter(|c| !c.is_control())
+        .take(200).collect();
+    if let Json::Object(ref mut map) = v {
+        map.remove("text");
+        map.insert("_auto_summarized".to_string(), json!(true));
+        map.insert("preview".to_string(), json!(preview));
+        map.insert("original_byte_count".to_string(), json!(text.len()));
+        map.insert("expand_with".to_string(), json!({
+            "tool": "omc_memory_recall",
+            "content_hash_str": hash.to_string(),
+            "namespace": "_auto_summary_cache",
+            "note": "Call this tool to retrieve the full body if the preview \
+                     isn't enough. The body is cached losslessly under this hash."
+        }));
+    }
+    serde_json::to_string_pretty(&v).unwrap_or(raw_response)
 }
 
 fn dispatch_tool(interp: &mut Interpreter, name: &str, args: &Json) -> Result<String, String> {
