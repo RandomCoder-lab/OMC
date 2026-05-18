@@ -404,20 +404,29 @@ fn list_tools() -> Vec<Json> {
                             \n\
                             Companion to omc_memory_store. Together they let prior agent \
                             turns stay in hash form in the current context, recovered on \
-                            demand only when reasoning needs them.",
+                            demand only when reasoning needs them.\n\
+                            \n\
+                            **v0.12.1: prefer `content_hash_str` (decimal string) over \
+                            `content_hash` (integer) for any hash > 2^53 ≈ 9e15.** JSON's \
+                            number type is f64 and silently rounds large ints. The store \
+                            response always includes both forms; pass back the string form \
+                            to be safe.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "content_hash": {
                         "type": "integer",
-                        "description": "Hash returned by a prior omc_memory_store."
+                        "description": "Hash returned by a prior omc_memory_store. Lossy above 2^53."
+                    },
+                    "content_hash_str": {
+                        "type": "string",
+                        "description": "Decimal-string form. Lossless. Preferred for hashes > 2^53."
                     },
                     "namespace": {
                         "type": "string",
                         "description": "Optional. If omitted, searches all namespaces."
                     }
-                },
-                "required": ["content_hash"]
+                }
             }
         }),
         json!({
@@ -434,14 +443,16 @@ fn list_tools() -> Vec<Json> {
                             full recall.\n\
                             \n\
                             Best paired with omc_memory_list which gives you the hashes; then \
-                            walk them through recall_summary; then recall the one(s) that matter.",
+                            walk them through recall_summary; then recall the one(s) that matter.\n\
+                            \n\
+                            **v0.12.1: prefer `content_hash_str` (decimal string) for hashes > 2^53.**",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "content_hash": {"type": "integer"},
+                    "content_hash": {"type": "integer", "description": "Lossy above 2^53."},
+                    "content_hash_str": {"type": "string", "description": "Decimal-string form. Preferred for large hashes."},
                     "namespace": {"type": "string"}
-                },
-                "required": ["content_hash"]
+                }
             }
         }),
         json!({
@@ -466,7 +477,11 @@ fn list_tools() -> Vec<Json> {
                 "properties": {
                     "content_hash": {
                         "type": "integer",
-                        "description": "Hash returned by a prior omc_memory_store."
+                        "description": "Hash returned by a prior omc_memory_store. Lossy above 2^53."
+                    },
+                    "content_hash_str": {
+                        "type": "string",
+                        "description": "Decimal-string form. Preferred for hashes > 2^53."
                     },
                     "namespace": {
                         "type": "string",
@@ -478,8 +493,7 @@ fn list_tools() -> Vec<Json> {
                         "minimum": 1,
                         "description": "Sampling stride; higher = smaller + lossier."
                     }
-                },
-                "required": ["content_hash"]
+                }
             }
         }),
         json!({
@@ -569,9 +583,10 @@ fn list_tools() -> Vec<Json> {
                 "properties": {
                     "namespace": {"type": "string", "default": "default"},
                     "text": {"type": "string", "description": "The new content (full text, not a diff)."},
-                    "base_hash": {"type": "integer", "description": "content_hash of an existing entry to delta against."}
+                    "base_hash": {"type": "integer", "description": "Base hash. Lossy above 2^53; prefer base_hash_str."},
+                    "base_hash_str": {"type": "string", "description": "Decimal-string form of base hash. Lossless."}
                 },
-                "required": ["text", "base_hash"]
+                "required": ["text"]
             }
         }),
         json!({
@@ -711,10 +726,14 @@ fn list_tools() -> Vec<Json> {
                     "entries": {
                         "type": "array",
                         "items": {"type": "integer"},
-                        "description": "Leaf content_hashes from prior omc_memory_store calls."
+                        "description": "Leaf content_hashes from prior omc_memory_store. Lossy above 2^53; prefer entries_str."
+                    },
+                    "entries_str": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Decimal-string forms of leaf hashes. Lossless. Preferred."
                     }
-                },
-                "required": ["entries"]
+                }
             }
         }),
         json!({
@@ -735,18 +754,48 @@ fn list_tools() -> Vec<Json> {
                     },
                     "content_hash": {
                         "type": "integer",
-                        "description": "The manifest hash from omc_memory_create_manifest."
+                        "description": "Manifest hash. Lossy above 2^53; prefer content_hash_str."
+                    },
+                    "content_hash_str": {
+                        "type": "string",
+                        "description": "Decimal-string form of the manifest hash. Lossless."
                     },
                     "expand": {
                         "type": "boolean",
                         "default": false,
                         "description": "If true, recall every leaf in one call."
                     }
-                },
-                "required": ["content_hash"]
+                }
             }
         }),
     ]
+}
+
+/// v0.12.1 — robust hash argument reader. JSON's number type can only
+/// faithfully represent integers up to 2^53; any FNV1a 64-bit hash above
+/// that gets silently rounded to the nearest f64 by the LLM/MCP client
+/// layer, making the entry unrecoverable. Accept the hash as either an
+/// `integer` (legacy, lossy above 2^53) or a `string` (decimal, lossless).
+/// Prefer the string form when both are present.
+fn read_hash_arg(args: &Json, tool: &str) -> Result<i64, String> {
+    if let Some(s) = args.get("content_hash_str").and_then(Json::as_str) {
+        return s.parse::<i64>().map_err(|e|
+            format!("{}: 'content_hash_str' is not a valid i64: {}", tool, e));
+    }
+    args.get("content_hash").and_then(Json::as_i64)
+        .ok_or_else(|| format!(
+            "{}: missing 'content_hash' (integer) or 'content_hash_str' (decimal string). \
+             Prefer 'content_hash_str' for hashes > 2^53 to avoid JSON-float precision loss.",
+            tool))
+}
+
+/// v0.12.1 — emit a hash in both forms so the caller can pass back the
+/// lossless string version. Inserts both `content_hash` and `content_hash_str`.
+fn hash_fields(h: i64) -> serde_json::Map<String, Json> {
+    let mut m = serde_json::Map::new();
+    m.insert("content_hash".to_string(), json!(h));
+    m.insert("content_hash_str".to_string(), json!(h.to_string()));
+    m
 }
 
 fn dispatch_tool(interp: &mut Interpreter, name: &str, args: &Json) -> Result<String, String> {
@@ -903,77 +952,82 @@ fn dispatch_tool(interp: &mut Interpreter, name: &str, args: &Json) -> Result<St
                 .unwrap_or("default");
             let store = MemoryStore::from_env();
             let hash = store.store(namespace, text)?;
-            Ok(serde_json::to_string_pretty(&json!({
-                "content_hash": hash,
-                "namespace": namespace,
-                "bytes": text.len(),
-            })).unwrap())
+            let mut resp = hash_fields(hash);
+            resp.insert("namespace".to_string(), json!(namespace));
+            resp.insert("bytes".to_string(), json!(text.len()));
+            Ok(serde_json::to_string_pretty(&Json::Object(resp)).unwrap())
         }
         "omc_memory_recall_summary" => {
-            let target = args.get("content_hash").and_then(Json::as_i64)
-                .ok_or_else(|| "omc_memory_recall_summary: missing 'content_hash' (i64)".to_string())?;
+            let target = read_hash_arg(args, "omc_memory_recall_summary")?;
             let namespace = args.get("namespace").and_then(Json::as_str);
             let store = MemoryStore::from_env();
             match store.recall_summary(namespace, target)? {
-                Some(p) => Ok(serde_json::to_string_pretty(&json!({
-                    "found": true,
-                    "content_hash": p.content_hash,
-                    "byte_count": p.byte_count,
-                    "first_line": p.first_line,
-                    "preview": p.preview,
-                    "attractor": p.attractor,
-                })).unwrap()),
-                None => Ok(serde_json::to_string_pretty(&json!({
-                    "found": false,
-                    "content_hash": target,
-                    "namespace": namespace,
-                })).unwrap()),
+                Some(p) => {
+                    let mut resp = hash_fields(p.content_hash);
+                    resp.insert("found".to_string(), json!(true));
+                    resp.insert("byte_count".to_string(), json!(p.byte_count));
+                    resp.insert("first_line".to_string(), json!(p.first_line));
+                    resp.insert("preview".to_string(), json!(p.preview));
+                    resp.insert("attractor".to_string(), json!(p.attractor));
+                    resp.insert("attractor_str".to_string(), json!(p.attractor.to_string()));
+                    Ok(serde_json::to_string_pretty(&Json::Object(resp)).unwrap())
+                }
+                None => {
+                    let mut resp = hash_fields(target);
+                    resp.insert("found".to_string(), json!(false));
+                    resp.insert("namespace".to_string(), json!(namespace));
+                    Ok(serde_json::to_string_pretty(&Json::Object(resp)).unwrap())
+                }
             }
         }
         "omc_memory_recall_codec" => {
-            let target = args.get("content_hash").and_then(Json::as_i64)
-                .ok_or_else(|| "omc_memory_recall_codec: missing 'content_hash' (i64)".to_string())?;
+            let target = read_hash_arg(args, "omc_memory_recall_codec")?;
             let namespace = args.get("namespace").and_then(Json::as_str);
             let every_n = args.get("every_n").and_then(Json::as_u64).unwrap_or(3) as usize;
             let want_array = args.get("include_tokens_array").and_then(Json::as_bool).unwrap_or(false);
             let store = MemoryStore::from_env();
             match store.recall_codec(namespace, target, every_n)? {
-                Some(payload) => Ok(serde_json::to_string_pretty(&json!({
-                    "found": true,
-                    "content_hash": payload.content_hash,
-                    "sampled_tokens_packed": payload.sampled_tokens_packed,
-                    "sampled_tokens": if want_array { json!(payload.sampled_tokens) } else { json!(null) },
-                    "sampled_token_count": payload.sampled_tokens.len(),
-                    "attractor": payload.attractor,
-                    "every_n": payload.every_n,
-                    "original_byte_count": payload.original_byte_count,
-                    "original_token_count": payload.original_token_count,
-                    "compression_ratio": payload.compression_ratio,
-                })).unwrap()),
-                None => Ok(serde_json::to_string_pretty(&json!({
-                    "found": false,
-                    "content_hash": target,
-                    "namespace": namespace,
-                })).unwrap()),
+                Some(payload) => {
+                    let mut resp = hash_fields(payload.content_hash);
+                    resp.insert("found".to_string(), json!(true));
+                    resp.insert("sampled_tokens_packed".to_string(), json!(payload.sampled_tokens_packed));
+                    resp.insert("sampled_tokens".to_string(),
+                        if want_array { json!(payload.sampled_tokens) } else { json!(null) });
+                    resp.insert("sampled_token_count".to_string(), json!(payload.sampled_tokens.len()));
+                    resp.insert("attractor".to_string(), json!(payload.attractor));
+                    resp.insert("attractor_str".to_string(), json!(payload.attractor.to_string()));
+                    resp.insert("every_n".to_string(), json!(payload.every_n));
+                    resp.insert("original_byte_count".to_string(), json!(payload.original_byte_count));
+                    resp.insert("original_token_count".to_string(), json!(payload.original_token_count));
+                    resp.insert("compression_ratio".to_string(), json!(payload.compression_ratio));
+                    Ok(serde_json::to_string_pretty(&Json::Object(resp)).unwrap())
+                }
+                None => {
+                    let mut resp = hash_fields(target);
+                    resp.insert("found".to_string(), json!(false));
+                    resp.insert("namespace".to_string(), json!(namespace));
+                    Ok(serde_json::to_string_pretty(&Json::Object(resp)).unwrap())
+                }
             }
         }
         "omc_memory_recall" => {
-            let target = args.get("content_hash").and_then(Json::as_i64)
-                .ok_or_else(|| "omc_memory_recall: missing 'content_hash' (i64) arg".to_string())?;
+            let target = read_hash_arg(args, "omc_memory_recall")?;
             let namespace = args.get("namespace").and_then(Json::as_str);
             let store = MemoryStore::from_env();
             match store.recall(namespace, target)? {
-                Some(text) => Ok(serde_json::to_string_pretty(&json!({
-                    "found": true,
-                    "content_hash": target,
-                    "bytes": text.len(),
-                    "text": text,
-                })).unwrap()),
-                None => Ok(serde_json::to_string_pretty(&json!({
-                    "found": false,
-                    "content_hash": target,
-                    "namespace": namespace,
-                })).unwrap()),
+                Some(text) => {
+                    let mut resp = hash_fields(target);
+                    resp.insert("found".to_string(), json!(true));
+                    resp.insert("bytes".to_string(), json!(text.len()));
+                    resp.insert("text".to_string(), json!(text));
+                    Ok(serde_json::to_string_pretty(&Json::Object(resp)).unwrap())
+                }
+                None => {
+                    let mut resp = hash_fields(target);
+                    resp.insert("found".to_string(), json!(false));
+                    resp.insert("namespace".to_string(), json!(namespace));
+                    Ok(serde_json::to_string_pretty(&Json::Object(resp)).unwrap())
+                }
             }
         }
         "omc_memory_list" => {
@@ -984,6 +1038,7 @@ fn dispatch_tool(interp: &mut Interpreter, name: &str, args: &Json) -> Result<St
             let entries = store.list(namespace, limit)?;
             let entry_jsons: Vec<Json> = entries.iter().map(|e| json!({
                 "content_hash": e.content_hash,
+                "content_hash_str": e.content_hash.to_string(),
                 "bytes": e.bytes,
                 "stored_at_unix": e.stored_at_unix,
                 "preview": e.preview,
@@ -1021,20 +1076,26 @@ fn dispatch_tool(interp: &mut Interpreter, name: &str, args: &Json) -> Result<St
         "omc_memory_store_delta" => {
             let text = args.get("text").and_then(Json::as_str)
                 .ok_or_else(|| "omc_memory_store_delta: missing 'text'".to_string())?;
-            let base = args.get("base_hash").and_then(Json::as_i64)
-                .ok_or_else(|| "omc_memory_store_delta: missing 'base_hash' (i64)".to_string())?;
+            // v0.12.1: accept base_hash as int OR base_hash_str as decimal string
+            let base = if let Some(s) = args.get("base_hash_str").and_then(Json::as_str) {
+                s.parse::<i64>().map_err(|e|
+                    format!("omc_memory_store_delta: 'base_hash_str' not a valid i64: {}", e))?
+            } else {
+                args.get("base_hash").and_then(Json::as_i64)
+                    .ok_or_else(|| "omc_memory_store_delta: missing 'base_hash' (integer) or \
+                                    'base_hash_str' (decimal string)".to_string())?
+            };
             let namespace = args.get("namespace").and_then(Json::as_str).unwrap_or("default");
             let store = MemoryStore::from_env();
             let hash = store.store_as_delta(namespace, text, base)?;
-            // Report what actually got stored on disk.
             let pool_p = format!("{}", store.root.display());
-            Ok(serde_json::to_string_pretty(&json!({
-                "content_hash": hash,
-                "namespace": namespace,
-                "base_hash": base,
-                "text_bytes": text.len(),
-                "pool_root": pool_p,
-            })).unwrap())
+            let mut resp = hash_fields(hash);
+            resp.insert("namespace".to_string(), json!(namespace));
+            resp.insert("base_hash".to_string(), json!(base));
+            resp.insert("base_hash_str".to_string(), json!(base.to_string()));
+            resp.insert("text_bytes".to_string(), json!(text.len()));
+            resp.insert("pool_root".to_string(), json!(pool_p));
+            Ok(serde_json::to_string_pretty(&Json::Object(resp)).unwrap())
         }
         "omc_memory_compact_bpe" => {
             let namespace = args.get("namespace").and_then(Json::as_str).unwrap_or("default");
@@ -1101,44 +1162,55 @@ fn dispatch_tool(interp: &mut Interpreter, name: &str, args: &Json) -> Result<St
         }
         "omc_memory_create_manifest" => {
             let namespace = args.get("namespace").and_then(Json::as_str).unwrap_or("default");
-            let entries_v = args.get("entries").and_then(Json::as_array)
-                .ok_or_else(|| "omc_memory_create_manifest: missing 'entries' array".to_string())?;
-            let mut leaves: Vec<i64> = Vec::with_capacity(entries_v.len());
-            for v in entries_v.iter() {
-                let h = v.as_i64()
-                    .ok_or_else(|| "omc_memory_create_manifest: 'entries' must be i64 hashes".to_string())?;
-                leaves.push(h);
+            // v0.12.1: accept entries as ints OR entries_str as decimal strings
+            let mut leaves: Vec<i64> = Vec::new();
+            if let Some(strs) = args.get("entries_str").and_then(Json::as_array) {
+                for v in strs.iter() {
+                    let s = v.as_str().ok_or_else(||
+                        "omc_memory_create_manifest: 'entries_str' must be array of decimal strings".to_string())?;
+                    leaves.push(s.parse::<i64>().map_err(|e|
+                        format!("omc_memory_create_manifest: bad entry_str '{}': {}", s, e))?);
+                }
+            } else {
+                let entries_v = args.get("entries").and_then(Json::as_array)
+                    .ok_or_else(|| "omc_memory_create_manifest: missing 'entries' (i64 array) or 'entries_str' (decimal-string array)".to_string())?;
+                for v in entries_v.iter() {
+                    let h = v.as_i64()
+                        .ok_or_else(|| "omc_memory_create_manifest: 'entries' must be i64 hashes (use 'entries_str' for hashes > 2^53)".to_string())?;
+                    leaves.push(h);
+                }
             }
             let store = MemoryStore::from_env();
             let manifest_hash = store.create_manifest(namespace, &leaves)?;
-            Ok(serde_json::to_string_pretty(&json!({
-                "manifest_hash": manifest_hash,
-                "namespace": namespace,
-                "leaf_count": leaves.len(),
-            })).unwrap())
+            let mut resp = serde_json::Map::new();
+            resp.insert("manifest_hash".to_string(), json!(manifest_hash));
+            resp.insert("manifest_hash_str".to_string(), json!(manifest_hash.to_string()));
+            resp.insert("namespace".to_string(), json!(namespace));
+            resp.insert("leaf_count".to_string(), json!(leaves.len()));
+            Ok(serde_json::to_string_pretty(&Json::Object(resp)).unwrap())
         }
         "omc_memory_recall_manifest" => {
-            let target = args.get("content_hash").and_then(Json::as_i64)
-                .ok_or_else(|| "omc_memory_recall_manifest: missing 'content_hash' (i64)".to_string())?;
+            let target = read_hash_arg(args, "omc_memory_recall_manifest")?;
             let namespace = args.get("namespace").and_then(Json::as_str);
             let expand = args.get("expand").and_then(Json::as_bool).unwrap_or(false);
             let store = MemoryStore::from_env();
             match store.recall_manifest(namespace, target)? {
                 None => {
-                    // It's a regular (non-manifest) entry. Return the body.
                     let text = store.recall(namespace, target)?.unwrap_or_default();
-                    Ok(serde_json::to_string_pretty(&json!({
-                        "is_manifest": false,
-                        "content_hash": target,
-                        "text": text,
-                        "bytes": text.len(),
-                    })).unwrap())
+                    let mut resp = hash_fields(target);
+                    resp.insert("is_manifest".to_string(), json!(false));
+                    resp.insert("text".to_string(), json!(text));
+                    resp.insert("bytes".to_string(), json!(text.len()));
+                    return Ok(serde_json::to_string_pretty(&Json::Object(resp)).unwrap());
                 }
                 Some(leaves) => {
+                    let leaves_str: Vec<String> = leaves.iter().map(|h| h.to_string()).collect();
                     let mut out = json!({
                         "is_manifest": true,
                         "manifest_hash": target,
+                        "manifest_hash_str": target.to_string(),
                         "entries": leaves.clone(),
+                        "entries_str": leaves_str,
                         "leaf_count": leaves.len(),
                     });
                     if expand {
