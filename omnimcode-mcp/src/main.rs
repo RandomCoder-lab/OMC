@@ -1527,14 +1527,31 @@ fn eval_program(_interp: &mut Interpreter, code: &str) -> Result<String, String>
     // session state on top if needed.
     let mut fresh = Interpreter::new();
     fresh.execute(stmts).map_err(|e| format!("runtime error: {}", e))?;
+
+    // Collect stdout captured by print/println.
+    let printed = fresh.take_output_lines();
+
     // Prefer the last top-level expression value, then fall back to
     // any function-level return value (e.g. `return 42;` at top level).
     let v = fresh.take_last_expression_value()
         .or_else(|| fresh.take_return_value());
-    Ok(match v {
+    let expr_result = match v {
         Some(v) => display_value(&v),
-        None => "null".to_string(),
-    })
+        None    => "null".to_string(),
+    };
+
+    // If any print() calls were made, return them first, then the
+    // expression result (unless it's "null", which is uninformative).
+    if printed.is_empty() {
+        Ok(expr_result)
+    } else {
+        let mut out = printed.join("\n");
+        if expr_result != "null" {
+            out.push('\n');
+            out.push_str(&expr_result);
+        }
+        Ok(out)
+    }
 }
 
 fn display_value(v: &Value) -> String {

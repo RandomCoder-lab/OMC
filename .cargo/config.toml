@@ -1,0 +1,10 @@
+# Workspace-level Cargo config.
+#
+# PYO3_USE_ABI3_FORWARD_COMPATIBILITY: pyo3 v0.23.5 supports Python up to 3.13.
+# Python 3.14 is installed on this machine and is newer than pyo3's hardcoded
+# maximum.  The ABI3 (stable ABI) compatibility flag tells pyo3 to build
+# against the stable ABI so it works with any Python ≥ 3.8 without needing a
+# version-specific check.  Remove once pyo3 is upgraded to a version that
+# officially lists 3.14 as supported.
+[env]
+PYO3_USE_ABI3_FORWARD_COMPATIBILITY = "1"

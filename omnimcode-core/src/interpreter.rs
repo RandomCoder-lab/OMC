@@ -53,6 +53,11 @@ pub struct Interpreter {
     /// remember "I saw this code as X" across calls. omc_remember
     /// and omc_recall expose it.
     code_memory: std::cell::RefCell<std::collections::BTreeMap<String, i64>>,
+    /// Collects lines written by `print`/`println` during execution so
+    /// the MCP `omc_eval` handler can return them as part of the tool
+    /// result rather than losing them to the server process's stdout.
+    /// Each `print` call still writes to real stdout too (for CLI use).
+    output_lines: std::cell::RefCell<Vec<String>>,
     /// Stack of yield callbacks for LAZY generators. When set, the
     /// active generator's yield statements invoke the topmost callback
     /// with the yielded value rather than appending to a Vec. Memory
@@ -155,6 +160,7 @@ impl Interpreter {
             gen_stop_requested: false,
             last_expression_value: None,
             code_memory: std::cell::RefCell::new(std::collections::BTreeMap::new()),
+            output_lines: std::cell::RefCell::new(Vec::new()),
         }
     }
 
@@ -162,6 +168,13 @@ impl Interpreter {
     /// Used by the MCP server to return the result of `omc_eval`.
     pub fn take_last_expression_value(&mut self) -> Option<Value> {
         self.last_expression_value.take()
+    }
+
+    /// Drain all lines printed via `print`/`println` since the last call.
+    /// Used by the MCP `omc_eval` handler to surface print output in the
+    /// tool result rather than losing it to the server's process stdout.
+    pub fn take_output_lines(&self) -> Vec<String> {
+        self.output_lines.borrow_mut().drain(..).collect()
     }
 
     /// Register a host-side builtin that OMC code can call by name.
@@ -1474,11 +1487,15 @@ impl Interpreter {
             }
             Statement::Expression(expr) => {
                 // Save the result so the MCP / REPL paths can read
-                // "what did the last top-level expression evaluate to"
-                // without re-running. Empty/silent expressions still
-                // leave the prior value in place.
+                // "what did the last TOP-LEVEL expression evaluate to"
+                // without re-running. Only update when we are at the
+                // top level (not inside a user function body), to avoid
+                // polluting the REPL result with sub-expression values
+                // computed deep inside call_stack frames.
                 let v = self.eval_expr(expr)?;
-                self.last_expression_value = Some(v);
+                if self.call_stack.is_empty() {
+                    self.last_expression_value = Some(v);
+                }
                 Ok(())
             }
             Statement::VarDecl {
@@ -4955,10 +4972,13 @@ impl Interpreter {
                 // "3" instead of "3.0".
                 if args.is_empty() {
                     println!();
+                    self.output_lines.borrow_mut().push(String::new());
                     return Ok(Value::Null);
                 }
                 let v = self.eval_expr(&args[0])?;
-                println!("{}", v.to_display_string());
+                let s = v.to_display_string();
+                println!("{}", s);
+                self.output_lines.borrow_mut().push(s);
                 Ok(Value::Null)
             }
             // print_raw — same as println but no trailing newline. Pairs.
@@ -12127,20 +12147,9 @@ fn vm_fast_dispatch(name: &str, args: &[Value]) -> Option<Result<Value, String>>
         ("to_string", 1) | ("string", 1) => {
             Some(Ok(Value::String(args[0].to_display_string())))
         }
-        // ---- println / print: they call out to stdout but the work
-        // is dominated by I/O, so saving the shim alloc still helps ----
-        ("println", _) => {
-            let mut parts: Vec<String> = Vec::with_capacity(args.len());
-            for v in args { parts.push(v.to_display_string()); }
-            println!("{}", parts.join(" "));
-            Some(Ok(Value::Null))
-        }
-        ("print", _) => {
-            let mut parts: Vec<String> = Vec::with_capacity(args.len());
-            for v in args { parts.push(v.to_display_string()); }
-            print!("{}", parts.join(" "));
-            Some(Ok(Value::Null))
-        }
+        // ---- println / print: handled by the Interpreter method (needs self) ----
+        // Intentionally NOT handled here so they fall through to the method
+        // which has access to self.output_lines for MCP stdout capture.
         _ => None,
     }
 }
