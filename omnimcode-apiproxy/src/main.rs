@@ -19,7 +19,8 @@
 //!      and persisting the cache across turns)
 //!
 //! Hard limits in this MVP:
-//!   - No streaming (`stream: true` requests pass through untouched)
+//!   - Response-side rewriting skipped for streaming sessions (the LLM can
+//!     still expand markers in a streamed response via the tool call path)
 //!   - No image / tool_use_block / citation rewriting
 //!   - No request batching
 //!   - Auth header is forwarded as-is; we never read/log it
@@ -74,6 +75,12 @@ struct Args {
     /// preview alone is enough or it needs to expand.
     #[arg(long, default_value_t = 200)]
     preview_bytes: usize,
+
+    /// Minimum content size (bytes) for a block to be eligible for delta
+    /// (OMCD/Axis-5) storage. Blocks shorter than this are always stored
+    /// plain — no diff attempted. Lower = more delta attempts, more disk I/O.
+    #[arg(long, default_value_t = 1024)]
+    delta_min_bytes: usize,
 }
 
 #[derive(Default, Debug, Clone)]
@@ -90,6 +97,9 @@ struct RewriteStats {
     cache_control_inserted: u64,
     conversation_count: u64,
     delta_stores_attempted: u64,
+    /// Streaming requests pass through rewritten (request side) but
+    /// the response is piped directly rather than buffered.
+    streaming_passthrough: u64,
 }
 
 /// Per-conversation state the proxy remembers across turns. Key is a stable
@@ -115,6 +125,7 @@ struct AppState {
     upstream: String,
     rewrite_threshold: usize,
     preview_bytes: usize,
+    delta_min_bytes: usize,
     http: reqwest::Client,
     store: Arc<MemoryStore>,
     stats: Arc<std::sync::Mutex<RewriteStats>>,
@@ -145,9 +156,9 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
     info!(
-        "omnimcode-apiproxy v{} starting — bind={} upstream={} threshold={}B preview={}B",
+        "omnimcode-apiproxy v{} starting — bind={} upstream={} threshold={}B preview={}B delta_min={}B",
         env!("CARGO_PKG_VERSION"),
-        args.bind, args.upstream, args.rewrite_threshold, args.preview_bytes,
+        args.bind, args.upstream, args.rewrite_threshold, args.preview_bytes, args.delta_min_bytes,
     );
     info!(
         "this proxy sees the full LLM conversation. localhost-only bind unless you change --bind."
@@ -157,6 +168,7 @@ async fn main() -> Result<()> {
         upstream: args.upstream.clone(),
         rewrite_threshold: args.rewrite_threshold,
         preview_bytes: args.preview_bytes,
+        delta_min_bytes: args.delta_min_bytes,
         http: reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(300))
             .build()?,
@@ -171,6 +183,7 @@ async fn main() -> Result<()> {
     let app = Router::new()
         .route("/v1/messages", post(handle_messages))
         .route("/_stats", axum::routing::get(stats_endpoint))
+        .route("/_version", axum::routing::get(version_endpoint))
         .fallback(any(passthrough))
         .with_state(state);
 
@@ -240,10 +253,12 @@ async fn handle_messages(State(state): State<AppState>, req: Request) -> Respons
     let _saved_unused = body_bytes.len() as i64 - rewritten.len() as i64;
 
     if is_streaming {
-        // SSE response: just pass through. The LLM can still emit the expand
-        // tool_use in the stream; the client will surface it. We accept this
-        // sharp edge in exchange for getting request-side compression on
-        // streaming sessions (the common case for Claude Code).
+        // Streaming response: pipe SSE chunks in real time. The request body
+        // was still fully rewritten (compression happens), and the response
+        // is forwarded chunk-by-chunk so the client sees tokens immediately.
+        // The auto-expand loop is skipped for streaming; the LLM can still
+        // call omc_proxy_expand_ref and the client surfaces it normally.
+        state.stats.lock().unwrap().streaming_passthrough += 1;
         forward_to_upstream(&state, &parts.headers, rewritten).await
     } else {
         handle_with_expand_loop(&state, &parts.headers, rewritten).await
@@ -417,6 +432,11 @@ async fn passthrough(State(state): State<AppState>, req: Request) -> Response {
 
 /// Used by the streaming-passthrough path in handle_messages and by the
 /// catch-all passthrough route. Bytes-in, bytes-out, no rewriting.
+/// Forward the rewritten request to upstream and stream the response back
+/// to the client as chunks arrive — works for both:
+///   • JSON (non-streaming) responses: the body is small, single chunk
+///   • SSE (`text/event-stream`) responses: chunks are forwarded in real-time
+///     instead of buffering the entire stream before returning
 async fn forward_to_upstream(
     state: &AppState, headers: &HeaderMap, body: Bytes,
 ) -> Response {
@@ -425,19 +445,25 @@ async fn forward_to_upstream(
     for (k, v) in headers.iter() {
         if k != "host" && k != "content-length" { req = req.header(k, v); }
     }
-    match req.send().await {
-        Ok(r) => {
-            let status = r.status();
-            let h = r.headers().clone();
-            match r.bytes().await {
-                Ok(b) => rebuild_response(status, &h, b),
-                Err(e) => error_response(StatusCode::BAD_GATEWAY,
-                    &format!("read upstream: {}", e)),
-            }
-        }
-        Err(e) => error_response(StatusCode::BAD_GATEWAY,
+    let upstream = match req.send().await {
+        Ok(r) => r,
+        Err(e) => return error_response(StatusCode::BAD_GATEWAY,
             &format!("upstream: {}", e)),
+    };
+    let status = upstream.status();
+    let resp_headers = upstream.headers().clone();
+    // Pipe upstream bytes through to the client as they arrive.
+    // Hop-by-hop headers must not be forwarded; content-length is unknown
+    // for streamed bodies and is omitted (axum uses chunked encoding).
+    let stream = upstream.bytes_stream();
+    let mut resp = Response::builder().status(status);
+    for (k, v) in resp_headers.iter() {
+        if k == "content-length" || k == "transfer-encoding" || k == "connection" { continue; }
+        resp = resp.header(k, v);
     }
+    resp.body(axum::body::Body::from_stream(stream))
+        .unwrap_or_else(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("response build: {}", e)))
 }
 
 fn error_response(code: StatusCode, msg: &str) -> Response {
@@ -495,11 +521,31 @@ async fn stats_endpoint(State(state): State<AppState>) -> Response {
         },
         "cache_control_inserted_count": s.cache_control_inserted,
         "conversations_seen": s.conversation_count,
-        "delta_stores_attempted": s.delta_stores_attempted
+        "delta_stores_attempted": s.delta_stores_attempted,
+        "streaming_passthrough": s.streaming_passthrough,
     })).unwrap();
     (StatusCode::OK,
      [(axum::http::header::CONTENT_TYPE, HeaderValue::from_static("application/json"))],
      json).into_response()
+}
+
+/// GET `/_version` — lightweight health-check endpoint.
+///
+/// Returns a JSON object with the proxy binary version and name. Useful for
+/// systemd ExecStartPost health probes, monitoring scripts, and CI smoke tests.
+///
+/// ```text
+/// curl http://localhost:8088/_version
+/// {"name":"omnimcode-apiproxy","version":"1.0.0"}
+/// ```
+async fn version_endpoint() -> Response {
+    let json = serde_json::json!({
+        "name": "omnimcode-apiproxy",
+        "version": env!("CARGO_PKG_VERSION"),
+    });
+    (StatusCode::OK,
+     [(axum::http::header::CONTENT_TYPE, HeaderValue::from_static("application/json"))],
+     json.to_string()).into_response()
 }
 
 /// Walk the request body and rewrite every eligible large block.
@@ -921,7 +967,7 @@ fn make_marker_with_dedup(
         .or_else(|| state.store.store(PROXY_CACHE_NAMESPACE, text).ok())
         .ok_or_else(|| anyhow::anyhow!("cache write failed"))?;
     // Index this body's prefix so the NEXT near-edit can find it as base.
-    if text.len() >= 1024 { register_prefix(text, hash, state); }
+    if text.len() >= state.delta_min_bytes { register_prefix(text, hash, state); }
 
     // v0.14.7-L: if we've already emitted a full marker for this hash this
     // request, the subsequent ones can be the bare-minimum form.
@@ -976,7 +1022,7 @@ fn register_prefix(text: &str, hash: i64, state: &AppState) {
 /// The hash returned is still the hash of the FULL text (so the marker / recall
 /// path is unchanged for the LLM).
 fn try_delta_store(text: &str, state: &AppState) -> Option<i64> {
-    if text.len() < 1024 { return None; }
+    if text.len() < state.delta_min_bytes { return None; }
     let prefix = &text.as_bytes()[..text.len().min(256)];
     let prefix_hash = omnimcode_core::tokenizer::fnv1a_64(prefix) as u64;
     let base_hash = {
@@ -1048,6 +1094,7 @@ mod tests {
             upstream: "http://127.0.0.1:0".into(),
             rewrite_threshold: threshold,
             preview_bytes: 80,
+            delta_min_bytes: 1024,
             http: reqwest::Client::new(),
             store: Arc::new(MemoryStore::from_env()),
             stats: Arc::new(std::sync::Mutex::new(RewriteStats::default())),
@@ -1565,5 +1612,83 @@ mod tests {
                 .unwrap().expect("must still be in cache");
             assert_eq!(got, expected);
         }
+    }
+
+    // ── Feature: streaming detection ──────────────────────────────────────────
+
+    /// `is_streaming_request` must return true only when the top-level
+    /// `stream` field is the boolean `true`.
+    #[test]
+    fn streaming_flag_detected() {
+        let to_bytes = |v: &serde_json::Value| serde_json::to_vec(v).unwrap();
+
+        let streaming    = json!({"model":"claude-3","stream":true, "messages":[]});
+        let not_streaming = json!({"model":"claude-3","stream":false,"messages":[]});
+        let no_field     = json!({"model":"claude-3","messages":[]});
+        let null_field   = json!({"model":"claude-3","stream":null,"messages":[]});
+
+        assert!( is_streaming_request(&to_bytes(&streaming)),    "stream:true should be detected");
+        assert!(!is_streaming_request(&to_bytes(&not_streaming)), "stream:false must not be detected");
+        assert!(!is_streaming_request(&to_bytes(&no_field)),     "missing field must not be detected");
+        assert!(!is_streaming_request(&to_bytes(&null_field)),   "null field must not be detected");
+    }
+
+    // ── Feature: configurable delta_min_bytes ─────────────────────────────────
+
+    /// With a very high `delta_min_bytes`, near-edits no longer attempt
+    /// delta storage — delta_stores_attempted stays zero.
+    #[test]
+    fn high_delta_min_bytes_skips_delta() {
+        let mut state = test_state(200);
+        state.delta_min_bytes = 999_999; // nothing will ever be this long in tests
+
+        let base = "a".repeat(500);
+        let edit = format!("{}modified", &base[..400]);
+
+        // Store base, then attempt a near-edit — both should be plain stores.
+        let body1 = json!({"model":"m","messages":[
+            {"role":"user","content": base.clone()}
+        ]});
+        let body2 = json!({"model":"m","messages":[
+            {"role":"assistant","content": base.clone()},
+            {"role":"user","content": edit.clone()}
+        ]});
+        let _ = rewrite_request_body(
+            &serde_json::to_vec(&body1).unwrap(), &state);
+        let _ = rewrite_request_body(
+            &serde_json::to_vec(&body2).unwrap(), &state);
+
+        assert_eq!(state.stats.lock().unwrap().delta_stores_attempted, 0,
+            "delta_stores_attempted must stay 0 when delta_min_bytes is very large");
+    }
+
+    /// With a low `delta_min_bytes`, even short near-edits route through the
+    /// delta store (delta_stores_attempted increments).
+    #[test]
+    fn low_delta_min_bytes_triggers_delta() {
+        let mut state = test_state(64);
+        state.delta_min_bytes = 64; // very low — any block ≥64 bytes attempts delta
+
+        let base = "x".repeat(200);
+
+        // First turn: assistant reply with base content — assistant messages are
+        // always eligible for rewriting, so the prefix gets registered.
+        let body1 = json!({"model":"m","messages":[
+            {"role":"user","content":"hi"},
+            {"role":"assistant","content":[{"type":"text","text": base.clone()}]}
+        ]});
+        let _ = rewrite_request_body(&serde_json::to_vec(&body1).unwrap(), &state);
+
+        // Second turn: same assistant content appears again as history.
+        // The prefix_index now has an entry for it, so try_delta_store fires.
+        let body2 = json!({"model":"m","messages":[
+            {"role":"user","content":"hi"},
+            {"role":"assistant","content":[{"type":"text","text": base.clone()}]},
+            {"role":"user","content":"follow-up question?"},
+        ]});
+        let _ = rewrite_request_body(&serde_json::to_vec(&body2).unwrap(), &state);
+
+        assert!(state.stats.lock().unwrap().delta_stores_attempted > 0,
+            "expected delta_stores_attempted > 0 with low delta_min_bytes");
     }
 }
