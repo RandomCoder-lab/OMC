@@ -509,13 +509,17 @@ async fn stats_endpoint(State(state): State<AppState>) -> Response {
 fn rewrite_request_body(body: &[u8], state: &AppState) -> Result<(Bytes, RewriteOutcome)> {
     let mut v: Value = serde_json::from_slice(body)?;
     let mut out = RewriteOutcome::default();
+    // v0.14.7-L: track hashes already seen this request so duplicates can
+    // emit the bare-minimum `<omc:ref h="..."/>` form.
+    let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
 
     // ---- system prompt (top-level field) ----
     if let Some(system) = v.get_mut("system") {
         match system {
             Value::String(s) => {
                 if s.len() >= state.rewrite_threshold {
-                    if let Ok(marker) = make_marker(s, state) {
+                    if let Ok(marker) = make_marker_with_dedup(
+                        s, state, MarkerKind::HistoricalText, Some(&mut seen)) {
                         out.bytes_system += s.len();
                         out.rewritten_count += 1;
                         *system = Value::String(marker);
@@ -527,7 +531,9 @@ fn rewrite_request_body(body: &[u8], state: &AppState) -> Result<(Bytes, Rewrite
                     if block.get("type").and_then(Value::as_str) == Some("text") {
                         let Some(text) = block.get("text").and_then(Value::as_str) else { continue };
                         if text.len() < state.rewrite_threshold { continue; }
-                        let Ok(marker) = make_marker(text, state) else { continue };
+                        let Ok(marker) = make_marker_with_dedup(
+                            text, state, MarkerKind::HistoricalText, Some(&mut seen))
+                            else { continue };
                         out.bytes_system += text.len();
                         out.rewritten_count += 1;
                         // Mutate ONLY the `text` field; preserve cache_control + everything else
@@ -555,7 +561,8 @@ fn rewrite_request_body(body: &[u8], state: &AppState) -> Result<(Bytes, Rewrite
         match content {
             Value::String(s) => {
                 if s.len() >= state.rewrite_threshold {
-                    if let Ok(marker) = make_marker(s, state) {
+                    if let Ok(marker) = make_marker_with_dedup(
+                        s, state, MarkerKind::HistoricalText, Some(&mut seen)) {
                         out.bytes_messages_text += s.len();
                         out.rewritten_count += 1;
                         *content = Value::String(marker);
@@ -569,14 +576,16 @@ fn rewrite_request_body(body: &[u8], state: &AppState) -> Result<(Bytes, Rewrite
                         "text" => {
                             let Some(text) = block.get("text").and_then(Value::as_str) else { continue };
                             if text.len() < state.rewrite_threshold { continue; }
-                            let Ok(marker) = make_marker(text, state) else { continue };
+                            let Ok(marker) = make_marker_with_dedup(
+                                text, state, MarkerKind::HistoricalText, Some(&mut seen))
+                                else { continue };
                             out.bytes_messages_text += text.len();
                             out.rewritten_count += 1;
                             block["text"] = Value::String(marker);
                         }
                         "tool_result" => {
                             if let Some(inner) = block.get_mut("content") {
-                                rewrite_tool_result_content(inner, state, &mut out);
+                                rewrite_tool_result_content(inner, state, &mut out, &mut seen);
                             }
                         }
                         "tool_use" => {
@@ -585,7 +594,7 @@ fn rewrite_request_body(body: &[u8], state: &AppState) -> Result<(Bytes, Rewrite
                             // LLM doesn't see (and thus copy) a fake field name
                             // when generating fresh tool calls in later turns.
                             if let Some(input) = block.get_mut("input") {
-                                rewrite_strings_recursive(input, state, &mut out);
+                                rewrite_strings_recursive(input, state, &mut out, &mut seen);
                             }
                         }
                         _ => {}
@@ -603,7 +612,8 @@ fn rewrite_request_body(body: &[u8], state: &AppState) -> Result<(Bytes, Rewrite
             if let Some(desc) = tool.get_mut("description") {
                 if let Value::String(s) = desc {
                     if s.len() >= state.rewrite_threshold {
-                        if let Ok(marker) = make_marker(s, state) {
+                        if let Ok(marker) = make_marker_with_dedup(
+                            s, state, MarkerKind::HistoricalText, Some(&mut seen)) {
                             out.bytes_tool_definitions += s.len();
                             out.rewritten_count += 1;
                             *desc = Value::String(marker);
@@ -615,7 +625,7 @@ fn rewrite_request_body(body: &[u8], state: &AppState) -> Result<(Bytes, Rewrite
             // property descriptions, enums, etc. — preserves schema structure.
             if let Some(schema) = tool.get_mut("input_schema") {
                 let before_count = out.rewritten_count;
-                rewrite_schema_strings(schema, state, &mut out);
+                rewrite_schema_strings(schema, state, &mut out, &mut seen);
                 if out.rewritten_count > before_count {
                     // already counted via rewrite_schema_strings into the
                     // bytes_tool_definitions field
@@ -760,11 +770,13 @@ fn insert_cache_control_on_last_block(msg: &mut Value) -> bool {
 /// fields, `enum` arrays of strings, and nested `properties` — all candidates.
 fn rewrite_schema_strings(
     val: &mut Value, state: &AppState, out: &mut RewriteOutcome,
+    seen: &mut std::collections::HashSet<i64>,
 ) {
     match val {
         Value::String(s) => {
             if s.len() >= state.rewrite_threshold {
-                if let Ok(marker) = make_marker(s, state) {
+                if let Ok(marker) = make_marker_with_dedup(
+                    s, state, MarkerKind::HistoricalText, Some(seen)) {
                     out.bytes_tool_definitions += s.len();
                     out.rewritten_count += 1;
                     *val = Value::String(marker);
@@ -772,10 +784,10 @@ fn rewrite_schema_strings(
             }
         }
         Value::Object(map) => {
-            for (_k, v) in map.iter_mut() { rewrite_schema_strings(v, state, out); }
+            for (_k, v) in map.iter_mut() { rewrite_schema_strings(v, state, out, seen); }
         }
         Value::Array(arr) => {
-            for v in arr.iter_mut() { rewrite_schema_strings(v, state, out); }
+            for v in arr.iter_mut() { rewrite_schema_strings(v, state, out, seen); }
         }
         _ => {}
     }
@@ -792,11 +804,13 @@ fn rewrite_schema_strings(
 ///   3. Array elements that are strings → same rule, in place.
 fn rewrite_strings_recursive(
     val: &mut Value, state: &AppState, out: &mut RewriteOutcome,
+    seen: &mut std::collections::HashSet<i64>,
 ) {
     match val {
         Value::String(s) => {
             if s.len() >= state.rewrite_threshold {
-                if let Ok(marker) = make_marker(s, state) {
+                if let Ok(marker) = make_marker_with_dedup(
+                    s, state, MarkerKind::ToolUseInput, Some(seen)) {
                     out.bytes_tool_use_input += s.len();
                     out.rewritten_count += 1;
                     *val = Value::String(marker);
@@ -805,12 +819,12 @@ fn rewrite_strings_recursive(
         }
         Value::Object(map) => {
             for (_k, v) in map.iter_mut() {
-                rewrite_strings_recursive(v, state, out);
+                rewrite_strings_recursive(v, state, out, seen);
             }
         }
         Value::Array(arr) => {
             for v in arr.iter_mut() {
-                rewrite_strings_recursive(v, state, out);
+                rewrite_strings_recursive(v, state, out, seen);
             }
         }
         _ => {}
@@ -819,11 +833,13 @@ fn rewrite_strings_recursive(
 
 fn rewrite_tool_result_content(
     inner: &mut Value, state: &AppState, out: &mut RewriteOutcome,
+    seen: &mut std::collections::HashSet<i64>,
 ) {
     match inner {
         Value::String(s) => {
             if s.len() >= state.rewrite_threshold {
-                if let Ok(marker) = make_marker(s, state) {
+                if let Ok(marker) = make_marker_with_dedup(
+                    s, state, MarkerKind::ToolResult, Some(seen)) {
                     out.bytes_tool_result += s.len();
                     out.rewritten_count += 1;
                     *inner = Value::String(marker);
@@ -835,7 +851,9 @@ fn rewrite_tool_result_content(
                 if part.get("type").and_then(Value::as_str) == Some("text") {
                     let Some(text) = part.get("text").and_then(Value::as_str) else { continue };
                     if text.len() < state.rewrite_threshold { continue; }
-                    let Ok(marker) = make_marker(text, state) else { continue };
+                    let Ok(marker) = make_marker_with_dedup(
+                        text, state, MarkerKind::ToolResult, Some(seen))
+                        else { continue };
                     out.bytes_tool_result += text.len();
                     out.rewritten_count += 1;
                     part["text"] = Value::String(marker);
@@ -846,23 +864,68 @@ fn rewrite_tool_result_content(
     }
 }
 
-fn make_marker(text: &str, state: &AppState) -> Result<String> {
+/// What category of content is being compressed. Drives whether the marker
+/// gets a `preview=` attribute (helpful for tool_result, wasted bytes for
+/// historical assistant text or tool_use inputs).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum MarkerKind {
+    /// `tool_result.content` — LLM benefits from preview to know if it
+    /// needs to expand. Keep the full marker.
+    ToolResult,
+    /// Historical assistant or user text block, system prompt, tool def.
+    /// LLM has already "seen" this in a prior turn; preview is wasted.
+    HistoricalText,
+    /// `tool_use.input` field value — LLM emitted this itself, doesn't
+    /// need to re-read its own output. Preview is wasted.
+    ToolUseInput,
+}
+
+fn make_marker(text: &str, state: &AppState, kind: MarkerKind) -> Result<String> {
+    make_marker_with_dedup(text, state, kind, None)
+}
+
+/// v0.14.7-L: intra-request dedup. `seen_hashes` is `Some(set)` when we want
+/// to track repeated content within a single request — first occurrence
+/// emits the full marker, subsequent emit the bare `<omc:ref h="..."/>`
+/// form (~30 bytes instead of ~150 for the duplicates).
+fn make_marker_with_dedup(
+    text: &str, state: &AppState, kind: MarkerKind,
+    seen_hashes: Option<&mut std::collections::HashSet<i64>>,
+) -> Result<String> {
     let hash = state.store.store(PROXY_CACHE_NAMESPACE, text)
         .map_err(anyhow::Error::msg)?;
-    // For very large blocks the LLM almost certainly wants either:
-    // (a) the full content (expand via tool), or (b) to move on.
-    // The preview adds no decision-quality. Drop it past 8 KB.
-    if text.len() >= 8192 {
-        return Ok(format!("<omc:ref h=\"{}\" b=\"{}\"/>", hash, text.len()));
+
+    // v0.14.7-L: if we've already emitted a full marker for this hash this
+    // request, the subsequent ones can be the bare-minimum form.
+    if let Some(set) = seen_hashes {
+        if !set.insert(hash) {
+            // already present
+            return Ok(format!("<omc:ref h=\"{}\"/>", hash));
+        }
     }
-    let preview: String = text.chars()
-        .filter(|c| !c.is_control())
-        .take(state.preview_bytes)
-        .collect();
-    Ok(format!(
-        "<omc:ref hash_str=\"{}\" bytes=\"{}\" preview={:?}/>",
-        hash, text.len(), preview
-    ))
+
+    // v0.14.7-K: drop preview for content the LLM doesn't benefit from
+    // previewing. Saves ~150 bytes/marker × 100s of markers per turn.
+    match kind {
+        MarkerKind::HistoricalText | MarkerKind::ToolUseInput => {
+            Ok(format!("<omc:ref h=\"{}\" b=\"{}\"/>", hash, text.len()))
+        }
+        MarkerKind::ToolResult => {
+            // Keep the preview only when content is large enough that the
+            // LLM might want to decide whether to expand.
+            if text.len() >= 8192 {
+                return Ok(format!("<omc:ref h=\"{}\" b=\"{}\"/>", hash, text.len()));
+            }
+            let preview: String = text.chars()
+                .filter(|c| !c.is_control())
+                .take(state.preview_bytes)
+                .collect();
+            Ok(format!(
+                "<omc:ref hash_str=\"{}\" bytes=\"{}\" preview={:?}/>",
+                hash, text.len(), preview
+            ))
+        }
+    }
 }
 
 /// Add the omc_proxy_expand_ref tool to the request's tools array so the
@@ -993,7 +1056,7 @@ mod tests {
     fn marker_round_trip_lossless() {
         let state = test_state(256);
         let original = "abc🎯 ñ é 漢字\nline2\n\tindented\n".repeat(50);  // multi-byte, control chars
-        let marker = make_marker(&original, &state).unwrap();
+        let marker = make_marker(&original, &state, MarkerKind::ToolResult).unwrap();
         // Extract hash_str from the marker
         let hash_attr = marker.split("hash_str=\"").nth(1).unwrap();
         let hash_str = hash_attr.split('"').next().unwrap();
@@ -1226,6 +1289,97 @@ mod tests {
         assert_eq!(blocks.len(), 1, "should not have added new block");
         assert!(blocks[0].get("cache_control").is_some(),
                 "user's cache_control preserved");
+    }
+
+    /// v0.14.7-K: markers for HistoricalText/ToolUseInput drop the
+    /// preview attribute (saves ~150 bytes/marker).
+    #[test]
+    fn slim_markers_drop_preview_for_historical_text() {
+        let state = test_state(256);
+        let big = "X".repeat(1000);
+        // Historical text in messages[]
+        let req = json!({
+            "model": "test", "max_tokens": 10,
+            "messages": [
+                {"role": "assistant", "content": big.clone()},
+                {"role": "user", "content": "ask"}
+            ]
+        });
+        let body = serde_json::to_vec(&req).unwrap();
+        let (out, _) = rewrite_request_body(&body, &state).unwrap();
+        let v: Value = serde_json::from_slice(&out).unwrap();
+        let marker = v["messages"][0]["content"].as_str().unwrap();
+        // HistoricalText markers should be the slim form: <omc:ref h="..." b="N"/>
+        assert!(marker.contains(" h=\""), "slim marker should use h= not hash_str=");
+        assert!(marker.contains(" b=\""), "slim marker should use b= not bytes=");
+        assert!(!marker.contains("preview="),
+                "slim marker for HistoricalText must not have preview");
+        // tool_result markers, by contrast, keep preview (for content < 8KB)
+        let req2 = json!({
+            "model": "test", "max_tokens": 10,
+            "messages": [
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "x", "content": big.clone()}
+                ]},
+                {"role": "user", "content": "ask"}
+            ]
+        });
+        let (out2, _) = rewrite_request_body(&serde_json::to_vec(&req2).unwrap(), &state).unwrap();
+        let v2: Value = serde_json::from_slice(&out2).unwrap();
+        let tr_marker = v2["messages"][0]["content"][0]["content"].as_str().unwrap();
+        assert!(tr_marker.contains("preview="),
+                "tool_result marker should keep preview (LLM needs it to decide expansion)");
+    }
+
+    /// v0.14.7-L: when the same content appears twice in one request,
+    /// the second occurrence collapses to bare `<omc:ref h="..."/>`.
+    #[test]
+    fn intra_request_dedup_collapses_repeats() {
+        let state = test_state(256);
+        let big = "REPEATING CONTENT BLOCK ".repeat(50); // ~1200 bytes
+        let req = json!({
+            "model": "test", "max_tokens": 10,
+            "messages": [
+                {"role": "assistant", "content": big.clone()},
+                {"role": "user", "content": big.clone()},
+                {"role": "assistant", "content": big.clone()},
+                {"role": "user", "content": "current"}
+            ]
+        });
+        let body = serde_json::to_vec(&req).unwrap();
+        let (out, _) = rewrite_request_body(&body, &state).unwrap();
+        let v: Value = serde_json::from_slice(&out).unwrap();
+        // Helper: pull marker text from a message regardless of whether
+        // it's string-form or array-form (cache_control insertion can
+        // convert string-form to array-form mid-pass).
+        let extract = |idx: usize| -> String {
+            let c = &v["messages"][idx]["content"];
+            if let Some(s) = c.as_str() { return s.to_string(); }
+            if let Some(arr) = c.as_array() {
+                if let Some(first) = arr.first() {
+                    if let Some(t) = first.get("text").and_then(Value::as_str) {
+                        return t.to_string();
+                    }
+                }
+            }
+            panic!("could not extract marker from messages[{}]: {}", idx, c)
+        };
+        let m0 = extract(0);
+        let m1 = extract(1);
+        let m2 = extract(2);
+        // First occurrence: full slim marker with b=
+        assert!(m0.contains(" b=\""), "first marker should be full: {}", m0);
+        // Second + third: bare form (no b= attr)
+        assert!(!m1.contains(" b=\""),
+                "second occurrence should be bare ref: {}", m1);
+        assert!(!m2.contains(" b=\""),
+                "third occurrence should be bare ref: {}", m2);
+        // All three reference the same hash
+        let extract_h = |m: &str| -> String {
+            m.split(" h=\"").nth(1).unwrap().split('"').next().unwrap().to_string()
+        };
+        assert_eq!(extract_h(&m0), extract_h(&m1));
+        assert_eq!(extract_h(&m0), extract_h(&m2));
     }
 
     /// Multi-turn dogfood simulation: walk a conversation, verify each turn's
