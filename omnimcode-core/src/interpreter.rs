@@ -9372,7 +9372,6 @@ impl Interpreter {
             //   Returns the list of models available from the active provider.
             //   Each element is a dict with at least {"id": string, "provider": string}.
             //   Useful for discovery: `let ms = llm_models()`.
-            #[cfg(feature = "native-llm")]
             "llm_models" => {
                 Ok(crate::llm_builtins::llm_models())
             }
