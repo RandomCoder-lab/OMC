@@ -548,23 +548,12 @@ fn rewrite_request_body(body: &[u8], state: &AppState) -> Result<(Bytes, Rewrite
                             }
                         }
                         "tool_use" => {
-                            // Compress big `input` JSON (e.g., Write/Edit
-                            // calls where the LLM emitted file content).
+                            // Compress big string values INSIDE the input dict.
+                            // Crucially, preserve the original key names so the
+                            // LLM doesn't see (and thus copy) a fake field name
+                            // when generating fresh tool calls in later turns.
                             if let Some(input) = block.get_mut("input") {
-                                let serialized = serde_json::to_string(input)
-                                    .unwrap_or_default();
-                                if serialized.len() >= state.rewrite_threshold {
-                                    if let Ok(marker) = make_marker(&serialized, state) {
-                                        out.bytes_tool_use_input += serialized.len();
-                                        out.rewritten_count += 1;
-                                        // Wrap marker as an object so the JSON
-                                        // remains structurally an object — many
-                                        // LLM clients assume `input` is a dict.
-                                        *input = serde_json::json!({
-                                            "_omc_compressed_input_marker": marker
-                                        });
-                                    }
-                                }
+                                rewrite_strings_recursive(input, state, &mut out);
                             }
                         }
                         _ => {}
@@ -580,6 +569,42 @@ fn rewrite_request_body(body: &[u8], state: &AppState) -> Result<(Bytes, Rewrite
     }
     let bytes = Bytes::from(serde_json::to_vec(&v)?);
     Ok((bytes, out))
+}
+
+/// v0.14.4 — walk a JSON value and replace any large STRING values in place,
+/// preserving all key names so the LLM doesn't see (and copy) a fake field
+/// name when generating new tool calls. Used for `tool_use.input`.
+///
+/// Two layers of value-rewriting:
+///   1. A top-level string longer than threshold → marker.
+///   2. Any string FIELD inside an object whose value exceeds threshold →
+///      marker (e.g. `{"content": "...big..."} → {"content": "<omc:ref ...>"}`).
+///   3. Array elements that are strings → same rule, in place.
+fn rewrite_strings_recursive(
+    val: &mut Value, state: &AppState, out: &mut RewriteOutcome,
+) {
+    match val {
+        Value::String(s) => {
+            if s.len() >= state.rewrite_threshold {
+                if let Ok(marker) = make_marker(s, state) {
+                    out.bytes_tool_use_input += s.len();
+                    out.rewritten_count += 1;
+                    *val = Value::String(marker);
+                }
+            }
+        }
+        Value::Object(map) => {
+            for (_k, v) in map.iter_mut() {
+                rewrite_strings_recursive(v, state, out);
+            }
+        }
+        Value::Array(arr) => {
+            for v in arr.iter_mut() {
+                rewrite_strings_recursive(v, state, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn rewrite_tool_result_content(
@@ -614,13 +639,16 @@ fn rewrite_tool_result_content(
 fn make_marker(text: &str, state: &AppState) -> Result<String> {
     let hash = state.store.store(PROXY_CACHE_NAMESPACE, text)
         .map_err(anyhow::Error::msg)?;
+    // For very large blocks the LLM almost certainly wants either:
+    // (a) the full content (expand via tool), or (b) to move on.
+    // The preview adds no decision-quality. Drop it past 8 KB.
+    if text.len() >= 8192 {
+        return Ok(format!("<omc:ref h=\"{}\" b=\"{}\"/>", hash, text.len()));
+    }
     let preview: String = text.chars()
         .filter(|c| !c.is_control())
         .take(state.preview_bytes)
         .collect();
-    // The marker uses an XML-ish form because LLMs are well-trained on
-    // tagged content and don't try to "interpret" attribute values as
-    // executable. The proxy's expand tool is the LLM's way out.
     Ok(format!(
         "<omc:ref hash_str=\"{}\" bytes=\"{}\" preview={:?}/>",
         hash, text.len(), preview
