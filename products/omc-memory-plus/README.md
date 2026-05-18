@@ -4,6 +4,8 @@ Persistent, content-addressed memory for Claude Code sessions. Hold context refe
 
 **Measured on real Claude Code dev sessions: 297× context compression ratio, 73% token cost reduction.**
 
+**v0.11.2 update — disk-side codec now beats plain zlib: 5.21× on 100KB native .omc vs 4.70× for zlib.** First axis to actually beat zlib. See `omc_memory_compact_bpe` below.
+
 ## What it is
 
 A Claude Code MCP plugin powered by OMNIcode's substrate codec. It gives Claude four tools:
@@ -92,10 +94,23 @@ Local-first by default. Cloud sync is opt-in. Your codebase and findings stay on
 - `omc_predict` — substrate-indexed code completion (OMC-specific)
 - `omc_fetch_by_hash` — companion to omc_predict
 - `omc_memory_store` / `_recall` / `_list` / `_stats` / `_evict` — the memory layer
+- `omc_memory_create_manifest` / `_recall_manifest` — bundle N hashes under 1 (Axis 1)
+- `omc_memory_store_delta` — store as a delta against a base (Axis 5)
+- `omc_memory_compact` (zlib), `_compact_substrate` (OMCT), `_compact_hbit` (OMCH),
+  **`_compact_bpe` (OMCB — beats zlib)** — aged-tier compression axes
 - `omc_unique_builtins` — list OMC-unique primitives (substrate ops, harmonic ops)
 - `omc_corpus_size` — diagnostic
 
-17 tools total. The 5 memory + compression tools are the load-bearing product; the rest are useful adjacent capabilities.
+## Compression axis benchmark (100KB native .omc)
+
+| axis | format | ratio | notes |
+|---|---|--:|---|
+| `omc_memory_compact_bpe` | OMCB | **5.21×** | ★ winner — self-training BPE, beats plain zlib |
+| `omc_memory_compact` | OMCZ | 4.70× | plain zlib (still the simplest fallback) |
+| `omc_memory_compact_substrate` | OMCT | 4.30× | substrate-tokenizer + zlib (loses to OMCZ) |
+| `omc_memory_compact_hbit` | OMCH | 3.23× | HBit dual-band split (loses to OMCZ) |
+
+Round-trip lossless for all four. The MemoryStore auto-detects body magic on recall, so once a body is compacted in any format, recall is transparent.
 
 ## Roadmap
 

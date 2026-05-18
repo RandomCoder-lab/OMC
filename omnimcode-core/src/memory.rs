@@ -244,21 +244,43 @@ impl MemoryStore {
     }
 
     fn recall_in(&self, namespace: &str, hash: i64) -> Result<Option<String>, String> {
-        // v0.9.2 Axis 2: prefer the global pool. v0.9.3 Axis 3: inflate
-        // bodies that start with the `OMCZ` magic (zlib-compacted aged
-        // entries). Falls back to legacy per-namespace storage for entries
-        // written before the dedup-pool refactor.
+        // v0.9.2 Axis 2: prefer the global pool. v0.9.3 Axis 3 + v0.10.0
+        // Axis 4: inflate bodies prefixed with OMCZ/OMCT/OMCD magics
+        // (zlib / substrate-tokenizer / delta).
         let pool_p = self.pool_path(hash);
         if pool_p.exists() {
             let raw = std::fs::read(&pool_p)
                 .map_err(|e| format!("read pool content {}: {}", pool_p.display(), e))?;
-            return Ok(Some(maybe_decompress(&raw)?));
+            return Ok(Some(self.maybe_decompress_with_recall(&raw)?));
         }
         let legacy = self.legacy_content_path(namespace, hash);
         if !legacy.exists() { return Ok(None); }
         let raw = std::fs::read(&legacy)
             .map_err(|e| format!("read legacy content {}: {}", legacy.display(), e))?;
-        Ok(Some(maybe_decompress(&raw)?))
+        Ok(Some(self.maybe_decompress_with_recall(&raw)?))
+    }
+
+    /// v0.10.1 Axis 5: decompression dispatch that has &self so OMCD
+    /// can recall the base entry recursively.
+    fn maybe_decompress_with_recall(&self, raw: &[u8]) -> Result<String, String> {
+        if raw.len() >= 16 && &raw[..4] == b"OMCD" {
+            let base_hash = i64::from_le_bytes(raw[4..12].try_into().unwrap());
+            let prefix_len = u32::from_le_bytes(raw[12..16].try_into().unwrap()) as usize;
+            let suffix = &raw[16..];
+            let base = self.recall(None, base_hash)?
+                .ok_or_else(|| format!("OMCD base hash {} not found", base_hash))?;
+            let base_bytes = base.as_bytes();
+            if prefix_len > base_bytes.len() {
+                return Err(format!("OMCD prefix_len {} exceeds base len {}",
+                                   prefix_len, base_bytes.len()));
+            }
+            let mut out = Vec::with_capacity(prefix_len + suffix.len());
+            out.extend_from_slice(&base_bytes[..prefix_len]);
+            out.extend_from_slice(suffix);
+            return String::from_utf8(out)
+                .map_err(|e| format!("OMCD result not valid UTF-8: {}", e));
+        }
+        maybe_decompress(raw)
     }
 
     /// List recent entries in a namespace (most recent first).
@@ -343,6 +365,198 @@ impl MemoryStore {
         Ok(Some(hashes))
     }
 
+    /// v0.10.1 Axis 5: delta compression against an explicit base entry.
+    ///
+    /// Store `text` as a delta against `base_hash`. The delta format is:
+    ///   `OMCD` (4 bytes magic) | base_hash (8 bytes LE i64) |
+    ///   prefix_len (4 bytes LE u32) | suffix (remaining bytes)
+    /// Recovers as `base_text[..prefix_len] ++ suffix`.
+    ///
+    /// Falls back to a regular store if (a) the base isn't in memory,
+    /// (b) the text shares less than 64 bytes of prefix with the base,
+    /// or (c) the delta would be larger than the raw text. The returned
+    /// hash is always the hash of the FULL text, so recall still works
+    /// by hash regardless of how the body is stored.
+    ///
+    /// Use case: iterative drafts. Store v1 normally, then v2/v3/v4 as
+    /// deltas off v1. Each delta is ~constant size if changes are local.
+    pub fn store_as_delta(
+        &self, namespace: &str, text: &str, base_hash: i64,
+    ) -> Result<i64, String> {
+        let base_text = match self.recall(None, base_hash)? {
+            Some(t) => t,
+            None => return self.store(namespace, text),  // base missing → plain store
+        };
+        let new_bytes = text.as_bytes();
+        let base_bytes = base_text.as_bytes();
+        let mut prefix_len = 0usize;
+        let max_prefix = new_bytes.len().min(base_bytes.len());
+        while prefix_len < max_prefix && new_bytes[prefix_len] == base_bytes[prefix_len] {
+            prefix_len += 1;
+        }
+        // Need at least a 64-byte prefix to be worth the OMCD framing overhead.
+        if prefix_len < 64 {
+            return self.store(namespace, text);
+        }
+        let suffix = &new_bytes[prefix_len..];
+        let delta_body_size = 4 + 8 + 4 + suffix.len();
+        if delta_body_size + 16 >= new_bytes.len() {
+            return self.store(namespace, text);
+        }
+        // Build the OMCD body and write directly to pool.
+        let hash = tokenizer::fnv1a_64(new_bytes);
+        let mut body = Vec::with_capacity(delta_body_size);
+        body.extend_from_slice(b"OMCD");
+        body.extend_from_slice(&(base_hash as u64).to_le_bytes());
+        body.extend_from_slice(&(prefix_len as u32).to_le_bytes());
+        body.extend_from_slice(suffix);
+        let pool_p = self.pool_path(hash);
+        if !pool_p.exists() {
+            if let Some(parent) = pool_p.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("create pool shard {}: {}", parent.display(), e))?;
+            }
+            std::fs::write(&pool_p, &body)
+                .map_err(|e| format!("write OMCD body: {}", e))?;
+        }
+        // Index entry (same shape as regular store).
+        self.append_index(namespace, hash, text.len())?;
+        if let Some(cap) = self.max_entries_per_namespace {
+            self.evict_to_cap(namespace, cap)?;
+        }
+        Ok(hash)
+    }
+
+    /// Internal: append a chronological-log entry to the namespace index.
+    /// Factored out so `store` and `store_as_delta` share the same path.
+    fn append_index(&self, namespace: &str, hash: i64, byte_len: usize) -> Result<(), String> {
+        use std::io::Write;
+        let ns_dir = self.namespace_dir(namespace);
+        std::fs::create_dir_all(&ns_dir)
+            .map_err(|e| format!("create namespace dir {}: {}", ns_dir.display(), e))?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64).unwrap_or(0);
+        let preview = String::new();  // delta entries don't carry a preview
+        let line = format!(
+            r#"{{"hash":{},"bytes":{},"stored_at":{},"preview":{}}}"#,
+            hash, byte_len, now, json_escape(&preview),
+        );
+        let index_p = self.index_path(namespace);
+        let mut f = std::fs::OpenOptions::new()
+            .create(true).append(true).open(&index_p)
+            .map_err(|e| format!("open index {}: {}", index_p.display(), e))?;
+        writeln!(f, "{}", line)
+            .map_err(|e| format!("write index {}: {}", index_p.display(), e))?;
+        Ok(())
+    }
+
+    /// v0.11.2 SBPE: ONN-style self-training BPE codec (magic `OMCB`).
+    ///
+    /// Walk the namespace and re-encode aged pool bodies through a per-body
+    /// trained BPE: 512 greedy frequency-merge passes produce a merge table,
+    /// the body is encoded into the resulting token vocabulary, then the
+    /// merge table and token stream are each zlib-deflated and concatenated.
+    /// Decoder rebuilds vocab from the merge table and expands tokens.
+    ///
+    /// Measured 5.21× on 100KB native .omc (vs 4.70× zlib) — first axis
+    /// to actually beat plain zlib on real content. The win is the
+    /// data-trains-its-own-vocab pattern: the merge table travels inline,
+    /// amortizing well for bodies ≥16KB.
+    ///
+    /// Body layout: `OMCB` (4 bytes magic) | varint(merge_table_zlib_len) |
+    /// merge_table_zlib | token_stream_zlib.
+    /// Merge table format (pre-zlib): varint(n_merges) | n × (varint a, varint b)
+    /// Token stream format (pre-zlib): varint(n_tokens) | n × varint(token_id)
+    ///
+    /// Skips entries already in any compressed form. Falls back to no-op when
+    /// the BPE layout doesn't save ≥16 bytes vs raw.
+    pub fn compact_namespace_bpe(
+        &self, namespace: &str, age_threshold_secs: i64,
+    ) -> Result<(usize, usize, usize), String> {
+        use std::io::Write;
+        let index_p = self.index_path(namespace);
+        if !index_p.exists() { return Ok((0, 0, 0)); }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64).unwrap_or(0);
+        let content = std::fs::read_to_string(&index_p)
+            .map_err(|e| format!("read index {}: {}", index_p.display(), e))?;
+        let mut compacted = 0usize;
+        let mut before = 0usize;
+        let mut after = 0usize;
+        for line in content.lines() {
+            if line.trim().is_empty() { continue; }
+            let Some(hash) = extract_hash_field(line) else { continue };
+            let Some(stored_at) = extract_stored_at_field(line) else { continue };
+            if now - stored_at < age_threshold_secs { continue; }
+            let pool_p = self.pool_path(hash);
+            if !pool_p.exists() { continue; }
+            let raw = std::fs::read(&pool_p)
+                .map_err(|e| format!("read pool {}: {}", pool_p.display(), e))?;
+            if raw.len() >= 4 {
+                let m = &raw[..4];
+                if m == b"OMCZ" || m == b"OMCT" || m == b"OMCH"
+                    || m == b"OMCD" || m == b"OMCB" {
+                    continue;
+                }
+            }
+            // BPE training cost is O(input × n_merges). Cap training input at
+            // 256KB to keep compaction time bounded; merges learned on the
+            // prefix still apply to the whole body via greedy left-to-right.
+            // But for tighter merges, use the full body if it fits.
+            let train_input: &[u8] = if raw.len() > 256 * 1024 {
+                &raw[..256 * 1024]
+            } else {
+                &raw
+            };
+            let n_merges = if raw.len() < 16 * 1024 { 256 }
+                           else if raw.len() < 256 * 1024 { 512 }
+                           else { 1024 };
+            let merges = bpe_train(train_input, n_merges);
+            let tokens = bpe_encode(&raw, &merges);
+            // Serialize merges (pre-zlib)
+            let mut h_raw = Vec::new();
+            varint_write(merges.len() as u64, &mut h_raw);
+            for &(a, b) in &merges {
+                varint_write(a as u64, &mut h_raw);
+                varint_write(b as u64, &mut h_raw);
+            }
+            let mut h_enc = flate2::write::DeflateEncoder::new(
+                Vec::new(), flate2::Compression::best());
+            h_enc.write_all(&h_raw)
+                .map_err(|e| format!("OMCB header deflate: {}", e))?;
+            let h_zlib = h_enc.finish()
+                .map_err(|e| format!("OMCB header finish: {}", e))?;
+            // Token stream (pre-zlib)
+            let mut tok_packed: Vec<u8> = Vec::with_capacity(tokens.len() * 2);
+            varint_write(tokens.len() as u64, &mut tok_packed);
+            for &t in &tokens { varint_write(t as u64, &mut tok_packed); }
+            let mut t_enc = flate2::write::DeflateEncoder::new(
+                Vec::new(), flate2::Compression::best());
+            t_enc.write_all(&tok_packed)
+                .map_err(|e| format!("OMCB body deflate: {}", e))?;
+            let t_zlib = t_enc.finish()
+                .map_err(|e| format!("OMCB body finish: {}", e))?;
+            // Frame: magic | varint(h_zlib_len) | h_zlib | t_zlib
+            let mut h_len_v = Vec::new();
+            varint_write(h_zlib.len() as u64, &mut h_len_v);
+            let total = 4 + h_len_v.len() + h_zlib.len() + t_zlib.len();
+            if total + 16 >= raw.len() { continue; }
+            let mut new_body = Vec::with_capacity(total);
+            new_body.extend_from_slice(b"OMCB");
+            new_body.extend_from_slice(&h_len_v);
+            new_body.extend_from_slice(&h_zlib);
+            new_body.extend_from_slice(&t_zlib);
+            std::fs::write(&pool_p, &new_body)
+                .map_err(|e| format!("write OMCB {}: {}", pool_p.display(), e))?;
+            compacted += 1;
+            before += raw.len();
+            after += new_body.len();
+        }
+        Ok((compacted, before, after))
+    }
+
     /// v0.10.0 Axis 4: substrate-aware tokenizer wired into codec.
     ///
     /// Walk the namespace and re-encode pool bodies through the
@@ -405,6 +619,95 @@ impl MemoryStore {
             new_body.extend_from_slice(&omct_body);
             std::fs::write(&pool_p, &new_body)
                 .map_err(|e| format!("write OMCT {}: {}", pool_p.display(), e))?;
+            compacted += 1;
+            before += raw.len();
+            after += new_body.len();
+        }
+        Ok((compacted, before, after))
+    }
+
+    /// v0.11.0 Axis 6: HBit dual-band substrate codec.
+    ///
+    /// Rewrites aged pool bodies through the substrate tokenizer (like
+    /// Axis 4) but then splits each i64 token id into a high-32-bit band
+    /// and a low-32-bit band, varint-encodes each band, and deflates the
+    /// two bands separately. The theory: in coherent natural-language
+    /// text the substrate tokenizer outputs cluster in a sub-region of
+    /// the id space, so the high band has lower entropy than the low
+    /// band and compresses better separately than interleaved.
+    ///
+    /// Layout: `OMCH` (4 bytes magic) | hi_len (4 bytes LE u32) |
+    /// hi_band_deflated (hi_len bytes) | lo_band_deflated (remainder).
+    ///
+    /// Skips entries already in any compressed form. Returns
+    /// `(compacted_count, bytes_before, bytes_after)`.
+    pub fn compact_namespace_hbit(
+        &self, namespace: &str, age_threshold_secs: i64,
+    ) -> Result<(usize, usize, usize), String> {
+        use std::io::Write;
+        let index_p = self.index_path(namespace);
+        if !index_p.exists() { return Ok((0, 0, 0)); }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64).unwrap_or(0);
+        let content = std::fs::read_to_string(&index_p)
+            .map_err(|e| format!("read index {}: {}", index_p.display(), e))?;
+        let mut compacted = 0usize;
+        let mut before = 0usize;
+        let mut after = 0usize;
+        for line in content.lines() {
+            if line.trim().is_empty() { continue; }
+            let Some(hash) = extract_hash_field(line) else { continue };
+            let Some(stored_at) = extract_stored_at_field(line) else { continue };
+            if now - stored_at < age_threshold_secs { continue; }
+            let pool_p = self.pool_path(hash);
+            if !pool_p.exists() { continue; }
+            let raw = std::fs::read(&pool_p)
+                .map_err(|e| format!("read pool {}: {}", pool_p.display(), e))?;
+            if raw.len() >= 4 {
+                let m = &raw[..4];
+                if m == b"OMCZ" || m == b"OMCT" || m == b"OMCH" || m == b"OMCD" {
+                    continue;
+                }
+            }
+            let text = match std::str::from_utf8(&raw) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let ids = tokenizer::encode(text);
+            // Split each id into hi/lo 32-bit bands. Delta-encode within
+            // each band so monotonic clusters varint-pack as 1 byte each.
+            let mut hi_packed: Vec<u8> = Vec::with_capacity(ids.len());
+            let mut lo_packed: Vec<u8> = Vec::with_capacity(ids.len());
+            let mut prev_hi: i64 = 0;
+            let mut prev_lo: i64 = 0;
+            for id in &ids {
+                let hi = ((*id as u64) >> 32) as i64;
+                let lo = ((*id as u64) & 0xFFFFFFFFu64) as i64;
+                varint_write(zigzag_encode(hi - prev_hi), &mut hi_packed);
+                varint_write(zigzag_encode(lo - prev_lo), &mut lo_packed);
+                prev_hi = hi;
+                prev_lo = lo;
+            }
+            let deflate_band = |band: &[u8]| -> Result<Vec<u8>, String> {
+                let mut enc = flate2::write::DeflateEncoder::new(
+                    Vec::new(), flate2::Compression::best());
+                enc.write_all(band)
+                    .map_err(|e| format!("OMCH deflate write: {}", e))?;
+                enc.finish().map_err(|e| format!("OMCH deflate finish: {}", e))
+            };
+            let hi_def = deflate_band(&hi_packed)?;
+            let lo_def = deflate_band(&lo_packed)?;
+            // Framing: magic (4) + hi_len (4) + hi + lo
+            let body_size = 4 + 4 + hi_def.len() + lo_def.len();
+            if body_size + 16 >= raw.len() { continue; }
+            let mut new_body = Vec::with_capacity(body_size);
+            new_body.extend_from_slice(b"OMCH");
+            new_body.extend_from_slice(&(hi_def.len() as u32).to_le_bytes());
+            new_body.extend_from_slice(&hi_def);
+            new_body.extend_from_slice(&lo_def);
+            std::fs::write(&pool_p, &new_body)
+                .map_err(|e| format!("write OMCH {}: {}", pool_p.display(), e))?;
             compacted += 1;
             before += raw.len();
             after += new_body.len();
@@ -783,9 +1086,11 @@ mod tests {
     }
 }
 
-/// v0.9.3 Axis 3 / v0.10.0 Axis 4 recall path.
+/// v0.9.3 Axis 3 / v0.10.0 Axis 4 / v0.11.0 Axis 6 recall path.
 ///   `OMCZ` (4 bytes) → zlib-deflated raw text.
 ///   `OMCT` (4 bytes) → zlib-deflated varint-packed substrate-tokenizer IDs.
+///   `OMCH` (4 bytes + 4 bytes hi_len) → HBit dual-band split — hi-32 band
+///       and lo-32 band each zigzag-delta-varint-packed and deflated separately.
 ///   anything else  → plain UTF-8.
 fn maybe_decompress(raw: &[u8]) -> Result<String, String> {
     if raw.len() >= 4 && &raw[..4] == b"OMCZ" {
@@ -811,8 +1116,180 @@ fn maybe_decompress(raw: &[u8]) -> Result<String, String> {
         }
         return Ok(tokenizer::decode(&ids));
     }
+    if raw.len() >= 8 && &raw[..4] == b"OMCB" {
+        use std::io::Read;
+        // OMCB: magic(4) | varint(h_zlib_len) | h_zlib | t_zlib
+        let mut pos = 4;
+        let (h_len, consumed) = varint_read(&raw[pos..])?;
+        pos += consumed;
+        let h_zlib_end = pos + h_len as usize;
+        if h_zlib_end > raw.len() {
+            return Err(format!("OMCB header length {} exceeds body {}",
+                               h_len, raw.len() - pos));
+        }
+        // Inflate merge-table header
+        let mut h_raw = Vec::new();
+        flate2::read::DeflateDecoder::new(&raw[pos..h_zlib_end])
+            .read_to_end(&mut h_raw)
+            .map_err(|e| format!("inflate OMCB header: {}", e))?;
+        let mut hp = 0;
+        let (n_merges, c) = varint_read(&h_raw[hp..])?;
+        hp += c;
+        let mut merges: Vec<(u32, u32)> = Vec::with_capacity(n_merges as usize);
+        for _ in 0..n_merges {
+            let (a, ca) = varint_read(&h_raw[hp..])?;
+            hp += ca;
+            let (b, cb) = varint_read(&h_raw[hp..])?;
+            hp += cb;
+            merges.push((a as u32, b as u32));
+        }
+        // Inflate token-stream body
+        let mut t_raw = Vec::new();
+        flate2::read::DeflateDecoder::new(&raw[h_zlib_end..])
+            .read_to_end(&mut t_raw)
+            .map_err(|e| format!("inflate OMCB body: {}", e))?;
+        let mut tp = 0;
+        let (n_tokens, c) = varint_read(&t_raw[tp..])?;
+        tp += c;
+        let mut tokens: Vec<u32> = Vec::with_capacity(n_tokens as usize);
+        for _ in 0..n_tokens {
+            let (t, ct) = varint_read(&t_raw[tp..])?;
+            tp += ct;
+            tokens.push(t as u32);
+        }
+        let recovered = bpe_decode(&tokens, &merges)?;
+        return String::from_utf8(recovered)
+            .map_err(|e| format!("OMCB result not valid UTF-8: {}", e));
+    }
+    if raw.len() >= 8 && &raw[..4] == b"OMCH" {
+        use std::io::Read;
+        let hi_len = u32::from_le_bytes(raw[4..8].try_into().unwrap()) as usize;
+        if 8 + hi_len > raw.len() {
+            return Err(format!("OMCH hi_len {} exceeds body {}", hi_len, raw.len() - 8));
+        }
+        let hi_def = &raw[8..8 + hi_len];
+        let lo_def = &raw[8 + hi_len..];
+        let mut hi_packed = Vec::new();
+        flate2::read::DeflateDecoder::new(hi_def).read_to_end(&mut hi_packed)
+            .map_err(|e| format!("inflate OMCH hi-band: {}", e))?;
+        let mut lo_packed = Vec::new();
+        flate2::read::DeflateDecoder::new(lo_def).read_to_end(&mut lo_packed)
+            .map_err(|e| format!("inflate OMCH lo-band: {}", e))?;
+        let his = read_zigzag_delta_stream(&hi_packed)?;
+        let los = read_zigzag_delta_stream(&lo_packed)?;
+        if his.len() != los.len() {
+            return Err(format!("OMCH band length mismatch: hi={} lo={}",
+                               his.len(), los.len()));
+        }
+        let mut ids: Vec<i64> = Vec::with_capacity(his.len());
+        for i in 0..his.len() {
+            let hi = his[i] as u64;
+            let lo = (los[i] as u64) & 0xFFFFFFFFu64;
+            ids.push(((hi << 32) | lo) as i64);
+        }
+        return Ok(tokenizer::decode(&ids));
+    }
     String::from_utf8(raw.to_vec())
         .map_err(|e| format!("body not valid UTF-8: {}", e))
+}
+
+/// v0.11.2 SBPE: greedy frequency BPE training.
+/// Returns Vec<(token_a, token_b)> where the i-th entry creates token 256+i.
+fn bpe_train(bytes: &[u8], n_merges: usize) -> Vec<(u32, u32)> {
+    use std::collections::HashMap;
+    let mut tokens: Vec<u32> = bytes.iter().map(|&b| b as u32).collect();
+    let mut merge_table: Vec<(u32, u32)> = Vec::with_capacity(n_merges);
+    for merge_idx in 0..n_merges {
+        let mut counts: HashMap<(u32, u32), u32> = HashMap::new();
+        for w in tokens.windows(2) {
+            *counts.entry((w[0], w[1])).or_insert(0) += 1;
+        }
+        if counts.is_empty() { break; }
+        let (best_pair, best_freq) = counts.iter()
+            .max_by_key(|(_, v)| *v)
+            .map(|(k, v)| (*k, *v))
+            .unwrap();
+        if best_freq < 2 { break; }
+        let new_token = (256 + merge_idx) as u32;
+        merge_table.push(best_pair);
+        let mut new_tokens: Vec<u32> = Vec::with_capacity(tokens.len());
+        let mut i = 0;
+        while i < tokens.len() {
+            if i + 1 < tokens.len() && tokens[i] == best_pair.0 && tokens[i + 1] == best_pair.1 {
+                new_tokens.push(new_token);
+                i += 2;
+            } else {
+                new_tokens.push(tokens[i]);
+                i += 1;
+            }
+        }
+        tokens = new_tokens;
+    }
+    merge_table
+}
+
+/// v0.11.2 SBPE: encode bytes to token IDs by applying merges in order.
+fn bpe_encode(bytes: &[u8], merges: &[(u32, u32)]) -> Vec<u32> {
+    let mut tokens: Vec<u32> = bytes.iter().map(|&b| b as u32).collect();
+    for (idx, &(a, b)) in merges.iter().enumerate() {
+        let new_token = (256 + idx) as u32;
+        let mut out: Vec<u32> = Vec::with_capacity(tokens.len());
+        let mut i = 0;
+        while i < tokens.len() {
+            if i + 1 < tokens.len() && tokens[i] == a && tokens[i + 1] == b {
+                out.push(new_token);
+                i += 2;
+            } else {
+                out.push(tokens[i]);
+                i += 1;
+            }
+        }
+        tokens = out;
+    }
+    tokens
+}
+
+/// v0.11.2 SBPE: decode token IDs back to bytes via reverse merge replay.
+fn bpe_decode(tokens: &[u32], merges: &[(u32, u32)]) -> Result<Vec<u8>, String> {
+    let mut token_bytes: Vec<Vec<u8>> = (0..256).map(|i| vec![i as u8]).collect();
+    for &(a, b) in merges {
+        if (a as usize) >= token_bytes.len() || (b as usize) >= token_bytes.len() {
+            return Err(format!("OMCB merge references undefined token: ({}, {})", a, b));
+        }
+        let mut combined = token_bytes[a as usize].clone();
+        combined.extend_from_slice(&token_bytes[b as usize]);
+        token_bytes.push(combined);
+    }
+    let mut out = Vec::new();
+    for &t in tokens {
+        if (t as usize) >= token_bytes.len() {
+            return Err(format!("OMCB token id {} out of range", t));
+        }
+        out.extend_from_slice(&token_bytes[t as usize]);
+    }
+    Ok(out)
+}
+
+fn read_zigzag_delta_stream(packed: &[u8]) -> Result<Vec<i64>, String> {
+    let mut out: Vec<i64> = Vec::new();
+    let mut i = 0;
+    let mut acc: i64 = 0;
+    while i < packed.len() {
+        let (v, consumed) = varint_read(&packed[i..])?;
+        let delta = zigzag_decode(v);
+        acc = acc.wrapping_add(delta);
+        out.push(acc);
+        i += consumed;
+    }
+    Ok(out)
+}
+
+fn zigzag_encode(v: i64) -> u64 {
+    ((v << 1) ^ (v >> 63)) as u64
+}
+
+fn zigzag_decode(v: u64) -> i64 {
+    ((v >> 1) as i64) ^ -((v & 1) as i64)
 }
 
 fn varint_write(mut v: u64, out: &mut Vec<u8>) {

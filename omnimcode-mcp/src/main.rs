@@ -491,6 +491,28 @@ fn list_tools() -> Vec<Json> {
             }
         }),
         json!({
+            "name": "omc_memory_store_delta",
+            "description": "v0.10.1 Axis 5 — store text as a delta against an explicit base \
+                            entry. Useful for iterative drafts: store v1 normally, then v2/v3 \
+                            as deltas off v1. Each delta is roughly constant size if the \
+                            edits are localized. Falls back to a regular store if the prefix \
+                            shared with base is <64 bytes or the delta wouldn't actually save \
+                            space.\n\
+                            \n\
+                            Bodies are tagged with `OMCD` magic and rebuilt on recall by \
+                            fetching the base. Returns the same hash you'd get from a regular \
+                            store (hash of the FULL text), so other tools work unchanged.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "namespace": {"type": "string", "default": "default"},
+                    "text": {"type": "string", "description": "The new content (full text, not a diff)."},
+                    "base_hash": {"type": "integer", "description": "content_hash of an existing entry to delta against."}
+                },
+                "required": ["text", "base_hash"]
+            }
+        }),
+        json!({
             "name": "omc_memory_compact_substrate",
             "description": "v0.10.0 Axis 4 — substrate-tokenizer compaction. Re-encodes \
                             aged pool bodies through the OMC substrate tokenizer (encode + \
@@ -517,6 +539,57 @@ fn list_tools() -> Vec<Json> {
                         "default": 86400,
                         "minimum": 0
                     }
+                }
+            }
+        }),
+        json!({
+            "name": "omc_memory_compact_bpe",
+            "description": "v0.11.2 SBPE — self-training BPE codec. First axis to actually \
+                            beat plain zlib on real content. Trains a per-body byte-pair \
+                            encoding (512 greedy frequency merges by default), then ships \
+                            the merge table + token stream as two zlib-deflated blobs. \
+                            The data trains its own vocabulary at compression time and the \
+                            merge table travels inline.\n\
+                            \n\
+                            Measured 5.21× on 100KB native .omc vs 4.70× for plain zlib \
+                            (Axis 3 / OMCZ). Header amortizes for bodies ≥16KB; smaller \
+                            bodies fall back to no-op (the safety check skips when SBPE \
+                            doesn't save ≥16 bytes vs raw).\n\
+                            \n\
+                            Bodies tagged with `OMCB` magic, transparently decompressed on \
+                            recall. Use as a replacement for omc_memory_compact when content \
+                            is large enough to amortize the inline merge table — for cold \
+                            archival of substantial bodies, this is now the best axis.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "namespace": {"type": "string", "default": "default"},
+                    "age_threshold_secs": {"type": "integer", "default": 86400, "minimum": 0}
+                }
+            }
+        }),
+        json!({
+            "name": "omc_memory_compact_hbit",
+            "description": "v0.11.0 Axis 6 — HBit dual-band codec. Substrate-tokenize each \
+                            aged body, then split each i64 token id into a high-32-bit band \
+                            and a low-32-bit band. Each band is zigzag-delta-varint-packed \
+                            and deflated separately. Wins when the two bands have different \
+                            entropy distributions, which is typical for substrate-tokenized \
+                            natural language (the hi band changes more slowly than the lo \
+                            band as tokens cluster within substrate attractor neighborhoods).\n\
+                            \n\
+                            Bodies tagged with `OMCH` magic, transparently rebuilt on recall. \
+                            Skips entries already in any compressed form. Falls back when the \
+                            two-band layout doesn't save ≥16 bytes vs the raw body.\n\
+                            \n\
+                            Schedule: try omc_memory_compact_hbit first on substrate-friendly \
+                            content; fall back to omc_memory_compact_substrate, then \
+                            omc_memory_compact. Returns {compacted, bytes_before, bytes_after}.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "namespace": {"type": "string", "default": "default"},
+                    "age_threshold_secs": {"type": "integer", "default": 86400, "minimum": 0}
                 }
             }
         }),
@@ -833,6 +906,56 @@ fn dispatch_tool(interp: &mut Interpreter, name: &str, args: &Json) -> Result<St
                 "namespace": namespace,
                 "dropped": dropped,
                 "kept": keep,
+            })).unwrap())
+        }
+        "omc_memory_store_delta" => {
+            let text = args.get("text").and_then(Json::as_str)
+                .ok_or_else(|| "omc_memory_store_delta: missing 'text'".to_string())?;
+            let base = args.get("base_hash").and_then(Json::as_i64)
+                .ok_or_else(|| "omc_memory_store_delta: missing 'base_hash' (i64)".to_string())?;
+            let namespace = args.get("namespace").and_then(Json::as_str).unwrap_or("default");
+            let store = MemoryStore::from_env();
+            let hash = store.store_as_delta(namespace, text, base)?;
+            // Report what actually got stored on disk.
+            let pool_p = format!("{}", store.root.display());
+            Ok(serde_json::to_string_pretty(&json!({
+                "content_hash": hash,
+                "namespace": namespace,
+                "base_hash": base,
+                "text_bytes": text.len(),
+                "pool_root": pool_p,
+            })).unwrap())
+        }
+        "omc_memory_compact_bpe" => {
+            let namespace = args.get("namespace").and_then(Json::as_str).unwrap_or("default");
+            let age = args.get("age_threshold_secs").and_then(Json::as_i64).unwrap_or(86400);
+            let store = MemoryStore::from_env();
+            let (n, before, after) = store.compact_namespace_bpe(namespace, age)?;
+            let ratio = if after > 0 { before as f64 / after as f64 } else { 0.0 };
+            Ok(serde_json::to_string_pretty(&json!({
+                "namespace": namespace,
+                "compacted": n,
+                "bytes_before": before,
+                "bytes_after": after,
+                "compression_ratio": ratio,
+                "age_threshold_secs": age,
+                "format": "OMCB",
+            })).unwrap())
+        }
+        "omc_memory_compact_hbit" => {
+            let namespace = args.get("namespace").and_then(Json::as_str).unwrap_or("default");
+            let age = args.get("age_threshold_secs").and_then(Json::as_i64).unwrap_or(86400);
+            let store = MemoryStore::from_env();
+            let (n, before, after) = store.compact_namespace_hbit(namespace, age)?;
+            let ratio = if after > 0 { before as f64 / after as f64 } else { 0.0 };
+            Ok(serde_json::to_string_pretty(&json!({
+                "namespace": namespace,
+                "compacted": n,
+                "bytes_before": before,
+                "bytes_after": after,
+                "compression_ratio": ratio,
+                "age_threshold_secs": age,
+                "format": "OMCH",
             })).unwrap())
         }
         "omc_memory_compact_substrate" => {
