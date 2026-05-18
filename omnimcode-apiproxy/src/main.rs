@@ -892,6 +892,7 @@ enum MarkerKind {
     ToolUseInput,
 }
 
+#[cfg(test)]
 fn make_marker(text: &str, state: &AppState, kind: MarkerKind) -> Result<String> {
     make_marker_with_dedup(text, state, kind, None)
 }
