@@ -1265,6 +1265,54 @@ pub const BUILTINS: &[BuiltinDoc] = &[
         example: "omc_id(src)  // \"omcid-12345-abcd\"",
         unique_to_omc: true,
     },
+    // ── LLM I/O builtins ──────────────────────────────────────────────────────
+    BuiltinDoc {
+        name: "llm_call", category: "llm_workflow",
+        signature: "(prompt: string, model?: string, opts?: dict) -> string",
+        description: concat!(
+            "Send a single-turn prompt to an LLM and return the text reply. ",
+            "Reads ANTHROPIC_API_KEY / OPENAI_API_KEY / LLM_API_KEY from env. ",
+            "Provider is auto-detected from `model` prefix or LLM_PROVIDER env var. ",
+            "Optional `opts` dict: {\"max_tokens\": int, \"temperature\": float, \"system\": string, ",
+            "\"endpoint\": string}. Blocks until the response arrives."
+        ),
+        example: "llm_call(\"Explain phi in one sentence\", \"claude-3-5-haiku-20241022\")",
+        unique_to_omc: true,
+    },
+    BuiltinDoc {
+        name: "llm_chat", category: "llm_workflow",
+        signature: "(messages: dict[], model?: string, opts?: dict) -> dict",
+        description: concat!(
+            "Multi-turn chat completion. `messages` is a list of {role, content} dicts ",
+            "(roles: \"user\" | \"assistant\" | \"system\"). Returns a dict with keys: ",
+            "{\"content\": string, \"role\": string, \"model\": string, \"usage\": dict}. ",
+            "Same provider/key detection as llm_call."
+        ),
+        example: "llm_chat([{\"role\":\"user\",\"content\":\"hi\"}], \"gpt-4o-mini\")",
+        unique_to_omc: true,
+    },
+    BuiltinDoc {
+        name: "llm_embed", category: "llm_workflow",
+        signature: "(text: string | string[], model?: string, opts?: dict) -> float[][]",
+        description: concat!(
+            "Generate embeddings for one or more texts. Returns a list of float arrays ",
+            "(one per input). Supported providers: OpenAI (text-embedding-* models) and ",
+            "Anthropic voyage-* via VOYAGE_API_KEY. Reads OPENAI_API_KEY / LLM_API_KEY."
+        ),
+        example: "llm_embed(\"hello world\", \"text-embedding-3-small\")",
+        unique_to_omc: true,
+    },
+    BuiltinDoc {
+        name: "llm_models", category: "llm_workflow",
+        signature: "() -> dict[]",
+        description: concat!(
+            "Return a static list of well-known model ids as an array of dicts ",
+            "{id: string, provider: string}. Useful for picking a model by name ",
+            "without hardcoding strings. Not a live API call — no network required."
+        ),
+        example: r#"let models = llm_models(); println(models[0]["id"])"#,
+        unique_to_omc: true,
+    },
     BuiltinDoc {
         name: "omc_token_vocab_dump", category: "tokenizer",
         signature: "(n?: int) -> string",

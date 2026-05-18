@@ -36,9 +36,10 @@ name = "omc-kernel"
 path = "src/bin/omc_kernel.rs"
 
 [features]
-default = ["python-embed"]
+default = ["python-embed", "native-llm"]
 # CPython embedding for `py_*` builtins. Forwards to core.
 python-embed = ["omnimcode-core/python-embed"]
+native-llm = ["omnimcode-core/native-llm"]
 # LLVM-backed dual-band JIT. When set at compile time, the CLI
 # consults `OMC_HBIT_JIT=1` at runtime; if also set, eligible user
 # fns are routed through omnimcode-codegen instead of tree-walk/VM.

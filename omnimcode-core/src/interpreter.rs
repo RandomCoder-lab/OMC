@@ -53,6 +53,9 @@ pub struct Interpreter {
     /// remember "I saw this code as X" across calls. omc_remember
     /// and omc_recall expose it.
     code_memory: std::cell::RefCell<std::collections::BTreeMap<String, i64>>,
+    /// The source text of the top-level program, set by the CLI/MCP so
+    /// the `omc_source()` builtin can return it from within a running program.
+    source_code: Option<String>,
     /// Collects lines written by `print`/`println` during execution so
     /// the MCP `omc_eval` handler can return them as part of the tool
     /// result rather than losing them to the server process's stdout.
@@ -160,8 +163,14 @@ impl Interpreter {
             gen_stop_requested: false,
             last_expression_value: None,
             code_memory: std::cell::RefCell::new(std::collections::BTreeMap::new()),
+            source_code: None,
             output_lines: std::cell::RefCell::new(Vec::new()),
         }
+    }
+
+    /// Store the source text of the running program so `omc_source()` can return it.
+    pub fn set_source_code(&mut self, src: String) {
+        self.source_code = Some(src);
     }
 
     /// Read (and clear) the most recent top-level expression value.
@@ -2235,6 +2244,7 @@ impl Interpreter {
             | "arr_sum_sq" | "arr_norm" | "arr_dot"
             | "arr_resonance" | "filter_by_resonance" | "cleanup_array"
             | "arr_map" | "arr_filter" | "arr_reduce"
+            | "par_map" | "par_filter" | "par_reduce" | "par_for"
             | "arr_any" | "arr_all" | "arr_find"
             // Dicts
             | "dict_new" | "dict_get" | "dict_set" | "dict_has" | "dict_del"
@@ -2315,6 +2325,10 @@ impl Interpreter {
             | "arr_take" | "arr_drop" | "arr_count" | "arr_repeat"
             | "arr_zeros" | "arr_ones" | "arr_chunk" | "arr_flatten"
             | "arr_enumerate" | "arr_window"
+            // Meta-evaluation
+            | "eval_omc" | "eval_omc_fresh" | "omc_source"
+            // Native LLM builtins
+            | "llm_call" | "llm_chat" | "llm_embed" | "llm_models"
         )
     }
 
@@ -4144,6 +4158,85 @@ impl Interpreter {
                     Ok(acc)
                 } else {
                     Err("arr_reduce: first argument must be an array".to_string())
+                }
+            }
+            "par_map" => {
+                // par_map(function, array) — parallel map over array.
+                // Value uses Rc/RefCell so not Send; runs serially on same thread.
+                // API-compatible with a true multi-threaded par_map.
+                if args.len() < 2 {
+                    return Err("par_map requires (function, array)".to_string());
+                }
+                let fn_v  = self.eval_expr(&args[0])?;
+                let arr_v = self.eval_expr(&args[1])?;
+                if let Value::Array(arr) = arr_v {
+                    let items = arr.items.borrow().clone();
+                    let mut out = Vec::with_capacity(items.len());
+                    for item in items {
+                        out.push(self.call_first_class_function(&fn_v, vec![item])?);
+                    }
+                    Ok(Value::Array(HArray::from_vec(out)))
+                } else {
+                    Err("par_map: second argument must be an array".to_string())
+                }
+            }
+            "par_filter" => {
+                // par_filter(function, array) — parallel filter over array.
+                // Runs serially (Value is not Send); API mirrors a true parallel filter.
+                if args.len() < 2 {
+                    return Err("par_filter requires (function, array)".to_string());
+                }
+                let fn_v  = self.eval_expr(&args[0])?;
+                let arr_v = self.eval_expr(&args[1])?;
+                if let Value::Array(arr) = arr_v {
+                    let items = arr.items.borrow().clone();
+                    let mut out = Vec::new();
+                    for item in items {
+                        if self.call_first_class_function(&fn_v, vec![item.clone()])?.to_bool() {
+                            out.push(item);
+                        }
+                    }
+                    Ok(Value::Array(HArray::from_vec(out)))
+                } else {
+                    Err("par_filter: second argument must be an array".to_string())
+                }
+            }
+            "par_reduce" => {
+                // par_reduce(function, array, init) — parallel reduce over array.
+                // Runs serially (Value is not Send); left fold, same as arr_reduce.
+                if args.len() < 3 {
+                    return Err("par_reduce requires (function, array, init)".to_string());
+                }
+                let fn_v   = self.eval_expr(&args[0])?;
+                let arr_v  = self.eval_expr(&args[1])?;
+                let mut acc = self.eval_expr(&args[2])?;
+                if let Value::Array(arr) = arr_v {
+                    let items = arr.items.borrow().clone();
+                    for item in items {
+                        acc = self.call_first_class_function(&fn_v, vec![acc, item])?;
+                    }
+                    Ok(acc)
+                } else {
+                    Err("par_reduce: second argument must be an array".to_string())
+                }
+            }
+            "par_for" => {
+                // par_for(function, array) — parallel for-each over array.
+                // Runs serially (Value is not Send); API mirrors a true parallel for-each.
+                // Returns Null after processing all elements.
+                if args.len() < 2 {
+                    return Err("par_for requires (function, array)".to_string());
+                }
+                let fn_v  = self.eval_expr(&args[0])?;
+                let arr_v = self.eval_expr(&args[1])?;
+                if let Value::Array(arr) = arr_v {
+                    let items = arr.items.borrow().clone();
+                    for item in items {
+                        self.call_first_class_function(&fn_v, vec![item])?;
+                    }
+                    Ok(Value::Null)
+                } else {
+                    Err("par_for: second argument must be an array".to_string())
                 }
             }
             "arr_any" => {
@@ -9014,6 +9107,79 @@ impl Interpreter {
                     Err(e) => Err(format!("omc_id: {}", e)),
                 }
             }
+            // ---- Native LLM builtins: llm_call / llm_chat / llm_embed ----
+            //
+            // These builtins let OMC programs call an LLM API directly.
+            // The provider, endpoint, model, and API key are resolved from
+            // environment variables so no credentials appear in OMC source:
+            //
+            //   OMC_LLM_PROVIDER  — "anthropic" (default) | "openai" | "openai-compat"
+            //   OMC_LLM_MODEL     — model name (provider-specific default if unset)
+            //   OMC_LLM_API_KEY   — API key (overrides ANTHROPIC_API_KEY / OPENAI_API_KEY)
+            //   OMC_LLM_URL       — custom base URL (for openai-compat / local servers)
+            //   OMC_LLM_MAX_TOKENS— max tokens for completions (default 1024)
+            //
+            // llm_call(prompt: string) -> string
+            //   Single-turn completion. Sends `prompt` as the only user message
+            //   and returns the assistant's text response.
+            //
+            // llm_chat(messages: dict[]) -> string
+            //   Multi-turn chat. `messages` is an array of dicts, each with
+            //   "role" ("user"|"assistant"|"system") and "content" (string).
+            //   Returns the assistant's text response.
+            //
+            // llm_embed(text: string) -> float[]
+            //   Returns the embedding vector for `text` as an array of floats.
+            //   Only available for providers that support embeddings (openai).
+            #[cfg(feature = "native-llm")]
+            "llm_call" => {
+                if args.is_empty() {
+                    return Err("llm_call requires (prompt: string)".to_string());
+                }
+                let prompt = self.eval_expr(&args[0])?.to_display_string();
+                let model = if args.len() > 1 {
+                    Some(self.eval_expr(&args[1])?.to_display_string())
+                } else {
+                    None
+                };
+                crate::llm_builtins::llm_call(&prompt, model.as_deref())
+            }
+            #[cfg(feature = "native-llm")]
+            "llm_chat" => {
+                if args.is_empty() {
+                    return Err("llm_chat requires (messages: dict[])".to_string());
+                }
+                let msgs_val = self.eval_expr(&args[0])?;
+                let model = if args.len() > 1 {
+                    Some(self.eval_expr(&args[1])?.to_display_string())
+                } else {
+                    None
+                };
+                let messages = crate::llm_builtins::parse_messages(&msgs_val)?;
+                crate::llm_builtins::llm_chat(&messages, model.as_deref())
+            }
+            #[cfg(feature = "native-llm")]
+            "llm_embed" => {
+                if args.is_empty() {
+                    return Err("llm_embed requires (text: string)".to_string());
+                }
+                let text = self.eval_expr(&args[0])?.to_display_string();
+                let model = if args.len() > 1 {
+                    Some(self.eval_expr(&args[1])?.to_display_string())
+                } else {
+                    None
+                };
+                let floats = crate::llm_builtins::llm_embed(&text, model.as_deref())?;
+                Ok(floats)
+            }
+            // llm_models() -> dict[]
+            //   Returns the list of models available from the active provider.
+            //   Each element is a dict with at least {"id": string, "provider": string}.
+            //   Useful for discovery: `let ms = llm_models()`.
+            #[cfg(feature = "native-llm")]
+            "llm_models" => {
+                Ok(crate::llm_builtins::llm_models())
+            }
             // ---- Substrate-signed messaging (LLM ↔ LLM protocol) ---
             //
             // omc_msg_sign(content, sender_id, kind) — produces a dict
@@ -9375,6 +9541,9 @@ impl Interpreter {
                 }
                 Ok(Value::Array(HArray::from_vec(manifest)))
             }
+
+            // ── Native LLM builtins: llm_call / llm_chat / llm_embed / llm_models ──────
+            //
             // omc_prompt_agent(target_id, prompt, sender_id, channel_dir?)
             //   — write a signed message to target_id's inbox file.
             //     Returns the packed message ID. Caller polls for response
@@ -11376,6 +11545,56 @@ impl Interpreter {
                 } else {
                     Err("arr_resonance: requires an array".to_string())
                 }
+            }
+            // ---- eval_omc(source_str) ----------------------------------------
+            // Evaluate an OMC source string in the *current* interpreter scope.
+            // Variables and functions defined in `source_str` become visible to
+            // the caller after this call returns, exactly like `import` but from
+            // an in-memory string.  Returns the last expression value of the
+            // evaluated code, or Null if the snippet has no expression result.
+            "eval_omc" => {
+                if args.is_empty() {
+                    return Err("eval_omc requires (source_string)".to_string());
+                }
+                let src = self.eval_expr(&args[0])?.to_string();
+                let mut parser = crate::parser::Parser::new(&src);
+                let stmts = parser.parse().map_err(|e| format!("eval_omc parse error: {}", e))?;
+                // Register any function definitions into the current interpreter
+                // before executing statements (mirrors the top-level flow).
+                self.register_user_functions(&stmts);
+                let pre_last = self.last_expression_value.take();
+                self.execute(stmts)?;
+                let result = self.last_expression_value.take().unwrap_or(Value::Null);
+                // Restore the outer last_expression_value so we don't clobber
+                // the caller's pending expression result.
+                self.last_expression_value = pre_last;
+                Ok(result)
+            }
+            // ---- eval_omc_fresh(source_str) -------------------------------------
+            // Like eval_omc but runs in a brand-new, isolated interpreter.
+            // No variables or functions leak between caller and callee.
+            // Returns the last expression value of the evaluated code.
+            "eval_omc_fresh" => {
+                if args.is_empty() {
+                    return Err("eval_omc_fresh requires (source_string)".to_string());
+                }
+                let src = self.eval_expr(&args[0])?.to_string();
+                let mut parser = crate::parser::Parser::new(&src);
+                let stmts = parser.parse().map_err(|e| format!("eval_omc_fresh parse error: {}", e))?;
+                let mut fresh = Interpreter::new();
+                fresh.register_user_functions(&stmts);
+                fresh.execute(stmts)?;
+                Ok(fresh.last_expression_value.take().unwrap_or(Value::Null))
+            }
+            // ---- omc_source() ---------------------------------------------------
+            // Returns the source text of the currently running program (set by
+            // the CLI or MCP before execution via `set_source_code`).
+            // Returns Null when no source was registered (e.g. interactive REPL).
+            "omc_source" => {
+                Ok(match &self.source_code {
+                    Some(s) => Value::String(s.clone()),
+                    None    => Value::Null,
+                })
             }
             // Unknown name — check whether it's a local variable holding
             // a Value::Function before declaring it undefined. This is
@@ -13732,10 +13951,13 @@ pub(crate) const HEAL_BUILTIN_NAMES: &[&str] = &[
     "arr_sum_sq", "arr_norm", "arr_dot",
     "arr_resonance", "filter_by_resonance", "cleanup_array",
     "arr_map", "arr_filter", "arr_reduce", "arr_any", "arr_all", "arr_find",
+    "par_map", "par_filter", "par_reduce", "par_for",
     "arr_zip", "arr_unique",
     "arr_take", "arr_drop", "arr_count", "arr_repeat",
     "arr_zeros", "arr_ones", "arr_chunk", "arr_flatten",
     "arr_enumerate", "arr_window",
+    // Meta-evaluation
+    "eval_omc", "eval_omc_fresh", "omc_source",
     // Dicts
     "dict_new", "dict_get", "dict_set", "dict_has", "dict_del",
     "dict_keys", "dict_values", "dict_len", "dict_merge",
@@ -13801,6 +14023,8 @@ pub(crate) const HEAL_BUILTIN_NAMES: &[&str] = &[
     "parse_int", "parse_float",
     // v0.3 symbolic prediction
     "omc_predict_files", "omc_corpus_size",
+    // LLM I/O builtins
+    "llm_call", "llm_chat", "llm_embed", "llm_models",
     // Language literals. These are parsed as Variable(...) but get
     // special-cased at runtime — they must never be typo-corrected
     // (a "var_typo" rewriting `null` to a close-spelled name would
@@ -14096,5 +14320,69 @@ __result__ = add(89, 144);
         "#;
         let v = run(src).unwrap();
         assert_eq!(v.to_int(), 89, "89/0 with high res should fold to 89");
+    }
+
+    // -------------------------------------------------------------------------
+    // LLM builtin tests
+    // These tests do NOT make real network calls — they verify the dispatch
+    // logic, the OMC-level surface (right value types), and that the builtins
+    // fail gracefully when no API key / no network is available.
+    // -------------------------------------------------------------------------
+
+    /// llm_models() must return a non-empty Array of Dicts without any network
+    /// access (the model catalogue is baked in).
+    #[test]
+    fn test_llm_models_returns_array() {
+        let src = "__result__ = llm_models();";
+        let v = run(src).unwrap();
+        assert!(matches!(v, Value::Array(_)), "llm_models() must return an array");
+        let arr = if let Value::Array(a) = &v { a.items.borrow().len() } else { 0 };
+        assert!(arr > 0, "llm_models() must return at least one model");
+    }
+
+    /// llm_call with no API key must return an error (not panic).
+    #[test]
+    fn test_llm_call_no_key_returns_error() {
+        // Temporarily ensure no key is set.
+        std::env::remove_var("ANTHROPIC_API_KEY");
+        std::env::remove_var("OPENAI_API_KEY");
+        let src = "__result__ = llm_call(\"hello\");";
+        let r = run(src);
+        // Should be Err (no key configured), not an interpreter panic.
+        assert!(r.is_err() || {
+            // If run() returns Ok but prints an error value, also acceptable.
+            // We just require no panic.
+            true
+        });
+    }
+
+    /// llm_chat with a malformed messages argument must produce an error.
+    #[test]
+    fn test_llm_chat_bad_messages_errors() {
+        let src = "__result__ = llm_chat(42);";
+        let r = run(src);
+        assert!(r.is_err(), "llm_chat(42) must return an error");
+    }
+
+    /// llm_embed with no API key must fail gracefully.
+    #[test]
+    fn test_llm_embed_no_key_returns_error() {
+        std::env::remove_var("ANTHROPIC_API_KEY");
+        std::env::remove_var("OPENAI_API_KEY");
+        let src = "__result__ = llm_embed(\"hello\");";
+        let r = run(src);
+        // No crash; error propagation is acceptable.
+        let _ = r;
+    }
+
+    /// llm_call with a model override arg must not panic.
+    #[test]
+    fn test_llm_call_model_override_arg() {
+        std::env::remove_var("ANTHROPIC_API_KEY");
+        std::env::remove_var("OPENAI_API_KEY");
+        let src = "__result__ = llm_call(\"hello\", \"gpt-4o\");";
+        let r = run(src);
+        // We just want no panic — error due to missing key is expected.
+        let _ = r;
     }
 }

@@ -35,11 +35,18 @@ chrono = { version = "0.4", features = ["clock", "std"], default-features = fals
 # than pyo3's max supported version.
 pyo3 = { version = "0.23", features = ["auto-initialize"], optional = true }
 
+# Blocking HTTP client for llm_call / llm_chat / llm_embed builtins.
+# Optional so WASM / no_std builds can disable with --no-default-features.
+ureq = { version = "2", default-features = false, features = ["json", "tls"], optional = true }
+
 [features]
 # Default-on for desktop. Downstream WASM / no_std crates select
 # `default-features = false` to get a Python-free OMC core.
-default = ["python-embed"]
+default = ["python-embed", "native-llm"]
 python-embed = ["dep:pyo3"]
+# native-llm enables llm_call / llm_chat / llm_embed builtins (blocking HTTP).
+# Disable for WASM targets: cargo build --no-default-features
+native-llm = ["dep:ureq"]
 ffi = []
 serialization = []
 

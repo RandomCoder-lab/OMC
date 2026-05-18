@@ -11,6 +11,7 @@ pub mod tokenizer;
 pub mod canonical;
 pub mod code_intel;
 pub mod llm_workflow;
+pub mod llm_builtins;  // llm_call / llm_chat / llm_embed native builtins
 pub mod onn;
 pub mod runtime;
 pub mod circuits;      // Genetic logic circuits
