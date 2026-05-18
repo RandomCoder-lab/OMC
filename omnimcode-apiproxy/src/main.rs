@@ -135,6 +135,10 @@ struct RewriteStats {
     /// Bytes saved by compressing large blocks in non-streaming responses.
     bytes_saved_response: u64,
     delegate_calls: u64,
+    /// Bytes in text blocks captured from streaming (SSE) responses and stored
+    /// in the proxy cache for future request-side compression.  No latency is
+    /// added — recording runs on a background tokio task after each send.
+    bytes_streamed_recorded: u64,
 }
 
 /// Per-conversation state the proxy remembers across turns. Key is a stable
@@ -969,6 +973,77 @@ async fn passthrough(State(state): State<AppState>, req: Request) -> Response {
 /// Forward the rewritten request to upstream and stream the response back
 /// to the client as chunks arrive — works for both:
 ///   • JSON (non-streaming) responses: the body is small, single chunk
+/// Parse an Anthropic SSE stream (accumulated bytes), extract text blocks
+/// that are large enough to be worth caching, and store them in the proxy
+/// cache.  Called from a background task after the stream has closed so there
+/// is zero added latency on the client path.
+///
+/// The stored hashes will be found by `compress_request_body` when the same
+/// text appears as assistant message history in a subsequent request, giving
+/// effectively the same savings as non-streaming response compression.
+fn side_record_sse_content(data: Vec<u8>, state: AppState) {
+    let text = match std::str::from_utf8(&data) {
+        Ok(t) => t,
+        Err(_) => return, // non-UTF-8 stream — skip
+    };
+    // Index → accumulated text for each content block.
+    let mut blocks: std::collections::HashMap<u64, String> = std::collections::HashMap::new();
+    let mut block_types: std::collections::HashMap<u64, String> = std::collections::HashMap::new();
+
+    for line in text.lines() {
+        let Some(json_str) = line.strip_prefix("data: ") else { continue };
+        if json_str.trim() == "[DONE]" { continue }
+        let ev: Value = match serde_json::from_str(json_str) {
+            Ok(v) => v, Err(_) => continue,
+        };
+        match ev.get("type").and_then(Value::as_str) {
+            Some("content_block_start") => {
+                let idx = ev.get("index").and_then(Value::as_u64).unwrap_or(0);
+                let bt  = ev.get("content_block")
+                    .and_then(|cb| cb.get("type"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("text");
+                block_types.insert(idx, bt.to_string());
+                blocks.entry(idx).or_default();
+            }
+            Some("content_block_delta") => {
+                let idx = ev.get("index").and_then(Value::as_u64).unwrap_or(0);
+                // text_delta for text blocks; partial_json for tool_use blocks
+                if let Some(t) = ev.get("delta")
+                    .and_then(|d| d.get("text"))
+                    .and_then(Value::as_str)
+                {
+                    blocks.entry(idx).or_default().push_str(t);
+                }
+                if let Some(t) = ev.get("delta")
+                    .and_then(|d| d.get("partial_json"))
+                    .and_then(Value::as_str)
+                {
+                    blocks.entry(idx).or_default().push_str(t);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let threshold = state.rewrite_threshold;
+    let mut total_saved = 0usize;
+    for (idx, content) in &blocks {
+        if content.len() < threshold { continue; }
+        // Only cache text blocks and tool_use input (partial_json) blocks.
+        let bt = block_types.get(idx).map(|s| s.as_str()).unwrap_or("text");
+        if bt != "text" && bt != "tool_use" { continue; }
+        match state.store.store(PROXY_CACHE_NAMESPACE, content) {
+            Ok(_hash) => total_saved += content.len(),
+            Err(e)    => debug!("streaming side-record store failed: {}", e),
+        }
+    }
+    if total_saved > 0 {
+        state.stats.lock().unwrap().bytes_streamed_recorded += total_saved as u64;
+        info!("streaming side-record: cached {} bytes from {} blocks", total_saved, blocks.len());
+    }
+}
+
 ///   • SSE (`text/event-stream`) responses: chunks are forwarded in real-time
 ///     instead of buffering the entire stream before returning
 async fn forward_to_upstream(
@@ -989,13 +1064,51 @@ async fn forward_to_upstream(
     // Pipe upstream bytes through to the client as they arrive.
     // Hop-by-hop headers must not be forwarded; content-length is unknown
     // for streamed bodies and is omitted (axum uses chunked encoding).
-    let stream = upstream.bytes_stream();
+    let is_sse = resp_headers.get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.contains("event-stream"))
+        .unwrap_or(false);
     let mut resp = Response::builder().status(status);
     for (k, v) in resp_headers.iter() {
         if k == "content-length" || k == "transfer-encoding" || k == "connection" { continue; }
         resp = resp.header(k, v);
     }
-    resp.body(axum::body::Body::from_stream(stream))
+    // For SSE responses, tap the stream so we can side-record large text
+    // blocks into the proxy cache — zero added latency, background task.
+    let body = if is_sse && status.is_success() {
+        use futures_util::StreamExt as _;
+        type BoxErr = Box<dyn std::error::Error + Send + Sync + 'static>;
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Result<Bytes, BoxErr>>();
+        let state_clone = state.clone();
+        tokio::spawn(async move {
+            let mut accumulated: Vec<u8> = Vec::new();
+            let mut stream = upstream.bytes_stream();
+            let mut clean_end = false;
+            loop {
+                match stream.next().await {
+                    None => { clean_end = true; break; }
+                    Some(Ok(chunk)) => {
+                        accumulated.extend_from_slice(&chunk);
+                        if tx.send(Ok(chunk)).is_err() { break; } // client gone
+                    }
+                    Some(Err(e)) => {
+                        let _ = tx.send(Err(Box::new(e) as BoxErr));
+                        break;
+                    }
+                }
+            }
+            if clean_end && !accumulated.is_empty() {
+                side_record_sse_content(accumulated, state_clone);
+            }
+        });
+        let recv_stream = futures_util::stream::unfold(rx, |mut r| async move {
+            r.recv().await.map(|item| (item, r))
+        });
+        axum::body::Body::from_stream(recv_stream)
+    } else {
+        axum::body::Body::from_stream(upstream.bytes_stream())
+    };
+    resp.body(body)
         .unwrap_or_else(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR,
             &format!("response build: {}", e)))
 }
@@ -1056,6 +1169,7 @@ async fn stats_endpoint(State(state): State<AppState>) -> Response {
             "tool_definitions": s.bytes_saved_tool_definitions,
             "images": s.bytes_saved_images,
             "response_body": s.bytes_saved_response,
+            "streaming_side_recorded": s.bytes_streamed_recorded,
         },
         "cache_control_inserted_count": s.cache_control_inserted,
         "conversations_seen": s.conversation_count,
