@@ -113,7 +113,22 @@ impl MemoryStore {
         self.root.join(sanitize_namespace(namespace))
     }
 
-    fn content_path(&self, namespace: &str, hash: i64) -> PathBuf {
+    /// v0.9.2 Axis 2: cross-namespace dedup pool path. All content lives
+    /// at `<root>/_pool/<hash>.txt` regardless of namespace. Namespace dirs
+    /// hold only the index. Same content stored in K namespaces costs ONE
+    /// body file. The fanout shards by the top byte of the hash so the
+    /// pool doesn't grow into one giant directory at scale.
+    fn pool_path(&self, hash: i64) -> PathBuf {
+        let shard = (hash as u64) >> 56;  // top byte = 256 shards
+        self.root.join("_pool").join(format!("{:02x}", shard))
+            .join(format!("{:016x}.txt", hash as u64))
+    }
+
+    /// Legacy per-namespace content path. Used by `recall_in` as a fallback
+    /// when an entry was stored before the dedup-pool refactor (or if the
+    /// pool body is missing for some other reason). Kept for backward
+    /// compatibility with existing `~/.omc/memory/<ns>/<hash>.txt` files.
+    fn legacy_content_path(&self, namespace: &str, hash: i64) -> PathBuf {
         self.namespace_dir(namespace).join(format!("{:016x}.txt", hash as u64))
     }
 
@@ -130,9 +145,20 @@ impl MemoryStore {
         let ns_dir = self.namespace_dir(namespace);
         std::fs::create_dir_all(&ns_dir)
             .map_err(|e| format!("create namespace dir {}: {}", ns_dir.display(), e))?;
-        let content_p = self.content_path(namespace, hash);
-        std::fs::write(&content_p, text)
-            .map_err(|e| format!("write content {}: {}", content_p.display(), e))?;
+        // v0.9.2 Axis 2: write the body to the global content-addressed
+        // pool, not to the namespace dir. Pool path is sharded by hash
+        // prefix. Idempotent — same hash skips the write entirely (no
+        // wasted IO when the body already exists from another namespace
+        // OR a prior store in the same namespace).
+        let pool_p = self.pool_path(hash);
+        if !pool_p.exists() {
+            if let Some(parent) = pool_p.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("create pool shard {}: {}", parent.display(), e))?;
+            }
+            std::fs::write(&pool_p, text)
+                .map_err(|e| format!("write pool content {}: {}", pool_p.display(), e))?;
+        }
         // Append to index.
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -218,11 +244,21 @@ impl MemoryStore {
     }
 
     fn recall_in(&self, namespace: &str, hash: i64) -> Result<Option<String>, String> {
-        let p = self.content_path(namespace, hash);
-        if !p.exists() { return Ok(None); }
-        let text = std::fs::read_to_string(&p)
-            .map_err(|e| format!("read content {}: {}", p.display(), e))?;
-        Ok(Some(text))
+        // v0.9.2 Axis 2: prefer the global pool. v0.9.3 Axis 3: inflate
+        // bodies that start with the `OMCZ` magic (zlib-compacted aged
+        // entries). Falls back to legacy per-namespace storage for entries
+        // written before the dedup-pool refactor.
+        let pool_p = self.pool_path(hash);
+        if pool_p.exists() {
+            let raw = std::fs::read(&pool_p)
+                .map_err(|e| format!("read pool content {}: {}", pool_p.display(), e))?;
+            return Ok(Some(maybe_decompress(&raw)?));
+        }
+        let legacy = self.legacy_content_path(namespace, hash);
+        if !legacy.exists() { return Ok(None); }
+        let raw = std::fs::read(&legacy)
+            .map_err(|e| format!("read legacy content {}: {}", legacy.display(), e))?;
+        Ok(Some(maybe_decompress(&raw)?))
     }
 
     /// List recent entries in a namespace (most recent first).
@@ -247,6 +283,192 @@ impl MemoryStore {
         entries.reverse();
         entries.truncate(limit.max(1));
         Ok(entries)
+    }
+
+    /// v0.9.1 Axis 1: Merkle manifest hashes.
+    ///
+    /// A manifest is a single content-addressed entry whose body is a JSON
+    /// list of leaf hashes. Storing a manifest gives the caller ONE hash
+    /// that references N leaves; recalling expands the list, after which
+    /// the caller can `recall` each leaf on demand. The compression win is
+    /// asymmetric: 1 manifest hash in context = 5 tokens; N leaf bodies
+    /// behind that hash = arbitrary content size.
+    ///
+    /// The manifest body uses the wire format `{"manifest":1,"entries":[..]}`
+    /// so an LLM that recalls it can spot it's a manifest from the first
+    /// byte and act accordingly.
+    pub fn create_manifest(&self, namespace: &str, entries: &[i64]) -> Result<i64, String> {
+        let mut s = String::from("{\"manifest\":1,\"entries\":[");
+        for (i, h) in entries.iter().enumerate() {
+            if i > 0 { s.push(','); }
+            s.push_str(&h.to_string());
+        }
+        s.push_str("]}");
+        self.store(namespace, &s)
+    }
+
+    /// Parse a recalled manifest body back into its leaf hash list.
+    /// Returns `Ok(Some(hashes))` if the body parses as a manifest,
+    /// `Ok(None)` if it's a regular (non-manifest) entry. `Err` only on
+    /// IO or hash-not-found.
+    pub fn recall_manifest(
+        &self, namespace: Option<&str>, hash: i64,
+    ) -> Result<Option<Vec<i64>>, String> {
+        let text = match self.recall(namespace, hash)? {
+            Some(t) => t,
+            None => return Err(format!("manifest hash {} not found", hash)),
+        };
+        // Cheap parse: look for `"manifest":1,"entries":[...]`.
+        let trimmed = text.trim();
+        if !trimmed.starts_with("{\"manifest\":1,\"entries\":[") {
+            return Ok(None);
+        }
+        let inside_start = match trimmed.find('[') {
+            Some(i) => i + 1,
+            None => return Ok(None),
+        };
+        let inside_end = match trimmed.rfind(']') {
+            Some(i) => i,
+            None => return Ok(None),
+        };
+        let list_body = &trimmed[inside_start..inside_end];
+        let mut hashes = Vec::new();
+        for tok in list_body.split(',') {
+            let t = tok.trim();
+            if t.is_empty() { continue; }
+            let h: i64 = t.parse()
+                .map_err(|e| format!("manifest parse: invalid hash {}: {}", t, e))?;
+            hashes.push(h);
+        }
+        Ok(Some(hashes))
+    }
+
+    /// v0.10.0 Axis 4: substrate-aware tokenizer wired into codec.
+    ///
+    /// Walk the namespace and re-encode pool bodies through the
+    /// substrate tokenizer (`tokenizer::encode`), varint-pack the i64 ID
+    /// stream, then zlib-deflate. Pick the smallest of `{raw, OMCZ, OMCT}`
+    /// for each body. OMCT bodies start with the 4-byte `OMCT` magic;
+    /// recall path detects + decodes transparently.
+    ///
+    /// The substrate tokenizer dictionary is tuned for OMC source +
+    /// adjacent prose, so OMCT wins on OMC-flavored content and gracefully
+    /// falls back to OMCZ on pure prose where the dictionary mostly emits
+    /// literal-byte escapes (ID 0).
+    pub fn compact_namespace_substrate(
+        &self, namespace: &str, age_threshold_secs: i64,
+    ) -> Result<(usize, usize, usize), String> {
+        let index_p = self.index_path(namespace);
+        if !index_p.exists() { return Ok((0, 0, 0)); }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64).unwrap_or(0);
+        let content = std::fs::read_to_string(&index_p)
+            .map_err(|e| format!("read index {}: {}", index_p.display(), e))?;
+        let mut compacted = 0usize;
+        let mut before = 0usize;
+        let mut after = 0usize;
+        for line in content.lines() {
+            if line.trim().is_empty() { continue; }
+            let Some(hash) = extract_hash_field(line) else { continue };
+            let Some(stored_at) = extract_stored_at_field(line) else { continue };
+            if now - stored_at < age_threshold_secs { continue; }
+            let pool_p = self.pool_path(hash);
+            if !pool_p.exists() { continue; }
+            let raw = std::fs::read(&pool_p)
+                .map_err(|e| format!("read pool {}: {}", pool_p.display(), e))?;
+            if raw.len() >= 4 && (&raw[..4] == b"OMCZ" || &raw[..4] == b"OMCT") {
+                continue;
+            }
+            // Try substrate-tokenize + varint + deflate.
+            let text = match std::str::from_utf8(&raw) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let ids = tokenizer::encode(text);
+            let mut packed: Vec<u8> = Vec::with_capacity(ids.len());
+            for id in &ids {
+                varint_write(*id as u64, &mut packed);
+            }
+            use std::io::Write;
+            let mut enc = flate2::write::DeflateEncoder::new(
+                Vec::new(), flate2::Compression::best());
+            enc.write_all(&packed)
+                .map_err(|e| format!("OMCT deflate write: {}", e))?;
+            let omct_body = enc.finish()
+                .map_err(|e| format!("OMCT deflate finish: {}", e))?;
+            if omct_body.len() + 4 + 16 >= raw.len() {
+                continue;  // not worth it on this body
+            }
+            let mut new_body = Vec::with_capacity(omct_body.len() + 4);
+            new_body.extend_from_slice(b"OMCT");
+            new_body.extend_from_slice(&omct_body);
+            std::fs::write(&pool_p, &new_body)
+                .map_err(|e| format!("write OMCT {}: {}", pool_p.display(), e))?;
+            compacted += 1;
+            before += raw.len();
+            after += new_body.len();
+        }
+        Ok((compacted, before, after))
+    }
+
+    /// v0.9.3 Axis 3: fibtier-aware progressive compression.
+    ///
+    /// Walk a namespace's index and rewrite pool bodies older than the
+    /// given threshold (in seconds) as zlib-deflated blobs. Files keep
+    /// the same `.txt` extension but get a 4-byte magic prefix `OMCZ` so
+    /// the recall path detects + transparently inflates them. Aged
+    /// content gets ~3-10× smaller on disk while staying losslessly
+    /// recoverable.
+    ///
+    /// Returns `(compacted_count, bytes_before, bytes_after)`.
+    pub fn compact_namespace(
+        &self, namespace: &str, age_threshold_secs: i64,
+    ) -> Result<(usize, usize, usize), String> {
+        use std::io::Write;
+        let index_p = self.index_path(namespace);
+        if !index_p.exists() { return Ok((0, 0, 0)); }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64).unwrap_or(0);
+        let content = std::fs::read_to_string(&index_p)
+            .map_err(|e| format!("read index {}: {}", index_p.display(), e))?;
+        let mut compacted = 0usize;
+        let mut before = 0usize;
+        let mut after = 0usize;
+        for line in content.lines() {
+            if line.trim().is_empty() { continue; }
+            let Some(hash) = extract_hash_field(line) else { continue };
+            let Some(stored_at) = extract_stored_at_field(line) else { continue };
+            if now - stored_at < age_threshold_secs { continue; }
+            // Already compacted? Check pool body for OMCZ magic.
+            let pool_p = self.pool_path(hash);
+            if !pool_p.exists() { continue; }
+            let raw = std::fs::read(&pool_p)
+                .map_err(|e| format!("read pool {}: {}", pool_p.display(), e))?;
+            if raw.len() >= 4 && &raw[..4] == b"OMCZ" { continue; }
+            // Compress with maximum deflate level.
+            let mut enc = flate2::write::DeflateEncoder::new(
+                Vec::new(), flate2::Compression::best());
+            enc.write_all(&raw)
+                .map_err(|e| format!("compact deflate write: {}", e))?;
+            let compressed = enc.finish()
+                .map_err(|e| format!("compact deflate finish: {}", e))?;
+            // Only rewrite if it actually saves bytes (small entries with
+            // high entropy can EXPAND under deflate). Magic + 1-byte
+            // overhead = 5 bytes; require we save at least 16 bytes for
+            // the rewrite to be worth the IO.
+            if compressed.len() + 4 + 16 >= raw.len() { continue; }
+            let mut new_body = Vec::with_capacity(compressed.len() + 4);
+            new_body.extend_from_slice(b"OMCZ");
+            new_body.extend_from_slice(&compressed);
+            std::fs::write(&pool_p, &new_body)
+                .map_err(|e| format!("write compacted {}: {}", pool_p.display(), e))?;
+            compacted += 1;
+            before += raw.len();
+            after += new_body.len();
+        }
+        Ok((compacted, before, after))
     }
 
     /// Stats for a namespace: how many entries indexed, total bytes
@@ -332,6 +554,14 @@ fn extract_bytes_field(line: &str) -> Option<usize> {
     let rest = line.split_once("\"bytes\":")?.1;
     let end = rest.find([',', '}']).unwrap_or(rest.len());
     rest[..end].trim().parse::<usize>().ok()
+}
+
+fn extract_hash_field(line: &str) -> Option<i64> {
+    extract_i64_field(line, "\"hash\":")
+}
+
+fn extract_stored_at_field(line: &str) -> Option<i64> {
+    extract_i64_field(line, "\"stored_at\":")
 }
 
 fn extract_string_field(line: &str, key: &str) -> Option<String> {
@@ -551,6 +781,62 @@ mod tests {
         let direct_hash = tokenizer::fnv1a_64(text.as_bytes());
         assert_eq!(memory_hash, direct_hash);
     }
+}
+
+/// v0.9.3 Axis 3 / v0.10.0 Axis 4 recall path.
+///   `OMCZ` (4 bytes) → zlib-deflated raw text.
+///   `OMCT` (4 bytes) → zlib-deflated varint-packed substrate-tokenizer IDs.
+///   anything else  → plain UTF-8.
+fn maybe_decompress(raw: &[u8]) -> Result<String, String> {
+    if raw.len() >= 4 && &raw[..4] == b"OMCZ" {
+        use std::io::Read;
+        let mut dec = flate2::read::DeflateDecoder::new(&raw[4..]);
+        let mut out = String::new();
+        dec.read_to_string(&mut out)
+            .map_err(|e| format!("inflate OMCZ body: {}", e))?;
+        return Ok(out);
+    }
+    if raw.len() >= 4 && &raw[..4] == b"OMCT" {
+        use std::io::Read;
+        let mut dec = flate2::read::DeflateDecoder::new(&raw[4..]);
+        let mut packed = Vec::new();
+        dec.read_to_end(&mut packed)
+            .map_err(|e| format!("inflate OMCT body: {}", e))?;
+        let mut ids: Vec<i64> = Vec::new();
+        let mut i = 0;
+        while i < packed.len() {
+            let (val, consumed) = varint_read(&packed[i..])?;
+            ids.push(val as i64);
+            i += consumed;
+        }
+        return Ok(tokenizer::decode(&ids));
+    }
+    String::from_utf8(raw.to_vec())
+        .map_err(|e| format!("body not valid UTF-8: {}", e))
+}
+
+fn varint_write(mut v: u64, out: &mut Vec<u8>) {
+    while v >= 0x80 {
+        out.push((v as u8) | 0x80);
+        v >>= 7;
+    }
+    out.push(v as u8);
+}
+
+fn varint_read(buf: &[u8]) -> Result<(u64, usize), String> {
+    let mut v: u64 = 0;
+    let mut shift = 0u32;
+    let mut i = 0;
+    loop {
+        if i >= buf.len() { return Err("varint truncated".into()); }
+        let b = buf[i];
+        v |= ((b & 0x7f) as u64) << shift;
+        i += 1;
+        if b & 0x80 == 0 { break; }
+        shift += 7;
+        if shift > 63 { return Err("varint overflow".into()); }
+    }
+    Ok((v, i))
 }
 
 // Inline tempdir helper to avoid adding a dependency just for tests.

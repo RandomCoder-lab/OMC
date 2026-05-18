@@ -490,6 +490,127 @@ fn list_tools() -> Vec<Json> {
                 "required": ["keep"]
             }
         }),
+        json!({
+            "name": "omc_memory_compact_substrate",
+            "description": "v0.10.0 Axis 4 — substrate-tokenizer compaction. Re-encodes \
+                            aged pool bodies through the OMC substrate tokenizer (encode + \
+                            varint pack + deflate). Wins on OMC-flavored content because the \
+                            substrate dictionary already exploits OMC syntax patterns; falls \
+                            back gracefully on prose (the rewrite is skipped when it doesn't \
+                            save ≥16 bytes).\n\
+                            \n\
+                            Bodies are tagged with the 4-byte `OMCT` magic and inflated \
+                            transparently on recall.\n\
+                            \n\
+                            Returns the same shape as omc_memory_compact. Schedule both: \
+                            run omc_memory_compact_substrate first (best for OMC content), \
+                            then omc_memory_compact (fallback for everything else).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "namespace": {
+                        "type": "string",
+                        "default": "default"
+                    },
+                    "age_threshold_secs": {
+                        "type": "integer",
+                        "default": 86400,
+                        "minimum": 0
+                    }
+                }
+            }
+        }),
+        json!({
+            "name": "omc_memory_compact",
+            "description": "v0.9.3 Axis 3 — fibtier-aware progressive compression. \
+                            Walk a namespace's index and rewrite pool bodies older than \
+                            `age_threshold_secs` as zlib-deflated blobs (3-10× smaller on \
+                            disk). Recall path transparently inflates them; content is \
+                            unchanged from the LLM's perspective. Aged-content compression \
+                            stacks on top of Axis 2 dedup.\n\
+                            \n\
+                            Returns {compacted, bytes_before, bytes_after}. Skips entries \
+                            already in OMCZ form. Skips entries where deflate doesn't save \
+                            at least 16 bytes (small high-entropy text can EXPAND under \
+                            deflate).\n\
+                            \n\
+                            Typical use: schedule a daily compact for namespaces older \
+                            than 86400 (1 day). Or fold into a session-boundary hook.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "namespace": {
+                        "type": "string",
+                        "default": "default"
+                    },
+                    "age_threshold_secs": {
+                        "type": "integer",
+                        "default": 86400,
+                        "minimum": 0,
+                        "description": "Only entries older than this (in seconds since stored_at) are compacted. 0 = compact everything."
+                    }
+                }
+            }
+        }),
+        json!({
+            "name": "omc_memory_create_manifest",
+            "description": "v0.9.1 Axis 1 — Merkle manifest hashes. Bundle N leaf \
+                            content_hashes into ONE manifest hash. The LLM holds the manifest \
+                            hash in context (~5 tokens) and expands on demand via \
+                            omc_memory_recall_manifest, which returns the leaf list. Leaves are \
+                            then recalled individually only when needed. Compression on the \
+                            'reference cost in context' axis grows linearly with N: 100 entries \
+                            = 1 manifest hash in context instead of 100 hashes.\n\
+                            \n\
+                            The manifest is itself a regular memory entry (stored with body \
+                            `{\"manifest\":1,\"entries\":[..]}`) so it persists across MCP restart \
+                            and can be evicted/listed like any other entry.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "namespace": {
+                        "type": "string",
+                        "default": "default",
+                        "description": "Namespace the manifest lives in. Leaf hashes can come from any namespace; the manifest just references them."
+                    },
+                    "entries": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": "Leaf content_hashes from prior omc_memory_store calls."
+                    }
+                },
+                "required": ["entries"]
+            }
+        }),
+        json!({
+            "name": "omc_memory_recall_manifest",
+            "description": "Recall a manifest hash and return the leaf list. If `expand` is true, \
+                            also fetches each leaf's full text in one call (use when you know \
+                            you'll need all leaves; cheaper than N round-trips).\n\
+                            \n\
+                            Returns {entries: [leaf_hashes]} OR {entries: [leaf_hashes], \
+                            expanded: [{hash, text}, ...]}. If the hash points at a regular \
+                            (non-manifest) entry, returns {is_manifest: false, text: <body>}.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "namespace": {
+                        "type": "string",
+                        "description": "Optional. If omitted, searches all namespaces."
+                    },
+                    "content_hash": {
+                        "type": "integer",
+                        "description": "The manifest hash from omc_memory_create_manifest."
+                    },
+                    "expand": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "If true, recall every leaf in one call."
+                    }
+                },
+                "required": ["content_hash"]
+            }
+        }),
     ]
 }
 
@@ -713,6 +834,95 @@ fn dispatch_tool(interp: &mut Interpreter, name: &str, args: &Json) -> Result<St
                 "dropped": dropped,
                 "kept": keep,
             })).unwrap())
+        }
+        "omc_memory_compact_substrate" => {
+            let namespace = args.get("namespace").and_then(Json::as_str).unwrap_or("default");
+            let age = args.get("age_threshold_secs").and_then(Json::as_i64).unwrap_or(86400);
+            let store = MemoryStore::from_env();
+            let (n, before, after) = store.compact_namespace_substrate(namespace, age)?;
+            let ratio = if after > 0 { before as f64 / after as f64 } else { 0.0 };
+            Ok(serde_json::to_string_pretty(&json!({
+                "namespace": namespace,
+                "compacted": n,
+                "bytes_before": before,
+                "bytes_after": after,
+                "compression_ratio": ratio,
+                "age_threshold_secs": age,
+                "format": "OMCT",
+            })).unwrap())
+        }
+        "omc_memory_compact" => {
+            let namespace = args.get("namespace").and_then(Json::as_str).unwrap_or("default");
+            let age = args.get("age_threshold_secs").and_then(Json::as_i64).unwrap_or(86400);
+            let store = MemoryStore::from_env();
+            let (n, before, after) = store.compact_namespace(namespace, age)?;
+            let ratio = if after > 0 { before as f64 / after as f64 } else { 0.0 };
+            Ok(serde_json::to_string_pretty(&json!({
+                "namespace": namespace,
+                "compacted": n,
+                "bytes_before": before,
+                "bytes_after": after,
+                "compression_ratio": ratio,
+                "age_threshold_secs": age,
+            })).unwrap())
+        }
+        "omc_memory_create_manifest" => {
+            let namespace = args.get("namespace").and_then(Json::as_str).unwrap_or("default");
+            let entries_v = args.get("entries").and_then(Json::as_array)
+                .ok_or_else(|| "omc_memory_create_manifest: missing 'entries' array".to_string())?;
+            let mut leaves: Vec<i64> = Vec::with_capacity(entries_v.len());
+            for v in entries_v.iter() {
+                let h = v.as_i64()
+                    .ok_or_else(|| "omc_memory_create_manifest: 'entries' must be i64 hashes".to_string())?;
+                leaves.push(h);
+            }
+            let store = MemoryStore::from_env();
+            let manifest_hash = store.create_manifest(namespace, &leaves)?;
+            Ok(serde_json::to_string_pretty(&json!({
+                "manifest_hash": manifest_hash,
+                "namespace": namespace,
+                "leaf_count": leaves.len(),
+            })).unwrap())
+        }
+        "omc_memory_recall_manifest" => {
+            let target = args.get("content_hash").and_then(Json::as_i64)
+                .ok_or_else(|| "omc_memory_recall_manifest: missing 'content_hash' (i64)".to_string())?;
+            let namespace = args.get("namespace").and_then(Json::as_str);
+            let expand = args.get("expand").and_then(Json::as_bool).unwrap_or(false);
+            let store = MemoryStore::from_env();
+            match store.recall_manifest(namespace, target)? {
+                None => {
+                    // It's a regular (non-manifest) entry. Return the body.
+                    let text = store.recall(namespace, target)?.unwrap_or_default();
+                    Ok(serde_json::to_string_pretty(&json!({
+                        "is_manifest": false,
+                        "content_hash": target,
+                        "text": text,
+                        "bytes": text.len(),
+                    })).unwrap())
+                }
+                Some(leaves) => {
+                    let mut out = json!({
+                        "is_manifest": true,
+                        "manifest_hash": target,
+                        "entries": leaves.clone(),
+                        "leaf_count": leaves.len(),
+                    });
+                    if expand {
+                        let mut expanded: Vec<Json> = Vec::with_capacity(leaves.len());
+                        for h in &leaves {
+                            let body = store.recall(None, *h)?;
+                            expanded.push(json!({
+                                "hash": h,
+                                "found": body.is_some(),
+                                "text": body.unwrap_or_default(),
+                            }));
+                        }
+                        out["expanded"] = json!(expanded);
+                    }
+                    Ok(serde_json::to_string_pretty(&out).unwrap())
+                }
+            }
         }
         "omc_decompress" => {
             let paths = parse_paths_arg(args, "omc_decompress")?;

@@ -15,6 +15,10 @@ path = "src/lib.rs"
 [dependencies]
 regex = "1.10"
 thiserror = "1.0"
+# v0.9.3 Axis 3 — aged-tier memory compression. Used by the MemoryStore
+# `compact_namespace` operation to rewrite old pool bodies as zlib-deflated
+# blobs. Adds <100KB to the binary.
+flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }
 serde_json = "1.0"
 sha2 = "0.10"
 base64 = "0.22"
