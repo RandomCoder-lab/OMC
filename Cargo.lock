@@ -1552,7 +1552,7 @@ dependencies = [
 
 [[package]]
 name = "omnimcode-apiproxy"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1569,7 +1569,7 @@ dependencies = [
 
 [[package]]
 name = "omnimcode-cli"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "inkwell",
  "omnimcode-codegen",
@@ -1580,7 +1580,7 @@ dependencies = [
 
 [[package]]
 name = "omnimcode-codegen"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "inkwell",
  "omnimcode-core",
@@ -1588,7 +1588,7 @@ dependencies = [
 
 [[package]]
 name = "omnimcode-core"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "base64",
  "chrono",
@@ -1604,7 +1604,7 @@ dependencies = [
 
 [[package]]
 name = "omnimcode-ffi"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "libc",
  "omnimcode-core",
@@ -1612,7 +1612,7 @@ dependencies = [
 
 [[package]]
 name = "omnimcode-gpu"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "bytemuck",
  "omnimcode-core",
@@ -1622,7 +1622,7 @@ dependencies = [
 
 [[package]]
 name = "omnimcode-js"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "clap",
  "omnimcode-core",
@@ -1630,7 +1630,7 @@ dependencies = [
 
 [[package]]
 name = "omnimcode-lsp"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "dashmap",
  "omnimcode-core",
@@ -1641,7 +1641,7 @@ dependencies = [
 
 [[package]]
 name = "omnimcode-mcp"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "omnimcode-core",
  "serde",
@@ -1650,7 +1650,7 @@ dependencies = [
 
 [[package]]
 name = "omnimcode-wasm"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "console_error_panic_hook",
  "omnimcode-core",
