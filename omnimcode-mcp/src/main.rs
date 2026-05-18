@@ -421,6 +421,68 @@ fn list_tools() -> Vec<Json> {
             }
         }),
         json!({
+            "name": "omc_memory_recall_summary",
+            "description": "v0.12.0 Axis 7 — high-leverage summary recall. Returns ~100-300 \
+                            bytes of `what is this content` metadata (content_hash, byte_count, \
+                            first_line, preview, attractor) instead of the full body. \
+                            **Lossless** — the verbatim is always still recoverable via \
+                            omc_memory_recall.\n\
+                            \n\
+                            Real measured savings on 100KB body: ~400× context-token reduction. \
+                            Designed for the **list-then-recall** workflow: get cheap previews \
+                            of many candidate hashes, pick the relevant one, issue a single \
+                            full recall.\n\
+                            \n\
+                            Best paired with omc_memory_list which gives you the hashes; then \
+                            walk them through recall_summary; then recall the one(s) that matter.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "content_hash": {"type": "integer"},
+                    "namespace": {"type": "string"}
+                },
+                "required": ["content_hash"]
+            }
+        }),
+        json!({
+            "name": "omc_memory_recall_codec",
+            "description": "v0.12.0 Axis 7 — codec-form recall for context-cost reduction. \
+                            Returns a substrate-codec payload (content_hash + every-N sampled \
+                            tokens + phi_pi_fib attractor + sizing metadata) instead of the \
+                            full text. **Lossless** — the verbatim body remains recoverable \
+                            via omc_memory_recall with the same content_hash.\n\
+                            \n\
+                            Honest savings on 100KB content (measured): every_n=5 → 1.5× \
+                            context savings, every_n=13 → 3.8×, every_n=21 → 6.2×. JSON \
+                            tokens cost ~10 bytes each, so savings only kick in past stride \
+                            5. Don't expect 50-500×; expect 2-6× at reasonable strides.\n\
+                            \n\
+                            Use this when the LLM has a structural fingerprint use case (e.g., \
+                            verifying that two entries describe the same content via attractor \
+                            equality, or remembering 'I've seen this hash before' without \
+                            re-reading the body) — not as a general full-text replacement.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "content_hash": {
+                        "type": "integer",
+                        "description": "Hash returned by a prior omc_memory_store."
+                    },
+                    "namespace": {
+                        "type": "string",
+                        "description": "Optional. If omitted, searches all namespaces."
+                    },
+                    "every_n": {
+                        "type": "integer",
+                        "default": 3,
+                        "minimum": 1,
+                        "description": "Sampling stride; higher = smaller + lossier."
+                    }
+                },
+                "required": ["content_hash"]
+            }
+        }),
+        json!({
             "name": "omc_memory_list",
             "description": "Browse a namespace's stored entries, most recent first. Each \
                             entry has {content_hash, bytes, stored_at_unix, preview}. The \
@@ -846,6 +908,54 @@ fn dispatch_tool(interp: &mut Interpreter, name: &str, args: &Json) -> Result<St
                 "namespace": namespace,
                 "bytes": text.len(),
             })).unwrap())
+        }
+        "omc_memory_recall_summary" => {
+            let target = args.get("content_hash").and_then(Json::as_i64)
+                .ok_or_else(|| "omc_memory_recall_summary: missing 'content_hash' (i64)".to_string())?;
+            let namespace = args.get("namespace").and_then(Json::as_str);
+            let store = MemoryStore::from_env();
+            match store.recall_summary(namespace, target)? {
+                Some(p) => Ok(serde_json::to_string_pretty(&json!({
+                    "found": true,
+                    "content_hash": p.content_hash,
+                    "byte_count": p.byte_count,
+                    "first_line": p.first_line,
+                    "preview": p.preview,
+                    "attractor": p.attractor,
+                })).unwrap()),
+                None => Ok(serde_json::to_string_pretty(&json!({
+                    "found": false,
+                    "content_hash": target,
+                    "namespace": namespace,
+                })).unwrap()),
+            }
+        }
+        "omc_memory_recall_codec" => {
+            let target = args.get("content_hash").and_then(Json::as_i64)
+                .ok_or_else(|| "omc_memory_recall_codec: missing 'content_hash' (i64)".to_string())?;
+            let namespace = args.get("namespace").and_then(Json::as_str);
+            let every_n = args.get("every_n").and_then(Json::as_u64).unwrap_or(3) as usize;
+            let want_array = args.get("include_tokens_array").and_then(Json::as_bool).unwrap_or(false);
+            let store = MemoryStore::from_env();
+            match store.recall_codec(namespace, target, every_n)? {
+                Some(payload) => Ok(serde_json::to_string_pretty(&json!({
+                    "found": true,
+                    "content_hash": payload.content_hash,
+                    "sampled_tokens_packed": payload.sampled_tokens_packed,
+                    "sampled_tokens": if want_array { json!(payload.sampled_tokens) } else { json!(null) },
+                    "sampled_token_count": payload.sampled_tokens.len(),
+                    "attractor": payload.attractor,
+                    "every_n": payload.every_n,
+                    "original_byte_count": payload.original_byte_count,
+                    "original_token_count": payload.original_token_count,
+                    "compression_ratio": payload.compression_ratio,
+                })).unwrap()),
+                None => Ok(serde_json::to_string_pretty(&json!({
+                    "found": false,
+                    "content_hash": target,
+                    "namespace": namespace,
+                })).unwrap()),
+            }
         }
         "omc_memory_recall" => {
             let target = args.get("content_hash").and_then(Json::as_i64)

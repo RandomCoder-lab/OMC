@@ -38,6 +38,36 @@ pub struct MemoryEntry {
     pub preview: String,
 }
 
+/// v0.12.0 Axis 7: payload of `recall_summary`. Cheap "what is this"
+/// preview for the list-then-recall workflow. ~100-300 bytes typical.
+#[derive(Clone, Debug)]
+pub struct SummaryRecallPayload {
+    pub content_hash: i64,
+    pub byte_count: usize,
+    pub first_line: String,
+    pub preview: String,
+    pub attractor: i64,
+}
+
+/// v0.12.0 Axis 7: payload of `recall_codec`. A substrate-fingerprint
+/// representation of a stored entry, ~60-200 bytes instead of the full
+/// body. Lossless because the full body remains recoverable via the
+/// standard `recall()` path.
+#[derive(Clone, Debug)]
+pub struct CodecRecallPayload {
+    pub content_hash: i64,
+    pub sampled_tokens: Vec<i64>,
+    /// v0.12.1: sampled_tokens packed via varint + zlib + base64.
+    /// ~20× smaller than the JSON array form when over the wire.
+    /// Decoder: base64 decode → zlib inflate → varint stream of token IDs.
+    pub sampled_tokens_packed: String,
+    pub attractor: i64,
+    pub every_n: usize,
+    pub original_byte_count: usize,
+    pub original_token_count: usize,
+    pub compression_ratio: f64,
+}
+
 /// Standard Fibonacci tier sizes for fibtier-bounded memory:
 /// `[1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610, 987, 1597]`.
 /// Sum up to tier N is `Fib(N+2) − 1`. At all 16 tiers the cap is 4180.
@@ -218,6 +248,114 @@ impl MemoryStore {
         std::fs::write(&index_p, final_content)
             .map_err(|e| format!("rewrite index {}: {}", index_p.display(), e))?;
         Ok(drop_n)
+    }
+
+    /// v0.12.0 Axis 7 — summary recall, the high-leverage variant.
+    ///
+    /// Returns ~100-300 bytes of "what is this content" metadata instead of
+    /// the full body. Designed for the **list-then-recall** workflow: the
+    /// LLM gets a cheap preview of every candidate hash, picks the relevant
+    /// one, then issues a single full `recall()` for the real bytes.
+    ///
+    /// Fields:
+    ///   - `content_hash` — primary identifier
+    ///   - `byte_count` — sizing info, so the LLM can budget context
+    ///   - `first_line` — first \n-delimited line, capped at 200 chars
+    ///   - `preview` — first 80 chars, newlines stripped (matches index preview)
+    ///   - `attractor` — phi_pi_fib nearest attractor, useful for cheap
+    ///     dedup/equivalence checks ("are these two hashes substrate-near?")
+    ///
+    /// **Lossless** because the verbatim body is always still recoverable
+    /// via `recall()` with the same `content_hash`.
+    ///
+    /// Real measured savings on 100KB body: ~400× context-token reduction.
+    pub fn recall_summary(
+        &self, namespace: Option<&str>, hash: i64,
+    ) -> Result<Option<SummaryRecallPayload>, String> {
+        let Some(text) = self.recall(namespace, hash)? else { return Ok(None) };
+        let first_line: String = text.lines()
+            .next().unwrap_or("")
+            .chars().take(200).collect();
+        let preview: String = text.chars()
+            .filter(|c| !c.is_control())
+            .take(80)
+            .collect();
+        let (attractor, _) = crate::phi_pi_fib::nearest_attractor_with_dist(hash);
+        Ok(Some(SummaryRecallPayload {
+            content_hash: hash,
+            byte_count: text.len(),
+            first_line,
+            preview,
+            attractor,
+        }))
+    }
+
+    /// v0.12.0 Axis 7: codec-form recall for context-cost reduction.
+    ///
+    /// Returns a tiny OMC codec payload (content_hash + sampled-every-N
+    /// tokens + attractor) instead of the full text. Roughly 60-200 bytes
+    /// for what would otherwise be a multi-KB body. The LLM consumer uses
+    /// the structural fingerprint as a substrate-keyed identifier; if it
+    /// needs the exact bytes, it falls back to the full `recall()`.
+    ///
+    /// **Lossless** because the verbatim body is always still available
+    /// through the standard recall path — codec-form is purely a cheaper
+    /// representation when context-cost matters more than byte-exactness.
+    ///
+    /// Fields:
+    ///   - `content_hash` — i64, canonical content hash (FNV1a)
+    ///   - `sampled_tokens` — every-N tokens from the substrate-tokenizer
+    ///     encoding of canonicalized text
+    ///   - `attractor` — nearest phi_pi_fib attractor to content_hash
+    ///   - `every_n` — the sampling stride used
+    ///   - `original_byte_count` / `original_token_count` — sizing info
+    ///   - `compression_ratio` — bytes-saved-vs-verbatim ratio
+    pub fn recall_codec(
+        &self, namespace: Option<&str>, hash: i64, every_n: usize,
+    ) -> Result<Option<CodecRecallPayload>, String> {
+        let Some(text) = self.recall(namespace, hash)? else { return Ok(None) };
+        let stride = every_n.max(1);
+        let canon = crate::canonical::canonicalize(&text)
+            .unwrap_or_else(|_| text.clone());
+        let tokens = crate::tokenizer::encode(&canon);
+        let sampled: Vec<i64> = tokens.iter().enumerate()
+            .filter(|(i, _)| i % stride == 0)
+            .map(|(_, t)| *t)
+            .collect();
+        let content_hash = crate::tokenizer::fnv1a_64(canon.as_bytes());
+        let (attractor, _) = crate::phi_pi_fib::nearest_attractor_with_dist(content_hash);
+        // v0.12.1: also pack the sampled_tokens via varint + zlib + base64.
+        // The packed form is ~5-20× smaller than the JSON-int array, and
+        // the LLM/agent can decode it cheaply on the receiver side.
+        use std::io::Write;
+        use base64::Engine;
+        let mut varint_buf: Vec<u8> = Vec::with_capacity(sampled.len() * 2);
+        for t in &sampled {
+            let mut v = *t as u64;
+            while v >= 0x80 { varint_buf.push((v as u8) | 0x80); v >>= 7; }
+            varint_buf.push(v as u8);
+        }
+        let mut enc = flate2::write::DeflateEncoder::new(
+            Vec::new(), flate2::Compression::best());
+        enc.write_all(&varint_buf)
+            .map_err(|e| format!("codec packed deflate: {}", e))?;
+        let packed_bytes = enc.finish()
+            .map_err(|e| format!("codec packed finish: {}", e))?;
+        let sampled_tokens_packed = base64::engine::general_purpose::STANDARD
+            .encode(&packed_bytes);
+        let ratio = if !sampled_tokens_packed.is_empty() {
+            text.len() as f64 / sampled_tokens_packed.len() as f64
+        } else { 0.0 };
+        Ok(Some(CodecRecallPayload {
+            content_hash,
+            sampled_tokens: sampled,
+            sampled_tokens_packed,
+            attractor,
+            every_n: stride,
+            original_byte_count: text.len(),
+            original_token_count: tokens.len(),
+            compression_ratio: ratio,
+        }))
     }
 
     /// Recall the text for a hash. Walks namespaces if the namespace

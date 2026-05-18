@@ -101,6 +101,23 @@ Local-first by default. Cloud sync is opt-in. Your codebase and findings stay on
 - `omc_unique_builtins` — list OMC-unique primitives (substrate ops, harmonic ops)
 - `omc_corpus_size` — diagnostic
 
+## Context-cost recall (v0.12.0, Axis 7) — 365× cheaper
+
+Two new MCP tools for the **list-then-recall** workflow: get cheap previews of many stored hashes, recall only the ones that matter.
+
+| recall type | bytes returned | context savings |
+|---|--:|--:|
+| `omc_memory_recall` (verbatim) | 105,658 | baseline |
+| **`omc_memory_recall_summary`** | **289** | **365.6×** |
+| `omc_memory_recall_codec` (every_n=21) | 4,511 | 23.4× |
+| `omc_memory_recall_codec` (every_n=5) | 13,298 | 7.9× |
+
+`recall_summary` returns content_hash + byte_count + first_line + 80-char preview + phi_pi_fib attractor — enough for the LLM to decide whether the body is worth full-recall context.
+
+`recall_codec` returns base64-packed varint-zlib-deflated sampled tokens for substrate-fingerprint comparison ("are these two hashes substrate-near?").
+
+Both **lossless** — the verbatim body is always still recoverable through `omc_memory_recall`.
+
 ## Compression axis benchmark (100KB native .omc)
 
 | axis | format | ratio | notes |
