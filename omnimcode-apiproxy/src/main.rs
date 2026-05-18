@@ -50,8 +50,9 @@ use tracing::{debug, info, warn};
 
 const PROXY_CACHE_NAMESPACE: &str = "_apiproxy_cache";
 const EXPAND_TOOL_NAME:   &str = "omc_proxy_expand_ref";
-const REMEMBER_TOOL_NAME: &str = "omc_proxy_remember";
-const RECALL_TOOL_NAME:   &str = "omc_proxy_recall";
+const REMEMBER_TOOL_NAME:  &str = "omc_proxy_remember";
+const RECALL_TOOL_NAME:    &str = "omc_proxy_recall";
+const LIST_REFS_TOOL_NAME: &str = "omc_proxy_list_refs";
 
 #[derive(Parser, Debug, Clone)]
 #[command(name = "omnimcode-apiproxy", version = env!("CARGO_PKG_VERSION"))]
@@ -367,6 +368,14 @@ async fn handle_with_expand_loop(
                     info!("omc_proxy_recall: key={:?}", key);
                     (id.clone(), text)
                 }
+                ProxyCall::ListRefs { id } => {
+                    let req_val: Value = serde_json::from_slice(&current_body)
+                        .unwrap_or_default();
+                    let markers = find_markers_in_value(&req_val);
+                    info!("omc_proxy_list_refs: found {} markers", markers.len());
+                    (id.clone(),
+                     serde_json::to_string_pretty(&markers).unwrap_or_default())
+                }
             };
             tool_results.push(json!({
                 "type": "tool_result",
@@ -392,6 +401,7 @@ enum ProxyCall {
     ExpandRef { id: String, hash_str: String },
     Remember  { id: String, key: String, value: String },
     Recall    { id: String, key: String },
+    ListRefs  { id: String },
 }
 
 fn collect_proxy_tool_calls(resp: &Value) -> Vec<ProxyCall> {
@@ -410,7 +420,7 @@ fn collect_proxy_tool_calls(resp: &Value) -> Vec<ProxyCall> {
                     .unwrap_or("").to_string();
                 if !id.is_empty() && !hash_str.is_empty() {
                     calls.push(ProxyCall::ExpandRef { id, hash_str });
-                } else { return vec![]; } // malformed — pass through
+                } else { return vec![]; }
             }
             n if n == REMEMBER_TOOL_NAME => {
                 let key   = inp.get("key").and_then(Value::as_str).unwrap_or("").to_string();
@@ -425,6 +435,11 @@ fn collect_proxy_tool_calls(resp: &Value) -> Vec<ProxyCall> {
                     calls.push(ProxyCall::Recall { id, key });
                 } else { return vec![]; }
             }
+            n if n == LIST_REFS_TOOL_NAME => {
+                if !id.is_empty() {
+                    calls.push(ProxyCall::ListRefs { id });
+                }
+            }
             _ => return vec![], // non-proxy tool → client must handle
         }
     }
@@ -438,6 +453,55 @@ fn lookup_expand(hash_str: &str, state: &AppState) -> Result<String> {
         .map_err(anyhow::Error::msg)?
         .ok_or_else(|| anyhow::anyhow!("not in cache"))?;
     Ok(body)
+}
+
+/// Extract a double-quoted attribute value from an `<omc:ref .../>` marker string.
+fn extract_marker_attr<'a>(marker: &'a str, attr: &str) -> Option<&'a str> {
+    let pat = format!(" {}=\"", attr);
+    let start = marker.find(pat.as_str())? + pat.len();
+    let end  = marker[start..].find('"')? + start;
+    Some(&marker[start..end])
+}
+
+/// Walk a JSON Value tree and collect every `<omc:ref/>` marker (deduplicated).
+/// Returns `[{"hash": "...", "bytes": N}, ...]`.
+fn find_markers_in_value(val: &Value) -> Vec<Value> {
+    let mut seen    = std::collections::HashSet::<String>::new();
+    let mut results = Vec::<Value>::new();
+    find_markers_rec(val, &mut seen, &mut results);
+    results
+}
+
+fn find_markers_rec(
+    val: &Value,
+    seen: &mut std::collections::HashSet<String>,
+    out:  &mut Vec<Value>,
+) {
+    match val {
+        Value::String(s) => {
+            let mut pos = 0usize;
+            while let Some(rel) = s[pos..].find("<omc:ref") {
+                let abs = pos + rel;
+                let end = s[abs..].find("/>").map(|e| abs + e + 2).unwrap_or(s.len());
+                let marker = &s[abs..end];
+                let hash = extract_marker_attr(marker, "hash_str")
+                    .or_else(|| extract_marker_attr(marker, "h"))
+                    .map(|h| h.to_string());
+                let bytes: Option<u64> = extract_marker_attr(marker, "bytes")
+                    .or_else(|| extract_marker_attr(marker, "b"))
+                    .and_then(|b| b.parse().ok());
+                if let Some(h) = hash {
+                    if seen.insert(h.clone()) {
+                        out.push(json!({ "hash": h, "bytes": bytes }));
+                    }
+                }
+                pos = end;
+            }
+        }
+        Value::Array(arr) => { for v in arr { find_markers_rec(v, seen, out); } }
+        Value::Object(map) => { for (_, v) in map { find_markers_rec(v, seen, out); } }
+        _ => {}
+    }
 }
 
 fn rebuild_response(status: StatusCode, headers: &HeaderMap, body: Bytes) -> Response {
@@ -1186,11 +1250,22 @@ fn inject_proxy_tools(req: &mut Value) {
             "required": ["key"]
         }
     }));
+
+    // ── omc_proxy_list_refs ─────────────────────────────────────────────────
+    tools_arr.push(json!({
+        "name": LIST_REFS_TOOL_NAME,
+        "description": "Return a JSON array describing every <omc:ref/> marker \
+                        currently present in the conversation context. Each entry \
+                        has {\"hash\", \"bytes\"} so you can decide which to expand. \
+                        Takes no arguments.",
+        "input_schema": { "type": "object", "properties": {}, "required": [] }
+    }));
 }
 
-/// Compatibility shim — callers that used inject_expand_tool still work.
+/// Compatibility shim -- callers that used inject_expand_tool still work.
 #[allow(dead_code)]
 fn inject_expand_tool(req: &mut Value) { inject_proxy_tools(req); }
+
 
 #[cfg(test)]
 mod tests {
@@ -1927,8 +2002,35 @@ mod tests {
         let tools = req["tools"].as_array().expect("tools array must exist");
         let names: Vec<&str> = tools.iter()
             .filter_map(|t| t["name"].as_str()).collect();
-        assert!(names.contains(&EXPAND_TOOL_NAME),   "expand_ref must be injected");
-        assert!(names.contains(&REMEMBER_TOOL_NAME), "remember must be injected");
-        assert!(names.contains(&RECALL_TOOL_NAME),   "recall must be injected");
+        assert!(names.contains(&EXPAND_TOOL_NAME),    "expand_ref must be injected");
+        assert!(names.contains(&REMEMBER_TOOL_NAME),  "remember must be injected");
+        assert!(names.contains(&RECALL_TOOL_NAME),    "recall must be injected");
+        assert!(names.contains(&LIST_REFS_TOOL_NAME), "list_refs must be injected");
+    }
+
+    /// find_markers_in_value correctly discovers all <omc:ref> markers in a
+    /// JSON tree (including inside nested arrays/objects) and deduplicates.
+    #[test]
+    fn list_refs_finds_markers_in_value() {
+        let text_with_marker = format!(
+            "Here is a compressed block: <omc:ref h=\"1234567\" b=\"4096\"/> and that's it.");
+        let text_with_two = format!(
+            "<omc:ref h=\"1234567\" b=\"4096\"/> and again <omc:ref h=\"9999999\" b=\"512\"/>");
+        let val = json!({
+            "messages": [
+                {"role": "user", "content": text_with_marker.clone()},
+                {"role": "assistant", "content": [
+                    {"type": "text", "text": text_with_two.clone()}
+                ]},
+                // Duplicate of first marker — should be deduped
+                {"role": "user", "content": text_with_marker.clone()},
+            ]
+        });
+        let markers = find_markers_in_value(&val);
+        assert_eq!(markers.len(), 2, "must find exactly 2 distinct hashes");
+        let hashes: Vec<&str> = markers.iter()
+            .filter_map(|m| m["hash"].as_str()).collect();
+        assert!(hashes.contains(&"1234567"));
+        assert!(hashes.contains(&"9999999"));
     }
 }
