@@ -86,6 +86,7 @@ struct RewriteStats {
     bytes_saved_tool_result: u64,
     bytes_saved_system: u64,
     bytes_saved_tool_use_input: u64,
+    bytes_saved_tool_definitions: u64,
 }
 
 #[derive(Clone)]
@@ -169,11 +170,12 @@ async fn handle_messages(State(state): State<AppState>, req: Request) -> Respons
         Ok((b, outcome)) => {
             if outcome.any() {
                 info!("rewrote request: {} → {} bytes ({:+} bytes saved across {} blocks) | \
-                       sys={}B msg={}B tool_result={}B tool_use_input={}B",
+                       sys={}B msg={}B tool_result={}B tool_use_input={}B tool_defs={}B",
                     body_bytes.len(), b.len(), -((body_bytes.len() - b.len()) as i64),
                     outcome.rewritten_count,
                     outcome.bytes_system, outcome.bytes_messages_text,
-                    outcome.bytes_tool_result, outcome.bytes_tool_use_input);
+                    outcome.bytes_tool_result, outcome.bytes_tool_use_input,
+                    outcome.bytes_tool_definitions);
             }
             // Update cumulative stats
             {
@@ -186,6 +188,7 @@ async fn handle_messages(State(state): State<AppState>, req: Request) -> Respons
                 s.bytes_saved_tool_result += outcome.bytes_tool_result as u64;
                 s.bytes_saved_system += outcome.bytes_system as u64;
                 s.bytes_saved_tool_use_input += outcome.bytes_tool_use_input as u64;
+                s.bytes_saved_tool_definitions += outcome.bytes_tool_definitions as u64;
             }
             b
         }
@@ -421,13 +424,10 @@ struct RewriteOutcome {
     bytes_tool_result: usize,
     bytes_system: usize,
     bytes_tool_use_input: usize,
+    bytes_tool_definitions: usize,
 }
 
 impl RewriteOutcome {
-    fn total_saved(&self) -> usize {
-        self.bytes_messages_text + self.bytes_tool_result
-            + self.bytes_system + self.bytes_tool_use_input
-    }
     fn any(&self) -> bool { self.rewritten_count > 0 }
 }
 
@@ -438,7 +438,8 @@ async fn stats_endpoint(State(state): State<AppState>) -> Response {
         s.bytes_in as f64 / s.bytes_out as f64
     } else { 0.0 };
     let total_saved = s.bytes_saved_messages + s.bytes_saved_tool_result
-        + s.bytes_saved_system + s.bytes_saved_tool_use_input;
+        + s.bytes_saved_system + s.bytes_saved_tool_use_input
+        + s.bytes_saved_tool_definitions;
     let json = serde_json::to_string_pretty(&serde_json::json!({
         "requests_processed": s.requests,
         "bytes_in_total":  s.bytes_in,
@@ -451,6 +452,7 @@ async fn stats_endpoint(State(state): State<AppState>) -> Response {
             "tool_result": s.bytes_saved_tool_result,
             "system_prompt": s.bytes_saved_system,
             "tool_use_input": s.bytes_saved_tool_use_input,
+            "tool_definitions": s.bytes_saved_tool_definitions,
         }
     })).unwrap();
     (StatusCode::OK,
@@ -564,11 +566,65 @@ fn rewrite_request_body(body: &[u8], state: &AppState) -> Result<(Bytes, Rewrite
         }
     }
 
+    // ---- tool definitions (rewrite BEFORE injecting our expand tool,
+    // so we don't compress + re-emit the expand tool we just added) ----
+    if let Some(tools) = v.get_mut("tools").and_then(Value::as_array_mut) {
+        for tool in tools.iter_mut() {
+            if let Some(desc) = tool.get_mut("description") {
+                if let Value::String(s) = desc {
+                    if s.len() >= state.rewrite_threshold {
+                        if let Ok(marker) = make_marker(s, state) {
+                            out.bytes_tool_definitions += s.len();
+                            out.rewritten_count += 1;
+                            *desc = Value::String(marker);
+                        }
+                    }
+                }
+            }
+            // input_schema is a JSON Schema dict; walk it for big strings in
+            // property descriptions, enums, etc. — preserves schema structure.
+            if let Some(schema) = tool.get_mut("input_schema") {
+                let before_count = out.rewritten_count;
+                rewrite_schema_strings(schema, state, &mut out);
+                if out.rewritten_count > before_count {
+                    // already counted via rewrite_schema_strings into the
+                    // bytes_tool_definitions field
+                }
+            }
+        }
+    }
+
     if out.any() {
         inject_expand_tool(&mut v);
     }
     let bytes = Bytes::from(serde_json::to_vec(&v)?);
     Ok((bytes, out))
+}
+
+/// Walk a JSON-Schema-shaped tool input_schema and marker-rewrite any large
+/// string VALUES while preserving structure. Schema dicts contain `description`
+/// fields, `enum` arrays of strings, and nested `properties` — all candidates.
+fn rewrite_schema_strings(
+    val: &mut Value, state: &AppState, out: &mut RewriteOutcome,
+) {
+    match val {
+        Value::String(s) => {
+            if s.len() >= state.rewrite_threshold {
+                if let Ok(marker) = make_marker(s, state) {
+                    out.bytes_tool_definitions += s.len();
+                    out.rewritten_count += 1;
+                    *val = Value::String(marker);
+                }
+            }
+        }
+        Value::Object(map) => {
+            for (_k, v) in map.iter_mut() { rewrite_schema_strings(v, state, out); }
+        }
+        Value::Array(arr) => {
+            for v in arr.iter_mut() { rewrite_schema_strings(v, state, out); }
+        }
+        _ => {}
+    }
 }
 
 /// v0.14.4 — walk a JSON value and replace any large STRING values in place,
@@ -685,6 +741,260 @@ fn inject_expand_tool(req: &mut Value) {
         }
         _ => {
             req["tools"] = Value::Array(vec![tool]);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Build an AppState pointing at a tempdir-scoped MemoryStore so tests
+    /// don't share cache state with each other or the real user store.
+    fn test_state(threshold: usize) -> AppState {
+        let tmpdir = std::env::temp_dir().join(format!(
+            "omc-apiproxy-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&tmpdir).unwrap();
+        std::env::set_var("OMC_MEMORY_ROOT", &tmpdir);
+        AppState {
+            upstream: "http://127.0.0.1:0".into(),
+            rewrite_threshold: threshold,
+            preview_bytes: 80,
+            http: reqwest::Client::new(),
+            store: Arc::new(MemoryStore::from_env()),
+            stats: Arc::new(std::sync::Mutex::new(RewriteStats::default())),
+        }
+    }
+
+    /// v0.14.4 regression: tool_use.input keys MUST be preserved. The whole
+    /// point of the v0.14.4 hotfix was to stop replacing the input dict with
+    /// `{"_omc_compressed_input_marker": "..."}` which the LLM then learned
+    /// to copy. Verify the rewritten input still has its original keys.
+    #[test]
+    fn tool_use_input_preserves_keys() {
+        let state = test_state(256);
+        let big = "X".repeat(1000);
+        let req = json!({
+            "model": "test", "max_tokens": 10,
+            "messages": [
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "tu_1", "name": "Write",
+                     "input": {"file_path": "/tmp/x.txt", "content": big}}
+                ]},
+                {"role": "user", "content": "summarize"}
+            ]
+        });
+        let body = serde_json::to_vec(&req).unwrap();
+        let (out, outcome) = rewrite_request_body(&body, &state).unwrap();
+        assert!(outcome.rewritten_count > 0, "expected at least 1 rewrite");
+        let v: Value = serde_json::from_slice(&out).unwrap();
+        let input = &v["messages"][0]["content"][0]["input"];
+        // Real keys must still be there. NO `_omc_compressed_input_marker` allowed.
+        assert!(input.get("file_path").is_some(), "lost file_path key");
+        assert!(input.get("content").is_some(), "lost content key");
+        assert!(input.get("_omc_compressed_input_marker").is_none(),
+                "v0.14.3 schema-poisoning regression — fake key reintroduced");
+        // The big string was marker-replaced, file_path is small enough to stay.
+        let content_str = input["content"].as_str().unwrap();
+        assert!(content_str.starts_with("<omc:ref"),
+                "expected content to become an <omc:ref/> marker, got: {}",
+                &content_str[..50.min(content_str.len())]);
+        assert_eq!(input["file_path"].as_str().unwrap(), "/tmp/x.txt",
+                   "small file_path should remain untouched");
+    }
+
+    /// The LAST user message is the user's current intent — it must NEVER
+    /// be marker-replaced, or the LLM would have to round-trip just to know
+    /// what was asked.
+    #[test]
+    fn last_user_message_never_rewritten() {
+        let state = test_state(256);
+        let big_question = "Please analyze: ".to_string() + &"Q".repeat(1000);
+        let req = json!({
+            "model": "test", "max_tokens": 10,
+            "messages": [
+                {"role": "user", "content": "old turn"},
+                {"role": "assistant", "content": "old reply"},
+                {"role": "user", "content": big_question.clone()}
+            ]
+        });
+        let body = serde_json::to_vec(&req).unwrap();
+        let (out, _) = rewrite_request_body(&body, &state).unwrap();
+        let v: Value = serde_json::from_slice(&out).unwrap();
+        let last = v["messages"][2]["content"].as_str().unwrap();
+        assert_eq!(last, big_question,
+                   "last user message must be byte-identical to input");
+    }
+
+    /// Marker round-trip: any text we compress must come back IDENTICAL via
+    /// the cache lookup path that the expand-tool uses.
+    #[test]
+    fn marker_round_trip_lossless() {
+        let state = test_state(256);
+        let original = "abc🎯 ñ é 漢字\nline2\n\tindented\n".repeat(50);  // multi-byte, control chars
+        let marker = make_marker(&original, &state).unwrap();
+        // Extract hash_str from the marker
+        let hash_attr = marker.split("hash_str=\"").nth(1).unwrap();
+        let hash_str = hash_attr.split('"').next().unwrap();
+        let hash: i64 = hash_str.parse().unwrap();
+        let recovered = state.store.recall(Some(PROXY_CACHE_NAMESPACE), hash)
+            .unwrap().expect("must be in cache");
+        assert_eq!(recovered, original, "byte-identical round-trip required");
+    }
+
+    /// Small blocks under threshold pass through unmodified.
+    #[test]
+    fn small_blocks_untouched() {
+        let state = test_state(1024);
+        let small = "short content";
+        let req = json!({
+            "model": "test", "max_tokens": 10,
+            "messages": [
+                {"role": "assistant", "content": small},
+                {"role": "user", "content": "ask"}
+            ]
+        });
+        let body = serde_json::to_vec(&req).unwrap();
+        let (out, outcome) = rewrite_request_body(&body, &state).unwrap();
+        assert_eq!(outcome.rewritten_count, 0);
+        let v: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["messages"][0]["content"].as_str().unwrap(), small);
+    }
+
+    /// System prompt with cache_control hints — the hint MUST survive the rewrite
+    /// so Anthropic's 90% prompt-cache discount keeps working.
+    #[test]
+    fn system_prompt_preserves_cache_control() {
+        let state = test_state(256);
+        let big_sys = "You are an expert. ".repeat(100);
+        let req = json!({
+            "model": "test", "max_tokens": 10,
+            "system": [
+                {"type": "text", "text": big_sys,
+                 "cache_control": {"type": "ephemeral"}}
+            ],
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        let body = serde_json::to_vec(&req).unwrap();
+        let (out, outcome) = rewrite_request_body(&body, &state).unwrap();
+        assert!(outcome.bytes_system > 0, "system prompt should have been compressed");
+        let v: Value = serde_json::from_slice(&out).unwrap();
+        let cc = &v["system"][0]["cache_control"];
+        assert_eq!(cc["type"].as_str().unwrap(), "ephemeral",
+                   "cache_control hint lost — would break Anthropic prompt-cache");
+    }
+
+    /// v0.14.5b: tool definitions (`tools[].description` + nested input_schema
+    /// strings) get compressed. The injected `omc_proxy_expand_ref` tool MUST
+    /// not itself be compressed (it was just added by us in this same pass).
+    #[test]
+    fn tool_definitions_compressed_but_expand_tool_preserved() {
+        let state = test_state(256);
+        let long_desc = "This tool does X. It accepts Y. Returns Z. ".repeat(50);
+        let req = json!({
+            "model": "test", "max_tokens": 10,
+            "messages": [{"role": "user", "content": "use the tool"}],
+            "tools": [
+                {
+                    "name": "BigTool",
+                    "description": long_desc.clone(),
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "arg": {
+                                "type": "string",
+                                "description": "A long arg description. ".repeat(50)
+                            }
+                        }
+                    }
+                }
+            ]
+        });
+        let body = serde_json::to_vec(&req).unwrap();
+        let (out, outcome) = rewrite_request_body(&body, &state).unwrap();
+        assert!(outcome.bytes_tool_definitions > 0,
+                "expected tool definition bytes to be compressed");
+        let v: Value = serde_json::from_slice(&out).unwrap();
+        let tools = v["tools"].as_array().unwrap();
+        // Original tool still has its name + shape, but description is a marker
+        let big = tools.iter().find(|t| t["name"] == "BigTool").unwrap();
+        let desc = big["description"].as_str().unwrap();
+        assert!(desc.starts_with("<omc:ref"),
+                "expected description to be marker, got: {}", &desc[..50.min(desc.len())]);
+        assert_eq!(big["input_schema"]["type"].as_str().unwrap(), "object",
+                   "schema structure must be preserved");
+        // The injected expand tool MUST exist and MUST have its uncompressed
+        // description (otherwise the LLM can't tell what it does).
+        let expand = tools.iter().find(|t| t["name"] == EXPAND_TOOL_NAME)
+            .expect("expand tool must be injected");
+        let expand_desc = expand["description"].as_str().unwrap();
+        assert!(!expand_desc.starts_with("<omc:ref"),
+                "expand tool's own description must not be compressed");
+    }
+
+    /// Multi-turn dogfood simulation: walk a conversation, verify each turn's
+    /// rewrite preserves the LLM-emitted shape AND the markers expand cleanly
+    /// to the original bytes via the cache.
+    #[test]
+    fn five_turn_conversation_no_drift() {
+        let state = test_state(256);
+        let mut messages: Vec<Value> = Vec::new();
+        let mut originals: Vec<(i64, String)> = Vec::new();
+
+        for turn in 0..5 {
+            // User turn
+            messages.push(json!({
+                "role": "user",
+                "content": format!("turn {} ask", turn)
+            }));
+            // Build the request with this conversation so far
+            let req = json!({
+                "model": "test", "max_tokens": 10,
+                "messages": messages.clone()
+            });
+            let body = serde_json::to_vec(&req).unwrap();
+            let (out, _) = rewrite_request_body(&body, &state).unwrap();
+            let v: Value = serde_json::from_slice(&out).unwrap();
+
+            // Assert last user message is uncompressed every turn
+            let last_idx = v["messages"].as_array().unwrap().len() - 1;
+            let last_text = v["messages"][last_idx]["content"].as_str().unwrap();
+            assert_eq!(last_text, format!("turn {} ask", turn),
+                "turn {}: last user msg got rewritten", turn);
+
+            // Now LLM emits an assistant reply with a big tool result
+            let big_output = format!("LARGE OUTPUT FOR TURN {} ", turn).repeat(50);
+            let h = state.store.store(PROXY_CACHE_NAMESPACE, &big_output).unwrap();
+            originals.push((h, big_output.clone()));
+            messages.push(json!({
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": format!("tu_{}", turn),
+                     "name": "Write", "input": {
+                         "file_path": format!("/tmp/{}.txt", turn),
+                         "content": big_output
+                     }}
+                ]
+            }));
+            messages.push(json!({
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": format!("tu_{}", turn),
+                     "content": format!("wrote turn {}", turn)}
+                ]
+            }));
+        }
+
+        // After 5 turns, all stored originals must round-trip from cache.
+        for (h, expected) in originals {
+            let got = state.store.recall(Some(PROXY_CACHE_NAMESPACE), h)
+                .unwrap().expect("must still be in cache");
+            assert_eq!(got, expected);
         }
     }
 }
