@@ -614,8 +614,28 @@ fn rewrite_request_body(body: &[u8], state: &AppState) -> Result<(Bytes, Rewrite
         .map(|(i, _)| i);
 
     for (idx, msg) in messages.iter_mut().enumerate() {
-        if Some(idx) == last_user_idx { continue; }
+        let is_last_user = Some(idx) == last_user_idx;
         let Some(content) = msg.get_mut("content") else { continue };
+
+        if is_last_user {
+            // The last user message contains the human's current question — we
+            // never rewrite text blocks there so the LLM sees it verbatim.
+            // However, tool_result blocks in the same message (bash output, file
+            // reads, etc.) can be megabytes of already-executed output that the
+            // LLM doesn't need to re-read in full to answer. Compress those.
+            if let Value::Array(blocks) = content {
+                for block in blocks.iter_mut() {
+                    if block.get("type").and_then(Value::as_str) == Some("tool_result") {
+                        if let Some(inner) = block.get_mut("content") {
+                            rewrite_tool_result_content(inner, state, &mut out, &mut seen);
+                        }
+                    }
+                    // text blocks in the last user message: pass through verbatim.
+                }
+            }
+            // String content (plain question): skip entirely.
+            continue;
+        }
         match content {
             Value::String(s) => {
                 if s.len() >= state.rewrite_threshold {
@@ -1147,6 +1167,8 @@ mod tests {
     /// what was asked.
     #[test]
     fn last_user_message_never_rewritten() {
+        // Text content (the human's actual question) in the last user message
+        // must always pass through verbatim — the LLM needs to see it to respond.
         let state = test_state(256);
         let big_question = "Please analyze: ".to_string() + &"Q".repeat(1000);
         let req = json!({
@@ -1162,7 +1184,57 @@ mod tests {
         let v: Value = serde_json::from_slice(&out).unwrap();
         let last = v["messages"][2]["content"].as_str().unwrap();
         assert_eq!(last, big_question,
-                   "last user message must be byte-identical to input");
+                   "last user message text content must be byte-identical to input");
+    }
+
+    /// tool_result blocks in the last user message ARE compressed even though
+    /// the wrapping message is "last user".  In agentic workflows the last
+    /// message is nearly always an array of tool_results (bash output, file
+    /// reads, …) — often megabytes — and the LLM can expand via
+    /// omc_proxy_expand_ref if it needs the full content.
+    #[test]
+    fn last_user_tool_results_are_compressed() {
+        let threshold = 256;
+        let state = test_state(threshold);
+
+        // A large tool_result body — clearly above threshold.
+        let big_output = "line: data output\n".repeat(100); // ~1.8KB
+        assert!(big_output.len() > threshold, "pre-condition: must exceed threshold");
+
+        let req = json!({
+            "model": "test", "max_tokens": 10,
+            "messages": [
+                {"role": "user",  "content": "run the script"},
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "tu_1", "name": "bash",
+                     "input": {"command": "echo hello"}}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "tu_1",
+                     "content": big_output.clone()},
+                    {"type": "text", "text": "What does this mean?"}
+                ]}
+            ]
+        });
+
+        let body = serde_json::to_vec(&req).unwrap();
+        let (out, outcome) = rewrite_request_body(&body, &state).unwrap();
+        let v: Value = serde_json::from_slice(&out).unwrap();
+
+        // tool_result block must have been rewritten to a marker
+        let last_msg_content = v["messages"][2]["content"].as_array().unwrap();
+        let tool_result_block = &last_msg_content[0];
+        let tr_content = tool_result_block["content"].as_str().unwrap();
+        assert!(tr_content.starts_with("<omc:ref"),
+            "tool_result in last user message must be compressed; got: {}", &tr_content[..80]);
+
+        // text block must pass through verbatim
+        let text_block = &last_msg_content[1];
+        assert_eq!(text_block["text"].as_str().unwrap(), "What does this mean?",
+            "text block in last user message must be verbatim");
+
+        // stat must have ticked
+        assert!(outcome.any(), "rewrite outcome must report at least one rewritten block");
     }
 
     /// Marker round-trip: any text we compress must come back IDENTICAL via
