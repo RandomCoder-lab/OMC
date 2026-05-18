@@ -1482,7 +1482,9 @@ impl Interpreter {
         match stmt {
             Statement::Print(expr) => {
                 let value = self.eval_expr(expr)?;
-                println!("{}", value.to_string());
+                let s = value.to_display_string();
+                println!("{}", s);
+                self.output_lines.borrow_mut().push(s);
                 Ok(())
             }
             Statement::Expression(expr) => {
