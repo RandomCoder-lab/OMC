@@ -91,6 +91,20 @@ struct Args {
     /// plain — no diff attempted. Lower = more delta attempts, more disk I/O.
     #[arg(long, default_value_t = 1024)]
     delta_min_bytes: usize,
+
+    /// Maximum entries kept in the proxy cache namespace. The MemoryStore
+    /// evicts oldest entries automatically after each store when the count
+    /// exceeds this value. Use 0 to fall back to OMC_MEMORY_MAX_ENTRIES env
+    /// var (default fibtier cap of 232 — very small for a busy proxy session).
+    #[arg(long, default_value_t = 4096)]
+    max_cache_entries: usize,
+
+    /// Progressively lower the compression threshold as the conversation
+    /// grows longer. Turns 0-10: normal threshold. Turns 11-20: threshold/2
+    /// (min 1 KB). Turns 21+: threshold/4 (min 512 B). Aggressively compresses
+    /// longer sessions where token budget is tight.
+    #[arg(long, default_value_t = false)]
+    adaptive_threshold: bool,
 }
 
 #[derive(Default, Debug, Clone)]
@@ -147,6 +161,9 @@ struct AppState {
     rewrite_threshold: usize,
     preview_bytes: usize,
     delta_min_bytes: usize,
+    /// When true, lowers the effective rewrite threshold as the conversation
+    /// grows: ≤10 msgs: full threshold; 11-20: threshold/2; 21+: threshold/4.
+    adaptive_threshold: bool,
     http: reqwest::Client,
     store: Arc<MemoryStore>,
     /// Named key→hash index for omc_proxy_remember / omc_proxy_recall.
@@ -199,10 +216,17 @@ async fn main() -> Result<()> {
         rewrite_threshold: args.rewrite_threshold,
         preview_bytes: args.preview_bytes,
         delta_min_bytes: args.delta_min_bytes,
+        adaptive_threshold: args.adaptive_threshold,
         http: reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(300))
             .build()?,
-        store: Arc::new(MemoryStore::from_env()),
+        store: {
+            let base = MemoryStore::from_env();
+            let s = if args.max_cache_entries > 0 {
+                base.with_max_entries(args.max_cache_entries)
+            } else { base };
+            Arc::new(s)
+        },
         stats: Arc::new(std::sync::Mutex::new(RewriteStats::default())),
         named_refs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         image_hashes: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
@@ -1076,6 +1100,22 @@ async fn version_endpoint() -> Response {
 ///     `input` field when its serialized form exceeds threshold; this
 ///     catches the LLM's own large tool arguments (e.g., Write file content)
 ///   - `system` (top-level): if a string, rewrites it as a single block; if
+/// Compute the effective rewrite threshold for this request.  When
+/// `adaptive` is true the threshold shrinks as the conversation grows,
+/// allowing more aggressive compression in long sessions:
+///
+///   ≤ 10 messages : full configured threshold (same as static)
+///   11 – 20 msgs  : threshold / 2  (floor: 1024 bytes)
+///   21+   msgs    : threshold / 4  (floor: 512  bytes)
+fn adaptive_threshold(base: usize, msg_count: usize, adaptive: bool) -> usize {
+    if !adaptive { return base; }
+    match msg_count {
+        0..=10  => base,
+        11..=20 => (base / 2).max(1024),
+        _       => (base / 4).max(512),
+    }
+}
+
 ///     an array, walks each `{type: "text", text: ...}` element. Critically
 ///     PRESERVES the `cache_control` field on each element so Anthropic's
 ///     prompt-cache layer still works on the rewritten form.
@@ -1085,6 +1125,9 @@ async fn version_endpoint() -> Response {
 fn rewrite_request_body(body: &[u8], state: &AppState) -> Result<(Bytes, RewriteOutcome)> {
     let mut v: Value = serde_json::from_slice(body)?;
     let mut out = RewriteOutcome::default();
+    // Adaptive threshold: compress more aggressively as the conversation grows.
+    let msg_count = v.get("messages").and_then(Value::as_array).map_or(0, |a| a.len());
+    let threshold = adaptive_threshold(state.rewrite_threshold, msg_count, state.adaptive_threshold);
     // v0.14.7-L: track hashes already seen this request so duplicates can
     // emit the bare-minimum `<omc:ref h="..."/>` form.
     let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
@@ -1093,7 +1136,7 @@ fn rewrite_request_body(body: &[u8], state: &AppState) -> Result<(Bytes, Rewrite
     if let Some(system) = v.get_mut("system") {
         match system {
             Value::String(s) => {
-                if s.len() >= state.rewrite_threshold {
+                if s.len() >= threshold {
                     if let Ok(marker) = make_marker_with_dedup(
                         s, state, MarkerKind::HistoricalText, Some(&mut seen)) {
                         out.bytes_system += s.len();
@@ -1106,7 +1149,7 @@ fn rewrite_request_body(body: &[u8], state: &AppState) -> Result<(Bytes, Rewrite
                 for block in blocks.iter_mut() {
                     if block.get("type").and_then(Value::as_str) == Some("text") {
                         let Some(text) = block.get("text").and_then(Value::as_str) else { continue };
-                        if text.len() < state.rewrite_threshold { continue; }
+                        if text.len() < threshold { continue; }
                         let Ok(marker) = make_marker_with_dedup(
                             text, state, MarkerKind::HistoricalText, Some(&mut seen))
                             else { continue };
@@ -1156,7 +1199,7 @@ fn rewrite_request_body(body: &[u8], state: &AppState) -> Result<(Bytes, Rewrite
         }
         match content {
             Value::String(s) => {
-                if s.len() >= state.rewrite_threshold {
+                if s.len() >= threshold {
                     if let Ok(marker) = make_marker_with_dedup(
                         s, state, MarkerKind::HistoricalText, Some(&mut seen)) {
                         out.bytes_messages_text += s.len();
@@ -1171,7 +1214,7 @@ fn rewrite_request_body(body: &[u8], state: &AppState) -> Result<(Bytes, Rewrite
                     match block_type {
                         "text" => {
                             let Some(text) = block.get("text").and_then(Value::as_str) else { continue };
-                            if text.len() < state.rewrite_threshold { continue; }
+                            if text.len() < threshold { continue; }
                             let Ok(marker) = make_marker_with_dedup(
                                 text, state, MarkerKind::HistoricalText, Some(&mut seen))
                                 else { continue };
@@ -1240,7 +1283,7 @@ fn rewrite_request_body(body: &[u8], state: &AppState) -> Result<(Bytes, Rewrite
         for tool in tools.iter_mut() {
             if let Some(desc) = tool.get_mut("description") {
                 if let Value::String(s) = desc {
-                    if s.len() >= state.rewrite_threshold {
+                    if s.len() >= threshold {
                         if let Ok(marker) = make_marker_with_dedup(
                             s, state, MarkerKind::HistoricalText, Some(&mut seen)) {
                             out.bytes_tool_definitions += s.len();
@@ -1427,8 +1470,8 @@ fn rewrite_schema_strings(
 /// name when generating new tool calls. Used for `tool_use.input`.
 ///
 /// Two layers of value-rewriting:
-///   1. A top-level string longer than threshold → marker.
-///   2. Any string FIELD inside an object whose value exceeds threshold →
+///   1. A top-level string longer than state.rewrite_threshold → marker.
+///   2. Any string FIELD inside an object whose value exceeds state.rewrite_threshold →
 ///      marker (e.g. `{"content": "...big..."} → {"content": "<omc:ref ...>"}`).
 ///   3. Array elements that are strings → same rule, in place.
 fn rewrite_strings_recursive(
@@ -1847,6 +1890,7 @@ mod tests {
             rewrite_threshold: threshold,
             preview_bytes: 80,
             delta_min_bytes: 1024,
+            adaptive_threshold: false,
             http: reqwest::Client::new(),
             store: Arc::new(MemoryStore::from_env()),
             stats: Arc::new(std::sync::Mutex::new(RewriteStats::default())),
