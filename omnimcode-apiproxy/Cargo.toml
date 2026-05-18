@@ -1,0 +1,23 @@
+[package]
+name = "omnimcode-apiproxy"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "OMC api-proxy — substrate-rewriting reverse proxy for api.anthropic.com that compresses large content blocks in the LLM's context window via content-addressed references"
+
+[[bin]]
+name = "omnimcode-apiproxy"
+path = "src/main.rs"
+
+[dependencies]
+omnimcode-core = { path = "../omnimcode-core", default-features = false }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util"] }
+axum = "0.7"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
