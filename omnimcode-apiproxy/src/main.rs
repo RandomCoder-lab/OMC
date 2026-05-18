@@ -89,6 +89,7 @@ struct RewriteStats {
     bytes_saved_tool_definitions: u64,
     cache_control_inserted: u64,
     conversation_count: u64,
+    delta_stores_attempted: u64,
 }
 
 /// Per-conversation state the proxy remembers across turns. Key is a stable
@@ -123,6 +124,14 @@ struct AppState {
     conversations: Arc<std::sync::Mutex<
         std::collections::HashMap<i64, ConversationState>
     >>,
+    /// v0.14.8-I: prefix index for fast near-cache-hit lookup. Maps
+    /// fnv1a(first 256 bytes of content) → content_hash. When a new block
+    /// arrives, we check if its prefix matches anything indexed; if yes,
+    /// we compare full text and might emit a differential marker.
+    /// Bounded to ~4096 entries with LRU eviction.
+    prefix_index: Arc<std::sync::Mutex<
+        std::collections::HashMap<u64, i64>
+    >>,
 }
 
 #[tokio::main]
@@ -154,6 +163,8 @@ async fn main() -> Result<()> {
         store: Arc::new(MemoryStore::from_env()),
         stats: Arc::new(std::sync::Mutex::new(RewriteStats::default())),
         conversations: Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new())),
+        prefix_index: Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new())),
     };
 
@@ -483,7 +494,8 @@ async fn stats_endpoint(State(state): State<AppState>) -> Response {
             "tool_definitions": s.bytes_saved_tool_definitions,
         },
         "cache_control_inserted_count": s.cache_control_inserted,
-        "conversations_seen": s.conversation_count
+        "conversations_seen": s.conversation_count,
+        "delta_stores_attempted": s.delta_stores_attempted
     })).unwrap();
     (StatusCode::OK,
      [(axum::http::header::CONTENT_TYPE, HeaderValue::from_static("application/json"))],
@@ -892,8 +904,23 @@ fn make_marker_with_dedup(
     text: &str, state: &AppState, kind: MarkerKind,
     seen_hashes: Option<&mut std::collections::HashSet<i64>>,
 ) -> Result<String> {
-    let hash = state.store.store(PROXY_CACHE_NAMESPACE, text)
-        .map_err(anyhow::Error::msg)?;
+    // v0.14.8-I: route cache writes through Axis 5 (OMCD delta) when we
+    // detect a near-edit of a previously-cached body. The base-hash lookup
+    // is O(1) via prefix_index. If a base is found, store_as_delta stores
+    // a tiny delta on disk instead of duplicating the full body.
+    //
+    // IMPORTANT: this is a DISK-side optimization, not a wire-side one.
+    // The wire marker is the same compact `<omc:ref h="..." b="N"/>` form.
+    // We tried emitting `<omc:diff base="..." pre="N" suf="..."/>` markers
+    // on the wire, but honest accounting showed they're LARGER than the
+    // 50-byte slim ref marker the recall path already produces. So the win
+    // is purely disk-resident: future store-side dedup, not request-time
+    // bytes.
+    let hash = try_delta_store(text, state)
+        .or_else(|| state.store.store(PROXY_CACHE_NAMESPACE, text).ok())
+        .ok_or_else(|| anyhow::anyhow!("cache write failed"))?;
+    // Index this body's prefix so the NEXT near-edit can find it as base.
+    if text.len() >= 1024 { register_prefix(text, hash, state); }
 
     // v0.14.7-L: if we've already emitted a full marker for this hash this
     // request, the subsequent ones can be the bare-minimum form.
@@ -926,6 +953,44 @@ fn make_marker_with_dedup(
             ))
         }
     }
+}
+
+/// v0.14.8-I: index a body's first-256-byte prefix → content_hash so the next
+/// call can try a near-cache-hit lookup.
+fn register_prefix(text: &str, hash: i64, state: &AppState) {
+    let prefix = &text.as_bytes()[..text.len().min(256)];
+    let prefix_hash = omnimcode_core::tokenizer::fnv1a_64(prefix) as u64;
+    let mut idx = state.prefix_index.lock().unwrap();
+    if idx.len() > 4096 {
+        // Crude eviction: clear when we hit the cap. Not LRU, but the
+        // MemoryStore is the source of truth so a cleared index just means
+        // future near-edits fall back to plain store (no data loss).
+        idx.clear();
+    }
+    idx.insert(prefix_hash, hash);
+}
+
+/// v0.14.8-I: try to store `text` as a delta against a prefix-near cached
+/// body. Returns `Some(hash_of_text)` if delta was viable, `None` otherwise.
+/// The hash returned is still the hash of the FULL text (so the marker / recall
+/// path is unchanged for the LLM).
+fn try_delta_store(text: &str, state: &AppState) -> Option<i64> {
+    if text.len() < 1024 { return None; }
+    let prefix = &text.as_bytes()[..text.len().min(256)];
+    let prefix_hash = omnimcode_core::tokenizer::fnv1a_64(prefix) as u64;
+    let base_hash = {
+        let idx = state.prefix_index.lock().unwrap();
+        *idx.get(&prefix_hash)?
+    };
+    // store_as_delta handles the "is the prefix actually long enough?" check
+    // itself (need ≥64 bytes shared) and falls back to plain store if not.
+    // Either way we get a valid content-hash for `text`.
+    let result = state.store.store_as_delta(PROXY_CACHE_NAMESPACE, text, base_hash).ok()?;
+    {
+        let mut s = state.stats.lock().unwrap();
+        s.delta_stores_attempted += 1;
+    }
+    Some(result)
 }
 
 /// Add the omc_proxy_expand_ref tool to the request's tools array so the
@@ -986,6 +1051,8 @@ mod tests {
             store: Arc::new(MemoryStore::from_env()),
             stats: Arc::new(std::sync::Mutex::new(RewriteStats::default())),
             conversations: Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new())),
+            prefix_index: Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new())),
         }
     }
@@ -1380,6 +1447,62 @@ mod tests {
         };
         assert_eq!(extract_h(&m0), extract_h(&m1));
         assert_eq!(extract_h(&m0), extract_h(&m2));
+    }
+
+    /// v0.14.8-I: when a content body is a near-edit of a previously-cached
+    /// body, the disk-side store should route through Axis 5 (OMCD delta).
+    /// We verify by checking that delta_stores_attempted ticks up AND that
+    /// recall still returns the correct full text byte-for-byte.
+    #[test]
+    fn near_edit_routes_through_delta_store() {
+        let state = test_state(256);
+        // Base body. Large enough to be eligible for prefix indexing.
+        let base = "Common prefix.\n".repeat(80); // ~1200 bytes
+        // First request stores `base`. No delta possible (nothing prior).
+        let req1 = json!({
+            "model": "test", "max_tokens": 10,
+            "messages": [
+                {"role": "assistant", "content": base.clone()},
+                {"role": "user", "content": "first"}
+            ]
+        });
+        let _ = rewrite_request_body(&serde_json::to_vec(&req1).unwrap(), &state).unwrap();
+        let delta_attempts_before = state.stats.lock().unwrap().delta_stores_attempted;
+
+        // Now a near-edit: same content + a small suffix. Should trigger delta.
+        let near_edit = format!("{}APPENDED MORE CONTENT TO THE END", base);
+        let req2 = json!({
+            "model": "test", "max_tokens": 10,
+            "messages": [
+                {"role": "assistant", "content": near_edit.clone()},
+                {"role": "user", "content": "second"}
+            ]
+        });
+        let (out2, _) = rewrite_request_body(&serde_json::to_vec(&req2).unwrap(), &state).unwrap();
+        let delta_attempts_after = state.stats.lock().unwrap().delta_stores_attempted;
+        assert!(delta_attempts_after > delta_attempts_before,
+                "expected delta_stores_attempted to increment for near-edit");
+
+        // Extract the marker that was emitted for near_edit, then recall via
+        // the hash inside it. Should reconstruct byte-identical original.
+        let v: Value = serde_json::from_slice(&out2).unwrap();
+        let marker_holder = &v["messages"][0]["content"];
+        let marker_str = if let Some(s) = marker_holder.as_str() {
+            s.to_string()
+        } else if let Some(arr) = marker_holder.as_array() {
+            // cache_control insertion may have moved it into array form
+            arr.first().and_then(|b| b.get("text"))
+                .and_then(Value::as_str).unwrap().to_string()
+        } else {
+            panic!("couldn't extract marker")
+        };
+        // Slim marker form: <omc:ref h="N" b="M"/>
+        let h = marker_str.split(" h=\"").nth(1).unwrap()
+            .split('"').next().unwrap().parse::<i64>().unwrap();
+        let recovered = state.store.recall(Some(PROXY_CACHE_NAMESPACE), h)
+            .unwrap().expect("must be recoverable");
+        assert_eq!(recovered, near_edit,
+                   "delta-stored body must round-trip byte-identical");
     }
 
     /// Multi-turn dogfood simulation: walk a conversation, verify each turn's
