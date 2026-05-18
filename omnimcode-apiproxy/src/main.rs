@@ -53,6 +53,7 @@ const EXPAND_TOOL_NAME:   &str = "omc_proxy_expand_ref";
 const REMEMBER_TOOL_NAME:  &str = "omc_proxy_remember";
 const RECALL_TOOL_NAME:    &str = "omc_proxy_recall";
 const LIST_REFS_TOOL_NAME: &str = "omc_proxy_list_refs";
+const FORWARD_TOOL_NAME:   &str = "omc_proxy_forward";
 
 #[derive(Parser, Debug, Clone)]
 #[command(name = "omnimcode-apiproxy", version = env!("CARGO_PKG_VERSION"))]
@@ -109,6 +110,8 @@ struct RewriteStats {
     recall_calls: u64,
     /// Bytes saved by replacing repeated base64 image blocks with text markers.
     bytes_saved_images: u64,
+    /// omc_proxy_forward calls resolved by the proxy.
+    forward_calls: u64,
 }
 
 /// Per-conversation state the proxy remembers across turns. Key is a stable
@@ -289,6 +292,75 @@ async fn handle_messages(State(state): State<AppState>, req: Request) -> Respons
 /// tool_result synthetically appended, and re-call upstream. Bounded to
 /// MAX_EXPAND_ROUNDS to prevent runaway loops if the LLM keeps asking
 /// to expand.
+/// Dispatch an `omc_proxy_forward` call: send `message` (optionally with
+/// expanded `context_refs`) to `endpoint`/v1/messages and return the
+/// sub-LLM's reply text (compressed to a marker if large).
+async fn dispatch_forward(
+    id: &str, endpoint: &str, message: &str, model: &str,
+    context_refs: &[String], headers: &HeaderMap, state: &AppState,
+) -> (String, String) {
+    // Resolve context_refs from MemoryStore
+    let mut parts = vec![message.to_string()];
+    for hash_str in context_refs {
+        if let Ok(h) = hash_str.parse::<i64>() {
+            if let Ok(Some(text)) = state.store.recall(Some(PROXY_CACHE_NAMESPACE), h) {
+                parts.push(format!("---\nContext ref {}:\n{}", hash_str, text));
+            }
+        }
+    }
+    let user_content = parts.join("\n\n");
+
+    let target_url = if endpoint.is_empty() || endpoint == "self" {
+        format!("{}/v1/messages", state.upstream.trim_end_matches('/'))
+    } else {
+        format!("{}/v1/messages", endpoint.trim_end_matches('/'))
+    };
+
+    let effective_model = if model.is_empty() { "claude-haiku-4-5" } else { model };
+    let req_body = serde_json::json!({
+        "model": effective_model,
+        "max_tokens": 4096,
+        "messages": [{"role": "user", "content": user_content}]
+    });
+
+    let mut req = state.http.post(&target_url).json(&req_body);
+    for (k, v) in headers.iter() {
+        if k == "x-api-key" || k == "authorization" || k == "anthropic-version" {
+            req = req.header(k, v);
+        }
+    }
+
+    match req.send().await {
+        Ok(resp) => {
+            match resp.json::<Value>().await {
+                Ok(body) => {
+                    let reply = body["content"][0]["text"]
+                        .as_str().unwrap_or("").to_string();
+                    let result = if reply.len() > state.rewrite_threshold {
+                        let hash = state.store
+                            .store(PROXY_CACHE_NAMESPACE, &reply)
+                            .unwrap_or(-1);
+                        let preview: String = reply.chars()
+                            .take(state.preview_bytes).collect();
+                        format!("<omc:ref h=\"{}\" b=\"{}\" preview={:?}/>",
+                            hash, reply.len(), preview)
+                    } else {
+                        reply
+                    };
+                    state.stats.lock().unwrap().forward_calls += 1;
+                    info!("omc_proxy_forward: endpoint={:?} model={:?} → {} bytes",
+                        endpoint, effective_model, result.len());
+                    (id.to_string(), result)
+                }
+                Err(e) => (id.to_string(),
+                    format!("[omc_proxy_forward: decode error: {}]", e))
+            }
+        }
+        Err(e) => (id.to_string(),
+            format!("[omc_proxy_forward: network error: {}]", e))
+    }
+}
+
 async fn handle_with_expand_loop(
     state: &AppState, headers: &HeaderMap, initial_body: Bytes,
 ) -> Response {
@@ -384,6 +456,10 @@ async fn handle_with_expand_loop(
                     (id.clone(),
                      serde_json::to_string_pretty(&markers).unwrap_or_default())
                 }
+                ProxyCall::Forward { id, endpoint, message, model, context_refs } => {
+                    dispatch_forward(id, endpoint, message, model, context_refs,
+                                     headers, state).await
+                }
             };
             tool_results.push(json!({
                 "type": "tool_result",
@@ -410,6 +486,9 @@ enum ProxyCall {
     Remember  { id: String, key: String, value: String },
     Recall    { id: String, key: String },
     ListRefs  { id: String },
+    /// Route a message to another LLM endpoint and return its compressed reply.
+    Forward   { id: String, endpoint: String, message: String, model: String,
+                 context_refs: Vec<String> },
 }
 
 fn collect_proxy_tool_calls(resp: &Value) -> Vec<ProxyCall> {
@@ -446,6 +525,23 @@ fn collect_proxy_tool_calls(resp: &Value) -> Vec<ProxyCall> {
             n if n == LIST_REFS_TOOL_NAME => {
                 if !id.is_empty() {
                     calls.push(ProxyCall::ListRefs { id });
+                }
+            }
+            n if n == FORWARD_TOOL_NAME => {
+                let endpoint = inp.get("endpoint")
+                    .and_then(Value::as_str).unwrap_or("").to_string();
+                let message = inp.get("message")
+                    .and_then(Value::as_str).unwrap_or("").to_string();
+                let model = inp.get("model")
+                    .and_then(Value::as_str).unwrap_or("claude-opus-4-5").to_string();
+                let context_refs = inp.get("context_refs")
+                    .and_then(Value::as_array)
+                    .map(|arr| arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect())
+                    .unwrap_or_default();
+                if !id.is_empty() && !message.is_empty() {
+                    calls.push(ProxyCall::Forward { id, endpoint, message, model, context_refs });
                 }
             }
             _ => return vec![], // non-proxy tool → client must handle
@@ -651,6 +747,7 @@ async fn stats_endpoint(State(state): State<AppState>) -> Response {
         "streaming_passthrough": s.streaming_passthrough,
         "remember_calls": s.remember_calls,
         "recall_calls": s.recall_calls,
+        "forward_calls": s.forward_calls,
     })).unwrap();
     (StatusCode::OK,
      [(axum::http::header::CONTENT_TYPE, HeaderValue::from_static("application/json"))],
@@ -1302,6 +1399,31 @@ fn inject_proxy_tools(req: &mut Value) {
                         has {\"hash\", \"bytes\"} so you can decide which to expand. \
                         Takes no arguments.",
         "input_schema": { "type": "object", "properties": {}, "required": [] }
+    }));
+
+    // ── omc_proxy_forward ────────────────────────────────────────────────
+    tools_arr.push(json!({
+        "name": FORWARD_TOOL_NAME,
+        "description": "Route a message to another LLM and return its compressed \
+                        reply as an <omc:ref/> marker. Use `endpoint` to target a \
+                        different proxy instance (default: same upstream). \
+                        Optionally pass `context_refs` (list of hash strings from \
+                        omc_proxy_list_refs) to expand relevant prior context into \
+                        the sub-request — sharing memory costs O(marker) not O(content).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "message":      { "type": "string",
+                                  "description": "The message to send to the target LLM." },
+                "model":        { "type": "string",
+                                  "description": "Model to use (default: claude-opus-4-5)." },
+                "endpoint":     { "type": "string",
+                                  "description": "Target proxy/API base URL (omit or 'self' for same upstream)." },
+                "context_refs": { "type": "array", "items": { "type": "string" },
+                                  "description": "Hash strings of context markers to include in the sub-request." }
+            },
+            "required": ["message"]
+        }
     }));
 }
 
@@ -2050,6 +2172,7 @@ mod tests {
         assert!(names.contains(&REMEMBER_TOOL_NAME),  "remember must be injected");
         assert!(names.contains(&RECALL_TOOL_NAME),    "recall must be injected");
         assert!(names.contains(&LIST_REFS_TOOL_NAME), "list_refs must be injected");
+        assert!(names.contains(&FORWARD_TOOL_NAME),   "forward must be injected");
     }
 
     /// find_markers_in_value correctly discovers all <omc:ref> markers in a
