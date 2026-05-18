@@ -2199,6 +2199,8 @@ impl Interpreter {
             | "re_match" | "re_find" | "re_find_all" | "re_replace" | "re_split"
             | "json_parse" | "json_stringify"
             | "sha256" | "sha512" | "base64_encode" | "base64_decode"
+            // LLM builtins (Anthropic API)
+            | "llm_call" | "llm_chat" | "llm_embed"
             | "now_iso" | "now_unix" | "format_time" | "parse_time"
             // Arrays
             | "arr_new" | "arr_from_range" | "arr_len" | "arr_get" | "arr_set"
@@ -3520,6 +3522,200 @@ impl Interpreter {
                     rows.push(Value::Array(HArray::from_vec(cells)));
                 }
                 Ok(Value::Array(HArray::from_vec(rows)))
+            }
+            // ---- LLM builtins (Anthropic API) ----------------------------------
+            // llm_call(prompt) | llm_call(prompt, model)
+            //   Sends a single-turn prompt to the Anthropic Messages API and
+            //   returns the assistant's text reply as a String.
+            //   Model defaults to "claude-3-5-haiku-latest".
+            //   Reads API key from env var ANTHROPIC_API_KEY.
+            "llm_call" => {
+                #[cfg(feature = "llm-builtins")]
+                {
+                    if args.is_empty() {
+                        return Err("llm_call requires (prompt [, model])".to_string());
+                    }
+                    let prompt = self.eval_expr(&args[0])?.to_display_string();
+                    let model = if args.len() >= 2 {
+                        self.eval_expr(&args[1])?.to_display_string()
+                    } else {
+                        "claude-3-5-haiku-latest".to_string()
+                    };
+                    let api_key = std::env::var("ANTHROPIC_API_KEY")
+                        .map_err(|_| "llm_call: ANTHROPIC_API_KEY not set".to_string())?;
+                    let client = reqwest::blocking::Client::new();
+                    let body = serde_json::json!({
+                        "model": model,
+                        "max_tokens": 4096,
+                        "messages": [{"role": "user", "content": prompt}]
+                    });
+                    let resp = client
+                        .post("https://api.anthropic.com/v1/messages")
+                        .header("x-api-key", &api_key)
+                        .header("anthropic-version", "2023-06-01")
+                        .header("content-type", "application/json")
+                        .json(&body)
+                        .send()
+                        .map_err(|e| format!("llm_call: HTTP error: {}", e))?;
+                    let status = resp.status();
+                    let json: serde_json::Value = resp
+                        .json()
+                        .map_err(|e| format!("llm_call: JSON decode error: {}", e))?;
+                    if !status.is_success() {
+                        let msg = json["error"]["message"]
+                            .as_str()
+                            .unwrap_or("unknown error")
+                            .to_string();
+                        return Err(format!("llm_call: API error {}: {}", status, msg));
+                    }
+                    let text = json["content"][0]["text"]
+                        .as_str()
+                        .ok_or_else(|| "llm_call: unexpected response shape".to_string())?
+                        .to_string();
+                    Ok(Value::String(text))
+                }
+                #[cfg(not(feature = "llm-builtins"))]
+                {
+                    let _ = args;
+                    Err("llm_call: built without llm-builtins feature".to_string())
+                }
+            }
+            // llm_chat(messages) | llm_chat(messages, model)
+            //   Multi-turn chat. `messages` is an OMC array of dicts, each with
+            //   keys "role" ("user" | "assistant") and "content" (String).
+            //   Returns the assistant's reply String.
+            "llm_chat" => {
+                #[cfg(feature = "llm-builtins")]
+                {
+                    if args.is_empty() {
+                        return Err("llm_chat requires (messages [, model])".to_string());
+                    }
+                    let msgs_val = self.eval_expr(&args[0])?;
+                    let model = if args.len() >= 2 {
+                        self.eval_expr(&args[1])?.to_display_string()
+                    } else {
+                        "claude-3-5-haiku-latest".to_string()
+                    };
+                    // Convert OMC array-of-dicts to serde_json array
+                    let msgs_json = match &msgs_val {
+                        Value::Array(arr) => {
+                            let mut out = Vec::new();
+                            for item in arr.items.borrow().iter() {
+                                match item {
+                                    Value::Dict(d) => {
+                                        let role = d.borrow().get("role")
+                                            .map(|v| v.to_display_string())
+                                            .unwrap_or_else(|| "user".to_string());
+                                        let content = d.borrow().get("content")
+                                            .map(|v| v.to_display_string())
+                                            .unwrap_or_default();
+                                        out.push(serde_json::json!({"role": role, "content": content}));
+                                    }
+                                    _ => return Err("llm_chat: each message must be a dict with 'role' and 'content'".to_string()),
+                                }
+                            }
+                            serde_json::Value::Array(out)
+                        }
+                        _ => return Err("llm_chat: first argument must be an array of message dicts".to_string()),
+                    };
+                    let api_key = std::env::var("ANTHROPIC_API_KEY")
+                        .map_err(|_| "llm_chat: ANTHROPIC_API_KEY not set".to_string())?;
+                    let client = reqwest::blocking::Client::new();
+                    let body = serde_json::json!({
+                        "model": model,
+                        "max_tokens": 4096,
+                        "messages": msgs_json
+                    });
+                    let resp = client
+                        .post("https://api.anthropic.com/v1/messages")
+                        .header("x-api-key", &api_key)
+                        .header("anthropic-version", "2023-06-01")
+                        .header("content-type", "application/json")
+                        .json(&body)
+                        .send()
+                        .map_err(|e| format!("llm_chat: HTTP error: {}", e))?;
+                    let status = resp.status();
+                    let json: serde_json::Value = resp
+                        .json()
+                        .map_err(|e| format!("llm_chat: JSON decode error: {}", e))?;
+                    if !status.is_success() {
+                        let msg = json["error"]["message"]
+                            .as_str()
+                            .unwrap_or("unknown error")
+                            .to_string();
+                        return Err(format!("llm_chat: API error {}: {}", status, msg));
+                    }
+                    let text = json["content"][0]["text"]
+                        .as_str()
+                        .ok_or_else(|| "llm_chat: unexpected response shape".to_string())?
+                        .to_string();
+                    Ok(Value::String(text))
+                }
+                #[cfg(not(feature = "llm-builtins"))]
+                {
+                    let _ = args;
+                    Err("llm_chat: built without llm-builtins feature".to_string())
+                }
+            }
+            // llm_embed(text) | llm_embed(text, model)
+            //   Returns an embedding vector (OMC Array of HFloat) for the
+            //   given text. Uses the Voyage AI embeddings endpoint via
+            //   VOYAGE_API_KEY, falling back to ANTHROPIC_API_KEY used with
+            //   the voyage-3-lite model. If VOYAGE_API_KEY is not set and
+            //   ANTHROPIC_API_KEY is not set, returns an error.
+            //   Model defaults to "voyage-3-lite".
+            "llm_embed" => {
+                #[cfg(feature = "llm-builtins")]
+                {
+                    if args.is_empty() {
+                        return Err("llm_embed requires (text [, model])".to_string());
+                    }
+                    let text = self.eval_expr(&args[0])?.to_display_string();
+                    let model = if args.len() >= 2 {
+                        self.eval_expr(&args[1])?.to_display_string()
+                    } else {
+                        "voyage-3-lite".to_string()
+                    };
+                    let api_key = std::env::var("VOYAGE_API_KEY")
+                        .or_else(|_| std::env::var("ANTHROPIC_API_KEY"))
+                        .map_err(|_| "llm_embed: set VOYAGE_API_KEY or ANTHROPIC_API_KEY".to_string())?;
+                    let client = reqwest::blocking::Client::new();
+                    let body = serde_json::json!({
+                        "input": [text],
+                        "model": model
+                    });
+                    let resp = client
+                        .post("https://api.voyageai.com/v1/embeddings")
+                        .header("Authorization", format!("Bearer {}", api_key))
+                        .header("content-type", "application/json")
+                        .json(&body)
+                        .send()
+                        .map_err(|e| format!("llm_embed: HTTP error: {}", e))?;
+                    let status = resp.status();
+                    let json: serde_json::Value = resp
+                        .json()
+                        .map_err(|e| format!("llm_embed: JSON decode error: {}", e))?;
+                    if !status.is_success() {
+                        let msg = json["error"]["message"]
+                            .as_str()
+                            .unwrap_or("unknown error")
+                            .to_string();
+                        return Err(format!("llm_embed: API error {}: {}", status, msg));
+                    }
+                    let embedding = json["data"][0]["embedding"]
+                        .as_array()
+                        .ok_or_else(|| "llm_embed: unexpected response shape".to_string())?;
+                    let floats: Vec<Value> = embedding
+                        .iter()
+                        .map(|v| Value::HFloat(v.as_f64().unwrap_or(0.0)))
+                        .collect();
+                    Ok(Value::Array(HArray::from_vec(floats)))
+                }
+                #[cfg(not(feature = "llm-builtins"))]
+                {
+                    let _ = args;
+                    Err("llm_embed: built without llm-builtins feature".to_string())
+                }
             }
             "str_join" => {
                 if args.len() < 2 {
@@ -13705,6 +13901,8 @@ pub(crate) const HEAL_BUILTIN_NAMES: &[&str] = &[
     "re_match", "re_find", "re_find_all", "re_replace", "re_split",
     "json_parse", "json_stringify",
     "sha256", "sha512", "base64_encode", "base64_decode",
+    // LLM builtins (Anthropic API — enabled with llm-builtins feature)
+    "llm_call", "llm_chat", "llm_embed",
     "now_iso", "now_unix", "format_time", "parse_time",
     // Arrays
     "arr_new", "arr_from_range", "arr_len", "arr_get", "arr_set",

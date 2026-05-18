@@ -35,11 +35,19 @@ chrono = { version = "0.4", features = ["clock", "std"], default-features = fals
 # than pyo3's max supported version.
 pyo3 = { version = "0.23", features = ["auto-initialize"], optional = true }
 
+# HTTP client for llm_call / llm_chat / llm_embed builtins.
+# Uses the blocking API so OMC programs don't need an async runtime.
+# Gate-kept behind the `llm-builtins` feature; enabled in `default`
+# for the desktop standalone. WASM / embedded builds that pass
+# `--no-default-features` remain HTTP-free.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"], optional = true }
+
 [features]
 # Default-on for desktop. Downstream WASM / no_std crates select
 # `default-features = false` to get a Python-free OMC core.
-default = ["python-embed"]
+default = ["python-embed", "llm-builtins"]
 python-embed = ["dep:pyo3"]
+llm-builtins = ["dep:reqwest"]
 ffi = []
 serialization = []
 
