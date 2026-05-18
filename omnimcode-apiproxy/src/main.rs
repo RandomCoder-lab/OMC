@@ -56,6 +56,10 @@ const LIST_REFS_TOOL_NAME: &str = "omc_proxy_list_refs";
 const FORWARD_TOOL_NAME:   &str = "omc_proxy_forward";
 const DIFF_TOOL_NAME:      &str = "omc_proxy_diff";
 const DELEGATE_TOOL_NAME:  &str = "omc_proxy_delegate";
+const NS_CREATE_TOOL_NAME: &str = "omc_proxy_namespace_create";
+const NS_LIST_TOOL_NAME:   &str = "omc_proxy_namespace_list";
+const NS_SHARE_TOOL_NAME:  &str = "omc_proxy_namespace_share";
+const SEARCH_TOOL_NAME:    &str = "omc_proxy_search";
 
 #[derive(Parser, Debug, Clone)]
 #[command(name = "omnimcode-apiproxy", version = env!("CARGO_PKG_VERSION"))]
@@ -166,6 +170,9 @@ struct AppState {
     prefix_index: Arc<std::sync::Mutex<
         std::collections::HashMap<u64, i64>
     >>,
+    /// Registered agent namespaces for multi-tenant isolation (task #9).
+    /// The default proxy cache namespace is always present.
+    registered_namespaces: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 }
 
 #[tokio::main]
@@ -203,6 +210,11 @@ async fn main() -> Result<()> {
             std::collections::HashMap::new())),
         prefix_index: Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new())),
+        registered_namespaces: Arc::new(std::sync::Mutex::new({
+            let mut s = std::collections::HashSet::new();
+            s.insert(PROXY_CACHE_NAMESPACE.to_string());
+            s
+        })),
     };
 
     let app = Router::new()
@@ -563,6 +575,111 @@ async fn handle_with_expand_loop(
                     dispatch_delegate(id, task, context_refs, model, *max_tokens,
                                       headers, state).await
                 }
+                ProxyCall::NamespaceCreate { id, name } => {
+                    let valid = !name.is_empty() && name.len() <= 64
+                        && name.chars().all(|c| c.is_alphanumeric()
+                            || c == '_' || c == '-');
+                    let result = if valid {
+                        state.registered_namespaces.lock().unwrap()
+                            .insert(name.clone());
+                        info!("omc_proxy_namespace_create: registered {:?}", name);
+                        json!({ "namespace": name, "status": "created" }).to_string()
+                    } else {
+                        json!({ "error":
+                            "invalid namespace name — use alphanumeric + _ - only, ≤64 chars"
+                        }).to_string()
+                    };
+                    (id.clone(), result)
+                }
+                ProxyCall::NamespaceList { id } => {
+                    let names: Vec<String> = state.registered_namespaces
+                        .lock().unwrap().iter().cloned().collect();
+                    let entries: Vec<_> = names.iter().map(|ns| {
+                        let (cnt, bytes) = state.store.stats(ns)
+                            .unwrap_or((0, 0));
+                        json!({ "namespace": ns, "entries": cnt, "bytes": bytes })
+                    }).collect();
+                    info!("omc_proxy_namespace_list: {} namespaces", entries.len());
+                    (id.clone(), json!(entries).to_string())
+                }
+                ProxyCall::NamespaceShare { id, target_ns, hash } => {
+                    let result = (|| {
+                        let h: i64 = match hash.parse() {
+                            Ok(v)  => v,
+                            Err(_) => return json!({ "error": "invalid hash" }).to_string(),
+                        };
+                        let content = match state.store.recall(None, h) {
+                            Ok(Some(c)) => c,
+                            Ok(None)    => return json!({ "error": "hash not found" })
+                                .to_string(),
+                            Err(e)      => return json!({ "error": e }).to_string(),
+                        };
+                        let valid_ns = !target_ns.is_empty() && target_ns.len() <= 64
+                            && target_ns.chars().all(|c| c.is_alphanumeric()
+                                || c == '_' || c == '-');
+                        if !valid_ns {
+                            return json!({ "error": "invalid target namespace" })
+                                .to_string();
+                        }
+                        match state.store.store(target_ns, &content) {
+                            Ok(new_h) => {
+                                state.registered_namespaces.lock().unwrap()
+                                    .insert(target_ns.clone());
+                                info!("omc_proxy_namespace_share: hash {} → ns {:?}",
+                                    new_h, target_ns);
+                                json!({
+                                    "hash": new_h.to_string(),
+                                    "namespace": target_ns,
+                                    "status": "shared"
+                                }).to_string()
+                            }
+                            Err(e) => json!({ "error": e }).to_string(),
+                        }
+                    })();
+                    (id.clone(), result)
+                }
+                ProxyCall::Search { id, query, top_k } => {
+                    let result = (|| {
+                        let entries = match state.store
+                            .list(PROXY_CACHE_NAMESPACE, 1000)
+                        {
+                            Ok(e)  => e,
+                            Err(e) => return json!({ "error": e }).to_string(),
+                        };
+                        let q_lower = query.to_lowercase();
+                        let words: Vec<&str> = q_lower.split_whitespace().collect();
+                        if words.is_empty() {
+                            return json!({ "error": "empty query" }).to_string();
+                        }
+                        let mut scored: Vec<_> = entries.iter()
+                            .filter_map(|e| {
+                                let hay = e.preview.to_lowercase();
+                                let matched = words.iter()
+                                    .filter(|w| hay.contains(**w)).count();
+                                if matched > 0 {
+                                    Some((matched as f64 / words.len() as f64, e))
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+                        scored.sort_by(|a, b| b.0.partial_cmp(&a.0)
+                            .unwrap_or(std::cmp::Ordering::Equal));
+                        scored.truncate(*top_k);
+                        let results: Vec<Value> = scored.iter().map(|(score, e)| {
+                            json!({
+                                "hash":    e.content_hash.to_string(),
+                                "preview": e.preview,
+                                "bytes":   e.bytes,
+                                "score":   score,
+                            })
+                        }).collect();
+                        info!("omc_proxy_search {:?}: {} hits (top_k={})",
+                            query, results.len(), top_k);
+                        json!(results).to_string()
+                    })();
+                    (id.clone(), result)
+                }
             };
             tool_results.push(json!({
                 "type": "tool_result",
@@ -597,6 +714,14 @@ enum ProxyCall {
                  model: String, max_tokens: u64 },
     /// Return a unified diff between two stored hashes.
     Diff      { id: String, hash_a: String, hash_b: String },
+    /// Create or register an isolated agent namespace.
+    NamespaceCreate { id: String, name: String },
+    /// List all registered namespaces with entry counts.
+    NamespaceList   { id: String },
+    /// Copy a stored hash into a named namespace for cross-agent sharing.
+    NamespaceShare  { id: String, target_ns: String, hash: String },
+    /// Keyword-search the proxy cache, return top_k matching entries.
+    Search          { id: String, query: String, top_k: usize },
 }
 
 fn collect_proxy_tool_calls(resp: &Value) -> Vec<ProxyCall> {
@@ -661,6 +786,30 @@ fn collect_proxy_tool_calls(resp: &Value) -> Vec<ProxyCall> {
                     .unwrap_or_default();
                 if !id.is_empty() && !task.is_empty() {
                     calls.push(ProxyCall::Delegate { id, task, context_refs: crefs, model, max_tokens: max_tok });
+                } else { return vec![]; }
+            }
+            n if n == NS_CREATE_TOOL_NAME => {
+                let name = inp.get("name").and_then(Value::as_str).unwrap_or("").to_string();
+                if !id.is_empty() && !name.is_empty() {
+                    calls.push(ProxyCall::NamespaceCreate { id, name });
+                } else { return vec![]; }
+            }
+            n if n == NS_LIST_TOOL_NAME => {
+                calls.push(ProxyCall::NamespaceList { id });
+            }
+            n if n == NS_SHARE_TOOL_NAME => {
+                let target_ns = inp.get("namespace").and_then(Value::as_str).unwrap_or("").to_string();
+                let hash      = inp.get("hash").and_then(Value::as_str).unwrap_or("").to_string();
+                if !id.is_empty() && !target_ns.is_empty() && !hash.is_empty() {
+                    calls.push(ProxyCall::NamespaceShare { id, target_ns, hash });
+                } else { return vec![]; }
+            }
+            n if n == SEARCH_TOOL_NAME => {
+                let query = inp.get("query").and_then(Value::as_str).unwrap_or("").to_string();
+                let top_k = inp.get("top_k").and_then(Value::as_u64).unwrap_or(5) as usize;
+                let top_k = top_k.max(1).min(50);
+                if !id.is_empty() && !query.is_empty() {
+                    calls.push(ProxyCall::Search { id, query, top_k });
                 } else { return vec![]; }
             }
             _ => return vec![], // non-proxy tool → client must handle
@@ -1604,6 +1753,73 @@ fn inject_proxy_tools(req: &mut Value) {
         }
     }));
 
+    // ── omc_proxy_namespace_create ────────────────────────────────────────
+    tools_arr.push(json!({
+        "name": NS_CREATE_TOOL_NAME,
+        "description": "Create or register an isolated agent namespace. Content stored \
+                        under one namespace is not visible to agents in other namespaces \
+                        unless explicitly shared via omc_proxy_namespace_share. Useful for \
+                        multi-agent deployments where agents must not see each other's \
+                        full working memory.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": { "type": "string",
+                           "description": "Namespace name (alphanumeric + _ - only, ≤64 chars)." }
+            },
+            "required": ["name"]
+        }
+    }));
+
+    // ── omc_proxy_namespace_list ──────────────────────────────────────────
+    tools_arr.push(json!({
+        "name": NS_LIST_TOOL_NAME,
+        "description": "List all registered proxy namespaces with their entry counts and \
+                        total stored bytes. Returns an array of {namespace, entries, bytes}.",
+        "input_schema": {
+            "type": "object",
+            "properties": {}
+        }
+    }));
+
+    // ── omc_proxy_namespace_share ─────────────────────────────────────────
+    tools_arr.push(json!({
+        "name": NS_SHARE_TOOL_NAME,
+        "description": "Copy a stored content hash into a named namespace, making it \
+                        readable by agents that have access to that namespace. The content \
+                        is content-addressed so the returned hash is identical to the input. \
+                        The target namespace is created automatically if it does not exist.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "namespace": { "type": "string",
+                                "description": "Target namespace to share into." },
+                "hash":      { "type": "string",
+                                "description": "Decimal hash string of the stored entry to share." }
+            },
+            "required": ["namespace", "hash"]
+        }
+    }));
+
+    // ── omc_proxy_search ──────────────────────────────────────────────────
+    tools_arr.push(json!({
+        "name": SEARCH_TOOL_NAME,
+        "description": "Keyword-search the proxy cache and return the top_k entries whose \
+                        stored previews best match the query. Useful when you remember the \
+                        topic of a stored block but not its exact hash. Returns an array of \
+                        {hash, preview, bytes, score} sorted by descending relevance.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query":  { "type": "string",
+                             "description": "Space-separated keywords to match against stored previews." },
+                "top_k":  { "type": "integer",
+                             "description": "Maximum number of results to return (default 5)." }
+            },
+            "required": ["query"]
+        }
+    }));
+
 }
 /// Compatibility shim -- callers that used inject_expand_tool still work.
 #[allow(dead_code)]
@@ -1640,6 +1856,11 @@ mod tests {
                 std::collections::HashMap::new())),
             prefix_index: Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new())),
+            registered_namespaces: Arc::new(std::sync::Mutex::new({
+                let mut s = std::collections::HashSet::new();
+                s.insert(PROXY_CACHE_NAMESPACE.to_string());
+                s
+            })),
         }
     }
 
