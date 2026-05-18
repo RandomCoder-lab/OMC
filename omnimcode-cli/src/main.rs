@@ -1072,6 +1072,7 @@ fn execute_program(source: &str) -> Result<(), String> {
     }
 
     let mut interpreter = Interpreter::new();
+    interpreter.set_source_code(source.to_string());
     maybe_register_python(&mut interpreter);
     maybe_register_jit(&mut interpreter, &statements);
     // OMC_HEAL_RETRY=1 — catch runtime errors after execution starts,
