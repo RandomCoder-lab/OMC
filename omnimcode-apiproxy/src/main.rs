@@ -114,6 +114,8 @@ struct RewriteStats {
     bytes_saved_images: u64,
     /// omc_proxy_forward calls resolved by the proxy.
     forward_calls: u64,
+    /// Bytes saved by compressing large blocks in non-streaming responses.
+    bytes_saved_response: u64,
     delegate_calls: u64,
 }
 
@@ -414,6 +416,40 @@ async fn dispatch_forward(
     }
 }
 
+
+/// Compress large text/tool_use blocks in a non-streaming response body before
+/// returning it to the client. The compressed versions will already be in marker
+/// form when the next request's history is built, saving a full rewrite round.
+fn compress_response_body(body: &[u8], state: &AppState) -> (Vec<u8>, usize) {
+    let mut val: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(_) => return (body.to_vec(), 0),
+    };
+    let mut saved = 0usize;
+    if let Some(content) = val.get_mut("content").and_then(|v| v.as_array_mut()) {
+        for block in content.iter_mut() {
+            let btype = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            if btype == "text" {
+                if let Some(serde_json::Value::String(s)) = block.get_mut("text") {
+                    if s.len() >= state.rewrite_threshold {
+                        if let Ok(hash) = state.store.store(PROXY_CACHE_NAMESPACE, s) {
+                            let preview: String = s.chars().take(state.preview_bytes).collect();
+                            let marker = format!("<omc:ref h=\"{}\" b=\"{}\" preview={:?}/>",
+                                hash, s.len(), preview);
+                            saved += s.len().saturating_sub(marker.len());
+                            *s = marker;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    match serde_json::to_vec(&val) {
+        Ok(b) => (b, saved),
+        Err(_) => (body.to_vec(), 0),
+    }
+}
+
 async fn handle_with_expand_loop(
     state: &AppState, headers: &HeaderMap, initial_body: Bytes,
 ) -> Response {
@@ -451,6 +487,11 @@ async fn handle_with_expand_loop(
         // Resolve any proxy-managed tool calls transparently
         let proxy_calls = collect_proxy_tool_calls(&resp_json);
         if proxy_calls.is_empty() {
+            let (compressed, saved) = compress_response_body(&resp_body, state);
+            if saved > 0 {
+                state.stats.lock().unwrap().bytes_saved_response += saved as u64;
+                return rebuild_response(status, &resp_headers, compressed.into());
+            }
             return rebuild_response(status, &resp_headers, resp_body);
         }
         info!("round {}: auto-resolving {} proxy tool_call(s)",
@@ -825,7 +866,8 @@ async fn stats_endpoint(State(state): State<AppState>) -> Response {
     } else { 0.0 };
     let total_saved = s.bytes_saved_messages + s.bytes_saved_tool_result
         + s.bytes_saved_system + s.bytes_saved_tool_use_input
-        + s.bytes_saved_tool_definitions + s.bytes_saved_images;
+        + s.bytes_saved_tool_definitions + s.bytes_saved_images
+        + s.bytes_saved_response;
     let json = serde_json::to_string_pretty(&serde_json::json!({
         "requests_processed": s.requests,
         "bytes_in_total":  s.bytes_in,
@@ -840,6 +882,7 @@ async fn stats_endpoint(State(state): State<AppState>) -> Response {
             "tool_use_input": s.bytes_saved_tool_use_input,
             "tool_definitions": s.bytes_saved_tool_definitions,
             "images": s.bytes_saved_images,
+            "response_body": s.bytes_saved_response,
         },
         "cache_control_inserted_count": s.cache_control_inserted,
         "conversations_seen": s.conversation_count,
