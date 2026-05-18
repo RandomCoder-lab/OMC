@@ -61,6 +61,8 @@ const NS_LIST_TOOL_NAME:   &str = "omc_proxy_namespace_list";
 const NS_SHARE_TOOL_NAME:  &str = "omc_proxy_namespace_share";
 const SEARCH_TOOL_NAME:    &str = "omc_proxy_search";
 const SUMMARIZE_TOOL_NAME: &str = "omc_proxy_summarize";
+const SWARM_TOOL_NAME:     &str = "omc_proxy_swarm";
+const KB_TOOL_NAME:        &str = "omc_proxy_kb";
 
 #[derive(Parser, Debug, Clone)]
 #[command(name = "omnimcode-apiproxy", version = env!("CARGO_PKG_VERSION"))]
@@ -468,6 +470,230 @@ async fn dispatch_forward(
     }
 }
 
+// ── helpers shared by delegate + swarm ───────────────────────────────────────
+
+/// Expand a list of hash strings from `namespace` into tagged XML context blocks.
+/// Silently skips hashes that are not found.
+fn expand_refs_into(
+    refs: &[String],
+    namespace: &str,
+    state: &AppState,
+    out: &mut String,
+) {
+    for hash_str in refs {
+        if let Ok(h) = hash_str.parse::<i64>() {
+            if let Ok(Some(text)) = state.store.recall(Some(namespace), h) {
+                out.push_str(&format!("<ctx h=\"{}\">{}</ctx>\n", hash_str, text));
+            } else if let Ok(Some(text)) = state.store.recall(None, h) {
+                // fall back to global search
+                out.push_str(&format!("<ctx h=\"{}\">{}</ctx>\n", hash_str, text));
+            }
+        }
+    }
+}
+
+// ── dispatch_swarm ────────────────────────────────────────────────────────────
+
+/// Spawn `agents` in parallel, each receiving `shared_refs` + its own
+/// `context_refs` expanded inline before its `task` message.
+/// Results are stored in per-agent namespaces and returned as a JSON summary.
+async fn dispatch_swarm(
+    swarm_id: &str,
+    agents: &[SwarmAgent],
+    shared_refs: &[String],
+    default_model: &str,
+    default_max_tokens: u64,
+    timeout_secs: u64,
+    headers: &HeaderMap,
+    state: &AppState,
+) -> (String, String) {
+    // ── expand shared refs once ──────────────────────────────────────────
+    let mut shared_ctx = String::new();
+    expand_refs_into(shared_refs, PROXY_CACHE_NAMESPACE, state, &mut shared_ctx);
+
+    // ── build per-agent futures ──────────────────────────────────────────
+    let upstream = state.upstream.trim_end_matches('/').to_string();
+    let futs: Vec<_> = agents
+        .iter()
+        .cloned()
+        .map(|spec| {
+            let shared = shared_ctx.clone();
+            let model  = spec.model.clone().unwrap_or_else(|| default_model.to_string());
+            let max_tok = spec.max_tokens.unwrap_or(default_max_tokens);
+            let ns = spec
+                .namespace
+                .clone()
+                .unwrap_or_else(|| PROXY_CACHE_NAMESPACE.to_string());
+            let state2 = state.clone();
+            let hdrs   = headers.clone();
+            let up     = upstream.clone();
+            async move {
+                // Expand agent-specific refs
+                let mut ctx = shared;
+                expand_refs_into(&spec.context_refs, &ns, &state2, &mut ctx);
+
+                let user_text = if ctx.is_empty() {
+                    spec.task.clone()
+                } else {
+                    format!("{}\n\n{}", ctx, spec.task)
+                };
+
+                let mut body = json!({
+                    "model":      model,
+                    "max_tokens": max_tok,
+                    "messages":   [{ "role": "user", "content": user_text }]
+                });
+                if let Some(sys) = &spec.system {
+                    body["system"] = serde_json::json!(sys);
+                }
+
+                // Forward to upstream (inheriting caller's auth headers)
+                let mut req = state2.http.post(format!("{}/v1/messages", up)).json(&body);
+                for (k, v) in hdrs.iter() {
+                    let ks = k.as_str();
+                    if ks == "host" || ks == "content-length" || ks == "content-type" {
+                        continue;
+                    }
+                    req = req.header(k, v);
+                }
+
+                let reply: String = match tokio::time::timeout(
+                    std::time::Duration::from_secs(timeout_secs),
+                    req.send(),
+                )
+                .await
+                {
+                    Err(_) => format!("[swarm timeout after {}s]", timeout_secs),
+                    Ok(Err(e)) => format!("[swarm network error: {}]", e),
+                    Ok(Ok(resp)) => match resp.json::<Value>().await {
+                        Err(e) => format!("[swarm decode error: {}]", e),
+                        Ok(body) => {
+                            // Extract text from Claude response
+                            body["content"]
+                                .as_array()
+                                .and_then(|a| a.iter().find(|c| c["type"] == "text"))
+                                .and_then(|c| c["text"].as_str())
+                                .map(str::to_string)
+                                .unwrap_or_else(|| {
+                                    body["error"]["message"]
+                                        .as_str()
+                                        .map(|m| format!("[api error: {}]", m))
+                                        .unwrap_or_else(|| "[empty response]".into())
+                                })
+                        }
+                    },
+                };
+
+                // Store result in agent's namespace
+                let is_err = reply.starts_with('[');
+                let stored = if !is_err {
+                    match state2.store.store(&ns, &reply) {
+                        Ok(h) => {
+                            // Persist namespace registration
+                            state2
+                                .registered_namespaces
+                                .lock()
+                                .unwrap()
+                                .insert(ns.clone());
+                            save_namespaces(&state2);
+                            Some(h)
+                        }
+                        Err(e) => {
+                            warn!("swarm agent {} store: {}", spec.id, e);
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                let preview: String = reply.chars().take(160).collect();
+                if let Some(h) = stored {
+                    json!({
+                        "id":        spec.id,
+                        "status":    "ok",
+                        "hash":      h.to_string(),
+                        "namespace": ns,
+                        "bytes":     reply.len(),
+                        "preview":   preview,
+                    })
+                } else {
+                    json!({
+                        "id":     spec.id,
+                        "status": "error",
+                        "error":  reply,
+                    })
+                }
+            }
+        })
+        .collect();
+
+    // ── run all in parallel ──────────────────────────────────────────────
+    let results: Vec<Value> = futures_util::future::join_all(futs).await;
+
+    let ok   = results.iter().filter(|r| r["status"] == "ok").count();
+    let fail = results.len() - ok;
+    let summary = json!({
+        "swarm_id":  swarm_id,
+        "total":     results.len(),
+        "succeeded": ok,
+        "failed":    fail,
+        "agents":    results,
+    });
+
+    let output = serde_json::to_string_pretty(&summary).unwrap_or_default();
+    let text = if output.len() > state.rewrite_threshold {
+        let h    = state.store.store(PROXY_CACHE_NAMESPACE, &output).unwrap_or(-1);
+        let prev: String = output.chars().take(state.preview_bytes).collect();
+        format!("<omc:ref h=\"{}\" b=\"{}\" preview={:?}/>", h, output.len(), prev)
+    } else {
+        output
+    };
+
+    info!("omc_proxy_swarm {swarm_id}: {ok}/{} agents ok", ok + fail);
+    state.stats.lock().unwrap().delegate_calls += (ok + fail) as u64;
+    (swarm_id.to_string(), text)
+}
+
+// ── dispatch_kb ──────────────────────────────────────────────────────────────
+
+/// Bulk-ingest `entries` (key → text pairs) into `namespace`.
+/// Returns a JSON map of `key → hash_string` for use as `context_refs`.
+fn dispatch_kb(
+    id: &str,
+    namespace: &str,
+    entries: &[(String, String)],
+    state: &AppState,
+) -> (String, String) {
+    let mut stored: serde_json::Map<String, Value> = serde_json::Map::new();
+    let mut errors: serde_json::Map<String, Value> = serde_json::Map::new();
+
+    for (key, text) in entries {
+        match state.store.store(namespace, text) {
+            Ok(h) => {
+                state
+                    .registered_namespaces
+                    .lock()
+                    .unwrap()
+                    .insert(namespace.to_string());
+                stored.insert(key.clone(), json!(h.to_string()));
+            }
+            Err(e) => {
+                errors.insert(key.clone(), json!(e.to_string()));
+            }
+        }
+    }
+    save_namespaces(state);
+
+    let result = json!({
+        "namespace": namespace,
+        "stored":    stored.len(),
+        "hashes":    stored,
+        "errors":    errors,
+    });
+    info!("omc_proxy_kb {id}: stored {} entries in ns={namespace}", result["stored"]);
+    (id.to_string(), serde_json::to_string_pretty(&result).unwrap_or_default())
+}
 
 /// Compress large text/tool_use blocks in a non-streaming response body before
 /// returning it to the client. The compressed versions will already be in marker
@@ -818,6 +1044,19 @@ async fn handle_with_expand_loop(
                     }.await;
                     (id.clone(), result)
                 }
+
+                // ── omc_proxy_swarm ──────────────────────────────────────────
+                ProxyCall::Swarm { id, agents, shared_refs, default_model,
+                                   default_max_tokens, timeout_secs } => {
+                    dispatch_swarm(&id, agents, shared_refs, &default_model,
+                                   *default_max_tokens, *timeout_secs,
+                                   &headers, &state).await
+                }
+
+                // ── omc_proxy_kb ─────────────────────────────────────────────
+                ProxyCall::Kb { id, namespace, entries } => {
+                    dispatch_kb(&id, &namespace, &entries, &state)
+                }
             };
             tool_results.push(json!({
                 "type": "tool_result",
@@ -837,6 +1076,30 @@ async fn handle_with_expand_loop(
 /// If the response's `content` array contains only proxy-managed tool_uses
 /// (expand_ref / remember / recall), return them all. If there are any
 /// non-proxy tool_uses the client must handle, return empty vec so the
+/// One agent in an `omc_proxy_swarm` call.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct SwarmAgent {
+    /// Caller-assigned id returned in the result.
+    id: String,
+    /// Task / user message for this agent.
+    task: String,
+    /// Optional system prompt (supplements or replaces the default).
+    #[serde(default)]
+    system: Option<String>,
+    /// Hashes from the proxy namespace to expand as inline context.
+    #[serde(default)]
+    context_refs: Vec<String>,
+    /// Model override for this agent (falls back to swarm-level default).
+    #[serde(default)]
+    model: Option<String>,
+    /// Namespace to store this agent's output (falls back to default).
+    #[serde(default)]
+    namespace: Option<String>,
+    /// max_tokens override.
+    #[serde(default)]
+    max_tokens: Option<u64>,
+}
+
 /// response passes through unchanged.
 #[derive(Debug)]
 enum ProxyCall {
@@ -863,6 +1126,26 @@ enum ProxyCall {
     /// Recall a set of refs, concatenate them, ask the upstream to summarize,
     /// store the summary in the proxy cache, and return its hash.
     Summarize       { id: String, refs: Vec<String>, model: String, max_tokens: u32 },
+    /// Run N agents in parallel; each receives shared_refs + its own context.
+    /// Results are stored in namespaces and a JSON summary is returned.
+    Swarm {
+        id: String,
+        agents: Vec<SwarmAgent>,
+        /// Refs loaded from the cache and prepended to every agent's context.
+        shared_refs: Vec<String>,
+        default_model: String,
+        default_max_tokens: u64,
+        /// Per-agent API call deadline in seconds.
+        timeout_secs: u64,
+    },
+    /// Bulk-ingest documents into a named namespace; return a hash→key index
+    /// that callers can use as a context_ref for subsequent swarm calls.
+    Kb {
+        id: String,
+        namespace: String,
+        /// Vec of (document-key, document-text) pairs.
+        entries: Vec<(String, String)>,
+    },
 }
 
 fn collect_proxy_tool_calls(resp: &Value) -> Vec<ProxyCall> {
@@ -969,6 +1252,52 @@ fn collect_proxy_tool_calls(resp: &Value) -> Vec<ProxyCall> {
                     calls.push(ProxyCall::Summarize { id, refs, model, max_tokens });
                 } else { return vec![]; }
             }
+
+            // ── omc_proxy_swarm ──────────────────────────────────────────────
+            n if n == SWARM_TOOL_NAME => {
+                let agents: Vec<SwarmAgent> = inp.get("agents")
+                    .and_then(Value::as_array)
+                    .map(|a| a.iter()
+                        .filter_map(|v| serde_json::from_value(v.clone()).ok())
+                        .collect())
+                    .unwrap_or_default();
+                if agents.is_empty() { return vec![]; }
+                let shared_refs: Vec<String> = inp.get("shared_refs")
+                    .and_then(Value::as_array)
+                    .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                    .unwrap_or_default();
+                let default_model = inp.get("model")
+                    .and_then(Value::as_str)
+                    .unwrap_or("claude-haiku-4-5")
+                    .to_string();
+                let default_max_tokens = inp.get("max_tokens")
+                    .and_then(Value::as_u64).unwrap_or(8192);
+                let timeout_secs = inp.get("timeout_secs")
+                    .and_then(Value::as_u64).unwrap_or(180);
+                calls.push(ProxyCall::Swarm {
+                    id, agents, shared_refs,
+                    default_model, default_max_tokens, timeout_secs,
+                });
+            }
+
+            // ── omc_proxy_kb ─────────────────────────────────────────────────
+            n if n == KB_TOOL_NAME => {
+                let namespace = inp.get("namespace")
+                    .and_then(Value::as_str)
+                    .unwrap_or(PROXY_CACHE_NAMESPACE)
+                    .to_string();
+                let entries: Vec<(String, String)> = inp.get("entries")
+                    .and_then(Value::as_array)
+                    .map(|arr| arr.iter().filter_map(|e| {
+                        let key  = e.get("key").and_then(Value::as_str)?.to_string();
+                        let text = e.get("text").and_then(Value::as_str)?.to_string();
+                        Some((key, text))
+                    }).collect())
+                    .unwrap_or_default();
+                if entries.is_empty() { return vec![]; }
+                calls.push(ProxyCall::Kb { id, namespace, entries });
+            }
+
             _ => return vec![], // non-proxy tool → client must handle
         }
     }
@@ -2152,9 +2481,100 @@ fn inject_proxy_tools(req: &mut Value) {
         }
     }));
 
-}
-/// Compatibility shim -- callers that used inject_expand_tool still work.
-#[allow(dead_code)]
+    // ── omc_proxy_swarm ──────────────────────────────────────────────────────
+    tools_arr.push(json!({
+        "name": SWARM_TOOL_NAME,
+        "description": "Spawn N sub-agents in parallel. Each agent receives the \
+                        shared_refs (expanded) plus its own context_refs, then \
+                        calls the upstream model with its task prompt. All results \
+                        are stored in their agent namespace and returned as a JSON \
+                        summary. With proxy compression each agent's context costs \
+                        ~5× fewer tokens, enabling far larger swarms in the same \
+                        token budget.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "agents": {
+                    "type": "array",
+                    "description": "List of agent specifications.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id":           { "type": "string",
+                                              "description": "Caller-assigned identifier returned in results." },
+                            "task":         { "type": "string",
+                                              "description": "User message / task description for this agent." },
+                            "system":       { "type": "string",
+                                              "description": "Optional system prompt. Falls back to a generic assistant prompt." },
+                            "context_refs": { "type": "array", "items": { "type": "string" },
+                                              "description": "Hash strings to expand as inline context (agent-specific)." },
+                            "model":        { "type": "string",
+                                              "description": "Model override. Falls back to the swarm-level default." },
+                            "namespace":    { "type": "string",
+                                              "description": "Namespace to store this agent's output." },
+                            "max_tokens":   { "type": "number",
+                                              "description": "max_tokens override for this agent." }
+                        },
+                        "required": ["id", "task"]
+                    }
+                },
+                "shared_refs": {
+                    "type": "array", "items": { "type": "string" },
+                    "description": "Hash strings expanded once and injected into ALL agents' context."
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Default model for agents that don't specify one. \
+                                    Default: claude-haiku-4-5."
+                },
+                "max_tokens": {
+                    "type": "number",
+                    "description": "Default max_tokens (default 4096)."
+                },
+                "timeout_secs": {
+                    "type": "number",
+                    "description": "Per-agent wall-clock timeout in seconds (default 120)."
+                }
+            },
+            "required": ["agents"]
+        }
+    }));
+
+    // ── omc_proxy_kb ─────────────────────────────────────────────────────────
+    tools_arr.push(json!({
+        "name": KB_TOOL_NAME,
+        "description": "Bulk-store documents into a proxy namespace and return a \
+                        map of key→hash. Pass the returned hashes as context_refs \
+                        to omc_proxy_swarm agents — agents receive only the hashes \
+                        in context and expand them on demand, keeping each agent's \
+                        context window small. Ideal for building a shared knowledge \
+                        base from OMC docs, source files, or any reference material \
+                        before spawning a swarm.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "namespace": {
+                    "type": "string",
+                    "description": "Namespace to store documents in."
+                },
+                "entries": {
+                    "type": "array",
+                    "description": "Documents to ingest.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "key":  { "type": "string", "description": "Human-readable name for this document." },
+                            "text": { "type": "string", "description": "Document text to store." }
+                        },
+                        "required": ["key", "text"]
+                    }
+                }
+            },
+            "required": ["namespace", "entries"]
+        }
+    }));
+
+}#[allow(dead_code)]
 fn inject_expand_tool(req: &mut Value) { inject_proxy_tools(req); }
 
 
