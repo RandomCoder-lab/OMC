@@ -7,9 +7,11 @@ h BENCH_DB = "/tmp/omc_benchmarks.json"
 h REGRESSION_THRESHOLD = 1.20
 
 fn load_history() {
-    h content = file_read(BENCH_DB)
+    h content = null
+    try { content = file_read(BENCH_DB) } catch e { return {} }
     if content == null { return {} }
-    h parsed = json_parse(content)
+    h parsed = null
+    try { parsed = json_parse(content) } catch e { return {} }
     if parsed == null { return {} }
     return parsed
 }
@@ -72,7 +74,7 @@ fn run_bench(name, code, iterations) {
 }
 
 fn compare_to_baseline(result, history) {
-    if not dict_has(history, result["name"]) {
+    if !dict_has(history, result["name"]) {
         return {status: "new", baseline: null, delta: null}
     }
     h baseline = history[result["name"]]
@@ -97,20 +99,20 @@ fn print_bench_row(result, comparison) {
 
     h baseline_str = "-"
     if comparison["baseline"] != null {
-        baseline_str = str_concat(to_str(comparison["baseline"]), "ms")
+        baseline_str = str_concat(to_string(comparison["baseline"]), "ms")
     }
 
     h delta_str = ""
     if comparison["delta"] != null {
         h d = comparison["delta"]
-        if d > 0 { delta_str = str_concat("+", to_str(d), "ms") }
-        else { delta_str = str_concat(to_str(d), "ms") }
+        if d > 0 { delta_str = str_concat("+", to_string(d), "ms") }
+        else { delta_str = str_concat(to_string(d), "ms") }
     }
 
     print(str_concat(
         status_icon, " ",
         _pad_right(result["name"], 30), " ",
-        _pad_left(to_str(result["mean_ms"]), 8), "ms",
+        _pad_left(to_string(result["mean_ms"]), 8), "ms",
         " baseline=", _pad_left(baseline_str, 10),
         " delta=", _pad_left(delta_str, 10)
     ))
@@ -133,7 +135,7 @@ h BENCHMARKS = [
     },
     {
         name: "dict_ops_500",
-        code: "h d = {}\nh i = 0\nwhile i < 500 { d[to_str(i)] = i * 2\ni = i + 1 }\narr_len(dict_keys(d))"
+        code: "h d = {}\nh i = 0\nwhile i < 500 { d[to_string(i)] = i * 2\ni = i + 1 }\narr_len(dict_keys(d))"
     },
     {
         name: "nested_loops_100x100",
@@ -144,7 +146,7 @@ h BENCHMARKS = [
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 print("=== OMC Benchmark Dashboard ===")
-print(str_concat("Regression threshold: ", to_str((REGRESSION_THRESHOLD - 1.0) * 100.0), "%"))
+print(str_concat("Regression threshold: ", to_string((REGRESSION_THRESHOLD - 1.0) * 100.0), "%"))
 print("")
 
 h history = load_history()
@@ -174,7 +176,7 @@ save_history(new_results)
 
 print("")
 if arr_len(regressions) > 0 {
-    print(red(str_concat("REGRESSIONS (", to_str(arr_len(regressions)), "): ")))
+    print(red(str_concat("REGRESSIONS (", to_string(arr_len(regressions)), "): ")))
     h ri = 0
     while ri < arr_len(regressions) {
         print(str_concat("  - ", regressions[ri]))
@@ -182,7 +184,7 @@ if arr_len(regressions) > 0 {
     }
 }
 if arr_len(improvements) > 0 {
-    print(green(str_concat("IMPROVEMENTS (", to_str(arr_len(improvements)), "): ")))
+    print(green(str_concat("IMPROVEMENTS (", to_string(arr_len(improvements)), "): ")))
     h ii = 0
     while ii < arr_len(improvements) {
         print(str_concat("  + ", improvements[ii]))
