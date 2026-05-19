@@ -34,6 +34,7 @@ fn main() {
             "--test-all" => mode = "test-all",
             "--bench" | "-b" => mode = "bench",
             "--audit" | "-a" => mode = "audit",
+            "--search" => mode = "search",
             "--gen-docs" => mode = "gen-docs",
             "--json" => json_output = true,
             "--help" | "-h" => mode = "help",
@@ -69,6 +70,7 @@ fn main() {
         }
         ("install", spec) => install_command(spec),
         ("list", _) => list_command(),
+        ("search", query) => search_command(query),
         ("init", _) => init_command(),
         ("test", Some(path)) => test_command(path, json_output),
         ("test", None) => { eprintln!("--test requires a file argument."); 2 }
@@ -896,16 +898,145 @@ fn list_command() -> i32 {
     0
 }
 
+/// `--search [QUERY]`: list packages from the registry that match QUERY (substring,
+/// case-insensitive). With no query, lists all registry entries. Also checks
+/// omc_modules/ for locally installed packages and examples/lib for built-ins.
+#[cfg(feature = "python-embed")]
+fn search_command(query: Option<&str>) -> i32 {
+    let q = query.unwrap_or("").to_lowercase();
+
+    // ── Built-in stdlib modules ──
+    let stdlib_dir = std::path::Path::new("examples/lib");
+    let mut builtin_names: Vec<String> = Vec::new();
+    if stdlib_dir.exists() {
+        if let Ok(entries) = std::fs::read_dir(stdlib_dir) {
+            for e in entries.filter_map(|e| e.ok()) {
+                if e.path().extension().and_then(|s| s.to_str()) == Some("omc") {
+                    if let Some(stem) = e.path().file_stem().and_then(|s| s.to_str()) {
+                        if q.is_empty() || stem.to_lowercase().contains(&q) {
+                            builtin_names.push(stem.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    builtin_names.sort();
+
+    // ── Locally installed modules ──
+    let modules_dir = std::path::Path::new("omc_modules");
+    let mut installed_names: Vec<String> = Vec::new();
+    if modules_dir.exists() {
+        if let Ok(entries) = std::fs::read_dir(modules_dir) {
+            for e in entries.filter_map(|e| e.ok()) {
+                if e.path().extension().and_then(|s| s.to_str()) == Some("omc") {
+                    if let Some(stem) = e.path().file_stem().and_then(|s| s.to_str()) {
+                        if q.is_empty() || stem.to_lowercase().contains(&q) {
+                            installed_names.push(stem.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    installed_names.sort();
+
+    // ── Registry (fetched online if available) ──
+    // We reuse the registry fetch path. The registry index has {"packages": {name: {url, sha256}}}
+    // We try to fetch it and list all matching names.
+    let registry_url = std::env::var("OMC_REGISTRY").unwrap_or_else(|_| {
+        "https://raw.githubusercontent.com/sovereignlattice/omnimcode/main/registry/index.json"
+            .to_string()
+    });
+    let mut registry_names: Vec<(String, String)> = Vec::new();
+    // Try fetching registry; if offline or unavailable, skip silently.
+    if let Ok(body) = omnimcode_core::python_embed::fetch_url(&registry_url) {
+        // Parse JSON manually — scan for package keys in the "packages" dict.
+        // Each line with pattern `    "pkgname": {` is a package entry.
+        for line in body.lines() {
+            let t = line.trim();
+            if t.starts_with('"') && (t.ends_with("\": {") || t.ends_with("\": {}")) {
+                let pkg = t.splitn(2, '"').nth(1).unwrap_or("").split('"').next().unwrap_or("");
+                if !pkg.is_empty() && (q.is_empty() || pkg.to_lowercase().contains(&q)) {
+                    registry_names.push((pkg.to_string(), "[registry]".to_string()));
+                }
+            }
+        }
+    }
+    registry_names.sort_by(|a, b| a.0.cmp(&b.0));
+
+    // ── Print results ──
+    let query_str = if q.is_empty() { "(all)".to_string() } else { format!("\"{}\"", q) };
+    println!("Search results for {}", query_str);
+    println!();
+
+    if !builtin_names.is_empty() {
+        println!("Built-in stdlib (examples/lib/):");
+        for n in &builtin_names {
+            println!("  {:<30} [stdlib]", n);
+        }
+        println!();
+    }
+
+    if !installed_names.is_empty() {
+        println!("Installed (omc_modules/):");
+        for n in &installed_names {
+            println!("  {:<30} [installed]", n);
+        }
+        println!();
+    }
+
+    if !registry_names.is_empty() {
+        println!("Registry ({}):", registry_url);
+        for (n, tag) in &registry_names {
+            println!("  {:<30} {}", n, tag);
+        }
+        println!();
+    }
+
+    let total = builtin_names.len() + installed_names.len() + registry_names.len();
+    if total == 0 {
+        println!("No packages matching {}", query_str);
+    } else {
+        println!("{} result(s) found. Install with: omc --install <name>", total);
+    }
+    0
+}
+
+#[cfg(not(feature = "python-embed"))]
+fn search_command(query: Option<&str>) -> i32 {
+    let q = query.unwrap_or("(all)");
+    // Even without Python, list builtins and installed modules.
+    let stdlib_dir = std::path::Path::new("examples/lib");
+    if stdlib_dir.exists() {
+        println!("Built-in stdlib (examples/lib/):");
+        let mut names: Vec<String> = std::fs::read_dir(stdlib_dir)
+            .into_iter().flatten().filter_map(|e| e.ok())
+            .filter_map(|e| {
+                if e.path().extension().and_then(|s| s.to_str()) == Some("omc") {
+                    e.path().file_stem().and_then(|s| s.to_str())
+                        .filter(|n| q == "(all)" || n.to_lowercase().contains(&q.to_lowercase()))
+                        .map(|s| s.to_string())
+                } else { None }
+            }).collect();
+        names.sort();
+        for n in names { println!("  {}", n); }
+    }
+    println!("(Registry search requires python-embed feature)");
+    0
+}
+
 fn print_help() {
     let prog = env::args().next().unwrap_or_else(|| "omnimcode-standalone".to_string());
     println!("Usage:");
     println!("  {} [FILE]              run a program (or start REPL if no file)", prog);
-    println!("  {} --check FILE        run heal pass, print diagnostics, exit", prog);
+    println!("  {} --check FILE        run heal pass + static lint, exit 1 if issues", prog);
     println!("  {} --fmt FILE          pretty-print AST as canonical OMC source", prog);
     println!("  {} --init              scaffold a new project (omc.toml + main.omc)", prog);
     println!("  {} --install [SPEC]    install package into omc_modules/", prog);
     println!("                         SPEC = URL, registry name, or absent (reads omc.toml)");
     println!("  {} --list              list packages installed under omc_modules/", prog);
+    println!("  {} --search [QUERY]    search stdlib/installed/registry packages", prog);
     println!("  {} --test FILE         run every fn test_*() in FILE, report pass/fail", prog);
     println!("  {} --bench FILE        run every fn bench_*() in FILE, report ms each", prog);
     println!("  {} --audit FILE        run FILE under both engines, exit 1 on output divergence", prog);
