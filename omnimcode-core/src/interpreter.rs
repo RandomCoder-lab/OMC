@@ -2338,7 +2338,7 @@ impl Interpreter {
             // Polish round
             | "str_pad_left" | "str_pad_right" | "arr_zip" | "arr_unique"
             | "arr_take" | "arr_drop" | "arr_count" | "arr_repeat"
-            | "arr_zeros" | "arr_ones" | "arr_chunk" | "arr_flatten"
+            | "arr_fill" | "arr_zeros" | "arr_ones" | "arr_chunk" | "arr_flatten"
             | "arr_enumerate" | "arr_window"
             // Meta-evaluation
             | "eval_omc" | "eval_omc_fresh" | "eval_omc_ctx" | "omc_source"
@@ -5321,6 +5321,16 @@ impl Interpreter {
                 Ok(Value::Array(HArray::from_vec(items)))
             }
             // arr_zeros(n) — array of n zeros (HInt). NumPy idiom.
+            // arr_fill(value, n) — array of n copies of value. Works with any Value.
+            "arr_fill" => {
+                if args.len() < 2 {
+                    return Err("arr_fill requires (value, n)".to_string());
+                }
+                let v = self.eval_expr(&args[0])?;
+                let n = self.eval_expr(&args[1])?.to_int().max(0) as usize;
+                let items: Vec<Value> = (0..n).map(|_| v.clone()).collect();
+                Ok(Value::Array(HArray::from_vec(items)))
+            }
             "arr_zeros" => {
                 if args.is_empty() {
                     return Err("arr_zeros requires (n)".to_string());
@@ -14517,7 +14527,7 @@ pub(crate) const HEAL_BUILTIN_NAMES: &[&str] = &[
     "par_map", "par_filter", "par_reduce", "par_for",
     "arr_zip", "arr_unique",
     "arr_take", "arr_drop", "arr_count", "arr_repeat",
-    "arr_zeros", "arr_ones", "arr_chunk", "arr_flatten",
+    "arr_fill", "arr_zeros", "arr_ones", "arr_chunk", "arr_flatten",
     "arr_enumerate", "arr_window",
     // Meta-evaluation
     "eval_omc", "eval_omc_fresh", "eval_omc_ctx", "omc_source",
