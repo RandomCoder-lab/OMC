@@ -1402,8 +1402,24 @@ fn lint_source(content: &str) -> Vec<LintHint> {
 
 /// AST-level lint: walk the statement tree looking for structural issues.
 fn lint_ast_stmts(stmts: &[Statement], in_fn: Option<&str>, hints: &mut Vec<LintHint>) {
-    // Dead code: any statement(s) after an unconditional control-flow terminator.
+    use std::collections::HashSet;
     let ctx = in_fn.unwrap_or("<top-level>");
+
+    // Shadow-var: flag `h x = ...; ... h x = ...` re-declaration in the same scope.
+    {
+        let mut seen: HashSet<&str> = HashSet::new();
+        for stmt in stmts {
+            if let Statement::VarDecl { name, .. } = stmt {
+                if !seen.insert(name.as_str()) {
+                    hints.push((None, "shadow-var",
+                        format!("`h {}` re-declares a variable already declared in `{}` — use assignment `{} = ...` instead",
+                            name, ctx, name)));
+                }
+            }
+        }
+    }
+
+    // Dead code: any statement(s) after an unconditional control-flow terminator.
     for i in 0..stmts.len().saturating_sub(1) {
         let is_terminal = matches!(&stmts[i],
             Statement::Return(_) | Statement::Break | Statement::Continue | Statement::Throw(_));
