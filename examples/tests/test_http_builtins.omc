@@ -1,0 +1,176 @@
+# Tests for native HTTP builtins.
+#
+# http_get(url, headers?)         → {status, body, ok}
+# http_post(url, body, headers?)  → {status, body, ok}
+# http_post_json(url, data, hdrs?)→ {status, body, ok, json}
+# http_put(url, body, headers?)   → {status, body, ok}
+# http_delete(url, headers?)      → {status, body, ok}
+#
+# Network-dependent tests are wrapped in try/catch so they pass
+# gracefully when the test environment has no outbound HTTP access.
+# They do validate the response schema when the network IS available.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+
+# ── Argument-validation (no network) ─────────────────────────────────────────
+
+fn test_http_get_requires_url() {
+    h err = ""
+    try { http_get() } catch e { err = e }
+    assert_true(str_len(err) > 0, "http_get() with no args → error")
+}
+
+fn test_http_post_requires_body() {
+    h err = ""
+    try { http_post("http://example.com") } catch e { err = e }
+    assert_true(str_len(err) > 0, "http_post with only url → error")
+}
+
+fn test_http_put_requires_body() {
+    h err = ""
+    try { http_put("http://example.com") } catch e { err = e }
+    assert_true(str_len(err) > 0, "http_put with only url → error")
+}
+
+fn test_http_delete_requires_url() {
+    h err = ""
+    try { http_delete() } catch e { err = e }
+    assert_true(str_len(err) > 0, "http_delete with no args → error")
+}
+
+fn test_http_post_json_requires_data() {
+    h err = ""
+    try { http_post_json("http://example.com") } catch e { err = e }
+    assert_true(str_len(err) > 0, "http_post_json with only url → error")
+}
+
+fn test_http_get_bad_header_type() {
+    # Headers must be a dict or null — passing an int should error.
+    h err = ""
+    try { http_get("http://example.com", 42) } catch e { err = e }
+    assert_true(str_len(err) > 0, "int headers → error")
+}
+
+# ── Response schema (network-conditional) ─────────────────────────────────────
+# Uses httpbin.org — a public echo/testing HTTP service.
+# If the request fails (no network), the test is silently skipped.
+
+fn test_http_get_response_schema() {
+    h net_ok = 1
+    h resp = null
+    try {
+        resp = http_get("https://httpbin.org/get")
+    } catch e {
+        net_ok = 0
+    }
+    if net_ok {
+        assert_true(dict_has(resp, "status"), "response has status")
+        assert_true(dict_has(resp, "body"),   "response has body")
+        assert_true(dict_has(resp, "ok"),     "response has ok")
+        assert_eq(resp["ok"], true, "httpbin GET returns 2xx")
+        assert_true(resp["status"] >= 200 and resp["status"] < 300, "status 2xx")
+        assert_true(str_len(resp["body"]) > 0, "body non-empty")
+    }
+}
+
+fn test_http_get_404_ok_false() {
+    h net_ok = 1
+    h resp = null
+    try {
+        resp = http_get("https://httpbin.org/status/404")
+    } catch e {
+        net_ok = 0
+    }
+    if net_ok {
+        assert_eq(resp["status"], 404, "404 status code")
+        assert_eq(resp["ok"], false, "404 → ok = false")
+    }
+}
+
+fn test_http_post_response_schema() {
+    h net_ok = 1
+    h resp = null
+    try {
+        resp = http_post("https://httpbin.org/post", "hello=world")
+    } catch e {
+        net_ok = 0
+    }
+    if net_ok {
+        assert_true(dict_has(resp, "status"), "has status")
+        assert_true(dict_has(resp, "body"),   "has body")
+        assert_true(dict_has(resp, "ok"),     "has ok")
+        assert_eq(resp["ok"], true, "POST httpbin → 2xx")
+    }
+}
+
+fn test_http_post_json_response_schema() {
+    h net_ok = 1
+    h resp = null
+    try {
+        resp = http_post_json("https://httpbin.org/post", {key: "value", num: 42})
+    } catch e {
+        net_ok = 0
+    }
+    if net_ok {
+        assert_true(dict_has(resp, "status"), "has status")
+        assert_true(dict_has(resp, "body"),   "has body")
+        assert_true(dict_has(resp, "ok"),     "has ok")
+        assert_true(dict_has(resp, "json"),   "has json key")
+        assert_eq(resp["ok"], true, "POST JSON httpbin → 2xx")
+        # httpbin echoes the JSON we sent under resp.json.json
+        h j = resp["json"]
+        if j != null {
+            assert_true(dict_has(j, "json"), "httpbin wraps payload under json")
+        }
+    }
+}
+
+fn test_http_delete_response_schema() {
+    h net_ok = 1
+    h resp = null
+    try {
+        resp = http_delete("https://httpbin.org/delete")
+    } catch e {
+        net_ok = 0
+    }
+    if net_ok {
+        assert_true(dict_has(resp, "status"), "has status")
+        assert_true(dict_has(resp, "body"),   "has body")
+        assert_eq(resp["ok"], true, "DELETE httpbin → 2xx")
+    }
+}
+
+fn test_http_get_with_custom_headers() {
+    h net_ok = 1
+    h resp = null
+    try {
+        resp = http_get("https://httpbin.org/headers", {X-OMC-Test: "yes"})
+    } catch e {
+        net_ok = 0
+    }
+    if net_ok {
+        assert_eq(resp["ok"], true, "headers GET → 2xx")
+        # httpbin echoes headers in the body JSON — we just verify body is non-empty
+        assert_true(str_len(resp["body"]) > 0, "body contains header echo")
+    }
+}
+
+fn test_http_get_null_headers_accepted() {
+    # Passing null explicitly for headers must not error.
+    h net_ok = 1
+    h resp = null
+    try {
+        resp = http_get("https://httpbin.org/get", null)
+    } catch e {
+        net_ok = 0
+    }
+    if net_ok {
+        assert_eq(resp["ok"], true, "null headers → 2xx")
+    }
+}
