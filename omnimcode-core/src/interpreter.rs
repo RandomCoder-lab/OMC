@@ -4804,16 +4804,19 @@ impl Interpreter {
             }
             "dict_del" => {
                 if args.len() < 2 {
-                    return Err("dict_del requires (dict_var, key)".to_string());
+                    return Err("dict_del requires (dict, key)".to_string());
                 }
                 let k = self.eval_expr(&args[1])?.to_display_string();
-                if let Expression::Variable(name) = &args[0] {
-                    if let Some(Value::Dict(d)) = self.get_var(name) {
+                // Accept both a plain variable AND any expression that evaluates
+                // to a dict (e.g. obj["store"]). The Rc is shared, so removal
+                // through the evaluated reference propagates to all holders.
+                match self.eval_expr(&args[0])? {
+                    Value::Dict(d) => {
                         d.borrow_mut().remove(&k);
-                        return Ok(Value::Null);
+                        Ok(Value::Null)
                     }
+                    _ => Err("dict_del: first argument must be a dict".to_string()),
                 }
-                Err("dict_del: first argument must be a dict variable".to_string())
             }
             "dict_keys" => {
                 if args.is_empty() {

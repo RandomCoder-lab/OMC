@@ -1,0 +1,129 @@
+# Tests for examples/lib/cache.omc
+# Uses module import to preserve internal helper functions.
+
+import "examples/lib/cache.omc" as cache
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+fn assert_null(v, msg)    { if v != null { test_record_failure(msg + ": expected null, got " + to_string(v)); } }
+
+# ── memoize ──────────────────────────────────────────────────────────────────
+
+h _call_count = 0
+fn _expensive(n) {
+    _call_count = _call_count + 1
+    return n * n
+}
+
+fn test_memoize_computes_correctly() {
+    h m = cache.memoize(_expensive)
+    assert_eq(m(5), 25, "memoize 5^2")
+    assert_eq(m(7), 49, "memoize 7^2")
+}
+
+fn test_memoize_caches_second_call() {
+    _call_count = 0
+    h m = cache.memoize(_expensive)
+    m(4)
+    m(4)
+    m(4)
+    assert_eq(_call_count, 1, "fn called only once for same arg")
+}
+
+fn test_memoize_different_args_not_cached() {
+    _call_count = 0
+    h m = cache.memoize(_expensive)
+    m(1)
+    m(2)
+    m(3)
+    assert_eq(_call_count, 3, "distinct args → 3 calls")
+}
+
+fn test_memoize2_computes_correctly() {
+    fn _add(a, b) { return a + b }
+    h m = cache.memoize2(_add)
+    assert_eq(m(3, 4), 7, "memoize2 3+4")
+    assert_eq(m(10, 20), 30, "memoize2 10+20")
+}
+
+# ── LRU cache ─────────────────────────────────────────────────────────────────
+
+fn test_lru_basic_put_get() {
+    h lru = cache.lru_new(10)
+    cache.lru_put(lru, "x", 42)
+    assert_eq(cache.lru_get(lru, "x"), 42, "get after put")
+}
+
+fn test_lru_miss_returns_null() {
+    h lru = cache.lru_new(10)
+    assert_null(cache.lru_get(lru, "no_such_key"), "miss → null")
+}
+
+fn test_lru_evicts_when_full() {
+    h lru = cache.lru_new(3)
+    cache.lru_put(lru, "a", 1)
+    cache.lru_put(lru, "b", 2)
+    cache.lru_put(lru, "c", 3)
+    cache.lru_put(lru, "d", 4)
+    # oldest ("a") should be evicted (or "b" if "a" was touched)
+    h s = cache.lru_stats(lru)
+    assert_eq(s["size"], 3, "size stays at capacity")
+}
+
+fn test_lru_stats_hits_misses() {
+    h lru = cache.lru_new(10)
+    cache.lru_put(lru, "k", 99)
+    cache.lru_get(lru, "k")
+    cache.lru_get(lru, "k")
+    cache.lru_get(lru, "miss")
+    h s = cache.lru_stats(lru)
+    assert_eq(s["hits"],   2, "2 hits")
+    assert_eq(s["misses"], 1, "1 miss")
+}
+
+fn test_lru_memoize() {
+    h count = 0
+    fn _fn(n) { count = count + 1 return n * 3 }
+    h m = cache.lru_memoize(_fn, 5)
+    assert_eq(m(2), 6, "lru_memoize computes")
+    m(2)
+    m(2)
+    assert_eq(count, 1, "subsequent calls cached")
+}
+
+# ── TTL cache ─────────────────────────────────────────────────────────────────
+
+fn test_ttl_basic() {
+    h ttl = cache.ttl_new(3600)
+    cache.ttl_put(ttl, "k", "hello")
+    assert_eq(cache.ttl_get(ttl, "k"), "hello", "ttl get unexpired")
+}
+
+fn test_ttl_miss() {
+    h ttl = cache.ttl_new(3600)
+    assert_null(cache.ttl_get(ttl, "nope"), "ttl miss → null")
+}
+
+# ── batch_cached ──────────────────────────────────────────────────────────────
+
+fn test_batch_cached_results() {
+    fn _triple(n) { return n * 3 }
+    h bc = cache.lru_new(20)
+    h out = cache.batch_cached(_triple, [1, 2, 3], bc)
+    assert_eq(out[0], 3,  "batch[0]")
+    assert_eq(out[1], 6,  "batch[1]")
+    assert_eq(out[2], 9,  "batch[2]")
+}
+
+fn test_batch_cached_deduplicates() {
+    h fn_calls = 0
+    fn _inc(n) { fn_calls = fn_calls + 1 return n }
+    h bc = cache.lru_new(20)
+    cache.batch_cached(_inc, [1, 2, 1, 2, 1], bc)
+    assert_eq(fn_calls, 2, "only 2 unique keys computed")
+}

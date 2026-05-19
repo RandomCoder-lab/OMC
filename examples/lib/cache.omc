@@ -6,8 +6,8 @@
 # Returns a wrapper that caches results keyed by stringified args.
 fn memoize(f) {
     h store = {}
-    fn memo_wrapper(arg) {
-        h key = to_str(arg)
+    h memo_wrapper = fn(arg) {
+        h key = to_string(arg)
         if dict_has(store, key) {
             return store[key]
         }
@@ -22,8 +22,8 @@ fn memoize(f) {
 # Two-argument version.
 fn memoize2(f) {
     h store = {}
-    fn memo2_wrapper(a, b) {
-        h key = str_concat(to_str(a), "|", to_str(b))
+    h memo2_wrapper = fn(a, b) {
+        h key = str_concat(to_string(a), "|", to_string(b))
         if dict_has(store, key) {
             return store[key]
         }
@@ -72,7 +72,7 @@ fn _lru_touch(lru, key) {
 
 # lru_get(lru, key) → value or null
 fn lru_get(lru, key) {
-    h k = to_str(key)
+    h k = to_string(key)
     if dict_has(lru["store"], k) {
         _lru_touch(lru, k)
         lru["hits"] = lru["hits"] + 1
@@ -84,8 +84,8 @@ fn lru_get(lru, key) {
 
 # lru_put(lru, key, value)
 fn lru_put(lru, key, value) {
-    h k = to_str(key)
-    if not dict_has(lru["store"], k) {
+    h k = to_string(key)
+    if !dict_has(lru["store"], k) {
         _lru_evict(lru)
         arr_push(lru["order"], k)
     } else {
@@ -112,8 +112,8 @@ fn lru_stats(lru) {
 # LRU-backed memoized wrapper.
 fn lru_memoize(f, capacity) {
     h cache = lru_new(capacity)
-    fn lru_wrapper(arg) {
-        h key = to_str(arg)
+    h lru_wrapper = fn(arg) {
+        h key = to_string(arg)
         h cached = lru_get(cache, key)
         if cached != null { return cached }
         h result = f(arg)
@@ -132,8 +132,8 @@ fn ttl_new(ttl_seconds) {
 
 # ttl_get(cache, key) → value or null (returns null if expired)
 fn ttl_get(cache, key) {
-    h k = to_str(key)
-    if not dict_has(cache["store"], k) {
+    h k = to_string(key)
+    if !dict_has(cache["store"], k) {
         cache["misses"] = cache["misses"] + 1
         return null
     }
@@ -150,7 +150,7 @@ fn ttl_get(cache, key) {
 
 # ttl_put(cache, key, value)
 fn ttl_put(cache, key, value) {
-    h k = to_str(key)
+    h k = to_string(key)
     h now = unix_time()
     cache["store"][k] = value
     cache["expires"][k] = now + cache["ttl"]
@@ -159,8 +159,8 @@ fn ttl_put(cache, key, value) {
 # ttl_memoize(fn, ttl_seconds) → fn
 fn ttl_memoize(f, ttl) {
     h cache = ttl_new(ttl)
-    fn ttl_wrapper(arg) {
-        h key = to_str(arg)
+    h ttl_wrapper = fn(arg) {
+        h key = to_string(arg)
         h cached = ttl_get(cache, key)
         if cached != null { return cached }
         h result = f(arg)
@@ -174,25 +174,24 @@ fn ttl_memoize(f, ttl) {
 
 # disk_cache_get(dir, key) → string or null
 fn disk_cache_get(dir, key) {
-    h safe_key = str_replace(to_str(key), "/", "_")
+    h safe_key = str_replace(to_string(key), "/", "_")
     h path = str_concat(dir, "/", safe_key, ".cache")
     h content = file_read(path)
-    if content == null { return null }
     return content
 }
 
 # disk_cache_put(dir, key, value)
 fn disk_cache_put(dir, key, value) {
-    h safe_key = str_replace(to_str(key), "/", "_")
+    h safe_key = str_replace(to_string(key), "/", "_")
     h path = str_concat(dir, "/", safe_key, ".cache")
-    file_write(path, to_str(value))
+    write_file(path, to_string(value))
 }
 
 # disk_memoize(fn, dir) → fn
 # Persists results to disk; survives process restarts.
 fn disk_memoize(f, dir) {
-    fn disk_wrapper(arg) {
-        h key = to_str(arg)
+    h disk_wrapper = fn(arg) {
+        h key = to_string(arg)
         h cached = disk_cache_get(dir, key)
         if cached != null { return cached }
         h result = f(arg)
