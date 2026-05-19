@@ -1,75 +1,21 @@
 # substrate_rag.omc
-# Phi-Pi-Fibonacci RAG (Retrieval-Augmented Generation) using substrate embeddings.
-# Stores documents with substrate-harmonic indexing; retrieves by harmonic distance.
+# Phi-Pi-Fibonacci RAG (Retrieval-Augmented Generation) using native substrate_embed.
+# The native substrate_embed builtin (no API key, pure math) powers all retrieval.
 
-import "examples/lib/text.omc"
 import "examples/lib/llm.omc"
 import "examples/lib/cache.omc"
 
 h MODEL = "claude-opus-4-5"
 h EMBED_CACHE = lru_new(500)
 
-# ── Phi-Pi-Fib substrate embedding (pure OMC) ──────────────────────────────────
+# ── Embedding helpers ─────────────────────────────────────────────────────────
 
-h PHI = 1.6180339887
-h PI = 3.14159265358979
-h FIB = [1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144]
-
-fn substrate_encode_char(c, position) {
-    h cp = str_len(c)
-    h fib_idx = position % arr_len(FIB)
-    h freq = FIB[fib_idx] * PHI
-    h phase = position * PI / 7.0
-    h signal = math_sin(freq + phase) * cp
-    return signal
-}
-
-fn substrate_embed(text) {
-    h cache_key = text
-    h cached = lru_get(EMBED_CACHE, cache_key)
+fn embed_cached(text) {
+    h cached = lru_get(EMBED_CACHE, text)
     if cached != null { return cached }
-
-    h tokens = tokenize(text)
-    h dim = arr_len(FIB)
-    h embedding = []
-    h d = 0
-    while d < dim {
-        arr_push(embedding, 0.0)
-        d = d + 1
-    }
-
-    h ti = 0
-    while ti < arr_len(tokens) {
-        h token = tokens[ti]
-        h ci = 0
-        while ci < str_len(token) {
-            h char = str_slice(token, ci, ci + 1)
-            h fib_idx = (ti + ci) % dim
-            h signal = substrate_encode_char(char, ti * 7 + ci)
-            embedding[fib_idx] = embedding[fib_idx] + signal
-            ci = ci + 1
-        }
-        ti = ti + 1
-    }
-
-    # L2 normalize
-    h mag = 0.0
-    h di = 0
-    while di < dim {
-        mag = mag + embedding[di] * embedding[di]
-        di = di + 1
-    }
-    mag = math_sqrt(mag)
-    if mag > 0.0 {
-        di = 0
-        while di < dim {
-            embedding[di] = embedding[di] / mag
-            di = di + 1
-        }
-    }
-
-    lru_put(EMBED_CACHE, cache_key, embedding)
-    return embedding
+    h v = substrate_embed(text, 16)
+    lru_put(EMBED_CACHE, text, v)
+    return v
 }
 
 fn cosine_sim(a, b) {
@@ -91,7 +37,7 @@ fn docstore_new() {
 }
 
 fn docstore_add(store, text, meta) {
-    h embedding = substrate_embed(text)
+    h embedding = embed_cached(text)
     arr_push(store["docs"], text)
     arr_push(store["embeddings"], embedding)
     h m = meta
@@ -100,7 +46,7 @@ fn docstore_add(store, text, meta) {
 }
 
 fn docstore_search(store, query, top_k) {
-    h query_embed = substrate_embed(query)
+    h query_embed = embed_cached(query)
     h scores = []
     h i = 0
     while i < arr_len(store["docs"]) {
@@ -108,7 +54,7 @@ fn docstore_search(store, query, top_k) {
         arr_push(scores, {idx: i, score: sim})
         i = i + 1
     }
-    # sort descending
+    # bubble-sort descending
     h n = arr_len(scores)
     h si = 0
     while si < n {
@@ -144,33 +90,25 @@ fn docstore_search(store, query, top_k) {
 fn rag_answer(store, question, top_k, model) {
     h m = model
     if m == null { m = MODEL }
-
     h retrieved = docstore_search(store, question, top_k)
-
     h context_parts = []
     h i = 0
     while i < arr_len(retrieved) {
         arr_push(context_parts, str_concat(
-            "[Doc ", to_str(i + 1), " | similarity: ", to_str(retrieved[i]["score"]), "]\n",
+            "[Doc ", to_str(i + 1), " | sim=", to_str(retrieved[i]["score"]), "]\n",
             retrieved[i]["text"]
         ))
         i = i + 1
     }
     h context = arr_join(context_parts, "\n\n")
-
     h sys = "You are a helpful assistant. Answer questions based only on the provided context. Be concise."
     h prompt = str_concat(
         "Context:\n", context, "\n\n",
         "Question: ", question, "\n\n",
         "Answer based only on the context above."
     )
-
     h answer = llm_call(prompt, m, sys)
-    return {
-        answer: answer,
-        retrieved: retrieved,
-        question: question
-    }
+    return {answer: answer, retrieved: retrieved, question: question}
 }
 
 # ── Knowledge base ────────────────────────────────────────────────────────────
@@ -183,7 +121,7 @@ h DOCUMENTS = [
         meta: {source: "OMC intro", topic: "language"}
     },
     {
-        text: "The phi-pi-fibonacci substrate uses Fibonacci numbers [1,1,2,3,5,8,13,21,...], the golden ratio φ=1.618..., and π=3.14159... to create harmonic positional embeddings. These beat sinusoidal encodings in transformerless architectures.",
+        text: "The phi-pi-fibonacci substrate uses Fibonacci numbers [1,1,2,3,5,8,13,21,...], the golden ratio phi=1.618..., and pi=3.14159... to create harmonic positional embeddings. These beat sinusoidal encodings in transformerless architectures.",
         meta: {source: "substrate docs", topic: "math"}
     },
     {
@@ -195,7 +133,7 @@ h DOCUMENTS = [
         meta: {source: "builtins ref", topic: "meta"}
     },
     {
-        text: "par_map(fn, array) runs fn on each element of array in parallel. OMC also provides par_filter and par_reduce. These are sequential fallbacks since Value uses Rc/RefCell internally.",
+        text: "par_map(fn, array) runs fn on each element of array in parallel. OMC also provides par_filter and par_reduce. These enable fast batch LLM calls via batch_llm_call.",
         meta: {source: "stdlib ref", topic: "parallel"}
     },
     {
@@ -212,42 +150,72 @@ h DOCUMENTS = [
     }
 ]
 
-# Index documents
+# Index documents using native substrate_embed (no API key, pure math)
+print("=== Substrate RAG demo ===")
+print("Indexing documents with native substrate_embed (offline, no API key)...")
 h i = 0
 while i < arr_len(DOCUMENTS) {
     h doc = DOCUMENTS[i]
     docstore_add(KB, doc["text"], doc["meta"])
     i = i + 1
 }
-
-print(str_concat("Indexed ", to_str(arr_len(DOCUMENTS)), " documents with substrate embeddings"))
+print(str_concat("Indexed ", to_str(arr_len(DOCUMENTS)), " documents"))
 print("")
 
-# ── Demo queries ──────────────────────────────────────────────────────────────
+# ── Part 1: Pure substrate retrieval (offline) ────────────────────────────────
 
-h QUESTIONS = [
+print("--- Part 1: Offline substrate retrieval ---")
+h QUERIES = [
     "How does OMC call Claude?",
     "What is the phi-pi-fibonacci substrate?",
     "Can OMC use Python libraries?",
-    "How does recursive self-improvement work in OMC?",
-    "What is Prometheus in OMC?"
+    "How does recursive self-improvement work in OMC?"
 ]
 
 h qi = 0
-while qi < arr_len(QUESTIONS) {
-    h q = QUESTIONS[qi]
+while qi < arr_len(QUERIES) {
+    h q = QUERIES[qi]
+    h retrieved = docstore_search(KB, q, 1)
+    h top = retrieved[0]
     print(str_concat("Q: ", q))
-
-    # First show substrate retrieval
-    h retrieved = docstore_search(KB, q, 2)
-    print(str_concat("  Retrieved: '", str_slice(retrieved[0]["text"], 0, 60), "...' (sim=", to_str(retrieved[0]["score"]), ")"))
-
-    # Then get RAG answer
-    h result = rag_answer(KB, q, 2, null)
-    print(str_concat("  A: ", str_slice(result["answer"], 0, 120)))
+    print(str_concat("  Best match (sim=", to_str(top["score"]), "): '", str_slice(top["text"], 0, 80), "...'"))
     print("")
-
     qi = qi + 1
 }
 
-print("=== Substrate RAG demo complete ===")
+# ── Part 2: str_similarity demo (uses same substrate math) ───────────────────
+
+print("--- Part 2: str_similarity (same substrate math, no API) ---")
+h pairs = [
+    ["phi-pi-fibonacci harmonic embeddings", "Fibonacci golden ratio substrate math"],
+    ["phi-pi-fibonacci harmonic embeddings", "Python neural network PyTorch training"],
+    ["OMC self-hosting language", "OMC recursive self-improvement"],
+    ["OMC self-hosting language", "NFL football scores statistics"]
+]
+h pi2 = 0
+while pi2 < arr_len(pairs) {
+    h pair = pairs[pi2]
+    h sim = str_similarity(pair[0], pair[1])
+    print(str_concat("  '", str_slice(pair[0], 0, 35), "' vs '", str_slice(pair[1], 0, 35), "' => ", to_str(sim)))
+    pi2 = pi2 + 1
+}
+print("")
+
+# ── Part 3: Full RAG with LLM answer ─────────────────────────────────────────
+
+print("--- Part 3: RAG answer via LLM ---")
+h LLM_QUESTIONS = [
+    "How does recursive self-improvement work in OMC?",
+    "What is Prometheus in OMC?"
+]
+h lqi = 0
+while lqi < arr_len(LLM_QUESTIONS) {
+    h q = LLM_QUESTIONS[lqi]
+    print(str_concat("Q: ", q))
+    h result = rag_answer(KB, q, 2, null)
+    print(str_concat("A: ", str_slice(result["answer"], 0, 200)))
+    print("")
+    lqi = lqi + 1
+}
+
+print("=== Substrate RAG complete ===")
