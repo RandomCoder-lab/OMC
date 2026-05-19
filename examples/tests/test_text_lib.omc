@@ -1,0 +1,172 @@
+# Tests for examples/lib/text.omc
+
+import "examples/lib/text.omc" as text
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual))
+    }
+}
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg) } }
+fn assert_null(v, msg)    { if v != null { test_record_failure(msg + ": expected null") } }
+
+# ── tokenize ─────────────────────────────────────────────────────────────────
+
+fn test_tokenize_basic() {
+    h tokens = text.tokenize("Hello, world!")
+    assert_eq(arr_len(tokens), 2, "2 tokens")
+    assert_eq(tokens[0], "hello", "lowercased")
+    assert_eq(tokens[1], "world", "punctuation stripped")
+}
+
+fn test_tokenize_empty_string() {
+    h tokens = text.tokenize("")
+    assert_eq(arr_len(tokens), 0, "empty → 0 tokens")
+}
+
+fn test_tokenize_multiple_spaces() {
+    h tokens = text.tokenize("one two three")
+    assert_eq(arr_len(tokens), 3, "3 tokens")
+}
+
+# ── term_freq ─────────────────────────────────────────────────────────────────
+
+fn test_term_freq_counts() {
+    h tokens = ["a", "b", "a", "c", "a"]
+    h freq = text.term_freq(tokens)
+    assert_eq(freq["a"], 3, "a appears 3x")
+    assert_eq(freq["b"], 1, "b appears 1x")
+    assert_eq(freq["c"], 1, "c appears 1x")
+}
+
+fn test_term_freq_empty() {
+    h freq = text.term_freq([])
+    assert_eq(arr_len(dict_keys(freq)), 0, "empty → empty freq")
+}
+
+# ── TF-IDF ────────────────────────────────────────────────────────────────────
+
+fn test_tfidf_corpus_builds() {
+    h docs = ["the cat sat", "the dog ran", "a cat and a dog"]
+    h corpus = text.tfidf_corpus(docs)
+    assert_eq(corpus["n"], 3, "3 docs")
+    assert_true(dict_has(corpus["doc_freqs"], "cat"), "cat in doc_freqs")
+    assert_eq(corpus["doc_freqs"]["cat"], 2, "cat in 2 docs")
+}
+
+fn test_tfidf_score_returns_all_docs() {
+    h docs = ["apple pie", "cherry cake", "apple crumble"]
+    h corpus = text.tfidf_corpus(docs)
+    h scores = text.tfidf_score(corpus, "apple")
+    assert_eq(arr_len(scores), 3, "score for each doc")
+}
+
+fn test_tfidf_score_ranks_relevant_first() {
+    h docs = ["apple pie recipe", "cherry cake", "orange juice"]
+    h corpus = text.tfidf_corpus(docs)
+    h scores = text.tfidf_score(corpus, "apple pie")
+    assert_eq(scores[0]["doc_idx"], 0, "apple pie doc ranks first")
+}
+
+# ── BM25 ──────────────────────────────────────────────────────────────────────
+
+fn test_bm25_corpus_builds() {
+    h docs = ["the cat sat", "the dog ran"]
+    h corpus = text.bm25_corpus(docs, null, null)
+    assert_eq(corpus["n"], 2, "2 docs")
+    assert_true(corpus["avgdl"] > 0, "avgdl > 0")
+}
+
+fn test_bm25_score_ranks_relevant_first() {
+    h docs = ["quick brown fox", "lazy dog sleeps", "fox and hound"]
+    h corpus = text.bm25_corpus(docs, null, null)
+    h scores = text.bm25_score(corpus, "fox")
+    assert_eq(scores[0]["doc_idx"], 0, "fox-containing doc ranks first or tied-first")
+}
+
+fn test_bm25_score_count() {
+    h docs = ["a b c", "d e f", "g h i"]
+    h corpus = text.bm25_corpus(docs, 1.5, 0.75)
+    h scores = text.bm25_score(corpus, "a")
+    assert_eq(arr_len(scores), 3, "one score per doc")
+}
+
+# ── Levenshtein ───────────────────────────────────────────────────────────────
+
+fn test_levenshtein_identical() {
+    assert_eq(text.levenshtein("hello", "hello"), 0, "same string → 0")
+}
+
+fn test_levenshtein_empty() {
+    assert_eq(text.levenshtein("", "abc"), 3, "empty → len of other")
+    assert_eq(text.levenshtein("abc", ""), 3, "empty → len of self")
+}
+
+fn test_levenshtein_one_edit() {
+    assert_eq(text.levenshtein("cat", "bat"), 1, "one substitution")
+    assert_eq(text.levenshtein("cat", "cats"), 1, "one insertion")
+    assert_eq(text.levenshtein("cats", "cat"), 1, "one deletion")
+}
+
+# ── text_similarity ───────────────────────────────────────────────────────────
+
+fn test_similarity_identical() {
+    h s = text.text_similarity("hello", "hello")
+    assert_true(s > 0.99, "identical → similarity ~1.0")
+}
+
+fn test_similarity_different() {
+    h s = text.text_similarity("abc", "xyz")
+    assert_true(s < 0.5, "very different → low similarity")
+}
+
+# ── closest ───────────────────────────────────────────────────────────────────
+
+fn test_closest_finds_best() {
+    h result = text.closest("colour", ["color", "colon", "column"])
+    assert_eq(result["text_match"], "color", "colour closest to color")
+}
+
+fn test_closest_has_score() {
+    h result = text.closest("test", ["testing", "best", "rest"])
+    assert_true(result["score"] > 0.0, "score > 0")
+    assert_true(result["idx"] >= 0, "idx >= 0")
+}
+
+# ── chunk_fixed ───────────────────────────────────────────────────────────────
+
+fn test_chunk_fixed_basic() {
+    h chunks = text.chunk_fixed("one two three four five", 2, null)
+    assert_eq(arr_len(chunks), 3, "5 tokens / size 2 → 3 chunks")
+    assert_eq(chunks[0], "one two", "first chunk")
+}
+
+fn test_chunk_fixed_with_overlap() {
+    h chunks = text.chunk_fixed("a b c d e", 3, 1)
+    assert_true(arr_len(chunks) > 1, "overlap creates more chunks")
+}
+
+# ── chunk_sentences ───────────────────────────────────────────────────────────
+
+fn test_chunk_sentences_basic() {
+    h text_in = "Hello world. Goodbye world. How are you."
+    h chunks = text.chunk_sentences(text_in, null)
+    assert_true(arr_len(chunks) > 0, "at least one sentence chunk")
+}
+
+# ── ngrams ────────────────────────────────────────────────────────────────────
+
+fn test_ngrams_bigrams() {
+    h tokens = ["a", "b", "c", "d"]
+    h bi = text.ngrams(tokens, 2)
+    assert_eq(arr_len(bi), 3, "4 tokens → 3 bigrams")
+    assert_eq(bi[0][0], "a", "first bigram starts with a")
+    assert_eq(bi[0][1], "b", "first bigram ends with b")
+}
+
+fn test_ngrams_unigrams() {
+    h tokens = ["x", "y", "z"]
+    h uni = text.ngrams(tokens, 1)
+    assert_eq(arr_len(uni), 3, "3 unigrams")
+}

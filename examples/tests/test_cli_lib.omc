@@ -1,0 +1,160 @@
+# Tests for examples/lib/cli.omc
+
+import "examples/lib/cli.omc" as cli
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual))
+    }
+}
+
+fn assert_true(cond, msg)  { if !cond { test_record_failure(msg) } }
+fn assert_false(cond, msg) { if cond { test_record_failure(msg) } }
+
+# ── ANSI helpers ──────────────────────────────────────────────────────────────
+
+fn test_ansi_reset_nonempty() {
+    assert_true(str_len(cli.ansi_reset()) > 0, "ansi_reset returns non-empty string")
+}
+
+fn test_color_wraps_text() {
+    h s = cli.red("hello")
+    assert_true(str_contains(s, "hello"), "red() contains text")
+    assert_true(str_contains(s, cli.ansi_reset()), "red() ends with reset")
+}
+
+fn test_green_contains_text() {
+    h s = cli.green("ok")
+    assert_true(str_contains(s, "ok"), "green() contains text")
+}
+
+fn test_bold_contains_text() {
+    h s = cli.bold("title")
+    assert_true(str_contains(s, "title"), "bold() contains text")
+}
+
+# ── parse_args ────────────────────────────────────────────────────────────────
+
+fn test_parse_args_flag_only() {
+    h p = cli.parse_args(["--verbose"])
+    assert_eq(p["flags"]["verbose"], true, "--verbose → true")
+}
+
+fn test_parse_args_key_equals_value() {
+    h p = cli.parse_args(["--output=file.txt"])
+    assert_eq(p["flags"]["output"], "file.txt", "--output=file.txt")
+}
+
+fn test_parse_args_key_space_value() {
+    h p = cli.parse_args(["--output", "file.txt"])
+    assert_eq(p["flags"]["output"], "file.txt", "--output file.txt")
+}
+
+fn test_parse_args_short_flag() {
+    h p = cli.parse_args(["-v"])
+    assert_eq(p["flags"]["v"], true, "-v → true")
+}
+
+fn test_parse_args_positional() {
+    h p = cli.parse_args(["foo", "bar"])
+    assert_eq(arr_len(p["positional"]), 2, "2 positional args")
+    assert_eq(p["positional"][0], "foo", "first positional")
+}
+
+fn test_parse_args_mixed() {
+    h p = cli.parse_args(["--verbose", "--output=out.txt", "input.txt"])
+    assert_eq(p["flags"]["verbose"], true, "verbose flag (followed by another flag)")
+    assert_eq(p["flags"]["output"], "out.txt", "output value")
+    assert_eq(arr_len(p["positional"]), 1, "one positional")
+    assert_eq(p["positional"][0], "input.txt", "positional value")
+}
+
+fn test_flag_default() {
+    h p = cli.parse_args(["--verbose"])
+    h val = cli.flag(p, "missing", "default")
+    assert_eq(val, "default", "missing flag returns default")
+}
+
+fn test_flag_present() {
+    h p = cli.parse_args(["--mode=fast"])
+    h val = cli.flag(p, "mode", null)
+    assert_eq(val, "fast", "present flag returned")
+}
+
+# ── progress_bar ──────────────────────────────────────────────────────────────
+
+fn test_progress_bar_returns_string() {
+    h s = cli.progress_bar(5, 10, 20, null)
+    assert_true(str_len(s) > 0, "progress_bar returns non-empty")
+}
+
+fn test_progress_bar_contains_percent() {
+    h s = cli.progress_bar(5, 10, 20, null)
+    assert_true(str_contains(s, "50"), "50% shown")
+}
+
+fn test_progress_bar_with_label() {
+    h s = cli.progress_bar(3, 10, 20, "Loading")
+    assert_true(str_contains(s, "Loading"), "label in bar")
+}
+
+fn test_progress_bar_full() {
+    h s = cli.progress_bar(10, 10, 10, null)
+    assert_true(str_contains(s, "100"), "100% shown")
+}
+
+# ── table ─────────────────────────────────────────────────────────────────────
+
+fn test_table_has_separator() {
+    h headers = ["Name", "Age"]
+    h rows = [["Alice", 30], ["Bob", 25]]
+    h t = cli.table(headers, rows)
+    assert_true(str_contains(t, "+"), "table has separator")
+}
+
+fn test_table_has_headers() {
+    h headers = ["Name", "Score"]
+    h rows = [["Alice", 100]]
+    h t = cli.table(headers, rows)
+    assert_true(str_contains(t, "Name"), "header Name present")
+    assert_true(str_contains(t, "Score"), "header Score present")
+}
+
+fn test_table_has_cell_values() {
+    h headers = ["Key", "Val"]
+    h rows = [["x", "42"]]
+    h t = cli.table(headers, rows)
+    assert_true(str_contains(t, "42"), "cell value present")
+}
+
+fn test_table_empty_rows() {
+    h headers = ["Col1", "Col2"]
+    h t = cli.table(headers, [])
+    assert_true(str_contains(t, "Col1"), "headers present even with no rows")
+}
+
+# ── spinner_frame ─────────────────────────────────────────────────────────────
+
+fn test_spinner_frame_wraps() {
+    h frames = cli.spinner_frames()
+    h n = arr_len(frames)
+    assert_eq(cli.spinner_frame(0), frames[0], "frame 0")
+    assert_eq(cli.spinner_frame(n), frames[0], "frame n wraps to 0")
+}
+
+fn test_spinner_frame_count() {
+    h frames = cli.spinner_frames()
+    assert_true(arr_len(frames) > 4, "at least 5 spinner frames")
+}
+
+# ── _repeat (internal helper) ─────────────────────────────────────────────────
+
+fn test_box_contains_title() {
+    h b = cli.box("MyTitle", "some content here", null)
+    assert_true(str_contains(b, "MyTitle"), "box contains title")
+}
+
+fn test_box_contains_content() {
+    h b = cli.box("T", "hello world", 40)
+    assert_true(str_contains(b, "hello world"), "box contains content")
+}

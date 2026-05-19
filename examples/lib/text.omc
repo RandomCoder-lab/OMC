@@ -63,7 +63,7 @@ fn tfidf_corpus(docs) {
         h j = 0
         while j < arr_len(keys) {
             h k = keys[j]
-            if not dict_has(seen, k) {
+            if !dict_has(seen, k) {
                 seen[k] = true
                 if dict_has(doc_freqs, k) {
                     doc_freqs[k] = doc_freqs[k] + 1
@@ -154,7 +154,7 @@ fn bm25_corpus(docs, k1, b) {
         h j = 0
         while j < arr_len(keys) {
             h k = keys[j]
-            if not dict_has(seen, k) {
+            if !dict_has(seen, k) {
                 seen[k] = true
                 if dict_has(doc_freqs, k) {
                     doc_freqs[k] = doc_freqs[k] + 1
@@ -277,7 +277,7 @@ fn closest(query, candidates) {
         }
         i = i + 1
     }
-    return {match: best, score: best_score, idx: best_idx}
+    return {text_match: best, score: best_score, idx: best_idx}
 }
 
 # ── Chunking ─────────────────────────────────────────────────────────────────

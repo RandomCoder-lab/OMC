@@ -1,0 +1,251 @@
+# Tests for examples/lib/schema.omc
+
+import "examples/lib/schema.omc" as schema
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual))
+    }
+}
+
+fn assert_true(cond, msg)  { if !cond { test_record_failure(msg) } }
+fn assert_false(cond, msg) { if cond { test_record_failure(msg) } }
+
+# ── schema_type_of ────────────────────────────────────────────────────────────
+
+fn test_type_of_null()    { assert_eq(schema.schema_type_of(null),  "null",    "null type") }
+fn test_type_of_bool()    { assert_eq(schema.schema_type_of(true),  "boolean", "bool type") }
+fn test_type_of_int()     { assert_eq(schema.schema_type_of(42),    "number",  "int type") }
+fn test_type_of_float()   { assert_eq(schema.schema_type_of(3.14),  "number",  "float type") }
+fn test_type_of_string()  { assert_eq(schema.schema_type_of("hi"),  "string",  "string type") }
+fn test_type_of_array()   { assert_eq(schema.schema_type_of([1,2]), "array",   "array type") }
+fn test_type_of_object()  { assert_eq(schema.schema_type_of({a:1}), "object",  "object type") }
+
+# ── validate: type ────────────────────────────────────────────────────────────
+
+fn test_validate_type_string_ok() {
+    h r = schema.validate("hello", {type: "string"})
+    assert_true(r["ok"], "string validates as string")
+    assert_eq(arr_len(r["errors"]), 0, "no errors")
+}
+
+fn test_validate_type_string_fail() {
+    h r = schema.validate(42, {type: "string"})
+    assert_false(r["ok"], "int does not validate as string")
+    assert_true(arr_len(r["errors"]) > 0, "has errors")
+}
+
+fn test_validate_type_number_ok() {
+    h r = schema.validate(3.14, {type: "number"})
+    assert_true(r["ok"], "float validates as number")
+}
+
+fn test_validate_type_integer_ok() {
+    h r = schema.validate(5, {type: "integer"})
+    assert_true(r["ok"], "int validates as integer")
+}
+
+fn test_validate_type_boolean_ok() {
+    h r = schema.validate(true, {type: "boolean"})
+    assert_true(r["ok"], "true validates as boolean")
+}
+
+fn test_validate_type_null_ok() {
+    h r = schema.validate(null, {type: "null"})
+    assert_true(r["ok"], "null validates as null")
+}
+
+# ── validate: enum ────────────────────────────────────────────────────────────
+
+fn test_validate_enum_ok() {
+    h r = schema.validate("b", {enum: ["a", "b", "c"]})
+    assert_true(r["ok"], "b is in enum")
+}
+
+fn test_validate_enum_fail() {
+    h r = schema.validate("z", {enum: ["a", "b", "c"]})
+    assert_false(r["ok"], "z not in enum")
+}
+
+# ── validate: const ───────────────────────────────────────────────────────────
+
+fn test_validate_const_ok() {
+    h r = schema.validate(42, {const: 42})
+    assert_true(r["ok"], "const match")
+}
+
+fn test_validate_const_fail() {
+    h r = schema.validate(43, {const: 42})
+    assert_false(r["ok"], "const mismatch")
+}
+
+# ── validate: string constraints ──────────────────────────────────────────────
+
+fn test_validate_min_length_ok() {
+    h r = schema.validate("hello", {type: "string", minLength: 3})
+    assert_true(r["ok"], "5-char string >= minLength 3")
+}
+
+fn test_validate_min_length_fail() {
+    h r = schema.validate("hi", {type: "string", minLength: 5})
+    assert_false(r["ok"], "2-char string < minLength 5")
+}
+
+fn test_validate_max_length_ok() {
+    h r = schema.validate("hi", {type: "string", maxLength: 5})
+    assert_true(r["ok"], "2-char string <= maxLength 5")
+}
+
+fn test_validate_max_length_fail() {
+    h r = schema.validate("toolong", {type: "string", maxLength: 4})
+    assert_false(r["ok"], "7-char string > maxLength 4")
+}
+
+fn test_validate_pattern_ok() {
+    h r = schema.validate("hello world", {type: "string", pattern: "world"})
+    assert_true(r["ok"], "pattern found")
+}
+
+fn test_validate_pattern_fail() {
+    h r = schema.validate("hello", {type: "string", pattern: "xyz"})
+    assert_false(r["ok"], "pattern not found")
+}
+
+# ── validate: number constraints ──────────────────────────────────────────────
+
+fn test_validate_minimum_ok() {
+    h r = schema.validate(10, {type: "number", minimum: 5})
+    assert_true(r["ok"], "10 >= minimum 5")
+}
+
+fn test_validate_minimum_fail() {
+    h r = schema.validate(3, {type: "number", minimum: 5})
+    assert_false(r["ok"], "3 < minimum 5")
+}
+
+fn test_validate_maximum_ok() {
+    h r = schema.validate(4, {type: "number", maximum: 10})
+    assert_true(r["ok"], "4 <= maximum 10")
+}
+
+fn test_validate_maximum_fail() {
+    h r = schema.validate(15, {type: "number", maximum: 10})
+    assert_false(r["ok"], "15 > maximum 10")
+}
+
+# ── validate: array constraints ───────────────────────────────────────────────
+
+fn test_validate_min_items_ok() {
+    h r = schema.validate([1, 2, 3], {type: "array", minItems: 2})
+    assert_true(r["ok"], "3 items >= minItems 2")
+}
+
+fn test_validate_min_items_fail() {
+    h r = schema.validate([1], {type: "array", minItems: 2})
+    assert_false(r["ok"], "1 item < minItems 2")
+}
+
+fn test_validate_items_schema() {
+    h r = schema.validate([1, 2, 3], {type: "array", items: {type: "number"}})
+    assert_true(r["ok"], "array of numbers valid")
+}
+
+fn test_validate_items_schema_fail() {
+    h r = schema.validate([1, "two", 3], {type: "array", items: {type: "number"}})
+    assert_false(r["ok"], "mixed array invalid for number items")
+}
+
+# ── validate: object constraints ──────────────────────────────────────────────
+
+fn test_validate_required_ok() {
+    h r = schema.validate({name: "alice", age: 30}, {type: "object", required: ["name", "age"]})
+    assert_true(r["ok"], "all required fields present")
+}
+
+fn test_validate_required_fail() {
+    h r = schema.validate({name: "alice"}, {type: "object", required: ["name", "age"]})
+    assert_false(r["ok"], "missing required field age")
+}
+
+fn test_validate_properties() {
+    h props = {name: {type: "string"}, age: {type: "number"}}
+    h r = schema.validate({name: "bob", age: 25}, {type: "object", properties: props})
+    assert_true(r["ok"], "properties validate correctly")
+}
+
+# ── coerce ────────────────────────────────────────────────────────────────────
+
+fn test_coerce_to_string() {
+    h v = schema.coerce(42, {type: "string"})
+    assert_eq(v, "42", "int coerced to string")
+}
+
+fn test_coerce_string_to_number() {
+    h v = schema.coerce("3.14", {type: "number"})
+    assert_true(v > 3.13 and v < 3.15, "string coerced to float")
+}
+
+fn test_coerce_string_to_int() {
+    h v = schema.coerce("7", {type: "integer"})
+    assert_eq(v, 7, "string coerced to int")
+}
+
+fn test_coerce_no_type_passthrough() {
+    h v = schema.coerce("hello", {})
+    assert_eq(v, "hello", "no type schema → passthrough")
+}
+
+# ── schema_* helpers ──────────────────────────────────────────────────────────
+
+fn test_schema_string_helper() {
+    h s = schema.schema_string(2, 10)
+    assert_eq(s["type"], "string", "schema_string type")
+    assert_eq(s["minLength"], 2, "minLength set")
+    assert_eq(s["maxLength"], 10, "maxLength set")
+}
+
+fn test_schema_number_helper() {
+    h s = schema.schema_number(0, 100)
+    assert_eq(s["type"], "number", "schema_number type")
+    assert_eq(s["minimum"], 0, "minimum set")
+    assert_eq(s["maximum"], 100, "maximum set")
+}
+
+fn test_schema_object_helper() {
+    h s = schema.schema_object(["id"], {id: {type: "string"}})
+    assert_eq(s["type"], "object", "schema_object type")
+    assert_true(arr_len(s["required"]) == 1, "required set")
+}
+
+fn test_schema_array_helper() {
+    h s = schema.schema_array({type: "number"}, 1, 5)
+    assert_eq(s["type"], "array", "schema_array type")
+    assert_eq(s["minItems"], 1, "minItems set")
+}
+
+fn test_schema_enum_helper() {
+    h s = schema.schema_enum(["a", "b"])
+    assert_eq(arr_len(s["enum"]), 2, "enum has 2 values")
+}
+
+# ── assert_valid ──────────────────────────────────────────────────────────────
+
+fn test_assert_valid_passes() {
+    h err = ""
+    try {
+        schema.assert_valid("hello", {type: "string"})
+    } catch e {
+        err = e
+    }
+    assert_eq(err, "", "assert_valid passes silently")
+}
+
+fn test_assert_valid_throws() {
+    h err = ""
+    try {
+        schema.assert_valid(42, {type: "string"})
+    } catch e {
+        err = e
+    }
+    assert_true(str_len(err) > 0, "assert_valid throws on failure")
+}

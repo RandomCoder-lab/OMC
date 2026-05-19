@@ -39,7 +39,7 @@ fn _validate_node(value, schema, path, errors) {
             if expected_type == "integer" and actual_type == "number" and type_of(value) == "int" { ok = true }
             if expected_type == "number" and (actual_type == "number") { ok = true }
         }
-        if not ok {
+        if !ok {
             h loc = path
             if str_len(loc) == 0 { loc = "(root)" }
             arr_push(errors, str_concat(loc, ": expected ", to_str(expected_type), ", got ", actual_type))
@@ -55,7 +55,7 @@ fn _validate_node(value, schema, path, errors) {
             if allowed[ei] == value { found = true }
             ei = ei + 1
         }
-        if not found {
+        if !found {
             h loc = path
             if str_len(loc) == 0 { loc = "(root)" }
             arr_push(errors, str_concat(loc, ": value not in enum"))
@@ -85,7 +85,7 @@ fn _validate_node(value, schema, path, errors) {
         }
         if dict_has(schema, "pattern") {
             h pat = schema["pattern"]
-            if not str_contains(value, pat) {
+            if !str_contains(value, pat) {
                 arr_push(errors, str_concat(path, ": string does not match pattern"))
             }
         }
@@ -161,7 +161,7 @@ fn _validate_node(value, schema, path, errors) {
             h req = schema["required"]
             h ri = 0
             while ri < arr_len(req) {
-                if not dict_has(value, req[ri]) {
+                if !dict_has(value, req[ri]) {
                     arr_push(errors, str_concat(path, ": missing required field '", req[ri], "'"))
                 }
                 ri = ri + 1
@@ -196,7 +196,7 @@ fn _validate_node(value, schema, path, errors) {
 
 # coerce(value, schema) → value (best-effort type coercion)
 fn coerce(value, schema) {
-    if not dict_has(schema, "type") { return value }
+    if !dict_has(schema, "type") { return value }
     h t = schema["type"]
     h actual = schema_type_of(value)
     if t == "string" and actual != "string" { return to_str(value) }
@@ -256,7 +256,7 @@ fn schema_enum(values) {
 # assert_valid(value, schema) — raises error if invalid
 fn assert_valid(value, schema) {
     h result = validate(value, schema)
-    if not result["ok"] {
+    if !result["ok"] {
         h msg = str_concat("Schema validation failed:\n", arr_join(result["errors"], "\n"))
         error(msg)
     }
