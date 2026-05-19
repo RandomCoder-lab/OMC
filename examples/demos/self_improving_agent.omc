@@ -47,7 +47,7 @@ fn run_test(code, test_case) {
         "__test_result"
     )
     h result = safe_eval(full_code)
-    if not result["ok"] {
+    if !result["ok"] {
         return {passed: false, error: result["error"], expected: test_case["expected"], got: null}
     }
     h passed = result["value"] == test_case["expected"]
@@ -59,7 +59,7 @@ fn run_all_tests(code, tests) {
     h i = 0
     while i < arr_len(tests) {
         h r = run_test(code, tests[i])
-        if not r["passed"] {
+        if !r["passed"] {
             arr_push(failures, {
                 test_idx: i,
                 expected: r["expected"],

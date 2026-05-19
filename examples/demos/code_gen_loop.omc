@@ -82,7 +82,7 @@ fn code_gen_loop(task_description, eval_prompt_template, generations) {
         # Try to run it
         h run_result = safe_run(current_code, "")
         h run_status = "ok"
-        if not run_result["ok"] { run_status = to_str(run_result["error"]) }
+        if !run_result["ok"] { run_status = to_str(run_result["error"]) }
         print(str_concat("  Run status: ", run_status))
 
         arr_push(history, {
