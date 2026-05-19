@@ -1,0 +1,146 @@
+# Tests for examples/lib/graph.omc
+
+import "examples/lib/graph.omc" as graph
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+fn assert_null(v, msg)    { if v != null { test_record_failure(msg + ": expected null"); } }
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+fn make_triangle() {
+    h g = graph.graph_new()
+    graph.graph_add_node(g, "a", null)
+    graph.graph_add_node(g, "b", null)
+    graph.graph_add_node(g, "c", null)
+    graph.graph_add_edge(g, "a", "b", 1)
+    graph.graph_add_edge(g, "b", "c", 2)
+    graph.graph_add_edge(g, "a", "c", 5)
+    return g
+}
+
+fn make_line() {
+    h g = graph.graph_new()
+    graph.graph_add_node(g, "1", null)
+    graph.graph_add_node(g, "2", null)
+    graph.graph_add_node(g, "3", null)
+    graph.graph_add_edge(g, "1", "2", 1)
+    graph.graph_add_edge(g, "2", "3", 1)
+    return g
+}
+
+# ── BFS ───────────────────────────────────────────────────────────────────────
+
+fn test_bfs_visits_all_reachable() {
+    h g = make_triangle()
+    h order = graph.bfs(g, "a")
+    assert_eq(arr_len(order), 3, "bfs visits 3 nodes")
+    assert_eq(order[0], "a", "bfs starts at a")
+}
+
+fn test_bfs_path_finds_route() {
+    h g = make_triangle()
+    h path = graph.bfs_path(g, "a", "c")
+    assert_true(path != null, "path found")
+    assert_eq(path[0], "a", "path starts at a")
+    h last = path[arr_len(path) - 1]
+    assert_eq(last, "c", "path ends at c")
+}
+
+fn test_bfs_path_unreachable_returns_null() {
+    h g = graph.graph_new()
+    graph.graph_add_node(g, "x", null)
+    graph.graph_add_node(g, "y", null)
+    assert_null(graph.bfs_path(g, "x", "y"), "no edge → null path")
+}
+
+# ── DFS ───────────────────────────────────────────────────────────────────────
+
+fn test_dfs_visits_all() {
+    h g = make_triangle()
+    h order = graph.dfs(g, "a")
+    assert_eq(arr_len(order), 3, "dfs visits 3 nodes")
+    assert_eq(order[0], "a", "dfs starts at a")
+}
+
+# ── Dijkstra ──────────────────────────────────────────────────────────────────
+
+fn test_dijkstra_distances() {
+    h g = make_triangle()
+    h d = graph.dijkstra(g, "a")
+    assert_eq(d["dist"]["a"], 0, "dist to start = 0")
+    assert_eq(d["dist"]["b"], 1, "dist a→b = 1")
+    assert_eq(d["dist"]["c"], 3, "dist a→b→c = 3 (cheaper than direct 5)")
+}
+
+fn test_shortest_path_nodes() {
+    h g = make_triangle()
+    h path = graph.shortest_path(g, "a", "c")
+    assert_true(path != null, "path exists")
+    assert_eq(path[0], "a", "start")
+    assert_eq(path[arr_len(path) - 1], "c", "end")
+    assert_eq(arr_len(path), 3, "a→b→c is 3 hops")
+}
+
+fn test_shortest_path_same_node() {
+    h g = make_triangle()
+    h path = graph.shortest_path(g, "a", "a")
+    assert_true(path != null, "trivial path")
+    assert_eq(arr_len(path), 1, "just [a]")
+}
+
+# ── Topological sort ──────────────────────────────────────────────────────────
+
+fn test_toposort_linear() {
+    h g = make_line()
+    h order = graph.toposort(g)
+    assert_eq(order[0], "1", "topo start")
+    assert_eq(order[arr_len(order) - 1], "3", "topo end")
+}
+
+# ── Cycle detection ───────────────────────────────────────────────────────────
+
+fn test_has_cycle_false_on_dag() {
+    h g = make_line()
+    assert_eq(graph.has_cycle(g), false, "DAG has no cycle")
+}
+
+fn test_has_cycle_true_on_cycle() {
+    h g = make_line()
+    graph.graph_add_edge(g, "3", "1", 1)
+    assert_eq(graph.has_cycle(g), true, "loop back → cycle")
+}
+
+# ── Connected components ──────────────────────────────────────────────────────
+
+fn test_connected_components_two() {
+    h g = graph.graph_new_undirected()
+    graph.graph_add_node(g, "a", null)
+    graph.graph_add_node(g, "b", null)
+    graph.graph_add_node(g, "c", null)
+    graph.graph_add_node(g, "d", null)
+    graph.graph_add_edge(g, "a", "b", 1)
+    graph.graph_add_edge(g, "c", "d", 1)
+    h cc = graph.connected_components(g)
+    assert_eq(arr_len(cc), 2, "2 components")
+}
+
+# ── PageRank ──────────────────────────────────────────────────────────────────
+
+fn test_pagerank_sums_to_one() {
+    h g = make_triangle()
+    h pr = graph.pagerank(g, 0.85, 50)
+    h total = pr["a"] + pr["b"] + pr["c"]
+    assert_true(total > 0.99 and total < 1.01, "PageRank sums to ~1.0")
+}
+
+fn test_pagerank_node_count() {
+    h g = make_triangle()
+    h pr = graph.pagerank(g, null, null)
+    assert_eq(arr_len(dict_keys(pr)), 3, "3 node ranks")
+}

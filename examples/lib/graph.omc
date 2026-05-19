@@ -1,4 +1,4 @@
-# graph.omc — graph algorithms: BFS, DFS, Dijkstra, toposort, PageRank, SCC
+# graph.omc — graph algorithms: BFS, DFS, Dijkstra, toposort, PageRank, connected components
 
 # ── Graph construction ──────────────────────────────────────────────────────
 
@@ -13,29 +13,29 @@ fn graph_new_undirected() {
 
 # graph_add_node(g, id, data?)
 fn graph_add_node(g, id, data) {
-    h key = to_str(id)
+    h key = to_string(id)
     g["nodes"][key] = data
-    if not dict_has(g["edges"], key) {
+    if !dict_has(g["edges"], key) {
         g["edges"][key] = []
     }
 }
 
 # graph_add_edge(g, from, to, weight?)
 fn graph_add_edge(g, from_node, to_node, weight) {
-    h f = to_str(from_node)
-    h t = to_str(to_node)
+    h f = to_string(from_node)
+    h t = to_string(to_node)
     h w = weight
     if w == null { w = 1 }
-    if not dict_has(g["edges"], f) { g["edges"][f] = [] }
-    if not dict_has(g["edges"], t) { g["edges"][t] = [] }
+    if !dict_has(g["edges"], f) { g["edges"][f] = [] }
+    if !dict_has(g["edges"], t) { g["edges"][t] = [] }
     arr_push(g["edges"][f], {to: t, weight: w})
-    if not g["directed"] {
+    if !g["directed"] {
         arr_push(g["edges"][t], {to: f, weight: w})
     }
 }
 
 fn graph_neighbors(g, node) {
-    h key = to_str(node)
+    h key = to_string(node)
     if dict_has(g["edges"], key) { return g["edges"][key] }
     return []
 }
@@ -45,9 +45,9 @@ fn graph_neighbors(g, node) {
 # bfs(g, start) → [node_ids in visit order]
 fn bfs(g, start) {
     h visited = {}
-    h queue = [to_str(start)]
+    h queue = [to_string(start)]
     h order = []
-    visited[to_str(start)] = true
+    visited[to_string(start)] = true
     while arr_len(queue) > 0 {
         h current = queue[0]
         queue = arr_slice(queue, 1, arr_len(queue))
@@ -56,7 +56,7 @@ fn bfs(g, start) {
         h i = 0
         while i < arr_len(neighbors) {
             h nb = neighbors[i]["to"]
-            if not dict_has(visited, nb) {
+            if !dict_has(visited, nb) {
                 visited[nb] = true
                 arr_push(queue, nb)
             }
@@ -66,13 +66,13 @@ fn bfs(g, start) {
     return order
 }
 
-# bfs_path(g, start, end) → [path] or null
+# bfs_path(g, start, goal) → [path] or null
 fn bfs_path(g, start, goal) {
     h visited = {}
     h parent = {}
-    h queue = [to_str(start)]
-    h s = to_str(start)
-    h e = to_str(goal)
+    h queue = [to_string(start)]
+    h s = to_string(start)
+    h e = to_string(goal)
     visited[s] = true
     parent[s] = null
     while arr_len(queue) > 0 {
@@ -91,7 +91,7 @@ fn bfs_path(g, start, goal) {
         h i = 0
         while i < arr_len(neighbors) {
             h nb = neighbors[i]["to"]
-            if not dict_has(visited, nb) {
+            if !dict_has(visited, nb) {
                 visited[nb] = true
                 parent[nb] = current
                 arr_push(queue, nb)
@@ -111,7 +111,7 @@ fn _dfs_visit(g, node, visited, order) {
     h i = 0
     while i < arr_len(neighbors) {
         h nb = neighbors[i]["to"]
-        if not dict_has(visited, nb) {
+        if !dict_has(visited, nb) {
             _dfs_visit(g, nb, visited, order)
         }
         i = i + 1
@@ -122,39 +122,39 @@ fn _dfs_visit(g, node, visited, order) {
 fn dfs(g, start) {
     h visited = {}
     h order = []
-    _dfs_visit(g, to_str(start), visited, order)
+    _dfs_visit(g, to_string(start), visited, order)
     return order
 }
 
 # ── Topological sort ─────────────────────────────────────────────────────────
 
-fn _topo_visit(g, node, visited, stack, cyclic) {
-    if dict_has(cyclic, node) { return }
-    if dict_has(visited, node) { return }
-    cyclic[node] = true
+fn _topo_visit(g, node, visited, stack, in_progress) {
+    if dict_has(in_progress, node) { return null; }
+    if dict_has(visited, node) { return null; }
+    in_progress[node] = true
     h neighbors = graph_neighbors(g, node)
     h i = 0
     while i < arr_len(neighbors) {
         h nb = neighbors[i]["to"]
-        _topo_visit(g, nb, visited, stack, cyclic)
+        _topo_visit(g, nb, visited, stack, in_progress)
         i = i + 1
     }
-    dict_delete(cyclic, node)
+    dict_delete(in_progress, node)
     visited[node] = true
     arr_push(stack, node)
 }
 
-# toposort(g) → [node_ids] in topological order, or null if cycle
+# toposort(g) → [node_ids] in topological order
 fn toposort(g) {
     h visited = {}
     h stack = []
-    h cyclic = {}
+    h in_progress = {}
     h nodes = dict_keys(g["nodes"])
     h i = 0
     while i < arr_len(nodes) {
         h n = nodes[i]
-        if not dict_has(visited, n) {
-            _topo_visit(g, n, visited, stack, cyclic)
+        if !dict_has(visited, n) {
+            _topo_visit(g, n, visited, stack, in_progress)
         }
         i = i + 1
     }
@@ -165,7 +165,7 @@ fn toposort(g) {
 
 # dijkstra(g, start) → {dist: {node: dist}, prev: {node: prev}}
 fn dijkstra(g, start) {
-    h s = to_str(start)
+    h s = to_string(start)
     h dist = {}
     h prev = {}
     h unvisited = []
@@ -180,7 +180,6 @@ fn dijkstra(g, start) {
     }
     dist[s] = 0
     while arr_len(unvisited) > 0 {
-        # find min dist unvisited node
         h u = null
         h min_d = 999999999
         h j = 0
@@ -193,7 +192,6 @@ fn dijkstra(g, start) {
             j = j + 1
         }
         if u == null { break }
-        # remove u from unvisited
         h new_unvisited = []
         h k = 0
         while k < arr_len(unvisited) {
@@ -202,27 +200,29 @@ fn dijkstra(g, start) {
         }
         unvisited = new_unvisited
         h neighbors = graph_neighbors(g, u)
-        h n = 0
-        while n < arr_len(neighbors) {
-            h edge = neighbors[n]
+        h n2 = 0
+        while n2 < arr_len(neighbors) {
+            h edge = neighbors[n2]
             h v = edge["to"]
-            h alt = dist[u] + edge["weight"]
-            if alt < dist[v] {
-                dist[v] = alt
-                prev[v] = u
+            if dict_has(dist, v) {
+                h alt = dist[u] + edge["weight"]
+                if alt < dist[v] {
+                    dist[v] = alt
+                    prev[v] = u
+                }
             }
-            n = n + 1
+            n2 = n2 + 1
         }
     }
     return {dist: dist, prev: prev}
 }
 
-# shortest_path(g, start, end) → [path] or null
+# shortest_path(g, start, goal) → [path] or null
 fn shortest_path(g, start, goal) {
     h result = dijkstra(g, start)
     h prev = result["prev"]
-    h e = to_str(goal)
-    if prev[e] == null and e != to_str(start) { return null }
+    h e = to_string(goal)
+    if prev[e] == null and e != to_string(start) { return null; }
     h path = []
     h node = e
     while node != null {
@@ -290,7 +290,7 @@ fn connected_components(g) {
     h i = 0
     while i < arr_len(nodes) {
         h n = nodes[i]
-        if not dict_has(visited, n) {
+        if !dict_has(visited, n) {
             h order = []
             _dfs_visit(g, n, visited, order)
             arr_push(components, order)
@@ -300,33 +300,36 @@ fn connected_components(g) {
     return components
 }
 
+# ── Cycle detection ──────────────────────────────────────────────────────────
+
+fn _cycle_check(g, node, visited, rec_stack) {
+    visited[node] = true
+    rec_stack[node] = true
+    h neighbors = graph_neighbors(g, node)
+    h i = 0
+    while i < arr_len(neighbors) {
+        h nb = neighbors[i]["to"]
+        if !dict_has(visited, nb) {
+            if _cycle_check(g, nb, visited, rec_stack) { return true }
+        } elif dict_has(rec_stack, nb) {
+            return true
+        }
+        i = i + 1
+    }
+    dict_delete(rec_stack, node)
+    return false
+}
+
 # has_cycle(g) → bool
 fn has_cycle(g) {
     h visited = {}
     h rec_stack = {}
-    fn _cycle_check(node) {
-        visited[node] = true
-        rec_stack[node] = true
-        h neighbors = graph_neighbors(g, node)
-        h i = 0
-        while i < arr_len(neighbors) {
-            h nb = neighbors[i]["to"]
-            if not dict_has(visited, nb) {
-                if _cycle_check(nb) { return true }
-            } else if dict_has(rec_stack, nb) {
-                return true
-            }
-            i = i + 1
-        }
-        dict_delete(rec_stack, node)
-        return false
-    }
     h nodes = dict_keys(g["nodes"])
     h i = 0
     while i < arr_len(nodes) {
         h n = nodes[i]
-        if not dict_has(visited, n) {
-            if _cycle_check(n) { return true }
+        if !dict_has(visited, n) {
+            if _cycle_check(g, n, visited, rec_stack) { return true }
         }
         i = i + 1
     }
