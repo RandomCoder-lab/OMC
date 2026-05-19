@@ -1,0 +1,134 @@
+# best_of_n_improve.omc — recursive self-improvement via best-of-N selection
+#
+# For each task:
+#   1. Generate N candidate solutions via batch_llm_call
+#   2. Judge all candidates via llm_judge
+#   3. Keep the best, pass it as context for next round
+#   4. Repeat until score >= threshold or max_rounds reached
+#
+# This demonstrates the core self-improvement loop using:
+#   batch_llm_call, llm_judge, eval_omc, json_extract
+
+fn extract_code(text) {
+    if str_contains(text, "```") {
+        h parts = str_split(text, "```")
+        if arr_len(parts) >= 3 {
+            h block = parts[1]
+            if str_contains(block, "\n") {
+                h lines = str_split(block, "\n")
+                h rest = []
+                h i = 1
+                while i < arr_len(lines) {
+                    arr_push(rest, lines[i])
+                    i = i + 1
+                }
+                return str_trim(arr_join(rest, "\n"))
+            }
+            return str_trim(block)
+        }
+    }
+    return str_trim(text)
+}
+
+fn get_best(scored) {
+    if arr_len(scored) == 0 { return null }
+    h best_score = -1
+    h best_idx = 0
+    h i = 0
+    while i < arr_len(scored) {
+        h entry = scored[i]
+        h s = 0
+        if dict_has(entry, "score") { s = entry["score"] }
+        if s > best_score {
+            best_score = s
+            best_idx = i
+        }
+        i = i + 1
+    }
+    return {idx: best_idx, score: best_score}
+}
+
+fn best_of_n_improve(task, n_candidates, criteria, max_rounds, threshold) {
+    print(str_concat("=== Task: ", task, " ==="))
+    print(str_concat("N candidates: ", to_str(n_candidates), "  Max rounds: ", to_str(max_rounds)))
+    print("")
+
+    h sys = "You are an expert OMC programmer. OMC uses h for variables (h x = 5), fn for functions. Write complete runnable code. Put code in ```omc blocks."
+    h best_code = ""
+    h best_score = 0
+
+    h round = 0
+    while round < max_rounds {
+        h prompt = str_concat("Write OMC code to: ", task)
+        if best_code != "" {
+            prompt = str_concat(prompt,
+                "\n\nPrevious best attempt (score ", to_str(best_score), "/10):\n```omc\n",
+                best_code, "\n```\nImprove it.")
+        }
+
+        print(str_concat("Round ", to_str(round + 1), ": generating ", to_str(n_candidates), " candidates..."))
+
+        h prompts = arr_fill({prompt: prompt, system: sys}, n_candidates)
+        h responses = batch_llm_call(prompts)
+
+        h candidates = par_map(responses, fn(r) { return extract_code(r) })
+
+        print("Judging candidates...")
+        h scores = llm_judge(candidates, criteria)
+
+        h best = get_best(scores)
+        if best == null {
+            print("Judge failed to score, skipping round")
+            round = round + 1
+            continue
+        }
+
+        h new_score = best["score"]
+        h new_idx = best["idx"]
+        h new_code = candidates[new_idx]
+
+        print(str_concat("Best this round: score=", to_str(new_score), "/10"))
+        print(str_concat("Code preview: ", str_slice(new_code, 0, 80)))
+
+        if new_score > best_score {
+            best_score = new_score
+            best_code = new_code
+        }
+
+        if best_score >= threshold {
+            print(str_concat("CONVERGED at score ", to_str(best_score), "/10"))
+            return {code: best_code, score: best_score, rounds: round + 1}
+        }
+
+        round = round + 1
+    }
+
+    print(str_concat("Max rounds reached. Final score: ", to_str(best_score), "/10"))
+    return {code: best_code, score: best_score, rounds: max_rounds}
+}
+
+# ── Task 1: fibonacci ─────────────────────────────────────────────────────────
+h r1 = best_of_n_improve(
+    "compute the Nth Fibonacci number recursively",
+    3,
+    "correctness: handles fib(0)=0, fib(1)=1, fib(10)=55; code quality; efficiency",
+    3,
+    8
+)
+print(str_concat("Final code (", to_str(str_len(r1["code"])), " chars):"))
+print(r1["code"])
+print("")
+
+# ── Task 2: word count ────────────────────────────────────────────────────────
+h r2 = best_of_n_improve(
+    "count words in a string (split on spaces, return count)",
+    3,
+    "correctness for edge cases: empty string, single word, multiple spaces; code clarity",
+    2,
+    8
+)
+print(str_concat("Final code (", to_str(str_len(r2["code"])), " chars):"))
+print(r2["code"])
+print("")
+
+print("=== best_of_n_improve complete ===")
