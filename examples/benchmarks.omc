@@ -46,8 +46,8 @@ fn bench_int_add(n) {
     h i = 0;
     h sum = 0;
     while i < n {
-        sum = sum + i;
-        i = i + 1;
+        sum += i;
+        i += 1;
     }
     return sum;
 }
@@ -56,8 +56,8 @@ fn bench_int_mul(n) {
     h i = 0;
     h prod = 1;
     while i < n {
-        prod = prod + (i * 3);
-        i = i + 1;
+        prod += (i * 3);
+        i += 1;
     }
     return prod;
 }
@@ -67,7 +67,7 @@ fn bench_str_concat(n) {
     h i = 0;
     while i < n {
         s = str_concat(s, "a");
-        i = i + 1;
+        i += 1;
     }
     return str_len(s);
 }
@@ -78,7 +78,7 @@ fn bench_str_split_join(n) {
     while i < n {
         h parts = str_split(base, " ");
         h joined = str_join(parts, ",");
-        i = i + 1;
+        i += 1;
     }
     return n;
 }
@@ -88,13 +88,13 @@ fn bench_arr_push_walk(n) {
     h i = 0;
     while i < n {
         arr_push(arr, i);
-        i = i + 1;
+        i += 1;
     }
     h sum = 0;
     h j = 0;
     while j < arr_len(arr) {
-        sum = sum + arr_get(arr, j);
-        j = j + 1;
+        sum += arr_get(arr, j);
+        j += 1;
     }
     return sum;
 }
@@ -113,9 +113,9 @@ fn bench_is_fibonacci(n) {
     h i = 0;
     while i < n {
         if is_fibonacci(i) {
-            hits = hits + 1;
+            hits += 1;
         }
-        i = i + 1;
+        i += 1;
     }
     return hits;
 }
@@ -125,7 +125,7 @@ fn bench_harmony_value(n) {
     h i = 0;
     while i < n {
         h r = harmony_value(i);
-        i = i + 1;
+        i += 1;
     }
     return total;
 }
@@ -205,7 +205,7 @@ fn _hof_add(a, b) { return a + b; }
 fn _hof_build_xs(n) {
     h xs = [];
     h i = 0;
-    while i < n { arr_push(xs, i); i = i + 1; }
+    while i < n { arr_push(xs, i); i += 1; }
     return xs;
 }
 
@@ -215,7 +215,7 @@ fn bench_hof_map(reps) {
     h i = 0;
     while i < reps {
         h ys = arr_map(_hof_xs, _hof_double);
-        i = i + 1;
+        i += 1;
     }
     return reps;
 }
@@ -224,7 +224,7 @@ fn bench_hof_filter(reps) {
     h i = 0;
     while i < reps {
         h ys = arr_filter(_hof_xs, _hof_is_even);
-        i = i + 1;
+        i += 1;
     }
     return reps;
 }
@@ -233,7 +233,7 @@ fn bench_hof_reduce(reps) {
     h i = 0;
     while i < reps {
         h s = arr_reduce(_hof_xs, _hof_add, 0);
-        i = i + 1;
+        i += 1;
     }
     return reps;
 }

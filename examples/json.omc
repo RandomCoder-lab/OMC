@@ -38,7 +38,7 @@ fn make_cursor(src) {
         if pos < len {
             c = str_slice(src, pos, pos + 1);
         }
-        pos = pos + 1;
+        pos += 1;
         return c;
     };
     h eof = fn() {
@@ -98,15 +98,15 @@ fn parse_string(c) {
         if ch == "\"" { return out; }
         if ch == "\\" {
             h esc = c_advance(c);
-            if esc == "n" { out = out + "\n"; }
-            else { if esc == "t" { out = out + "\t"; }
-            else { if esc == "r" { out = out + "\r"; }
-            else { if esc == "\"" { out = out + "\""; }
-            else { if esc == "\\" { out = out + "\\"; }
+            if esc == "n" { out += "\n"; }
+            else { if esc == "t" { out += "\t"; }
+            else { if esc == "r" { out += "\r"; }
+            else { if esc == "\"" { out += "\""; }
+            else { if esc == "\\" { out += "\\"; }
             else { error(concat_many("bad escape: \\", esc)); } } } } }
         }
         else {
-            out = out + ch;
+            out += ch;
         }
     }
     error("unterminated string");
@@ -141,7 +141,7 @@ fn parse_literal(c, word, value) {
         if c_advance(c) != str_slice(word, i, i + 1) {
             error(concat_many("expected literal '", word, "' at pos ", start));
         }
-        i = i + 1;
+        i += 1;
     }
     return value;
 }
@@ -227,13 +227,13 @@ fn json_escape(s) {
     h i = 0;
     while i < n {
         h ch = str_slice(s, i, i + 1);
-        if ch == "\"" { out = out + "\\\""; }
-        else { if ch == "\\" { out = out + "\\\\"; }
-        else { if ch == "\n" { out = out + "\\n"; }
-        else { if ch == "\t" { out = out + "\\t"; }
-        else { if ch == "\r" { out = out + "\\r"; }
-        else { out = out + ch; } } } } }
-        i = i + 1;
+        if ch == "\"" { out += "\\\""; }
+        else { if ch == "\\" { out += "\\\\"; }
+        else { if ch == "\n" { out += "\\n"; }
+        else { if ch == "\t" { out += "\\t"; }
+        else { if ch == "\r" { out += "\\r"; }
+        else { out += ch; } } } } }
+        i += 1;
     }
     return out;
 }
@@ -260,7 +260,7 @@ fn json_stringify(v) {
             h k = arr_get(ks, i);
             h vv = dict_get(v, k);
             arr_push(pairs, concat_many("\"", json_escape(k), "\":", json_stringify(vv)));
-            i = i + 1;
+            i += 1;
         }
         return concat_many("{", arr_join(pairs, ","), "}");
     }

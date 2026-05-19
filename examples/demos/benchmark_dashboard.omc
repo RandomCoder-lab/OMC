@@ -3,6 +3,10 @@
 
 import "examples/lib/cli.omc"
 
+fn red(s)   { return str_concat("\x1b[31m", s, "\x1b[0m") }
+fn green(s) { return str_concat("\x1b[32m", s, "\x1b[0m") }
+fn cyan(s)  { return str_concat("\x1b[36m", s, "\x1b[0m") }
+
 h BENCH_DB = "/tmp/omc_benchmarks.json"
 h REGRESSION_THRESHOLD = 1.20
 
@@ -177,18 +181,18 @@ save_history(new_results)
 print("")
 if arr_len(regressions) > 0 {
     print(red(str_concat("REGRESSIONS (", to_string(arr_len(regressions)), "): ")))
-    h ri = 0
-    while ri < arr_len(regressions) {
-        print(str_concat("  - ", regressions[ri]))
-        ri += 1
+    h reg_i = 0
+    while reg_i < arr_len(regressions) {
+        print(str_concat("  - ", regressions[reg_i]))
+        reg_i += 1
     }
 }
 if arr_len(improvements) > 0 {
     print(green(str_concat("IMPROVEMENTS (", to_string(arr_len(improvements)), "): ")))
-    h ii = 0
-    while ii < arr_len(improvements) {
-        print(str_concat("  + ", improvements[ii]))
-        ii += 1
+    h imp_i = 0
+    while imp_i < arr_len(improvements) {
+        print(str_concat("  + ", improvements[imp_i]))
+        imp_i += 1
     }
 }
 if arr_len(regressions) == 0 and arr_len(improvements) == 0 {

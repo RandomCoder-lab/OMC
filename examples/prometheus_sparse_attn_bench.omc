@@ -21,7 +21,7 @@ fn build_vocab(text) {
     while i < str_len(text) {
         h ch = str_slice(text, i, i + 1);
         if !dict_has(seen, ch) { dict_set(seen, ch, arr_len(chars)); arr_push(chars, ch); }
-        i = i + 1;
+        i += 1;
     }
     h v = dict_new();
     dict_set(v, "chars", chars);
@@ -36,7 +36,7 @@ fn encode(text, vocab) {
     while i < str_len(text) {
         h ch = str_slice(text, i, i + 1);
         arr_push(ids, dict_get(lookup, ch));
-        i = i + 1;
+        i += 1;
     }
     return ids;
 }
@@ -69,7 +69,7 @@ fn forward_window(model, token_ids, pe_table) {
     h x = prom_embedding_batch(dict_get(model, "emb"), token_ids);
     h pe_rows = [];
     h i = 0;
-    while i < arr_len(token_ids) { arr_push(pe_rows, arr_get(pe_table, i)); i = i + 1; }
+    while i < arr_len(token_ids) { arr_push(pe_rows, arr_get(pe_table, i)); i += 1; }
     x = tape_add(x, tape_const(pe_rows));
     h attn_out = prom_attention_substrate_k_forward(dict_get(model, "attn"), x);
     h x_post = tape_add(x, attn_out);
@@ -93,9 +93,9 @@ fn collect_all(model) {
     ]);
     h out = [];
     h i = 0;
-    while i < arr_len(attn_p) { arr_push(out, arr_get(attn_p, i)); i = i + 1; }
+    while i < arr_len(attn_p) { arr_push(out, arr_get(attn_p, i)); i += 1; }
     i = 0;
-    while i < arr_len(other) { arr_push(out, arr_get(other, i)); i = i + 1; }
+    while i < arr_len(other) { arr_push(out, arr_get(other, i)); i += 1; }
     return out;
 }
 
@@ -115,13 +115,13 @@ fn train_q6(vocab_size, ids, seq_len, d_model, ff_dim, lr, steps, seed) {
         while k < seq_len {
             arr_push(window, arr_get(ids, start + k));
             arr_push(targets, arr_get(ids, start + k + 1));
-            k = k + 1;
+            k += 1;
         }
         h logits = forward_window(model, window, pe_table);
         h loss = prom_cross_entropy_batch(logits, targets, vocab_size);
         tape_backward(loss);
         prom_adamw_step(opt);
-        step = step + 1;
+        step += 1;
     }
     h out = dict_new();
     dict_set(out, "model", model);
@@ -133,11 +133,11 @@ fn train_q6(vocab_size, ids, seq_len, d_model, ff_dim, lr, steps, seed) {
 fn run_dense_attn(model, pe_table, ids, seq_len) {
     h window = [];
     h k = 0;
-    while k < seq_len { arr_push(window, arr_get(ids, k)); k = k + 1; }
+    while k < seq_len { arr_push(window, arr_get(ids, k)); k += 1; }
     h x = prom_embedding_batch(dict_get(model, "emb"), window);
     h pe_rows = [];
     h i = 0;
-    while i < arr_len(window) { arr_push(pe_rows, arr_get(pe_table, i)); i = i + 1; }
+    while i < arr_len(window) { arr_push(pe_rows, arr_get(pe_table, i)); i += 1; }
     x = tape_add(x, tape_const(pe_rows));
     h attn = dict_get(model, "attn");
     h Q_w = dict_get(attn, "Q");
@@ -155,11 +155,11 @@ fn run_dense_attn(model, pe_table, ids, seq_len) {
 fn run_sparse_attn(model, pe_table, ids, seq_len, threshold) {
     h window = [];
     h k = 0;
-    while k < seq_len { arr_push(window, arr_get(ids, k)); k = k + 1; }
+    while k < seq_len { arr_push(window, arr_get(ids, k)); k += 1; }
     h x = prom_embedding_batch(dict_get(model, "emb"), window);
     h pe_rows = [];
     h i = 0;
-    while i < arr_len(window) { arr_push(pe_rows, arr_get(pe_table, i)); i = i + 1; }
+    while i < arr_len(window) { arr_push(pe_rows, arr_get(pe_table, i)); i += 1; }
     x = tape_add(x, tape_const(pe_rows));
     h attn = dict_get(model, "attn");
     h Q_w = dict_get(attn, "Q");
@@ -183,10 +183,10 @@ fn l1_diff(a, b, n) {
         while j < n {
             h diff = arr_get(ra, j) - arr_get(rb, j);
             if diff < 0.0 { diff = 0.0 - diff; }
-            s = s + diff;
-            j = j + 1;
+            s += diff;
+            j += 1;
         }
-        i = i + 1;
+        i += 1;
     }
     return s;
 }
@@ -220,7 +220,7 @@ fn main() {
     h dense_result = null;
     while iter < 10 {
         dense_result = run_dense_attn(model, pe_table, ids, seq_len);
-        iter = iter + 1;
+        iter += 1;
     }
     h t1 = py_eval("__import__('time').time()");
     h dense_ms = (t1 - t0) * 100.0;   # /10 iters * 1000 ms
@@ -231,7 +231,7 @@ fn main() {
     h sparse_result = null;
     while iter < 10 {
         sparse_result = run_sparse_attn(model, pe_table, ids, seq_len, 5);
-        iter = iter + 1;
+        iter += 1;
     }
     h t3 = py_eval("__import__('time').time()");
     h sparse_ms = (t3 - t2) * 100.0;

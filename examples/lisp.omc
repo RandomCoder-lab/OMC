@@ -52,34 +52,34 @@ fn lisp_tokenize(src) {
     while i < n {
         h c = str_slice(src, i, i + 1);
         match c {
-            " " | "\t" | "\n" | "\r" => { i = i + 1; }
-            "(" => { arr_push(tokens, "("); i = i + 1; }
-            ")" => { arr_push(tokens, ")"); i = i + 1; }
-            "'" => { arr_push(tokens, "'"); i = i + 1; }
+            " " | "\t" | "\n" | "\r" => { i += 1; }
+            "(" => { arr_push(tokens, "("); i += 1; }
+            ")" => { arr_push(tokens, ")"); i += 1; }
+            "'" => { arr_push(tokens, "'"); i += 1; }
             ";" => {
                 # Skip to end-of-line.
                 while i < n {
                     h ch = str_slice(src, i, i + 1);
                     if ch == "\n" {
-                        i = i + 1;
+                        i += 1;
                         break;
                     }
-                    i = i + 1;
+                    i += 1;
                 }
             }
             "\"" => {
                 # Quoted string — keep quotes attached so lisp_atom can
                 # recognise it as a string literal.
                 h start = i;
-                i = i + 1;
+                i += 1;
                 while i < n {
                     h ch = str_slice(src, i, i + 1);
                     if ch == "\"" {
                         arr_push(tokens, str_slice(src, start, i + 1));
-                        i = i + 1;
+                        i += 1;
                         break;
                     }
-                    i = i + 1;
+                    i += 1;
                 }
             }
             _ => {
@@ -89,7 +89,7 @@ fn lisp_tokenize(src) {
                     h ch = str_slice(src, i, i + 1);
                     match ch {
                         " " | "\t" | "\n" | "\r" | "(" | ")" => { break; }
-                        _ => { i = i + 1; }
+                        _ => { i += 1; }
                     }
                 }
                 arr_push(tokens, str_slice(src, start, i));
@@ -178,7 +178,7 @@ fn lisp_looks_numeric(s) {
     while i < n {
         h ch = str_slice(s, i, i + 1);
         match ch {
-            "0".."9" => { i = i + 1; }
+            "0".."9" => { i += 1; }
             _ => { return 0; }
         }
     }
@@ -280,7 +280,7 @@ fn lisp_eval(expr, env) {
                             h n = dict_get(arr_get(b, 0), "v");
                             h v = lisp_eval(arr_get(b, 1), env);
                             env_define(new_env, n, v);
-                            k = k + 1;
+                            k += 1;
                         }
                         return lisp_eval(body, new_env);
                     }
@@ -289,7 +289,7 @@ fn lisp_eval(expr, env) {
                         h last = mk_nil();
                         while k < arr_len(items) {
                             last = lisp_eval(arr_get(items, k), env);
-                            k = k + 1;
+                            k += 1;
                         }
                         return last;
                     }
@@ -302,7 +302,7 @@ fn lisp_eval(expr, env) {
             h k = 1;
             while k < arr_len(items) {
                 arr_push(argvs, lisp_eval(arr_get(items, k), env));
-                k = k + 1;
+                k += 1;
             }
             return lisp_apply(fn_v, argvs);
         }
@@ -338,7 +338,7 @@ fn lisp_apply(fn_v, args) {
             h k = 0;
             while k < arr_len(params) {
                 env_define(frame, arr_get(params, k), arr_get(args, k));
-                k = k + 1;
+                k += 1;
             }
             return lisp_eval(body, frame);
         }
@@ -383,7 +383,7 @@ fn lisp_builtin(name, args) {
             h k = 0;
             while k < arr_len(tail) {
                 arr_push(out, arr_get(tail, k));
-                k = k + 1;
+                k += 1;
             }
             return mk_list(out);
         }
@@ -449,13 +449,13 @@ fn lisp_arith(args, op) {
     while k < arr_len(args) {
         h n = lisp_int(arr_get(args, k));
         match op {
-            "+" => { acc = acc + n; }
-            "-" => { acc = acc - n; }
-            "*" => { acc = acc * n; }
-            "/" => { acc = acc / n; }
+            "+" => { acc += n; }
+            "-" => { acc -= n; }
+            "*" => { acc *= n; }
+            "/" => { acc /= n; }
             _ => {}
         }
-        k = k + 1;
+        k += 1;
     }
     return mk_int(acc);
 }

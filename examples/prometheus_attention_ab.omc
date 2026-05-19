@@ -36,7 +36,7 @@ fn build_vocab(text) {
             dict_set(seen, ch, arr_len(chars));
             arr_push(chars, ch);
         }
-        i = i + 1;
+        i += 1;
     }
     h v = dict_new();
     dict_set(v, "chars", chars);
@@ -51,7 +51,7 @@ fn encode(text, vocab) {
     while i < str_len(text) {
         h ch = str_slice(text, i, i + 1);
         arr_push(ids, dict_get(lookup, ch));
-        i = i + 1;
+        i += 1;
     }
     return ids;
 }
@@ -91,7 +91,7 @@ fn forward_window(model, token_ids, pe_table) {
     h i = 0;
     while i < arr_len(token_ids) {
         arr_push(pe_rows, arr_get(pe_table, i));
-        i = i + 1;
+        i += 1;
     }
     h pe_const = tape_const(pe_rows);
     x = tape_add(x, pe_const);
@@ -146,18 +146,18 @@ fn train_arm(alpha, text, vocab, vocab_size, ids, seq_len, d_model,
         while k < seq_len {
             arr_push(window, arr_get(ids, start + k));
             arr_push(targets, arr_get(ids, start + k + 1));
-            k = k + 1;
+            k += 1;
         }
         h logits = forward_window(model, window, pe_table);
         h loss = prom_cross_entropy_batch(logits, targets, vocab_size);
         tape_backward(loss);
         prom_adamw_step(opt);
         if step >= steps - 10 { arr_push(tail_losses, tape_value(loss)); }
-        step = step + 1;
+        step += 1;
     }
     h sum = 0.0;
     h i = 0;
-    while i < arr_len(tail_losses) { sum = sum + arr_get(tail_losses, i); i = i + 1; }
+    while i < arr_len(tail_losses) { sum += arr_get(tail_losses, i); i += 1; }
     return sum / arr_len(tail_losses);
 }
 
@@ -200,7 +200,7 @@ fn main() {
             "  vanilla=", to_string(loss_a),
             "  geodesic=", to_string(loss_b),
             "  delta=", to_string(delta), "  ", tag));
-        s = s + 1;
+        s += 1;
     }
 
     h a_sum = 0.0;
@@ -208,10 +208,10 @@ fn main() {
     h wins = 0;
     h i = 0;
     while i < arr_len(seeds) {
-        a_sum = a_sum + arr_get(a_results, i);
-        b_sum = b_sum + arr_get(b_results, i);
-        if arr_get(b_results, i) < arr_get(a_results, i) { wins = wins + 1; }
-        i = i + 1;
+        a_sum += arr_get(a_results, i);
+        b_sum += arr_get(b_results, i);
+        if arr_get(b_results, i) < arr_get(a_results, i) { wins += 1; }
+        i += 1;
     }
     h a_mean = a_sum / arr_len(seeds);
     h b_mean = b_sum / arr_len(seeds);

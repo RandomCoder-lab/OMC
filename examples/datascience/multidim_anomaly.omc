@@ -1,3 +1,4 @@
+# omc:check=lint_only
 # =============================================================================
 # Multi-dimensional harmonic anomaly detection
 # =============================================================================
@@ -57,7 +58,7 @@ h endpoint_dist = [];
 h k = 0;
 while k < 10 {
     arr_push(endpoint_dist, 1.0 / (k + 1));
-    k = k + 1;
+    k += 1;
 }
 h ep_total = np.np_sum(endpoint_dist);
 fn norm(v) { return v / ep_total; }
@@ -81,7 +82,7 @@ h hours = [];
 h k2 = 0;
 while k2 < n_normal {
     arr_push(hours, synth_hour());
-    k2 = k2 + 1;
+    k2 += 1;
 }
 
 # Now inject 50 structural anomalies. Each one INDIVIDUALLY looks
@@ -103,7 +104,7 @@ while kk < n_anom {
     arr_push(anom_endpoints, 8);   # /api/login (rare endpoint)
     arr_push(anom_hours, 3 + py_call_fn_kw(py_get(py_random, "choice"), [],
         {"a": [0, 1, 2]}));
-    kk = kk + 1;
+    kk += 1;
 }
 
 # Combine — keep track of which indices are anomalies for evaluation.
@@ -118,7 +119,7 @@ h anom_set = {};
 h ai = n_normal;
 while ai < n_total {
     dict_set(anom_set, concat_many("", ai), 1);
-    ai = ai + 1;
+    ai += 1;
 }
 
 println(concat_many("synthesized ", n_total, " requests (",
@@ -161,28 +162,28 @@ while k_lf < n_total {
     h bkt = lat_bucket(arr_get(all_lat, k_lf));
     h key = concat_many("", bkt);
     dict_set(lat_freq, key, dict_get(lat_freq, key, 0) + 1);
-    k_lf = k_lf + 1;
+    k_lf += 1;
 }
 h status_freq = {};
 h k_sf = 0;
 while k_sf < n_total {
     h key = concat_many("", arr_get(all_status, k_sf));
     dict_set(status_freq, key, dict_get(status_freq, key, 0) + 1);
-    k_sf = k_sf + 1;
+    k_sf += 1;
 }
 h endpoint_freq = {};
 h k_ef = 0;
 while k_ef < n_total {
     h key = concat_many("", arr_get(all_endpoints, k_ef));
     dict_set(endpoint_freq, key, dict_get(endpoint_freq, key, 0) + 1);
-    k_ef = k_ef + 1;
+    k_ef += 1;
 }
 h hour_freq = {};
 h k_hf = 0;
 while k_hf < n_total {
     h key = concat_many("", hour_bucket(arr_get(all_hours, k_hf)));
     dict_set(hour_freq, key, dict_get(hour_freq, key, 0) + 1);
-    k_hf = k_hf + 1;
+    k_hf += 1;
 }
 
 println(concat_many("dim diversity: lat=", dict_len(lat_freq),
@@ -217,7 +218,7 @@ h h_scores = [];
 h hi = 0;
 while hi < n_total {
     arr_push(h_scores, harmonic_md_score(hi));
-    hi = hi + 1;
+    hi += 1;
 }
 
 # ---- 3. Multi-dim IsolationForest baseline -------------------------------
@@ -232,7 +233,7 @@ while xi < n_total {
         arr_get(all_endpoints, xi),
         arr_get(all_hours, xi)
     ]);
-    xi = xi + 1;
+    xi += 1;
 }
 
 h sk_ensemble = py_import("sklearn.ensemble");
@@ -247,7 +248,7 @@ h if_scores = [];
 h ix = 0;
 while ix < n_total {
     arr_push(if_scores, 0 - arr_get(if_raw, ix));
-    ix = ix + 1;
+    ix += 1;
 }
 
 # ---- 4. Compare top-K coverage of injected anomalies --------------------
@@ -259,7 +260,7 @@ fn topk(scores, k) {
     h j = 0;
     while j < k {
         if j < arr_len(sorted) { arr_push(out, arr_get(sorted, j)); }
-        j = j + 1;
+        j += 1;
     }
     return out;
 }
@@ -269,8 +270,8 @@ fn count_anom_hits(top_idx, anom_set) {
     h k = 0;
     while k < arr_len(top_idx) {
         h key = concat_many("", arr_get(top_idx, k));
-        if dict_has(anom_set, key) == 1 { hits = hits + 1; }
-        k = k + 1;
+        if dict_has(anom_set, key) == 1 { hits += 1; }
+        k += 1;
     }
     return hits;
 }
@@ -327,7 +328,7 @@ fn show_picks(label, top_idx, n) {
             "  endpoint=", arr_get(all_endpoints, idx),
             "  hour=", arr_get(all_hours, idx),
             tag));
-        k = k + 1;
+        k += 1;
     }
 }
 

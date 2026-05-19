@@ -1,3 +1,4 @@
+# omc:check=lint_only
 # =============================================================================
 # Time-aware harmonic anomaly detection — NAB benchmark, second attempt
 # =============================================================================
@@ -52,7 +53,7 @@ fn rolling_robust_z(values, W) {
         h j = lo;
         while j <= hi {
             arr_push(window, arr_get(values, j));
-            j = j + 1;
+            j += 1;
         }
         h med = py_call(py_np, "median", [window]);
         h abs_dev = [];
@@ -61,7 +62,7 @@ fn rolling_robust_z(values, W) {
             h d = arr_get(window, k) - med;
             if d < 0 { d = 0 - d; }
             arr_push(abs_dev, d);
-            k = k + 1;
+            k += 1;
         }
         h mad = py_call(py_np, "median", [abs_dev]);
         if mad < 0.001 { mad = 0.001; }
@@ -69,7 +70,7 @@ fn rolling_robust_z(values, W) {
         # Positive deviations only — flag spikes, not dips.
         if dev <= 0 { dev = 0; }
         arr_push(scores, dev / mad);
-        i = i + 1;
+        i += 1;
     }
     return scores;
 }
@@ -88,7 +89,7 @@ fn harmonic_rebucket(z_scores) {
         h bkt = fold(to_int(arr_get(z_scores, k) * 10));
         h key = concat_many("", bkt);
         dict_set(bucket_counts, key, dict_get(bucket_counts, key, 0) + 1);
-        k = k + 1;
+        k += 1;
     }
     # Final score = z * (1/sqrt(bucket_count + 1))
     # Multiplies raw deviation by bucket rarity. Big rare = highest.
@@ -101,7 +102,7 @@ fn harmonic_rebucket(z_scores) {
         h cnt = dict_get(bucket_counts, key, 1);
         h rarity = 1.0 / py_call(math, "sqrt", [cnt + 1]);
         arr_push(scores, z * rarity);
-        i = i + 1;
+        i += 1;
     }
     return scores;
 }
@@ -116,7 +117,7 @@ fn iforest_scorer(values) {
     h k = 0;
     while k < arr_len(values) {
         arr_push(X, [arr_get(values, k)]);
-        k = k + 1;
+        k += 1;
     }
     h model = py_call_fn_kw(iforest_cls, [],
         {"contamination": 0.05, "random_state": 89, "n_estimators": 100});
@@ -126,7 +127,7 @@ fn iforest_scorer(values) {
     h j = 0;
     while j < arr_len(raw) {
         arr_push(out, 0 - arr_get(raw, j));
-        j = j + 1;
+        j += 1;
     }
     return out;
 }
@@ -142,7 +143,7 @@ fn window_index_for(ts_str, windows) {
                 return k;
             }
         }
-        k = k + 1;
+        k += 1;
     }
     return 0 - 1;
 }
@@ -151,7 +152,7 @@ fn topk_with_nms(scores, k, radius) {
     h n = arr_len(scores);
     h work = [];
     h i = 0;
-    while i < n { arr_push(work, arr_get(scores, i)); i = i + 1; }
+    while i < n { arr_push(work, arr_get(scores, i)); i += 1; }
     h out = [];
     h picked = 0;
     while picked < k {
@@ -163,7 +164,7 @@ fn topk_with_nms(scores, k, radius) {
                 best_val = arr_get(work, j);
                 best_idx = j;
             }
-            j = j + 1;
+            j += 1;
         }
         if best_val <= 0 - 999999 { return out; }
         arr_push(out, best_idx);
@@ -174,9 +175,9 @@ fn topk_with_nms(scores, k, radius) {
         h m = lo;
         while m <= hi {
             arr_set(work, m, 0 - 999999);
-            m = m + 1;
+            m += 1;
         }
-        picked = picked + 1;
+        picked += 1;
     }
     return out;
 }
@@ -190,7 +191,7 @@ fn windows_covered(top_idx, ts_strs, windows) {
         if widx >= 0 {
             dict_set(covered, concat_many("", widx), 1);
         }
-        k = k + 1;
+        k += 1;
     }
     return dict_len(covered);
 }
@@ -257,9 +258,9 @@ while d < n_datasets {
     h if10c = windows_covered(if10, ts, windows);
     h if20c = windows_covered(if20, ts, windows);
 
-    tot_w     = tot_w + n_windows;
-    tot_if10  = tot_if10 + if10c;  tot_h10  = tot_h10  + h10c;
-    tot_if20  = tot_if20 + if20c;  tot_h20  = tot_h20  + h20c;
+    tot_w += n_windows;
+    tot_if10 += if10c;  tot_h10 += h10c;
+    tot_if20 += if20c;  tot_h20 += h20c;
 
     println(concat_many("  ", str_pad_right(fname, 41, " "),
         "  ", n_windows,
@@ -267,7 +268,7 @@ while d < n_datasets {
         "      ", h10c, "/", n_windows,
         "      ", if20c, "/", n_windows,
         "      ", h20c, "/", n_windows));
-    d = d + 1;
+    d += 1;
 }
 
 println("");

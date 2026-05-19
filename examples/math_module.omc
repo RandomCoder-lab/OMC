@@ -28,8 +28,8 @@ fn cube_root(x) {
     h r = x / 3;
     h i = 0;
     while i < 8 {
-        r = r - (r * r * r - x) / (3 * r * r);
-        i = i + 1;
+        r -= (r * r * r - x) / (3 * r * r);
+        i += 1;
     }
     return r;
 }
@@ -39,8 +39,8 @@ fn sum_range(lo, hi) {
     h total = 0;
     h k = lo;
     while k <= hi {
-        total = total + k;
-        k = k + 1;
+        total += k;
+        k += 1;
     }
     return total;
 }

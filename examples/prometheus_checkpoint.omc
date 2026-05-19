@@ -37,7 +37,7 @@ fn make_corpus() {
         elif ch == "b" { idx = 1; }
         elif ch == "c" { idx = 2; }
         arr_push(ids, idx);
-        i = i + 1;
+        i += 1;
     }
     h corpus = dict_new();
     dict_set(corpus, "chars", chars);
@@ -73,7 +73,7 @@ fn predict_all(model, vocab, chars) {
         h logits = tape_value(pred_id);
         h idx = prom_argmax_row(logits);
         arr_push(preds, arr_get(chars, idx));
-        c = c + 1;
+        c += 1;
     }
     return preds;
 }
@@ -92,7 +92,7 @@ fn train_model(model, corpus, steps, lr) {
         h loss = prom_mse_loss(pred, target);
         tape_backward(loss);
         prom_sgd_step(params, lr);
-        step = step + 1;
+        step += 1;
     }
 }
 
@@ -164,7 +164,7 @@ fn main() {
         if arr_get(preds_a, i) != arr_get(preds_b, i) {
             preds_match = false;
         }
-        i = i + 1;
+        i += 1;
     }
     print(concat_many("  predictions match: ", to_string(preds_match)));
 

@@ -1,3 +1,4 @@
+# omc:check=lint_only
 # =============================================================================
 # Real-world demo: pandas-loads-MovieLens → OMC-harmonic-clusters → numpy-stats
 # =============================================================================
@@ -67,7 +68,7 @@ fn ratings_x100(arr) {
     h i = 0;
     while i < arr_len(arr) {
         arr_push(out, to_int(arr_get(arr, i) * 100));
-        i = i + 1;
+        i += 1;
     }
     return out;
 }
@@ -100,7 +101,7 @@ while k < arr_len(buckets) {
             "std=", sd
         ));
     }
-    k = k + 1;
+    k += 1;
 }
 println("");
 
@@ -122,7 +123,7 @@ fn negate(arr) {
     h i = 0;
     while i < arr_len(arr) {
         arr_push(out, 0 - arr_get(arr, i));
-        i = i + 1;
+        i += 1;
     }
     return out;
 }
@@ -137,7 +138,7 @@ while j < 10 {
         "  movie ", arr_get(movie_ids, idx),
         "   avg=", arr_get(avg_ratings, idx)
     ));
-    j = j + 1;
+    j += 1;
 }
 
 println("");

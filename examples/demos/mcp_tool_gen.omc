@@ -213,10 +213,10 @@ h all_tools = []
 h fi = 0
 while fi < arr_len(LIB_FILES) {
     h tools = process_omc_file(LIB_FILES[fi], ENHANCE)
-    h ti = 0
-    while ti < arr_len(tools) {
-        arr_push(all_tools, tools[ti])
-        ti += 1
+    h tool_idx = 0
+    while tool_idx < arr_len(tools) {
+        arr_push(all_tools, tools[tool_idx])
+        tool_idx += 1
     }
     fi += 1
 }

@@ -25,7 +25,7 @@ fn indent_of(level) -> string {
     h i = 0;
     while i < level {
         s = str_concat(s, "    ");
-        i = i + 1;
+        i += 1;
     }
     return s;
 }
@@ -61,7 +61,7 @@ fn escape_for_source(s) -> string {
                 }
             }
         }
-        i = i + 1;
+        i += 1;
     }
     return out;
 }
@@ -106,7 +106,7 @@ fn emit_expr(ast) -> string {
         while i < n {
             if i > 0 { out = str_concat(out, ", "); }
             out = str_concat(out, emit_expr(arr_get(args, i)));
-            i = i + 1;
+            i += 1;
         }
         return str_concat(out, ")");
     }
@@ -172,7 +172,7 @@ fn emit_stmt(ast, level) -> string {
         while i < pn {
             if i > 0 { plist = str_concat(plist, ", "); }
             plist = str_concat(plist, arr_get(params, i));
-            i = i + 1;
+            i += 1;
         }
         return concat_many(pad, "fn ", name, "(", plist, ") {\n", body, pad, "}\n");
     }
@@ -189,7 +189,7 @@ fn emit_block(stmts, level) -> string {
     h n = arr_len(stmts);
     while i < n {
         out = str_concat(out, emit_stmt(arr_get(stmts, i), level));
-        i = i + 1;
+        i += 1;
     }
     return out;
 }
@@ -248,7 +248,7 @@ print("Emitted OMC source:");
 print(emit_stmt(ast3, 0));
 
 # Demo 4: while loop with assignments
-print("--- AST 4: while i < 10 { sum = sum + i; i = i + 1; } ---");
+print("--- AST 4: while i < 10 { sum += i; i += 1; } ---");
 h ast4 = ["WHILE",
     ["BINOP", "<", ["VAR", "i"], ["NUMBER", "10"]],
     [

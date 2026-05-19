@@ -1,3 +1,4 @@
+# omc:check=lint_only
 # =============================================================================
 # NAB benchmark validation: harmonic vs IsolationForest on REAL telemetry
 # =============================================================================
@@ -59,7 +60,7 @@ fn build_harmonic_scorer(values) {
         h j = lo;
         while j <= hi {
             arr_push(window, arr_get(values, j));
-            j = j + 1;
+            j += 1;
         }
         h med = np.median(window);
         h v = arr_get(values, i);
@@ -78,7 +79,7 @@ fn build_harmonic_scorer(values) {
         } else {
             arr_push(scores, 0.0);
         }
-        i = i + 1;
+        i += 1;
     }
     return scores;
 }
@@ -94,7 +95,7 @@ fn iforest_scorer(values) {
     h k = 0;
     while k < arr_len(values) {
         arr_push(X, [arr_get(values, k)]);
-        k = k + 1;
+        k += 1;
     }
     h model = py_call_fn_kw(iforest_cls, [],
         {"contamination": 0.05, "random_state": 89, "n_estimators": 100});
@@ -106,7 +107,7 @@ fn iforest_scorer(values) {
     h j = 0;
     while j < arr_len(raw) {
         arr_push(out, 0 - arr_get(raw, j));
-        j = j + 1;
+        j += 1;
     }
     return out;
 }
@@ -130,7 +131,7 @@ fn check_in_window(ts_str, windows) {
                 return 1;
             }
         }
-        k = k + 1;
+        k += 1;
     }
     return 0;
 }
@@ -141,14 +142,14 @@ fn topk_indices(scores, k) {
     h i = 0;
     while i < arr_len(scores) {
         arr_push(neg, 0 - arr_get(scores, i));
-        i = i + 1;
+        i += 1;
     }
     h sorted = np.argsort(neg);
     h out = [];
     h j = 0;
     while j < k {
         if j < arr_len(sorted) { arr_push(out, arr_get(sorted, j)); }
-        j = j + 1;
+        j += 1;
     }
     return out;
 }
@@ -163,7 +164,7 @@ fn topk_with_nms(scores, k, radius) {
     # Copy scores so we can mutate.
     h work = [];
     h i = 0;
-    while i < n { arr_push(work, arr_get(scores, i)); i = i + 1; }
+    while i < n { arr_push(work, arr_get(scores, i)); i += 1; }
     h out = [];
     h picked = 0;
     while picked < k {
@@ -176,7 +177,7 @@ fn topk_with_nms(scores, k, radius) {
                 best_val = arr_get(work, j);
                 best_idx = j;
             }
-            j = j + 1;
+            j += 1;
         }
         if best_val <= 0 - 999999 { return out; }   # nothing left
         arr_push(out, best_idx);
@@ -188,9 +189,9 @@ fn topk_with_nms(scores, k, radius) {
         h m = lo;
         while m <= hi {
             arr_set(work, m, 0 - 999999);
-            m = m + 1;
+            m += 1;
         }
-        picked = picked + 1;
+        picked += 1;
     }
     return out;
 }
@@ -200,8 +201,8 @@ fn precision_at_k(top_idx, ts_strs, windows) {
     h k = 0;
     while k < arr_len(top_idx) {
         h ts = arr_get(ts_strs, arr_get(top_idx, k));
-        if check_in_window(ts, windows) == 1 { hits = hits + 1; }
-        k = k + 1;
+        if check_in_window(ts, windows) == 1 { hits += 1; }
+        k += 1;
     }
     return hits;
 }
@@ -216,7 +217,7 @@ fn window_index_for(ts_str, windows) {
                 return k;
             }
         }
-        k = k + 1;
+        k += 1;
     }
     return 0 - 1;
 }
@@ -235,7 +236,7 @@ fn windows_covered(top_idx, ts_strs, windows) {
         if widx >= 0 {
             dict_set(covered, concat_many("", widx), 1);
         }
-        k = k + 1;
+        k += 1;
     }
     return dict_len(covered);
 }
@@ -304,10 +305,10 @@ while d < n_datasets {
     h if10c = windows_covered(if10, ts, windows);
     h if20c = windows_covered(if20, ts, windows);
 
-    tot_w = tot_w + n_windows;
-    tot_if5  = tot_if5  + if5c;   tot_h5  = tot_h5  + h5c;
-    tot_if10 = tot_if10 + if10c;  tot_h10 = tot_h10 + h10c;
-    tot_if20 = tot_if20 + if20c;  tot_h20 = tot_h20 + h20c;
+    tot_w += n_windows;
+    tot_if5 += if5c;   tot_h5 += h5c;
+    tot_if10 += if10c;  tot_h10 += h10c;
+    tot_if20 += if20c;  tot_h20 += h20c;
 
     println(concat_many("  ", str_pad_right(fname, 41, " "),
         "  ", n_windows,
@@ -317,7 +318,7 @@ while d < n_datasets {
         "     ", h10c, "/", n_windows,
         "      ", if20c, "/", n_windows,
         "     ", h20c, "/", n_windows));
-    d = d + 1;
+    d += 1;
 }
 
 println("");

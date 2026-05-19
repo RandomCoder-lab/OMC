@@ -30,7 +30,7 @@ fn make_corpus() {
         elif ch == "b" { idx = 1; }
         elif ch == "c" { idx = 2; }
         arr_push(ids, idx);
-        i = i + 1;
+        i += 1;
     }
     h corpus = dict_new();
     dict_set(corpus, "vocab", 3);
@@ -87,13 +87,13 @@ fn train_run(seed, optimizer_kind, alpha) {
         if step >= steps - 20 {
             arr_push(tail_losses, tape_value(loss));
         }
-        step = step + 1;
+        step += 1;
     }
     h sum = 0.0;
     h i = 0;
     while i < arr_len(tail_losses) {
-        sum = sum + arr_get(tail_losses, i);
-        i = i + 1;
+        sum += arr_get(tail_losses, i);
+        i += 1;
     }
     return sum / arr_len(tail_losses);
 }
@@ -125,7 +125,7 @@ fn main() {
             "  vanilla=", to_string(v),
             "  harmonic=", to_string(hv),
             "  delta=", to_string(delta), "  ", marker));
-        s = s + 1;
+        s += 1;
     }
     print("");
 
@@ -135,15 +135,15 @@ fn main() {
     h wins = 0;
     h i = 0;
     while i < arr_len(seeds) {
-        v_mean = v_mean + arr_get(vanilla_results, i);
-        h_mean = h_mean + arr_get(harmonic_results, i);
+        v_mean += arr_get(vanilla_results, i);
+        h_mean += arr_get(harmonic_results, i);
         if arr_get(harmonic_results, i) < arr_get(vanilla_results, i) {
-            wins = wins + 1;
+            wins += 1;
         }
-        i = i + 1;
+        i += 1;
     }
-    v_mean = v_mean / arr_len(seeds);
-    h_mean = h_mean / arr_len(seeds);
+    v_mean /= arr_len(seeds);
+    h_mean /= arr_len(seeds);
     print(concat_many("vanilla   mean: ", to_string(v_mean)));
     print(concat_many("harmonic  mean: ", to_string(h_mean)));
     h rel = (h_mean - v_mean) / v_mean * 100.0;

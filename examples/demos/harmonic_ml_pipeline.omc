@@ -12,6 +12,15 @@
 # proving the autograd, matmul, and substrate-typed primitives all
 # co-operate end-to-end on a single workload.
 
+# Dual-number forward-mode autograd (val, d) pairs for d/dw derivatives.
+fn dual(val, d)   { return {val: to_float(val), d: to_float(d)} }
+fn _dlift(x)      { if type_of(x) == "dict" { return x } return dual(x, 0.0) }
+fn dual_add(a, b) { h da = _dlift(a); h db = _dlift(b); return dual(da["val"] + db["val"], da["d"] + db["d"]) }
+fn dual_sub(a, b) { h da = _dlift(a); h db = _dlift(b); return dual(da["val"] - db["val"], da["d"] - db["d"]) }
+fn dual_mul(a, b) { h da = _dlift(a); h db = _dlift(b); return dual(da["val"] * db["val"], da["val"] * db["d"] + da["d"] * db["val"]) }
+fn dual_val(dn)   { return _dlift(dn)["val"] }
+fn dual_deriv(dn) { return _dlift(dn)["d"] }
+
 fn approx_eq(a, b, tol) {
     h d = a - b;
     if d < 0.0 { d = 0.0 - d; }
@@ -108,8 +117,8 @@ fn main() {
 
     while step < max_steps {
         h L = loss_and_grad(w, xs, ys);
-        h Lv = dual_v(L);
-        h dLdw = dual_d(L);
+        h Lv = dual_val(L);
+        h dLdw = dual_deriv(L);
         if Lv < 0.01 {
             converged = 1;
             print("    converged at step " + to_string(step) +

@@ -163,10 +163,10 @@ fn attend_and_emit(input_codes, n) -> int {
         # Track coherence (how harmonically aligned the chosen emission is
         # with the input state — averaged at the end).
         h coherence_contribution = to_int(confidence * 1000);
-        sum_coherence = sum_coherence + coherence_contribution;
+        sum_coherence += coherence_contribution;
 
         prev_encoded = encoded;
-        pos = pos + 1;
+        pos += 1;
     }
     # Return mean coherence × 1000 (so it stays integer for display).
     return sum_coherence / n;

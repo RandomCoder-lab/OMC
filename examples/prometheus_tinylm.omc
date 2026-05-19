@@ -46,7 +46,7 @@ fn make_corpus() {
         elif ch == "b" { idx = 1; }
         elif ch == "c" { idx = 2; }
         arr_push(ids, idx);
-        i = i + 1;
+        i += 1;
     }
     h corpus = dict_new();
     dict_set(corpus, "chars", chars);
@@ -119,7 +119,7 @@ fn main() {
         if step % 20 == 0 || step == steps - 1 {
             print(concat_many("step ", to_string(step), "  loss=", to_string(lv)));
         }
-        step = step + 1;
+        step += 1;
     }
     print("");
 
@@ -147,13 +147,13 @@ fn main() {
         # Expected next: (c+1) % vocab for the abcabc cycle
         h expected = (c + 1) % vocab;
         h ok = pred_idx == expected;
-        if ok { correct = correct + 1; }
-        total = total + 1;
+        if ok { correct += 1; }
+        total += 1;
         h marker = "✗";
         if ok { marker = "✓"; }
         print(concat_many("  ", arr_get(chars, c), " → ", arr_get(chars, pred_idx),
                           "  (expected ", arr_get(chars, expected), ") ", marker));
-        c = c + 1;
+        c += 1;
     }
     print("");
     print(concat_many("argmax accuracy: ", to_string(correct), "/", to_string(total)));

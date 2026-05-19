@@ -3,7 +3,7 @@
 # A population of OMC functions evolves across generations toward a fitness goal.
 
 import "examples/lib/llm.omc"
-import "examples/lib/cache.omc"
+import "examples/lib/cache.omc" as cache
 
 h MODEL = "claude-opus-4-5"
 h POP_SIZE = 5
@@ -11,13 +11,13 @@ h GENERATIONS = 4
 h MUTATION_RATE = 0.7
 h ELITE_COUNT = 2
 
-h eval_cache = lru_new(200)
+h eval_cache = cache.lru_new(200)
 
 # ── Fitness function ─────────────────────────────────────────────────────────
 
 fn compute_fitness(code, test_cases) {
     h cache_key = code
-    h cached = lru_get(eval_cache, cache_key)
+    h cached = cache.lru_get(eval_cache, cache_key)
     if cached != null { return cached }
 
     h passed = 0
@@ -40,7 +40,7 @@ fn compute_fitness(code, test_cases) {
         i += 1
     }
     h fitness = passed / total
-    lru_put(eval_cache, cache_key, fitness)
+    cache.lru_put(eval_cache, cache_key, fitness)
     return fitness
 }
 

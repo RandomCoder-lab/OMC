@@ -21,7 +21,7 @@ fn build_random_corpus(n_tokens, vocab_size) {
     while i < n_tokens {
         s = (s * 1103515245 + 12345) - ((s * 1103515245 + 12345) / 2147483648) * 2147483648;
         arr_push(ids, s - (s / vocab_size) * vocab_size);
-        i = i + 1;
+        i += 1;
     }
     return ids;
 }
@@ -51,7 +51,7 @@ fn forward_window(model, token_ids, pe_table) {
     h i = 0;
     while i < arr_len(token_ids) {
         arr_push(pe_rows, arr_get(pe_table, i));
-        i = i + 1;
+        i += 1;
     }
     x = tape_add(x, tape_const(pe_rows));
     h attn_out = prom_attention_substrate_k_forward(dict_get(model, "attn"), x);
@@ -76,9 +76,9 @@ fn collect_params(model) {
     ]);
     h out = [];
     h i = 0;
-    while i < arr_len(attn_p) { arr_push(out, arr_get(attn_p, i)); i = i + 1; }
+    while i < arr_len(attn_p) { arr_push(out, arr_get(attn_p, i)); i += 1; }
     i = 0;
-    while i < arr_len(other) { arr_push(out, arr_get(other, i)); i = i + 1; }
+    while i < arr_len(other) { arr_push(out, arr_get(other, i)); i += 1; }
     return out;
 }
 
@@ -124,14 +124,14 @@ fn main() {
         while k < seq_len {
             arr_push(window, arr_get(ids, start + k));
             arr_push(targets, arr_get(ids, start + k + 1));
-            k = k + 1;
+            k += 1;
         }
         h logits = forward_window(model, window, pe_table);
         h loss = prom_cross_entropy_batch(logits, targets, vocab_size);
         tape_backward(loss);
         prom_adamw_step(opt);
         last_loss = tape_value(loss);
-        step = step + 1;
+        step += 1;
     }
     h t1 = py_eval("__import__('time').time()");
     h elapsed = t1 - t0;

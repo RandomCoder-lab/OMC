@@ -52,8 +52,8 @@ fn harmonic_signature(row) {
     h i = 0;
     while i < arr_len(row) {
         h v = to_int(arr_get(row, i) * 100);   # scale into integer space
-        sum = sum + harmony_value(v);
-        i = i + 1;
+        sum += harmony_value(v);
+        i += 1;
     }
     return sum;
 }
@@ -67,7 +67,7 @@ fn augment(matrix) {
         h h_score = harmonic_signature(row);
         h new_row = arr_concat(row, [h_score]);
         arr_push(out, new_row);
-        i = i + 1;
+        i += 1;
     }
     return out;
 }

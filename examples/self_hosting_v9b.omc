@@ -79,7 +79,7 @@ fn skip_ws_b(source, pos) {
         while p < n {
             h c = str_slice(source, p, p + 1);
             if is_space_b(c) == 1 {
-                p = p + 1;
+                p += 1;
                 moved = 1;
             } else { break; }
         }
@@ -90,7 +90,7 @@ fn skip_ws_b(source, pos) {
                 while p < n {
                     h cc = str_slice(source, p, p + 1);
                     if cc == "\n" { break; }
-                    p = p + 1;
+                    p += 1;
                 }
                 moved = 1;
             }
@@ -164,18 +164,18 @@ fn scan_string(source, pos) {
         if done == 0 {
             h cc = str_slice(source, end, end + 1);
             if cc == "\"" {
-                end = end + 1;
+                end += 1;
                 done = 1;
             } else {
                 if cc == "\\" {
                     if end + 1 < n {
                         h nx = str_slice(source, end + 1, end + 2);
                         s = str_concat(s, decode_escape(nx));
-                        end = end + 2;
-                    } else { end = end + 1; }
+                        end += 2;
+                    } else { end += 1; }
                 } else {
                     s = str_concat(s, cc);
-                    end = end + 1;
+                    end += 1;
                 }
             }
         }
@@ -200,7 +200,7 @@ fn tokenize_b(source) {
                 h end = pos;
                 while end < n {
                     h cc = str_slice(source, end, end + 1);
-                    if is_alnum_b(cc) == 1 { end = end + 1; } else { break; }
+                    if is_alnum_b(cc) == 1 { end += 1; } else { break; }
                 }
                 h word = str_slice(source, pos, end);
                 arr_push(tokens, [classify_b(word), word]);
@@ -210,7 +210,7 @@ fn tokenize_b(source) {
                     h end = pos;
                     while end < n {
                         h cc = str_slice(source, end, end + 1);
-                        if is_digit_b(cc) == 1 { end = end + 1; } else { break; }
+                        if is_digit_b(cc) == 1 { end += 1; } else { break; }
                     }
                     arr_push(tokens, ["NUMBER", str_slice(source, pos, end)]);
                     pos = end;
@@ -220,7 +220,7 @@ fn tokenize_b(source) {
                     h mm_len = arr_get(mm, 1);
                     if str_len(mm_kind) > 0 {
                         arr_push(tokens, [mm_kind, str_slice(source, pos, pos + mm_len)]);
-                        pos = pos + mm_len;
+                        pos += mm_len;
                     } else {
                         h kind = punct_kind_b(c);
                         if str_len(kind) > 0 {
@@ -228,7 +228,7 @@ fn tokenize_b(source) {
                         } else {
                             arr_push(tokens, ["UNKNOWN", c]);
                         }
-                        pos = pos + 1;
+                        pos += 1;
                     }
                 }
             }
@@ -264,7 +264,7 @@ fn p_args(toks, p) {
         arr_push(args, arr_get(r, 0));
         np = arr_get(r, 1);
         if tkind(toks, np) == "COMMA" {
-            np = np + 1;
+            np += 1;
         } else { done = 1; }
     }
     return [args, np + 1];
@@ -283,7 +283,7 @@ fn p_array_lit(toks, p) {
         arr_push(elems, arr_get(r, 0));
         np = arr_get(r, 1);
         if tkind(toks, np) == "COMMA" {
-            np = np + 1;
+            np += 1;
         } else { done = 1; }
     }
     return [["ARR", elems], np + 1];   # consume RBRACKET
@@ -389,9 +389,9 @@ fn p_params(toks, p) {
     h done = 0;
     while done == 0 {
         arr_push(params, tval(toks, np));
-        np = np + 1;
+        np += 1;
         if tkind(toks, np) == "COMMA" {
-            np = np + 1;
+            np += 1;
         } else { done = 1; }
     }
     return [params, np + 1];
@@ -423,7 +423,7 @@ fn p_stmt(toks, p) {
         np = arr_get(then_r, 1);
         h else_body = arr_new(0, 0);
         if tkind(toks, np) == "ELSE" {
-            np = np + 2;
+            np += 2;
             h eb = p_block(toks, np);
             else_body = arr_get(eb, 0);
             np = arr_get(eb, 1);
@@ -440,10 +440,10 @@ fn p_stmt(toks, p) {
         # effect — so we just skip past it.
         if tkind(toks, np) == "MINUS" {
             if tkind(toks, np + 1) == "GT" {
-                np = np + 3;
+                np += 3;
             }
         }
-        np = np + 1;   # consume LBRACE
+        np += 1;   # consume LBRACE
         h body_r = p_block(toks, np);
         return [["FN", name, params, arr_get(body_r, 0)], arr_get(body_r, 1)];
     }
@@ -484,7 +484,7 @@ fn p_block(toks, p) {
     while done == 0 {
         h k = tkind(toks, np);
         if k == "RBRACE" {
-            np = np + 1;
+            np += 1;
             done = 1;
         } else {
             if k == "EOF" {
@@ -525,7 +525,7 @@ fn arr_concat(a, b) {
     h n = arr_len(b);
     while i < n {
         arr_push(a, arr_get(b, i));
-        i = i + 1;
+        i += 1;
     }
     return a;
 }
@@ -567,7 +567,7 @@ fn enc_expr(ast) {
         h n = arr_len(elems);
         while i < n {
             out = arr_concat(out, enc_expr(arr_get(elems, i)));
-            i = i + 1;
+            i += 1;
         }
         arr_push(out, ["MAKE_ARR", n]);
         return out;
@@ -621,7 +621,7 @@ fn enc_expr(ast) {
         h n = arr_len(args);
         while i < n {
             out = arr_concat(out, enc_expr(arr_get(args, i)));
-            i = i + 1;
+            i += 1;
         }
         if is_builtin(name) == 1 {
             arr_push(out, ["CALL_BUILTIN", name, n]);
@@ -700,7 +700,7 @@ fn enc_stmt(ast) {
             if arr_get(opk, 0) == "JUMP_BREAK" {
                 arr_set(body_ops, k, ["JUMP", b_len + 1 - k]);
             }
-            k = k + 1;
+            k += 1;
         }
         out = arr_concat(out, cond_ops);
         arr_push(out, ["JUMP_IF_FALSE", b_len + 2]);
@@ -752,7 +752,7 @@ fn enc_block(stmts) {
     h n = arr_len(stmts);
     while i < n {
         out = arr_concat(out, enc_stmt(arr_get(stmts, i)));
-        i = i + 1;
+        i += 1;
     }
     return out;
 }
@@ -785,7 +785,7 @@ fn print_bytecode(prog) {
             }
         }
         print(line);
-        i = i + 1;
+        i += 1;
     }
     return 0;
 }
@@ -803,7 +803,7 @@ fn scope_get(scope, name) {
         if arr_get(pair, 0) == name {
             return arr_get(pair, 1);
         }
-        i = i + 1;
+        i += 1;
     }
     return 0;
 }
@@ -817,7 +817,7 @@ fn scope_set(scope, name, value) {
             arr_set(scope, i, [name, value]);
             return scope;
         }
-        i = i + 1;
+        i += 1;
     }
     arr_push(scope, [name, value]);
     return scope;
@@ -834,7 +834,7 @@ fn pop1(stack) {
     h i = 0;
     while i < n - 1 {
         arr_push(ns, arr_get(stack, i));
-        i = i + 1;
+        i += 1;
     }
     return [top, ns];
 }
@@ -850,13 +850,13 @@ fn pop_n_ordered(stack, n) {
         h pr = pop1(s);
         arr_push(reverse, arr_get(pr, 0));
         s = arr_get(pr, 1);
-        k = k + 1;
+        k += 1;
     }
     h ordered = arr_new(0, 0);
     h j = n - 1;
     while j >= 0 {
         arr_push(ordered, arr_get(reverse, j));
-        j = j - 1;
+        j -= 1;
     }
     return [ordered, s];
 }
@@ -902,7 +902,7 @@ fn call_builtin(name, args) {
         h i = 1;
         while i < n {
             s = str_concat(s, to_string(arr_get(args, i)));
-            i = i + 1;
+            i += 1;
         }
         return s;
     }
@@ -927,7 +927,7 @@ fn collect_fns(prog) {
             h params = arr_get(op, 3);
             arr_push(table, [name, i + 1, params]);
         }
-        i = i + 1;
+        i += 1;
     }
     return table;
 }
@@ -940,7 +940,7 @@ fn fn_lookup(table, name) {
         if arr_get(row, 0) == name {
             return row;
         }
-        i = i + 1;
+        i += 1;
     }
     return ["", 0 - 1, arr_new(0, 0)];
 }
@@ -969,27 +969,27 @@ fn execute(prog) {
                 handled = 1;
             }
             if kind == "NOP" {
-                pc = pc + 1;
+                pc += 1;
                 handled = 1;
             }
             if kind == "POP" {
                 h pr = pop1(stack); stack = arr_get(pr, 1);
-                pc = pc + 1;
+                pc += 1;
                 handled = 1;
             }
             if kind == "LOAD_INT" {
                 arr_push(stack, parse_int(arr_get(op, 1)));
-                pc = pc + 1;
+                pc += 1;
                 handled = 1;
             }
             if kind == "LOAD_STR" {
                 arr_push(stack, arr_get(op, 1));
-                pc = pc + 1;
+                pc += 1;
                 handled = 1;
             }
             if kind == "LOAD_VAR" {
                 arr_push(stack, scope_get(scope, arr_get(op, 1)));
-                pc = pc + 1;
+                pc += 1;
                 handled = 1;
             }
             if kind == "STORE_VAR" {
@@ -997,7 +997,7 @@ fn execute(prog) {
                 h v = arr_get(pr, 0);
                 stack = arr_get(pr, 1);
                 scope = scope_set(scope, arr_get(op, 1), v);
-                pc = pc + 1;
+                pc += 1;
                 handled = 1;
             }
             if kind == "ARR_PUSH_NAMED" {
@@ -1010,7 +1010,7 @@ fn execute(prog) {
                 arr_push(arr, val);
                 scope = scope_set(scope, name, arr);
                 arr_push(stack, arr);
-                pc = pc + 1;
+                pc += 1;
                 handled = 1;
             }
             if kind == "ARR_SET_NAMED" {
@@ -1023,7 +1023,7 @@ fn execute(prog) {
                 arr_set(arr, idx, val);
                 scope = scope_set(scope, name, arr);
                 arr_push(stack, arr);
-                pc = pc + 1;
+                pc += 1;
                 handled = 1;
             }
             if kind == "MAKE_ARR" {
@@ -1036,45 +1036,45 @@ fn execute(prog) {
                 h i = 0;
                 while i < len {
                     arr_push(arr, arr_get(elems, i));
-                    i = i + 1;
+                    i += 1;
                 }
                 arr_push(stack, arr);
-                pc = pc + 1;
+                pc += 1;
                 handled = 1;
             }
             if kind == "ADD" {
                 h pr = pop1(stack); h r = arr_get(pr, 0); stack = arr_get(pr, 1);
                 h pl = pop1(stack); h l = arr_get(pl, 0); stack = arr_get(pl, 1);
                 arr_push(stack, l + r);
-                pc = pc + 1;
+                pc += 1;
                 handled = 1;
             }
             if kind == "SUB" {
                 h pr = pop1(stack); h r = arr_get(pr, 0); stack = arr_get(pr, 1);
                 h pl = pop1(stack); h l = arr_get(pl, 0); stack = arr_get(pl, 1);
                 arr_push(stack, l - r);
-                pc = pc + 1;
+                pc += 1;
                 handled = 1;
             }
             if kind == "MUL" {
                 h pr = pop1(stack); h r = arr_get(pr, 0); stack = arr_get(pr, 1);
                 h pl = pop1(stack); h l = arr_get(pl, 0); stack = arr_get(pl, 1);
                 arr_push(stack, l * r);
-                pc = pc + 1;
+                pc += 1;
                 handled = 1;
             }
             if kind == "DIV" {
                 h pr = pop1(stack); h r = arr_get(pr, 0); stack = arr_get(pr, 1);
                 h pl = pop1(stack); h l = arr_get(pl, 0); stack = arr_get(pl, 1);
                 arr_push(stack, l / r);
-                pc = pc + 1;
+                pc += 1;
                 handled = 1;
             }
             if kind == "MOD" {
                 h pr = pop1(stack); h r = arr_get(pr, 0); stack = arr_get(pr, 1);
                 h pl = pop1(stack); h l = arr_get(pl, 0); stack = arr_get(pl, 1);
                 arr_push(stack, l % r);
-                pc = pc + 1;
+                pc += 1;
                 handled = 1;
             }
             if kind == "LT" {
@@ -1083,7 +1083,7 @@ fn execute(prog) {
                 h v = 0;
                 if l < r { v = 1; }
                 arr_push(stack, v);
-                pc = pc + 1;
+                pc += 1;
                 handled = 1;
             }
             if kind == "LE" {
@@ -1092,7 +1092,7 @@ fn execute(prog) {
                 h v = 0;
                 if l <= r { v = 1; }
                 arr_push(stack, v);
-                pc = pc + 1;
+                pc += 1;
                 handled = 1;
             }
             if kind == "GT" {
@@ -1101,7 +1101,7 @@ fn execute(prog) {
                 h v = 0;
                 if l > r { v = 1; }
                 arr_push(stack, v);
-                pc = pc + 1;
+                pc += 1;
                 handled = 1;
             }
             if kind == "GE" {
@@ -1110,7 +1110,7 @@ fn execute(prog) {
                 h v = 0;
                 if l >= r { v = 1; }
                 arr_push(stack, v);
-                pc = pc + 1;
+                pc += 1;
                 handled = 1;
             }
             if kind == "EQ" {
@@ -1119,7 +1119,7 @@ fn execute(prog) {
                 h v = 0;
                 if l == r { v = 1; }
                 arr_push(stack, v);
-                pc = pc + 1;
+                pc += 1;
                 handled = 1;
             }
             if kind == "NE" {
@@ -1128,11 +1128,11 @@ fn execute(prog) {
                 h v = 0;
                 if l != r { v = 1; }
                 arr_push(stack, v);
-                pc = pc + 1;
+                pc += 1;
                 handled = 1;
             }
             if kind == "JUMP" {
-                pc = pc + to_int(arr_get(op, 1));
+                pc += to_int(arr_get(op, 1));
                 handled = 1;
             }
             if kind == "JUMP_IF_FALSE" {
@@ -1140,9 +1140,9 @@ fn execute(prog) {
                 h top = arr_get(pr, 0);
                 stack = arr_get(pr, 1);
                 if top == 0 {
-                    pc = pc + to_int(arr_get(op, 1));
+                    pc += to_int(arr_get(op, 1));
                 } else {
-                    pc = pc + 1;
+                    pc += 1;
                 }
                 handled = 1;
             }
@@ -1151,11 +1151,11 @@ fn execute(prog) {
                 h top = arr_get(pr, 0);
                 stack = arr_get(pr, 1);
                 print(top);
-                pc = pc + 1;
+                pc += 1;
                 handled = 1;
             }
             if kind == "DEF_FN" {
-                pc = pc + 1 + to_int(arr_get(op, 2));
+                pc += 1 + to_int(arr_get(op, 2));
                 handled = 1;
             }
             if kind == "CALL_BUILTIN" {
@@ -1166,7 +1166,7 @@ fn execute(prog) {
                 stack = arr_get(pr, 1);
                 h result = call_builtin(name, args);
                 arr_push(stack, result);
-                pc = pc + 1;
+                pc += 1;
                 handled = 1;
             }
             if kind == "CALL" {
@@ -1184,7 +1184,7 @@ fn execute(prog) {
                     h pname = arr_get(params, j);
                     h pval = arr_get(args, j);
                     arr_push(new_scope, [pname, pval]);
-                    j = j + 1;
+                    j += 1;
                 }
                 arr_push(scope_stack, scope);
                 arr_push(pc_stack, pc + 1);
@@ -1205,14 +1205,14 @@ fn execute(prog) {
                     h s_i = 0;
                     while s_i < sp_idx {
                         arr_push(new_ss, arr_get(scope_stack, s_i));
-                        s_i = s_i + 1;
+                        s_i += 1;
                     }
                     scope_stack = new_ss;
                     h new_ps = arr_new(0, 0);
                     h p_i = 0;
                     while p_i < pc_idx {
                         arr_push(new_ps, arr_get(pc_stack, p_i));
-                        p_i = p_i + 1;
+                        p_i += 1;
                     }
                     pc_stack = new_ps;
                     pc = to_int(saved_pc);
@@ -1273,7 +1273,7 @@ fn arr_equal_flat(a, b) {
         if arr_get(a, i) != arr_get(b, i) {
             return 0;
         }
-        i = i + 1;
+        i += 1;
     }
     return 1;
 }
@@ -1288,7 +1288,7 @@ fn arr_concat_b(a, b) {
     h n = arr_len(b);
     while i < n {
         arr_push(a, arr_get(b, i));
-        i = i + 1;
+        i += 1;
     }
     return a;
 }
@@ -1338,7 +1338,7 @@ fn arr_concat_b(a, b) {
     h n = arr_len(b);
     while i < n {
         arr_push(a, arr_get(b, i));
-        i = i + 1;
+        i += 1;
     }
     return a;
 }
@@ -1391,7 +1391,7 @@ fn classify_word(w) -> string {
             found = 1;
             break;
         }
-        i = i + 1;
+        i += 1;
     }
     if found == 1 { return "alpha"; }
     return "beta";
@@ -1426,7 +1426,7 @@ fn classify_word(w) -> string {
             found = 1;
             break;
         }
-        i = i + 1;
+        i += 1;
     }
     if found == 1 { return \"alpha\"; }
     return \"beta\";
@@ -1453,7 +1453,7 @@ fn run_fixpoint(label, tree_walk_result, source) {
     h ia = 0;
     while ia < arr_len(tree_walk_result) {
         print(concat_many("    ", ia, ": ", arr_get(tree_walk_result, ia)));
-        ia = ia + 1;
+        ia += 1;
     }
     print("");
     print("--- Path B: lex + parse + encode + execute on bytecode VM ---");
@@ -1468,7 +1468,7 @@ fn run_fixpoint(label, tree_walk_result, source) {
     h ib = 0;
     while ib < arr_len(bytecode_result) {
         print(concat_many("    ", ib, ": ", arr_get(bytecode_result, ib)));
-        ib = ib + 1;
+        ib += 1;
     }
     print("");
     print("--- Comparison ---");
@@ -1528,7 +1528,7 @@ fn tokenize_subset(source) {
         while pos < n {
             h c = str_slice(source, pos, pos + 1);
             if c == " " {
-                pos = pos + 1;
+                pos += 1;
             } else {
                 break;
             }
@@ -1539,7 +1539,7 @@ fn tokenize_subset(source) {
             h end = pos;
             while end < n {
                 h cc = str_slice(source, end, end + 1);
-                if is_digit_t(cc) == 1 { end = end + 1; } else { break; }
+                if is_digit_t(cc) == 1 { end += 1; } else { break; }
             }
             arr_push(tokens, concat_many("NUM:", str_slice(source, pos, end)));
             pos = end;
@@ -1549,16 +1549,16 @@ fn tokenize_subset(source) {
                 while end < n {
                     h cc = str_slice(source, end, end + 1);
                     if is_alpha_t(cc) == "y" {
-                        end = end + 1;
+                        end += 1;
                     } else {
-                        if is_digit_t(cc) == 1 { end = end + 1; } else { break; }
+                        if is_digit_t(cc) == 1 { end += 1; } else { break; }
                     }
                 }
                 arr_push(tokens, concat_many("ID:", str_slice(source, pos, end)));
                 pos = end;
             } else {
                 arr_push(tokens, concat_many("PUNCT:", c));
-                pos = pos + 1;
+                pos += 1;
             }
         }
     }
@@ -1586,7 +1586,7 @@ fn tokenize_subset(source) {
         while pos < n {
             h c = str_slice(source, pos, pos + 1);
             if c == \" \" {
-                pos = pos + 1;
+                pos += 1;
             } else {
                 break;
             }
@@ -1597,7 +1597,7 @@ fn tokenize_subset(source) {
             h end = pos;
             while end < n {
                 h cc = str_slice(source, end, end + 1);
-                if is_digit_t(cc) == 1 { end = end + 1; } else { break; }
+                if is_digit_t(cc) == 1 { end += 1; } else { break; }
             }
             arr_push(tokens, concat_many(\"NUM:\", str_slice(source, pos, end)));
             pos = end;
@@ -1607,16 +1607,16 @@ fn tokenize_subset(source) {
                 while end < n {
                     h cc = str_slice(source, end, end + 1);
                     if is_alpha_t(cc) == \"y\" {
-                        end = end + 1;
+                        end += 1;
                     } else {
-                        if is_digit_t(cc) == 1 { end = end + 1; } else { break; }
+                        if is_digit_t(cc) == 1 { end += 1; } else { break; }
                     }
                 }
                 arr_push(tokens, concat_many(\"ID:\", str_slice(source, pos, end)));
                 pos = end;
             } else {
                 arr_push(tokens, concat_many(\"PUNCT:\", c));
-                pos = pos + 1;
+                pos += 1;
             }
         }
     }

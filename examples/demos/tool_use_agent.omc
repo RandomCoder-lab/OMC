@@ -140,9 +140,9 @@ h questions = [
 
 h i = 0
 while i < arr_len(questions) {
-    h q = questions[i]
-    print(str_concat("Q: ", q))
-    h answer = tool_agent(q, 3)
+    h cur_q = questions[i]
+    print(str_concat("Q: ", cur_q))
+    h answer = tool_agent(cur_q, 3)
     print(str_concat("A: ", answer))
     print("")
     i += 1

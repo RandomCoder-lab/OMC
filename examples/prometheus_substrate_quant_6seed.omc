@@ -19,7 +19,7 @@ fn build_vocab(text) {
     while i < str_len(text) {
         h ch = str_slice(text, i, i + 1);
         if !dict_has(seen, ch) { dict_set(seen, ch, arr_len(chars)); arr_push(chars, ch); }
-        i = i + 1;
+        i += 1;
     }
     h v = dict_new();
     dict_set(v, "chars", chars);
@@ -34,7 +34,7 @@ fn encode(text, vocab) {
     while i < str_len(text) {
         h ch = str_slice(text, i, i + 1);
         arr_push(ids, dict_get(lookup, ch));
-        i = i + 1;
+        i += 1;
     }
     return ids;
 }
@@ -66,7 +66,7 @@ fn forward_window(model, token_ids, pe_table) {
     h x = prom_embedding_batch(dict_get(model, "emb"), token_ids);
     h pe_rows = [];
     h i = 0;
-    while i < arr_len(token_ids) { arr_push(pe_rows, arr_get(pe_table, i)); i = i + 1; }
+    while i < arr_len(token_ids) { arr_push(pe_rows, arr_get(pe_table, i)); i += 1; }
     x = tape_add(x, tape_const(pe_rows));
     h attn_out = prom_attention_substrate_k_forward(dict_get(model, "attn"), x);
     h x_post = tape_add(x, attn_out);
@@ -90,9 +90,9 @@ fn collect_all(model) {
     ]);
     h out = [];
     h i = 0;
-    while i < arr_len(attn_p) { arr_push(out, arr_get(attn_p, i)); i = i + 1; }
+    while i < arr_len(attn_p) { arr_push(out, arr_get(attn_p, i)); i += 1; }
     i = 0;
-    while i < arr_len(other) { arr_push(out, arr_get(other, i)); i = i + 1; }
+    while i < arr_len(other) { arr_push(out, arr_get(other, i)); i += 1; }
     return out;
 }
 
@@ -113,24 +113,24 @@ fn train(vocab_size, ids, seq_len, d_model, ff_dim, lr, steps, seed) {
         while k < seq_len {
             arr_push(window, arr_get(ids, start + k));
             arr_push(targets, arr_get(ids, start + k + 1));
-            k = k + 1;
+            k += 1;
         }
         h logits = forward_window(model, window, pe_table);
         h loss = prom_cross_entropy_batch(logits, targets, vocab_size);
         tape_backward(loss);
         prom_adamw_step(opt);
         if step >= steps - 30 { arr_push(tail, tape_value(loss)); }
-        step = step + 1;
+        step += 1;
     }
     h s = 0.0;
     h i = 0;
-    while i < arr_len(tail) { s = s + arr_get(tail, i); i = i + 1; }
+    while i < arr_len(tail) { s += arr_get(tail, i); i += 1; }
     return s / arr_len(tail);
 }
 
 fn mean_arr(xs) {
     h s = 0.0; h i = 0;
-    while i < arr_len(xs) { s = s + arr_get(xs, i); i = i + 1; }
+    while i < arr_len(xs) { s += arr_get(xs, i); i += 1; }
     return s / arr_len(xs);
 }
 
@@ -163,7 +163,7 @@ fn main() {
         h L = train(vocab_size, ids, seq_len, d_model, ff_dim, lr, steps, seed);
         arr_push(losses, L);
         print(concat_many("  seed=", to_string(seed), "  loss=", to_string(L)));
-        si = si + 1;
+        si += 1;
     }
     h mu = mean_arr(losses);
     print(concat_many("mean=", to_string(mu)));

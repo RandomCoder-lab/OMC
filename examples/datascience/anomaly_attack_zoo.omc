@@ -52,7 +52,7 @@ fn run_scenario(label, normal_gen, attack_gen, n_normal, n_attack,
     h i = 0;
     while i < n_normal {
         arr_push(rows, py_call_fn(cb_normal, [i]));
-        i = i + 1;
+        i += 1;
     }
     h attack_indices = {};
     h j = 0;
@@ -60,7 +60,7 @@ fn run_scenario(label, normal_gen, attack_gen, n_normal, n_attack,
         h idx = arr_len(rows);
         arr_push(rows, py_call_fn(cb_attack, [j]));
         dict_set(attack_indices, concat_many("", idx), 1);
-        j = j + 1;
+        j += 1;
     }
 
     # Build the detector.
@@ -68,7 +68,7 @@ fn run_scenario(label, normal_gen, attack_gen, n_normal, n_attack,
     h s = 0;
     while s < arr_len(strategies) {
         ha.set_strategy(det, s, arr_get(strategies, s));
-        s = s + 1;
+        s += 1;
     }
     ha.fit(det, rows);
 
@@ -80,8 +80,8 @@ fn run_scenario(label, normal_gen, attack_gen, n_normal, n_attack,
     h k = 0;
     while k < K {
         h key = concat_many("", arr_get(top, k));
-        if dict_has(attack_indices, key) == 1 { hits = hits + 1; }
-        k = k + 1;
+        if dict_has(attack_indices, key) == 1 { hits += 1; }
+        k += 1;
     }
 
     println(concat_many("  ", label,

@@ -103,7 +103,7 @@ fn build_X(includes_harmonic) {
             row = arr_concat(row, [arr_get(age_attr, i), arr_get(fare_attr, i)]);
         }
         arr_push(X, row);
-        i = i + 1;
+        i += 1;
     }
     return X;
 }

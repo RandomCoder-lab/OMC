@@ -33,7 +33,7 @@ fn build_vocab(text) {
             dict_set(seen, ch, arr_len(chars));
             arr_push(chars, ch);
         }
-        i = i + 1;
+        i += 1;
     }
     h out = dict_new();
     dict_set(out, "chars", chars);
@@ -48,7 +48,7 @@ fn encode(text, vocab) {
     while i < str_len(text) {
         h ch = str_slice(text, i, i + 1);
         arr_push(ids, dict_get(lookup, ch));
-        i = i + 1;
+        i += 1;
     }
     return ids;
 }
@@ -116,11 +116,11 @@ fn main() {
         if step % n_pairs == 0 {
             print(concat_many("  epoch ", to_string(step / n_pairs), "  loss=", to_string(lv)));
         }
-        step = step + 1;
+        step += 1;
     }
     h sum = 0.0;
     h i = 0;
-    while i < arr_len(last_losses) { sum = sum + arr_get(last_losses, i); i = i + 1; }
+    while i < arr_len(last_losses) { sum += arr_get(last_losses, i); i += 1; }
     h last_mean = sum / arr_len(last_losses);
     print("");
     print(concat_many("first loss: ", to_string(first_loss)));

@@ -1,3 +1,4 @@
+# omc:check=lint_only
 # =============================================================================
 # ONN Self-Healing Code Demo (Phase O)
 # =============================================================================
@@ -62,7 +63,7 @@ while pos < n_items {
         "  -> ", result
     ));
 
-    pos = pos + 1;
+    pos += 1;
 }
 
 print("");
@@ -97,7 +98,7 @@ while pos2 < n2 {
         "  ->  healed=", healed,
         " (harm=", h_after, ")"
     ));
-    pos2 = pos2 + 1;
+    pos2 += 1;
 }
 
 print("");

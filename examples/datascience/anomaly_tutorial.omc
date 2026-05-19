@@ -1,3 +1,4 @@
+# omc:check=lint_only
 # =============================================================================
 # Tutorial: drop-in IsolationForest replacement using harmonic_anomaly
 # =============================================================================
@@ -36,13 +37,13 @@ fn synth_attack() {
 
 h rows = [];
 h i = 0;
-while i < 200 { arr_push(rows, synth_normal()); i = i + 1; }
+while i < 200 { arr_push(rows, synth_normal()); i += 1; }
 h attack_indices = [];
 h j = 0;
 while j < 5 {
     arr_push(attack_indices, arr_len(rows));
     arr_push(rows, synth_attack());
-    j = j + 1;
+    j += 1;
 }
 
 println(concat_many("synthesized ", arr_len(rows),
@@ -68,7 +69,7 @@ while k < arr_len(top) {
     println(concat_many("  #", k + 1, ": idx=", idx,
         "  row=", row,
         "  score=", s));
-    k = k + 1;
+    k += 1;
 }
 
 # Compare with the ground truth
@@ -77,8 +78,8 @@ fn count_hits(picks, truth_set) {
     h k = 0;
     while k < arr_len(picks) {
         h key = concat_many("", arr_get(picks, k));
-        if dict_has(truth_set, key) == 1 { hits = hits + 1; }
-        k = k + 1;
+        if dict_has(truth_set, key) == 1 { hits += 1; }
+        k += 1;
     }
     return hits;
 }
@@ -87,7 +88,7 @@ h truth = {};
 h ti = 0;
 while ti < arr_len(attack_indices) {
     dict_set(truth, concat_many("", arr_get(attack_indices, ti)), 1);
-    ti = ti + 1;
+    ti += 1;
 }
 h hits = count_hits(top, truth);
 println(concat_many("Recall: ", hits, "/", arr_len(attack_indices),

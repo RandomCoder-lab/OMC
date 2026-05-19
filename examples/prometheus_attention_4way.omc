@@ -30,7 +30,7 @@ fn build_vocab(text) {
             dict_set(seen, ch, arr_len(chars));
             arr_push(chars, ch);
         }
-        i = i + 1;
+        i += 1;
     }
     h v = dict_new();
     dict_set(v, "chars", chars);
@@ -45,7 +45,7 @@ fn encode(text, vocab) {
     while i < str_len(text) {
         h ch = str_slice(text, i, i + 1);
         arr_push(ids, dict_get(lookup, ch));
-        i = i + 1;
+        i += 1;
     }
     return ids;
 }
@@ -113,7 +113,7 @@ fn forward_window(model, token_ids, pe_table) {
     h i = 0;
     while i < arr_len(token_ids) {
         arr_push(pe_rows, arr_get(pe_table, i));
-        i = i + 1;
+        i += 1;
     }
     h pe_const = tape_const(pe_rows);
     x = tape_add(x, pe_const);
@@ -142,9 +142,9 @@ fn collect_all_params(model) {
     ]);
     h out = [];
     h i = 0;
-    while i < arr_len(attn_p) { arr_push(out, arr_get(attn_p, i)); i = i + 1; }
+    while i < arr_len(attn_p) { arr_push(out, arr_get(attn_p, i)); i += 1; }
     i = 0;
-    while i < arr_len(other) { arr_push(out, arr_get(other, i)); i = i + 1; }
+    while i < arr_len(other) { arr_push(out, arr_get(other, i)); i += 1; }
     return out;
 }
 
@@ -165,18 +165,18 @@ fn train_arm(variant, vocab_size, ids, seq_len, d_model, ff_dim, n_windows, lr, 
         while k < seq_len {
             arr_push(window, arr_get(ids, start + k));
             arr_push(targets, arr_get(ids, start + k + 1));
-            k = k + 1;
+            k += 1;
         }
         h logits = forward_window(model, window, pe_table);
         h loss = prom_cross_entropy_batch(logits, targets, vocab_size);
         tape_backward(loss);
         prom_adamw_step(opt);
         if step >= steps - 10 { arr_push(tail_losses, tape_value(loss)); }
-        step = step + 1;
+        step += 1;
     }
     h sum = 0.0;
     h i = 0;
-    while i < arr_len(tail_losses) { sum = sum + arr_get(tail_losses, i); i = i + 1; }
+    while i < arr_len(tail_losses) { sum += arr_get(tail_losses, i); i += 1; }
     h mean_tail = sum / arr_len(tail_losses);
     h result = dict_new();
     dict_set(result, "loss", mean_tail);
@@ -222,7 +222,7 @@ fn main() {
                             n_windows, lr, steps, seed);
             arr_push(losses, dict_get(r, "loss"));
             n_params = dict_get(r, "n_params");
-            si = si + 1;
+            si += 1;
         }
         h entry = dict_new();
         dict_set(entry, "losses", losses);
@@ -230,12 +230,12 @@ fn main() {
         dict_set(results, v, entry);
         h sum = 0.0;
         h i = 0;
-        while i < arr_len(losses) { sum = sum + arr_get(losses, i); i = i + 1; }
+        while i < arr_len(losses) { sum += arr_get(losses, i); i += 1; }
         h mean = sum / arr_len(losses);
         print(concat_many("[", v, "] params=", to_string(n_params),
             "  mean loss=", to_string(mean),
             "  per-seed=", to_string(losses)));
-        vi = vi + 1;
+        vi += 1;
     }
 
     print("");
@@ -243,7 +243,7 @@ fn main() {
     h baseline = dict_get(dict_get(results, "L0"), "losses");
     h base_sum = 0.0;
     h i = 0;
-    while i < arr_len(baseline) { base_sum = base_sum + arr_get(baseline, i); i = i + 1; }
+    while i < arr_len(baseline) { base_sum += arr_get(baseline, i); i += 1; }
     h base_mean = base_sum / arr_len(baseline);
 
     vi = 0;
@@ -255,9 +255,9 @@ fn main() {
         h wins = 0;
         h j = 0;
         while j < arr_len(ls) {
-            s = s + arr_get(ls, j);
-            if arr_get(ls, j) < arr_get(baseline, j) { wins = wins + 1; }
-            j = j + 1;
+            s += arr_get(ls, j);
+            if arr_get(ls, j) < arr_get(baseline, j) { wins += 1; }
+            j += 1;
         }
         h mean = s / arr_len(ls);
         h rel = (mean - base_mean) / base_mean * 100.0;
@@ -265,7 +265,7 @@ fn main() {
             "  mean=", to_string(mean),
             "  vs L0: ", to_string(rel), "%",
             "  wins=", to_string(wins), "/", to_string(arr_len(ls))));
-        vi = vi + 1;
+        vi += 1;
     }
 
     print("");

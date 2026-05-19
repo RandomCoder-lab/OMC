@@ -42,7 +42,7 @@ fn make_turns(n) {
         h t = arr_get(topics, i - (i / arr_len(topics)) * arr_len(topics));
         h labeled = concat_many("[turn ", to_string(i + 1), "] ", t);
         arr_push(turns, labeled);
-        i = i + 1;
+        i += 1;
     }
     return turns;
 }
@@ -74,7 +74,7 @@ fn main() {
         if (i + 1) % 10 == 0 {
             print_state(mem, i + 1);
         }
-        i = i + 1;
+        i += 1;
     }
 
     print("");
@@ -115,7 +115,7 @@ fn main() {
             "  dist=", to_string(dict_get(r, "distance")),
             "  content=", dict_get(e, "content")
         ));
-        j = j + 1;
+        j += 1;
     }
 }
 

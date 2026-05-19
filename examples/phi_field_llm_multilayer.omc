@@ -161,7 +161,7 @@ fn run_model(input_codes, n) -> int {
 
         h coherence = omni_weight(current, l3);
         h coh_int = to_int(coherence * 1000);
-        sum_coherence = sum_coherence + coh_int;
+        sum_coherence += coh_int;
 
         print(concat_many(
             "  pos=", pos,
@@ -176,7 +176,7 @@ fn run_model(input_codes, n) -> int {
         prev_l1 = l1;
         prev_l2 = l2;
         prev_l3 = l3;
-        pos = pos + 1;
+        pos += 1;
     }
 
     return sum_coherence / n;

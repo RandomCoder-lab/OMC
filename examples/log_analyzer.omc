@@ -1,3 +1,4 @@
+# omc:check=lint_only
 # =============================================================================
 # Web log analyzer — a non-trivial OMC program
 # =============================================================================
@@ -120,7 +121,7 @@ fn make_counter_table() {
                 arr_set(vals, i, arr_get(vals, i) + 1);
                 return 0;
             }
-            i = i + 1;
+            i += 1;
         }
         # First time seeing this key — append.
         arr_push(keys, k);
@@ -153,7 +154,7 @@ println("=== Per-endpoint counts (via mutable closures) ============");
 h i = 0;
 while i < arr_len(endpoints) {
     println(concat_many("  ", arr_get(endpoints, i), " : ", arr_get(counts, i)));
-    i = i + 1;
+    i += 1;
 }
 println("");
 
@@ -172,7 +173,7 @@ println("  Top 5 by harmonic dominance:");
 h j = 0;
 while j < 5 {
     println(concat_many("    ", arr_get(harmonic_sorted, j), " ms"));
-    j = j + 1;
+    j += 1;
 }
 println("");
 
@@ -186,7 +187,7 @@ while k < arr_len(partitioned) {
     # Attractor-id = fold(first element) — cheap label.
     h label = fold(arr_get(bucket, 0));
     println(concat_many("  attractor ~", label, " : ", bucket_len, " request(s)"));
-    k = k + 1;
+    k += 1;
 }
 println("");
 
@@ -208,7 +209,7 @@ h m = 0;
 while m < arr_len(spikes) {
     h s = arr_get(spikes, m);
     println(concat_many("  spike: ", s, " ms (folds to attractor ", fold(s), ")"));
-    m = m + 1;
+    m += 1;
 }
 
 println("");

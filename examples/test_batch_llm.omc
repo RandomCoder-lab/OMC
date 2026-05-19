@@ -6,12 +6,12 @@ h prompts = [
 
 print("Running batch LLM call (3 prompts)...")
 h results = batch_llm_call(prompts, null, 2)
-print(str_concat("Got ", to_str(arr_len(results)), " results"))
+print(str_concat("Got ", to_string(arr_len(results)), " results"))
 
 h i = 0
 while i < arr_len(results) {
-    print(str_concat("  [", to_str(i), "] ", str_slice(results[i], 0, 50)))
-    i = i + 1
+    print(str_concat("  [", to_string(i), "] ", str_slice(results[i], 0, 50)))
+    i += 1
 }
 
 # With per-prompt system messages

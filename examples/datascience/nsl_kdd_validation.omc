@@ -1,3 +1,4 @@
+# omc:check=lint_only
 # =============================================================================
 # Real-world validation: harmonic_anomaly on NSL-KDD network intrusion data
 # =============================================================================
@@ -72,7 +73,7 @@ while i < arr_len(rows_raw) {
             dict_set(attack_indices, concat_many("", i), 1);
         }
     }
-    i = i + 1;
+    i += 1;
 }
 
 h n_total = arr_len(features);
@@ -111,7 +112,7 @@ h if_scores = [];
 h ix = 0;
 while ix < arr_len(if_raw) {
     arr_push(if_scores, 0 - arr_get(if_raw, ix));
-    ix = ix + 1;
+    ix += 1;
 }
 
 # ---- Top-K precision per detector ---------------------------------------
@@ -125,14 +126,14 @@ fn topk(scores, k) {
     h ni = 0;
     while ni < arr_len(scores) {
         arr_push(neg, 0 - arr_get(scores, ni));
-        ni = ni + 1;
+        ni += 1;
     }
     h sorted = np.argsort(neg);
     h out = [];
     h j = 0;
     while j < k {
         if j < arr_len(sorted) { arr_push(out, arr_get(sorted, j)); }
-        j = j + 1;
+        j += 1;
     }
     return out;
 }
@@ -142,8 +143,8 @@ fn count_hits(top_idx, truth_set) {
     h k = 0;
     while k < arr_len(top_idx) {
         h key = concat_many("", arr_get(top_idx, k));
-        if dict_has(truth_set, key) == 1 { hits = hits + 1; }
-        k = k + 1;
+        if dict_has(truth_set, key) == 1 { hits += 1; }
+        k += 1;
     }
     return hits;
 }
@@ -164,7 +165,7 @@ while k_idx < arr_len(ks) {
     h if_hit = count_hits(if_top, attack_indices);
     arr_push(h_results, h_hit);
     arr_push(if_results, if_hit);
-    k_idx = k_idx + 1;
+    k_idx += 1;
 }
 
 println(concat_many("  IsolationForest    ",
@@ -191,7 +192,7 @@ fn show_picks(label, top, labels, n) {
         if lbl != "normal" { tag = " <-"; }
         println(concat_many("    #", k + 1, ": idx=", idx,
             "  label=", lbl, tag));
-        k = k + 1;
+        k += 1;
     }
 }
 

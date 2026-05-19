@@ -96,6 +96,39 @@ fn test_to_string_not_flagged() {
     assert_true(result["ok"], "to_string() is fine")
 }
 
+# ── augmented-assign → style lint ─────────────────────────────────────────────
+
+fn test_augmented_assign_flagged() {
+    h r = omc_spawn("sh", ["-c",
+        "printf 'fn f(n) { h i = 0; while i < n { i = i + 1 } return i }\\n' > /tmp/_lint_aug.omc"])
+    h result = check_file("/tmp/_lint_aug.omc")
+    assert_false(result["ok"], "i = i + 1 fails check")
+    assert_true(str_contains(result["stdout"], "style"), "style hint emitted")
+    assert_true(str_contains(result["stdout"], "+="), "+= suggested in output")
+}
+
+fn test_augmented_assign_minus_flagged() {
+    h r = omc_spawn("sh", ["-c",
+        "printf 'fn f(n) { n = n - 1; return n }\\n' > /tmp/_lint_augm.omc"])
+    h result = check_file("/tmp/_lint_augm.omc")
+    assert_false(result["ok"], "n = n - 1 fails check")
+    assert_true(str_contains(result["stdout"], "-="), "-= suggested in output")
+}
+
+fn test_augmented_assign_declaration_not_flagged() {
+    h r = omc_spawn("sh", ["-c",
+        "printf 'fn f(x) { h y = x + 1; return y }\\n' > /tmp/_lint_augdecl.omc"])
+    h result = check_file("/tmp/_lint_augdecl.omc")
+    assert_true(result["ok"], "h y = x + 1 is a declaration, not flagged")
+}
+
+fn test_augmented_assign_already_correct_not_flagged() {
+    h r = omc_spawn("sh", ["-c",
+        "printf 'fn f(n) { n += 1; return n }\\n' > /tmp/_lint_augok.omc"])
+    h result = check_file("/tmp/_lint_augok.omc")
+    assert_true(result["ok"], "n += 1 is already correct, not flagged")
+}
+
 # ── parse error → exit 1 with message ─────────────────────────────────────────
 
 fn test_parse_error_exits_one() {

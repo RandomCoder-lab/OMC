@@ -44,8 +44,8 @@ fn hidx_size(idx) {
     h total = 0;
     h i = 0;
     while i < arr_len(ks) {
-        total = total + arr_len(dict_get(idx, arr_get(ks, i)));
-        i = i + 1;
+        total += arr_len(dict_get(idx, arr_get(ks, i)));
+        i += 1;
     }
     return total;
 }
@@ -70,7 +70,7 @@ fn load_ratings(path) {
                 ]);
             }
         }
-        i = i + 1;
+        i += 1;
     }
     return out;
 }
@@ -93,7 +93,7 @@ fn aggregate_by_movie(ratings) {
             arr_get(cur, 0) + 1,
             arr_get(cur, 1) + rating
         ]);
-        i = i + 1;
+        i += 1;
     }
     return agg;
 }
@@ -110,7 +110,7 @@ fn agg_to_rows(agg) {
         h sum = arr_get(pair, 1);
         h avg = sum / cnt;
         arr_push(rows, [to_int(k), cnt, avg]);
-        i = i + 1;
+        i += 1;
     }
     return rows;
 }
@@ -127,7 +127,7 @@ fn build_harmonic_engine(movie_rows) {
         h avg = arr_get(row, 2);
         h key = to_int(avg * 100);
         idx = hidx_insert(idx, key, row);
-        i = i + 1;
+        i += 1;
     }
     return idx;
 }
@@ -144,7 +144,7 @@ fn linear_recommend(movie_rows, target_rating, delta) {
         if diff <= delta {
             arr_push(hits, row);
         }
-        i = i + 1;
+        i += 1;
     }
     return hits;
 }
@@ -157,7 +157,7 @@ fn harmonic_recommend(idx, target_rating) {
     h i = 0;
     while i < arr_len(pairs) {
         arr_push(rows, arr_get(arr_get(pairs, i), 1));
-        i = i + 1;
+        i += 1;
     }
     return rows;
 }

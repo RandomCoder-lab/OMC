@@ -87,7 +87,7 @@ fn skip_ws_b(source, pos) {
     while p < n {
         h c = str_slice(source, p, p + 1);
         if is_space_b(c) == 1 {
-            p = p + 1;
+            p += 1;
         } else {
             break;
         }
@@ -144,7 +144,7 @@ fn tokenize_b(source) {
             h end = pos;
             while end < n {
                 h cc = str_slice(source, end, end + 1);
-                if is_alnum_b(cc) == 1 { end = end + 1; } else { break; }
+                if is_alnum_b(cc) == 1 { end += 1; } else { break; }
             }
             h word = str_slice(source, pos, end);
             arr_push(tokens, [classify_b(word), word]);
@@ -154,7 +154,7 @@ fn tokenize_b(source) {
                 h end = pos;
                 while end < n {
                     h cc = str_slice(source, end, end + 1);
-                    if is_digit_b(cc) == 1 { end = end + 1; } else { break; }
+                    if is_digit_b(cc) == 1 { end += 1; } else { break; }
                 }
                 arr_push(tokens, ["NUMBER", str_slice(source, pos, end)]);
                 pos = end;
@@ -164,7 +164,7 @@ fn tokenize_b(source) {
                 h mm_len = arr_get(mm, 1);
                 if str_len(mm_kind) > 0 {
                     arr_push(tokens, [mm_kind, str_slice(source, pos, pos + mm_len)]);
-                    pos = pos + mm_len;
+                    pos += mm_len;
                 } else {
                     h kind = punct_kind_b(c);
                     if str_len(kind) > 0 {
@@ -172,7 +172,7 @@ fn tokenize_b(source) {
                     } else {
                         arr_push(tokens, ["UNKNOWN", c]);
                     }
-                    pos = pos + 1;
+                    pos += 1;
                 }
             }
         }
@@ -302,7 +302,7 @@ fn p_stmt(toks, p) {
         np = arr_get(then_r, 1);
         h else_body = arr_new(0, 0);
         if tkind(toks, np) == "ELSE" {
-            np = np + 2;
+            np += 2;
             h eb = p_block(toks, np);
             else_body = arr_get(eb, 0);
             np = arr_get(eb, 1);
@@ -328,7 +328,7 @@ fn p_block(toks, p) {
     while done == 0 {
         h k = tkind(toks, np);
         if k == "RBRACE" {
-            np = np + 1;
+            np += 1;
             done = 1;
         } else {
             if k == "EOF" {
@@ -371,7 +371,7 @@ fn arr_concat(a, b) {
     h n = arr_len(b);
     while i < n {
         arr_push(a, arr_get(b, i));
-        i = i + 1;
+        i += 1;
     }
     return a;
 }
@@ -481,7 +481,7 @@ fn enc_block(stmts) {
     h n = arr_len(stmts);
     while i < n {
         out = arr_concat(out, enc_stmt(arr_get(stmts, i)));
-        i = i + 1;
+        i += 1;
     }
     return out;
 }
@@ -508,7 +508,7 @@ fn print_bytecode(prog) {
             line = concat_many(line, " ", arr_get(op, 2));
         }
         print(line);
-        i = i + 1;
+        i += 1;
     }
     return 0;
 }
@@ -528,7 +528,7 @@ fn scope_get(scope, name) {
         if arr_get(pair, 0) == name {
             return arr_get(pair, 1);
         }
-        i = i + 1;
+        i += 1;
     }
     return 0;
 }
@@ -543,7 +543,7 @@ fn scope_set(scope, name, value) {
             arr_set(scope, i, [name, value]);
             return scope;
         }
-        i = i + 1;
+        i += 1;
     }
     arr_push(scope, [name, value]);
     return scope;
@@ -566,7 +566,7 @@ fn pop1(stack) {
     h i = 0;
     while i < n - 1 {
         arr_push(ns, arr_get(stack, i));
-        i = i + 1;
+        i += 1;
     }
     return [top, ns];
 }
@@ -592,17 +592,17 @@ fn execute(prog) {
                 handled = 1;
             }
             if kind == "NOP" {
-                pc = pc + 1;
+                pc += 1;
                 handled = 1;
             }
             if kind == "LOAD_INT" {
                 arr_push(stack, parse_int(arr_get(op, 1)));
-                pc = pc + 1;
+                pc += 1;
                 handled = 1;
             }
             if kind == "LOAD_VAR" {
                 arr_push(stack, scope_get(scope, arr_get(op, 1)));
-                pc = pc + 1;
+                pc += 1;
                 handled = 1;
             }
             if kind == "STORE_VAR" {
@@ -610,42 +610,42 @@ fn execute(prog) {
                 h v = arr_get(pr, 0);
                 stack = arr_get(pr, 1);
                 scope = scope_set(scope, arr_get(op, 1), v);
-                pc = pc + 1;
+                pc += 1;
                 handled = 1;
             }
             if kind == "ADD" {
                 h pr = pop1(stack); h r = arr_get(pr, 0); stack = arr_get(pr, 1);
                 h pl = pop1(stack); h l = arr_get(pl, 0); stack = arr_get(pl, 1);
                 arr_push(stack, l + r);
-                pc = pc + 1;
+                pc += 1;
                 handled = 1;
             }
             if kind == "SUB" {
                 h pr = pop1(stack); h r = arr_get(pr, 0); stack = arr_get(pr, 1);
                 h pl = pop1(stack); h l = arr_get(pl, 0); stack = arr_get(pl, 1);
                 arr_push(stack, l - r);
-                pc = pc + 1;
+                pc += 1;
                 handled = 1;
             }
             if kind == "MUL" {
                 h pr = pop1(stack); h r = arr_get(pr, 0); stack = arr_get(pr, 1);
                 h pl = pop1(stack); h l = arr_get(pl, 0); stack = arr_get(pl, 1);
                 arr_push(stack, l * r);
-                pc = pc + 1;
+                pc += 1;
                 handled = 1;
             }
             if kind == "DIV" {
                 h pr = pop1(stack); h r = arr_get(pr, 0); stack = arr_get(pr, 1);
                 h pl = pop1(stack); h l = arr_get(pl, 0); stack = arr_get(pl, 1);
                 arr_push(stack, l / r);
-                pc = pc + 1;
+                pc += 1;
                 handled = 1;
             }
             if kind == "MOD" {
                 h pr = pop1(stack); h r = arr_get(pr, 0); stack = arr_get(pr, 1);
                 h pl = pop1(stack); h l = arr_get(pl, 0); stack = arr_get(pl, 1);
                 arr_push(stack, l % r);
-                pc = pc + 1;
+                pc += 1;
                 handled = 1;
             }
             if kind == "LT" {
@@ -654,7 +654,7 @@ fn execute(prog) {
                 h v = 0;
                 if l < r { v = 1; }
                 arr_push(stack, v);
-                pc = pc + 1;
+                pc += 1;
                 handled = 1;
             }
             if kind == "LE" {
@@ -663,7 +663,7 @@ fn execute(prog) {
                 h v = 0;
                 if l <= r { v = 1; }
                 arr_push(stack, v);
-                pc = pc + 1;
+                pc += 1;
                 handled = 1;
             }
             if kind == "GT" {
@@ -672,7 +672,7 @@ fn execute(prog) {
                 h v = 0;
                 if l > r { v = 1; }
                 arr_push(stack, v);
-                pc = pc + 1;
+                pc += 1;
                 handled = 1;
             }
             if kind == "GE" {
@@ -681,7 +681,7 @@ fn execute(prog) {
                 h v = 0;
                 if l >= r { v = 1; }
                 arr_push(stack, v);
-                pc = pc + 1;
+                pc += 1;
                 handled = 1;
             }
             if kind == "EQ" {
@@ -690,7 +690,7 @@ fn execute(prog) {
                 h v = 0;
                 if l == r { v = 1; }
                 arr_push(stack, v);
-                pc = pc + 1;
+                pc += 1;
                 handled = 1;
             }
             if kind == "NE" {
@@ -699,11 +699,11 @@ fn execute(prog) {
                 h v = 0;
                 if l != r { v = 1; }
                 arr_push(stack, v);
-                pc = pc + 1;
+                pc += 1;
                 handled = 1;
             }
             if kind == "JUMP" {
-                pc = pc + to_int(arr_get(op, 1));
+                pc += to_int(arr_get(op, 1));
                 handled = 1;
             }
             if kind == "JUMP_IF_FALSE" {
@@ -711,9 +711,9 @@ fn execute(prog) {
                 h top = arr_get(pr, 0);
                 stack = arr_get(pr, 1);
                 if top == 0 {
-                    pc = pc + to_int(arr_get(op, 1));
+                    pc += to_int(arr_get(op, 1));
                 } else {
-                    pc = pc + 1;
+                    pc += 1;
                 }
                 handled = 1;
             }
@@ -722,7 +722,7 @@ fn execute(prog) {
                 h top = arr_get(pr, 0);
                 stack = arr_get(pr, 1);
                 print(top);
-                pc = pc + 1;
+                pc += 1;
                 handled = 1;
             }
 
@@ -771,7 +771,7 @@ compile_and_run("Test 1: arithmetic", "h x = 89 + 144; print(x);");
 
 # Demo 2: while loop counting 0..4
 compile_and_run("Test 2: while-loop counter",
-    "h i = 0; while i < 5 { print(i); i = i + 1; }");
+    "h i = 0; while i < 5 { print(i); i += 1; }");
 
 # Demo 3: if/else
 compile_and_run("Test 3: if / else",
@@ -779,7 +779,7 @@ compile_and_run("Test 3: if / else",
 
 # Demo 4: a small computation — sum 1..10 (expect 55, a Fibonacci coincidence)
 compile_and_run("Test 4: sum 1..10",
-    "h s = 0; h i = 1; while i <= 10 { s = s + i; i = i + 1; } print(s);");
+    "h s = 0; h i = 1; while i <= 10 { s += i; i += 1; } print(s);");
 
 print("############################################################");
 print("# Observations");

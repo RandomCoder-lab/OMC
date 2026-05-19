@@ -22,7 +22,7 @@ fn make_corpus() {
         elif ch == "b" { idx = 1; }
         elif ch == "c" { idx = 2; }
         arr_push(ids, idx);
-        i = i + 1;
+        i += 1;
     }
     h corpus = dict_new();
     dict_set(corpus, "chars", chars);
@@ -67,7 +67,7 @@ fn main() {
         h loss = prom_mse_loss(pred, target);
         tape_backward(loss);
         prom_sgd_step(params, 0.05);
-        step = step + 1;
+        step += 1;
     }
     print("[trained]");
 
@@ -84,7 +84,7 @@ fn main() {
         while k < 20 {
             h idx = (seed + k) % 3;
             expected = concat_many(expected, arr_get(chars, idx));
-            k = k + 1;
+            k += 1;
         }
         h ok = text == expected;
         if !ok { all_correct = false; }
@@ -92,7 +92,7 @@ fn main() {
         if ok { tag = "ok"; }
         print(concat_many("  seed=", arr_get(chars, seed),
                           "  generated=\"", text, "\"  expected=\"", expected, "\" ", tag));
-        seed = seed + 1;
+        seed += 1;
     }
 
     print("");

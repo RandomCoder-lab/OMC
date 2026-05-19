@@ -19,7 +19,7 @@ fn main() {
     h i = 0;
     while i < 5 {
         arr_push(diag, arr_get(arr_get(bias, i), i));
-        i = i + 1;
+        i += 1;
     }
     print(concat_many("  ", to_string(diag)));
 
@@ -28,7 +28,7 @@ fn main() {
     h r0 = arr_get(bias, 0);
     h trim0 = [];
     i = 0;
-    while i < 8 { arr_push(trim0, arr_get(r0, i)); i = i + 1; }
+    while i < 8 { arr_push(trim0, arr_get(r0, i)); i += 1; }
     print(concat_many("  ", to_string(trim0)));
 
     print("");
@@ -36,7 +36,7 @@ fn main() {
     h r5 = arr_get(bias, 5);
     h trim5 = [];
     i = 0;
-    while i < 8 { arr_push(trim5, arr_get(r5, i)); i = i + 1; }
+    while i < 8 { arr_push(trim5, arr_get(r5, i)); i += 1; }
     print(concat_many("  ", to_string(trim5)));
 
     # Mean off-diagonal should be ~1.0 (normalization target).
@@ -47,12 +47,12 @@ fn main() {
         h j = 0;
         while j < seq_len {
             if i != j {
-                sum = sum + arr_get(arr_get(bias, i), j);
-                count = count + 1;
+                sum += arr_get(arr_get(bias, i), j);
+                count += 1;
             }
-            j = j + 1;
+            j += 1;
         }
-        i = i + 1;
+        i += 1;
     }
     h mean = sum / count;
     print("");
@@ -69,9 +69,9 @@ fn main() {
             h diff = a - b;
             if diff < 0.0 { diff = 0.0 - diff; }
             if diff > 0.00001 { sym_ok = false; }
-            j = j + 1;
+            j += 1;
         }
-        i = i + 1;
+        i += 1;
     }
     print(concat_many("symmetric: ", to_string(sym_ok)));
 
@@ -81,7 +81,7 @@ fn main() {
     while i < seq_len {
         h d = arr_get(arr_get(bias, i), i);
         if d != 0.0 { diag_ok = false; }
-        i = i + 1;
+        i += 1;
     }
     print(concat_many("diagonal all zero: ", to_string(diag_ok)));
 

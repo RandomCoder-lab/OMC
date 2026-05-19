@@ -1,3 +1,4 @@
+# omc:check=lint_only
 # =============================================================================
 # OMNIcode harmonic variants — operations that USE the φ-math substrate
 # =============================================================================
@@ -50,7 +51,7 @@ print(arr_len(chunks));
 h i = 0;
 while i < arr_len(chunks) {
     print(concat_many("  [", str_chars(arr_get(chunks, i)), " chars] ", arr_get(chunks, i)));
-    i = i + 1;
+    i += 1;
 }
 
 print("");
@@ -63,7 +64,7 @@ h j = 0;
 while j < arr_len(groups) {
     h grp = arr_get(groups, j);
     print(concat_many("  group ", j, ": ", arr_join(grp, ",")));
-    j = j + 1;
+    j += 1;
 }
 
 print("");

@@ -1,3 +1,4 @@
+# omc:check=lint_only
 # =============================================================================
 # harmonic_anomaly v1 (linear _find_key) vs v2 (sorted + int_binary_search)
 # =============================================================================
@@ -41,7 +42,7 @@ while i < arr_len(rows_raw) {
             dict_set(attack_indices, concat_many("", i), 1);
         }
     }
-    i = i + 1;
+    i += 1;
 }
 h n_total = arr_len(features);
 h n_attacks = dict_len(attack_indices);
@@ -93,14 +94,14 @@ fn topk(scores, k) {
     h ni = 0;
     while ni < arr_len(scores) {
         arr_push(neg, 0 - arr_get(scores, ni));
-        ni = ni + 1;
+        ni += 1;
     }
     h sorted = np.argsort(neg);
     h out = [];
     h j = 0;
     while j < k {
         if j < arr_len(sorted) { arr_push(out, arr_get(sorted, j)); }
-        j = j + 1;
+        j += 1;
     }
     return out;
 }
@@ -110,8 +111,8 @@ fn count_hits(top_idx, truth_set) {
     h k = 0;
     while k < arr_len(top_idx) {
         h key = concat_many("", arr_get(top_idx, k));
-        if dict_has(truth_set, key) == 1 { hits = hits + 1; }
-        k = k + 1;
+        if dict_has(truth_set, key) == 1 { hits += 1; }
+        k += 1;
     }
     return hits;
 }

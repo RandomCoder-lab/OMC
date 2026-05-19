@@ -3,10 +3,10 @@
 # The loop recurses until the improver itself is good enough to improve other programs.
 
 import "examples/lib/llm.omc"
-import "examples/lib/cache.omc"
+import "examples/lib/cache.omc" as cache
 
 h MODEL = "claude-opus-4-5"
-h MEMO_CACHE = lru_new(256)
+h MEMO_CACHE = cache.lru_new(256)
 
 # ── Core primitives ──────────────────────────────────────────────────────────
 
@@ -70,7 +70,7 @@ fn improve_to_convergence(code, goal, max_rounds) {
     if rounds == null { rounds = 3 }
 
     h cache_key = str_concat(code, "|", goal)
-    h cached = lru_get(MEMO_CACHE, cache_key)
+    h cached = cache.lru_get(MEMO_CACHE, cache_key)
     if cached != null { return cached }
 
     h current = code
@@ -92,7 +92,7 @@ fn improve_to_convergence(code, goal, max_rounds) {
     }
 
     h result = {code: current, rounds: r, trace: trace}
-    lru_put(MEMO_CACHE, cache_key, result)
+    cache.lru_put(MEMO_CACHE, cache_key, result)
     return result
 }
 

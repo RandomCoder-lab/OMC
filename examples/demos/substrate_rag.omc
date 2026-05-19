@@ -3,18 +3,18 @@
 # The native substrate_embed builtin (no API key, pure math) powers all retrieval.
 
 import "examples/lib/llm.omc"
-import "examples/lib/cache.omc"
+import "examples/lib/cache.omc" as cache
 
 h MODEL = "claude-opus-4-5"
-h EMBED_CACHE = lru_new(500)
+h EMBED_CACHE = cache.lru_new(500)
 
 # ── Embedding helpers ─────────────────────────────────────────────────────────
 
 fn embed_cached(text) {
-    h cached = lru_get(EMBED_CACHE, text)
+    h cached = cache.lru_get(EMBED_CACHE, text)
     if cached != null { return cached }
     h v = substrate_embed(text, 16)
-    lru_put(EMBED_CACHE, text, v)
+    cache.lru_put(EMBED_CACHE, text, v)
     return v
 }
 
@@ -43,6 +43,7 @@ fn docstore_add(store, text, meta) {
     h m = meta
     if m == null { m = {} }
     arr_push(store["metadata"], m)
+    return null;
 }
 
 fn docstore_search(store, query, top_k) {
@@ -50,8 +51,8 @@ fn docstore_search(store, query, top_k) {
     h scores = []
     h i = 0
     while i < arr_len(store["docs"]) {
-        h sim = cosine_sim(query_embed, store["embeddings"][i])
-        arr_push(scores, {idx: i, score: sim})
+        h csim = cosine_sim(query_embed, store["embeddings"][i])
+        arr_push(scores, {idx: i, score: csim})
         i += 1
     }
     # bubble-sort descending
@@ -174,10 +175,10 @@ h QUERIES = [
 
 h qi = 0
 while qi < arr_len(QUERIES) {
-    h q = QUERIES[qi]
-    h retrieved = docstore_search(KB, q, 1)
+    h qtext = QUERIES[qi]
+    h retrieved = docstore_search(KB, qtext, 1)
     h top = retrieved[0]
-    print(str_concat("Q: ", q))
+    print(str_concat("Q: ", qtext))
     print(str_concat("  Best match (sim=", to_string(top["score"]), "): '", str_slice(top["text"], 0, 80), "...'"))
     print("")
     qi += 1
@@ -195,8 +196,8 @@ h pairs = [
 h pi2 = 0
 while pi2 < arr_len(pairs) {
     h pair = pairs[pi2]
-    h sim = str_similarity(pair[0], pair[1])
-    print(str_concat("  '", str_slice(pair[0], 0, 35), "' vs '", str_slice(pair[1], 0, 35), "' => ", to_string(sim)))
+    h strsim = str_similarity(pair[0], pair[1])
+    print(str_concat("  '", str_slice(pair[0], 0, 35), "' vs '", str_slice(pair[1], 0, 35), "' => ", to_string(strsim)))
     pi2 += 1
 }
 print("")
@@ -210,9 +211,9 @@ h LLM_QUESTIONS = [
 ]
 h lqi = 0
 while lqi < arr_len(LLM_QUESTIONS) {
-    h q = LLM_QUESTIONS[lqi]
-    print(str_concat("Q: ", q))
-    h result = rag_answer(KB, q, 2, null)
+    h question = LLM_QUESTIONS[lqi]
+    print(str_concat("Q: ", question))
+    h result = rag_answer(KB, question, 2, null)
     print(str_concat("A: ", str_slice(result["answer"], 0, 200)))
     print("")
     lqi += 1

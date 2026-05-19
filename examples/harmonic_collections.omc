@@ -1,3 +1,4 @@
+# omc:check=lint_only
 # =============================================================================
 # Harmonic-distinctive collections: the OMC-only data structures
 # =============================================================================
@@ -91,8 +92,8 @@ fn _hpq_him_key(v) {
     h padded = "";
     h i = 0;
     while i < pad_count {
-        padded = padded + "0";
-        i = i + 1;
+        padded += "0";
+        i += 1;
     }
     return padded + s;
 }
@@ -138,8 +139,8 @@ fn hpq_len(q) {
     h total = 0;
     h i = 0;
     while i < arr_len(ks) {
-        total = total + arr_len(dict_get(q, arr_get(ks, i)));
-        i = i + 1;
+        total += arr_len(dict_get(q, arr_get(ks, i)));
+        i += 1;
     }
     return total;
 }
@@ -180,8 +181,8 @@ fn hidx_size(idx) {
     h total = 0;
     h i = 0;
     while i < arr_len(ks) {
-        total = total + arr_len(dict_get(idx, arr_get(ks, i)));
-        i = i + 1;
+        total += arr_len(dict_get(idx, arr_get(ks, i)));
+        i += 1;
     }
     return total;
 }
@@ -257,7 +258,7 @@ while k < arr_len(hits) {
     h pair = arr_get(hits, k);
     println(concat_many("    user_id=", arr_get(pair, 0),
         " -> ", arr_get(pair, 1)));
-    k = k + 1;
+    k += 1;
 }
 
 println("  query: who is near user_id 91?");
@@ -267,7 +268,7 @@ while k2 < arr_len(hits2) {
     h pair = arr_get(hits2, k2);
     println(concat_many("    user_id=", arr_get(pair, 0),
         " -> ", arr_get(pair, 1)));
-    k2 = k2 + 1;
+    k2 += 1;
 }
 
 println("  query: who is near user_id 999? (folds off-spine to 610)");

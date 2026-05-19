@@ -110,7 +110,7 @@ fn parse_primary(tokens, pos) {
                 arr_push(args, arr_get(r, 0));
                 np = arr_get(r, 1);
                 if tok_kind(tokens, np) == "COMMA" {
-                    np = np + 1;
+                    np += 1;
                 } else {
                     done = 1;
                 }
@@ -267,7 +267,7 @@ fn parse_statement(tokens, pos) {
         np = arr_get(then_body_r, 1);
         h else_body = arr_new(0, 0);
         if tok_kind(tokens, np) == "ELSE" {
-            np = np + 1;
+            np += 1;
             np = expect(tokens, np, "LBRACE");
             h eb = parse_block(tokens, np);
             else_body = arr_get(eb, 0);
@@ -290,14 +290,14 @@ fn parse_statement(tokens, pos) {
         h np = expect(tokens, pos + 2, "LPAREN");
         h params = arr_new(0, 0);
         if tok_kind(tokens, np) == "RPAREN" {
-            np = np + 1;
+            np += 1;
         } else {
             h done = 0;
             while done == 0 {
                 arr_push(params, tok_value(tokens, np));
-                np = np + 1;
+                np += 1;
                 if tok_kind(tokens, np) == "COMMA" {
-                    np = np + 1;
+                    np += 1;
                 } else {
                     done = 1;
                 }
@@ -337,7 +337,7 @@ fn parse_block(tokens, pos) {
     while done == 0 {
         h k = tok_kind(tokens, np);
         if k == "RBRACE" {
-            np = np + 1;
+            np += 1;
             done = 1;
         } else {
             if k == "EOF" {
@@ -384,7 +384,7 @@ fn print_ast(ast, indent) {
     h i = 0;
     while i < indent {
         prefix = str_concat(prefix, "  ");
-        i = i + 1;
+        i += 1;
     }
 
     if tag == "NUMBER" {
@@ -415,7 +415,7 @@ fn print_ast(ast, indent) {
         h j = 0;
         while j < arr_len(args) {
             print_ast(arr_get(args, j), indent + 1);
-            j = j + 1;
+            j += 1;
         }
         return 0;
     }
@@ -452,7 +452,7 @@ fn print_ast(ast, indent) {
         h ti = 0;
         while ti < arr_len(tb) {
             print_ast(arr_get(tb, ti), indent + 2);
-            ti = ti + 1;
+            ti += 1;
         }
         h eb = arr_get(ast, 3);
         if arr_len(eb) > 0 {
@@ -460,7 +460,7 @@ fn print_ast(ast, indent) {
             h ei = 0;
             while ei < arr_len(eb) {
                 print_ast(arr_get(eb, ei), indent + 2);
-                ei = ei + 1;
+                ei += 1;
             }
         }
         return 0;
@@ -473,7 +473,7 @@ fn print_ast(ast, indent) {
         h bi = 0;
         while bi < arr_len(b) {
             print_ast(arr_get(b, bi), indent + 2);
-            bi = bi + 1;
+            bi += 1;
         }
         return 0;
     }
@@ -483,14 +483,14 @@ fn print_ast(ast, indent) {
         h pi = 0;
         while pi < arr_len(ps) {
             print(concat_many(prefix, "  param: ", arr_get(ps, pi)));
-            pi = pi + 1;
+            pi += 1;
         }
         print(concat_many(prefix, "  body:"));
         h b = arr_get(ast, 3);
         h bi = 0;
         while bi < arr_len(b) {
             print_ast(arr_get(b, bi), indent + 2);
-            bi = bi + 1;
+            bi += 1;
         }
         return 0;
     }
@@ -526,7 +526,7 @@ h ast1 = parse_program(tok1);
 h i = 0;
 while i < arr_len(ast1) {
     print_ast(arr_get(ast1, i), 0);
-    i = i + 1;
+    i += 1;
 }
 print("");
 
@@ -554,7 +554,7 @@ h ast2 = parse_program(tok2);
 h j = 0;
 while j < arr_len(ast2) {
     print_ast(arr_get(ast2, j), 0);
-    j = j + 1;
+    j += 1;
 }
 print("");
 
@@ -589,7 +589,7 @@ h ast3 = parse_program(tok3);
 h k = 0;
 while k < arr_len(ast3) {
     print_ast(arr_get(ast3, k), 0);
-    k = k + 1;
+    k += 1;
 }
 print("");
 
@@ -620,7 +620,7 @@ h ast4 = parse_program(tok4);
 h m = 0;
 while m < arr_len(ast4) {
     print_ast(arr_get(ast4, m), 0);
-    m = m + 1;
+    m += 1;
 }
 print("");
 

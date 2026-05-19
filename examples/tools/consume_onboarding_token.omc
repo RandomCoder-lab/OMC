@@ -53,7 +53,7 @@ fn main() {
             "  ", dict_get(entry, "signature"),
             "  hash=", to_string(dict_get(entry, "canonical_hash"))
         ));
-        i = i + 1;
+        i += 1;
     }
 
     # Step 4: show that the LLM can now ask "do you have fns returning float[]?"
@@ -64,7 +64,7 @@ fn main() {
     while i < arr_len(hits) {
         h r = arr_get(hits, i);
         print(concat_many("  ", dict_get(r, "name"), " :: ", dict_get(r, "signature")));
-        i = i + 1;
+        i += 1;
     }
 
     print("");
