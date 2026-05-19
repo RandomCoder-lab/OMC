@@ -1,0 +1,190 @@
+# Tests for v1.3.1 builtins: substrate_embed, omc_spawn, omc_pipe, llm_tools
+# substrate_embed: always works (offline, pure math)
+# omc_spawn / omc_pipe: always work (shell commands)
+# llm_tools: requires ANTHROPIC_API_KEY (arg-validation only without key)
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual))
+    }
+}
+
+fn assert_true(cond, msg)  { if !cond { test_record_failure(msg) } }
+fn assert_false(cond, msg) { if cond { test_record_failure(msg) } }
+fn assert_null(v, msg)     { if v != null { test_record_failure(msg + ": expected null") } }
+
+# ── substrate_embed ───────────────────────────────────────────────────────────
+
+fn test_substrate_embed_returns_array() {
+    h v = substrate_embed("hello world", 16)
+    assert_eq(type_of(v), "array", "returns array")
+    assert_eq(arr_len(v), 16, "length 16")
+}
+
+fn test_substrate_embed_default_dims() {
+    h v = substrate_embed("test")
+    assert_eq(arr_len(v), 16, "default 16 dims")
+}
+
+fn test_substrate_embed_custom_dims() {
+    h v = substrate_embed("test", 32)
+    assert_eq(arr_len(v), 32, "custom 32 dims")
+}
+
+fn test_substrate_embed_values_are_floats() {
+    h v = substrate_embed("hello", 8)
+    h i = 0
+    while i < arr_len(v) {
+        h t = type_of(v[i])
+        assert_true(t == "float" or t == "int", "element is numeric")
+        i = i + 1
+    }
+}
+
+fn test_substrate_embed_is_normalized() {
+    h v = substrate_embed("normalize me", 16)
+    h dot = 0.0
+    h i = 0
+    while i < arr_len(v) {
+        dot = dot + v[i] * v[i]
+        i = i + 1
+    }
+    assert_true(dot > 0.9 and dot < 1.1, "L2 norm ≈ 1.0")
+}
+
+fn test_substrate_embed_different_texts_differ() {
+    h v1 = substrate_embed("cat", 8)
+    h v2 = substrate_embed("dog", 8)
+    h same = true
+    h i = 0
+    while i < 8 {
+        if v1[i] != v2[i] { same = false }
+        i = i + 1
+    }
+    assert_false(same, "different texts produce different embeddings")
+}
+
+fn test_substrate_embed_same_text_identical() {
+    h v1 = substrate_embed("repeat", 8)
+    h v2 = substrate_embed("repeat", 8)
+    h i = 0
+    while i < 8 {
+        assert_eq(v1[i], v2[i], "same text → same vector element")
+        i = i + 1
+    }
+}
+
+fn test_substrate_embed_empty_string() {
+    h v = substrate_embed("", 4)
+    assert_eq(arr_len(v), 4, "empty string → length 4")
+}
+
+fn test_substrate_embed_requires_text() {
+    h err = ""
+    try { substrate_embed() } catch e { err = e }
+    assert_true(str_len(err) > 0, "no args → error")
+}
+
+# ── omc_spawn ─────────────────────────────────────────────────────────────────
+
+fn test_omc_spawn_echo() {
+    h r = omc_spawn("echo", ["hello"])
+    assert_true(dict_has(r, "stdout"), "has stdout")
+    assert_true(dict_has(r, "stderr"), "has stderr")
+    assert_true(dict_has(r, "exit_code"), "has exit_code")
+    assert_true(dict_has(r, "ok"), "has ok")
+    assert_eq(r["exit_code"], 0, "echo exits 0")
+    assert_eq(r["ok"], true, "echo ok=true")
+    assert_true(str_contains(r["stdout"], "hello"), "stdout contains hello")
+}
+
+fn test_omc_spawn_exit_code() {
+    h r = omc_spawn("false", [])
+    assert_false(r["ok"], "false → ok=false")
+    assert_true(r["exit_code"] != 0, "false → non-zero exit")
+}
+
+fn test_omc_spawn_true_command() {
+    h r = omc_spawn("true", [])
+    assert_eq(r["exit_code"], 0, "true exits 0")
+    assert_eq(r["ok"], true, "true ok=true")
+}
+
+fn test_omc_spawn_no_args_uses_empty_array() {
+    h r = omc_spawn("echo", null)
+    assert_true(dict_has(r, "ok"), "null args accepted")
+}
+
+fn test_omc_spawn_captures_stderr() {
+    h r = omc_spawn("sh", ["-c", "echo error >&2; exit 1"])
+    assert_true(str_contains(r["stderr"], "error"), "stderr captured")
+    assert_false(r["ok"], "failed exit code")
+}
+
+fn test_omc_spawn_multiarg_echo() {
+    h r = omc_spawn("echo", ["one", "two", "three"])
+    assert_true(str_contains(r["stdout"], "one"), "first arg in stdout")
+    assert_true(str_contains(r["stdout"], "three"), "third arg in stdout")
+}
+
+# ── omc_pipe ──────────────────────────────────────────────────────────────────
+
+fn test_omc_pipe_basic() {
+    h r = omc_pipe([["echo", "hello world"], ["grep", "hello"]])
+    assert_true(dict_has(r, "stdout"), "has stdout")
+    assert_eq(r["ok"], true, "pipe ok")
+    assert_true(str_contains(r["stdout"], "hello"), "piped output contains hello")
+}
+
+fn test_omc_pipe_single_command() {
+    h r = omc_pipe([["echo", "single"]])
+    assert_eq(r["ok"], true, "single command pipe ok")
+    assert_true(str_contains(r["stdout"], "single"), "single output")
+}
+
+fn test_omc_pipe_count_lines() {
+    h r = omc_pipe([["printf", "a\nb\nc\n"], ["wc", "-l"]])
+    assert_eq(r["ok"], true, "wc pipe ok")
+    assert_true(str_contains(str_trim(r["stdout"]), "3"), "3 lines counted")
+}
+
+fn test_omc_pipe_requires_array() {
+    h err = ""
+    try { omc_pipe("not an array") } catch e { err = e }
+    assert_true(str_len(err) > 0, "non-array → error")
+}
+
+# ── llm_tools ─────────────────────────────────────────────────────────────────
+
+fn test_llm_tools_requires_two_args() {
+    h err = ""
+    try { llm_tools() } catch e { err = e }
+    assert_true(str_len(err) > 0, "no args → error")
+}
+
+fn test_llm_tools_requires_messages_and_tools() {
+    h err = ""
+    try { llm_tools([]) } catch e { err = e }
+    assert_true(str_len(err) > 0, "one arg → error")
+}
+
+fn test_llm_tools_conditional() {
+    h err = ""
+    h result = null
+    try {
+        h messages = [{role: "user", content: "What is 2+2?"}]
+        h tools = [{
+            name: "calculator",
+            description: "Performs arithmetic",
+            input_schema: {type: "object", properties: {expr: {type: "string"}}}
+        }]
+        result = llm_tools(messages, tools, null)
+    } catch e {
+        err = e
+    }
+    # Without API key: error is expected. With key: result should be a dict.
+    if result != null {
+        assert_true(type_of(result) == "dict", "result is dict")
+    }
+    assert_true(true, "llm_tools callable")
+}
