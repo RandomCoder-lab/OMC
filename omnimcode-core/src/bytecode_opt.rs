@@ -20,6 +20,8 @@ pub struct OptStats {
     /// Pure-unary ops on constants folded: res(89), phi.fold(N), fibonacci(N),
     /// is_fibonacci(N), HimScore(N), -N, !N, ~N, etc.
     pub unary_calls_cached: usize,
+    /// Nop holes removed after all peephole passes + jump offsets rewritten.
+    pub nops_compacted: usize,
 }
 
 impl OptStats {
@@ -29,6 +31,7 @@ impl OptStats {
             + self.double_nots_collapsed
             + self.double_negs_collapsed
             + self.unary_calls_cached
+            + self.nops_compacted
     }
 }
 
@@ -49,6 +52,13 @@ pub fn optimize_function(func: &mut CompiledFunction) -> OptStats {
             break;
         }
     }
+    // Compact Nop holes once, after the peephole fixpoint.
+    // This rewrites jump offsets so the VM traverses a dense bytecode
+    // slice with no wasted iterations. Must run after all Nop-emitting
+    // passes are done; running it inside the loop would only help if a
+    // compacted bytecode exposed new constant-fold opportunities (it
+    // doesn't — the folded constants are already in func.constants).
+    stats.nops_compacted = compact_nops(func);
     stats
 }
 
@@ -277,6 +287,75 @@ fn const_to_float(c: &Const) -> Option<f64> {
     }
 }
 
+/// Remove all `Op::Nop` holes from a function's bytecode and rewrite
+/// the relative jump offsets (Jump/JumpIfFalse/JumpIfTrue) so they
+/// point to the same logical targets in the compacted slice.
+///
+/// Targets that pointed INTO a run of Nops are forwarded to the first
+/// non-Nop after them (or to end-of-bytecode if the tail is all Nops).
+///
+/// Returns the number of Nops removed.
+fn compact_nops(func: &mut CompiledFunction) -> usize {
+    let n = func.ops.len();
+
+    // Map old_index -> new_index. None = this op is a Nop (removed).
+    let mut old_to_new: Vec<Option<usize>> = vec![None; n];
+    let mut new_count = 0usize;
+    for i in 0..n {
+        if !matches!(func.ops[i], Op::Nop) {
+            old_to_new[i] = Some(new_count);
+            new_count += 1;
+        }
+    }
+    let removed = n - new_count;
+    if removed == 0 {
+        return 0;
+    }
+
+    // For a jump target at old absolute index `abs`, find the new index.
+    // If `abs` lands on a Nop, skip forward to the first non-Nop.
+    // If everything remaining is Nops, return `new_count` (past end).
+    let resolve = |abs: usize| -> usize {
+        let mut t = abs;
+        while t < n {
+            if let Some(nidx) = old_to_new[t] {
+                return nidx;
+            }
+            t += 1;
+        }
+        new_count
+    };
+
+    let mut new_ops: Vec<Op> = Vec::with_capacity(new_count);
+    for i in 0..n {
+        match &func.ops[i] {
+            Op::Nop => {}
+            Op::Jump(off) => {
+                let abs_old = ((i as i32) + 1 + off) as usize;
+                let abs_new = resolve(abs_old);
+                let my_new = old_to_new[i].unwrap() as i32;
+                new_ops.push(Op::Jump((abs_new as i32) - my_new - 1));
+            }
+            Op::JumpIfFalse(off) => {
+                let abs_old = ((i as i32) + 1 + off) as usize;
+                let abs_new = resolve(abs_old);
+                let my_new = old_to_new[i].unwrap() as i32;
+                new_ops.push(Op::JumpIfFalse((abs_new as i32) - my_new - 1));
+            }
+            Op::JumpIfTrue(off) => {
+                let abs_old = ((i as i32) + 1 + off) as usize;
+                let abs_new = resolve(abs_old);
+                let my_new = old_to_new[i].unwrap() as i32;
+                new_ops.push(Op::JumpIfTrue((abs_new as i32) - my_new - 1));
+            }
+            other => new_ops.push(other.clone()),
+        }
+    }
+
+    func.ops = new_ops;
+    removed
+}
+
 pub fn optimize_module(module: &mut Module) -> OptStats {
     let mut total = OptStats::default();
     accumulate(&mut total, optimize_function(&mut module.main));
@@ -292,6 +371,7 @@ fn accumulate(total: &mut OptStats, s: OptStats) {
     total.double_nots_collapsed += s.double_nots_collapsed;
     total.double_negs_collapsed += s.double_negs_collapsed;
     total.unary_calls_cached += s.unary_calls_cached;
+    total.nops_compacted += s.nops_compacted;
 }
 
 #[cfg(test)]
@@ -474,5 +554,108 @@ mod tests {
             .constants
             .iter()
             .any(|c| matches!(c, Const::Float(f) if (f - 1.5).abs() < 1e-9)));
+    }
+
+    // ── compact_nops tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn compaction_removes_nops_from_constant_folded_code() {
+        // `2 + 3` constant-folds: two LoadConsts become Nop;Nop, then
+        // compaction removes them.
+        let (m, stats) = compile_and_opt("h x = 2 + 3;");
+        assert!(stats.nops_compacted >= 2, "expected >=2 Nops removed, got {}", stats.nops_compacted);
+        // No Nops should remain after compaction.
+        assert!(
+            !m.main.ops.iter().any(|op| matches!(op, Op::Nop)),
+            "Nop found after compaction"
+        );
+    }
+
+    #[test]
+    fn compaction_preserves_branch_semantics() {
+        // A while-loop with runtime variable condition emits JumpIfFalse +
+        // Jump. After constant-folding dead loads and compacting Nops, all
+        // remaining jump offsets must stay in-bounds.
+        let src = "h x = 10; while x > 0 { x = x - 1 }";
+        let (m, _stats) = compile_and_opt(src);
+        let n = m.main.ops.len();
+        for (i, op) in m.main.ops.iter().enumerate() {
+            let off = match op {
+                Op::Jump(o) => Some(*o),
+                Op::JumpIfFalse(o) => Some(*o),
+                Op::JumpIfTrue(o) => Some(*o),
+                _ => None,
+            };
+            if let Some(off) = off {
+                let target = (i as i32 + 1 + off) as usize;
+                assert!(
+                    target <= n,
+                    "jump at op{} target {} out of range (len={})", i, target, n
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn compaction_preserves_loop_semantics() {
+        // A while loop has a backward jump; compaction must not break it.
+        let src = "h s = 0; h i = 0; while i < 5 { s += i; i += 1 }";
+        let (m, _stats) = compile_and_opt(src);
+        let n = m.main.ops.len();
+        for (i, op) in m.main.ops.iter().enumerate() {
+            let off = match op {
+                Op::Jump(o) => Some(*o),
+                Op::JumpIfFalse(o) => Some(*o),
+                Op::JumpIfTrue(o) => Some(*o),
+                _ => None,
+            };
+            if let Some(off) = off {
+                let target = (i as i32 + 1 + off) as usize;
+                assert!(
+                    target <= n,
+                    "loop jump at op{} target {} out of range (len={})", i, target, n
+                );
+            }
+        }
+        assert!(!m.main.ops.iter().any(|op| matches!(op, Op::Nop)),
+            "Nop found after compaction");
+    }
+
+    fn make_func(ops: Vec<Op>, constants: Vec<Const>) -> CompiledFunction {
+        use crate::ast::Pos;
+        let n = ops.len();
+        CompiledFunction {
+            name: "test".to_string(),
+            params: vec![],
+            param_types: vec![],
+            return_type: None,
+            ops,
+            constants,
+            call_cache: vec![std::cell::Cell::new(0); n],
+            op_positions: vec![Pos::unknown(); n],
+            pragmas: vec![],
+        }
+    }
+
+    #[test]
+    fn compact_nops_direct_no_nops() {
+        let mut func = make_func(vec![Op::LoadConst(0), Op::Return], vec![Const::Int(42)]);
+        let removed = compact_nops(&mut func);
+        assert_eq!(removed, 0);
+        assert_eq!(func.ops.len(), 2);
+        assert!(!func.ops.iter().any(|op| matches!(op, Op::Nop)));
+    }
+
+    #[test]
+    fn compact_nops_direct_removes_nops() {
+        // Nop; Nop; LoadConst(0); Nop; Return  →  LoadConst(0); Return
+        let mut func = make_func(
+            vec![Op::Nop, Op::Nop, Op::LoadConst(0), Op::Nop, Op::Return],
+            vec![Const::Int(1)],
+        );
+        let removed = compact_nops(&mut func);
+        assert_eq!(removed, 3);
+        assert_eq!(func.ops.len(), 2);
+        assert!(!func.ops.iter().any(|op| matches!(op, Op::Nop)));
     }
 }

@@ -272,6 +272,22 @@ pub extern "C" fn omc_value_danger(n_bits: i64) -> i64 {
     (-f.abs()).exp().to_bits() as i64
 }
 
+/// resonance(n) -> f64 bits as i64.
+/// Harmonic resonance score: 1.0 for exact Fibonacci attractor, decays with distance.
+/// Op::Resonance in the JIT scalar lowerer.
+#[no_mangle]
+pub extern "C" fn omc_resonance_bits(n: i64) -> i64 {
+    omnimcode_core::value::HInt::compute_resonance(n).to_bits() as i64
+}
+
+/// him_score(n) -> f64 bits as i64.
+/// Harmonic Integer Map score: fractional part of n*phi, clamped to [0, 0.5].
+/// Op::HimScore in the JIT scalar lowerer.
+#[no_mangle]
+pub extern "C" fn omc_him_score_bits(n: i64) -> i64 {
+    omnimcode_core::value::HInt::compute_him(n).to_bits() as i64
+}
+
 // ---------------------------------------------------------------------------
 // Binary i64,i64 -> i64 harmonic primitives
 // ---------------------------------------------------------------------------
@@ -641,6 +657,9 @@ impl<'ctx> JitContext<'ctx> {
             ("omc_harmonic_unalign",   omc_harmonic_unalign as *const () as usize),
             ("omc_harmony_value",      omc_harmony_value as *const () as usize),
             ("omc_value_danger",       omc_value_danger as *const () as usize),
+            // Op::Resonance / Op::HimScore — f64 result packed as i64 bits.
+            ("omc_resonance_bits",     omc_resonance_bits as *const () as usize),
+            ("omc_him_score_bits",     omc_him_score_bits as *const () as usize),
             // Array-input intrinsics — same i64 -> i64 signature; the
             // input i64 is the L1.6 length-prefixed buffer pointer.
             ("omc_arr_sum_int",        omc_arr_sum_int as *const () as usize),
@@ -1030,6 +1049,7 @@ struct FunctionLowerer<'ctx, 'a> {
     builder: Builder<'ctx>,
     function: FunctionValue<'ctx>,
     f: &'a CompiledFunction,
+    module: &'a LlvmModule<'ctx>,
 
     /// One LLVM basic block per op-index leader, plus the entry block.
     /// Map: bytecode op-index -> the LLVM block whose body begins there.
@@ -1066,6 +1086,7 @@ impl<'ctx, 'a> FunctionLowerer<'ctx, 'a> {
             builder,
             function,
             f,
+            module,
             blocks: HashMap::new(),
             var_slots: HashMap::new(),
             cleanup_pops: std::collections::HashSet::new(),
@@ -1524,6 +1545,43 @@ impl<'ctx, 'a> FunctionLowerer<'ctx, 'a> {
                     }
                 }
 
+                // ── Substrate ops ─────────────────────────────────────────
+                // All delegate to extern C shims already registered in the
+                // JIT engine. omc_fold/omc_is_attractor/omc_nth_fibonacci
+                // were registered in an earlier session; omc_resonance_bits
+                // and omc_him_score_bits were added this session.
+                // Resonance and HimScore return f64-as-i64-bits (same
+                // convention as the i64 register file for floats).
+                Op::Fold1 => {
+                    let x = pop(&mut stack, i, "Fold1")?;
+                    let result = self.emit_unary_extern_call("omc_fold", x, i)?;
+                    stack.push(result);
+                }
+
+                Op::IsFibonacci => {
+                    let x = pop(&mut stack, i, "IsFibonacci")?;
+                    let result = self.emit_unary_extern_call("omc_is_attractor", x, i)?;
+                    stack.push(result);
+                }
+
+                Op::Fibonacci => {
+                    let x = pop(&mut stack, i, "Fibonacci")?;
+                    let result = self.emit_unary_extern_call("omc_nth_fibonacci", x, i)?;
+                    stack.push(result);
+                }
+
+                Op::Resonance => {
+                    let x = pop(&mut stack, i, "Resonance")?;
+                    let result = self.emit_unary_extern_call("omc_resonance_bits", x, i)?;
+                    stack.push(result);
+                }
+
+                Op::HimScore => {
+                    let x = pop(&mut stack, i, "HimScore")?;
+                    let result = self.emit_unary_extern_call("omc_him_score_bits", x, i)?;
+                    stack.push(result);
+                }
+
                 other => {
                     return Err(format!(
                         "Session B doesn't yet lower op: {:?} at op{}",
@@ -1700,6 +1758,33 @@ impl<'ctx, 'a> FunctionLowerer<'ctx, 'a> {
             .map_err(|e| format!("fcmp ext at op{}: {}", op_idx, e))?;
         stack.push(i64v);
         Ok(())
+    }
+
+    /// Emit a call to a pre-registered unary extern `fn(i64) -> i64`.
+    /// The function must already be declared in `self.module` (done during
+    /// JitContext initialisation). Returns the i64 result value.
+    fn emit_unary_extern_call(
+        &self,
+        name: &str,
+        arg: IntValue<'ctx>,
+        op_idx: usize,
+    ) -> Result<IntValue<'ctx>, CodegenError> {
+        let ext_fn = self
+            .module
+            .get_function(name)
+            .ok_or_else(|| format!("{} not declared in module at op{}", name, op_idx))?;
+        let call = self
+            .builder
+            .build_call(ext_fn, &[arg.into()], &format!("{}_ret", name))
+            .map_err(|e| format!("{} call at op{}: {}", name, op_idx, e))?;
+        let ret = call
+            .try_as_basic_value()
+            .left()
+            .ok_or_else(|| format!("{} returned void at op{}", name, op_idx))?;
+        match ret {
+            inkwell::values::BasicValueEnum::IntValue(iv) => Ok(iv),
+            _ => Err(format!("{} returned non-int at op{}", name, op_idx)),
+        }
     }
 }
 

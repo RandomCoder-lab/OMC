@@ -316,9 +316,14 @@ impl<'ctx, 'a> DualBandLowerer<'ctx, 'a> {
                 }
                 Op::StoreVar(name) | Op::AssignVar(name) => {
                     let v = self.pop(&mut stack, i, "Store/AssignVar")?;
+                    // PhiShadow: on every store, re-derive β = fold(α).
+                    // This makes β track the nearest Fibonacci attractor of
+                    // the live α value so that harmony() reads a meaningful
+                    // substrate distance rather than a stale splatted copy.
+                    let diverged = self.phi_shadow_store(v, i)?;
                     let slot = self.get_or_create_slot(name)?;
                     self.builder
-                        .build_store(slot, v)
+                        .build_store(slot, diverged)
                         .map_err(|e| format!("hbit store {} at op{}: {}", name, i, e))?;
                 }
 
@@ -1327,6 +1332,54 @@ impl<'ctx, 'a> DualBandLowerer<'ctx, 'a> {
             .build_insert_element(v, beta_iv, i64_type.const_int(1, false), "shadow_v")
             .map_err(|e| format!("phi_shadow insert β at op{}: {}", op_idx, e))?;
         Ok(new_v)
+    }
+
+    /// PhiShadow: extract α from a `<2 x i64>` and rebuild with β = fold(α).
+    /// β is set to the nearest Fibonacci attractor of α via `omc_fold`.
+    /// Every StoreVar/AssignVar calls this so the β band is never stale.
+    fn phi_shadow_store(
+        &self,
+        v: VectorValue<'ctx>,
+        op_idx: usize,
+    ) -> Result<VectorValue<'ctx>, CodegenError> {
+        let i64_type = self.ctx.i64_type();
+        // Extract α (lane 0).
+        let alpha_bv = self
+            .builder
+            .build_extract_element(v, i64_type.const_int(0, false), "ps_alpha")
+            .map_err(|e| format!("phi_shadow extract α at op{}: {}", op_idx, e))?;
+        let alpha_iv = match alpha_bv {
+            inkwell::values::BasicValueEnum::IntValue(iv) => iv,
+            _ => return Err(format!("phi_shadow: α not int at op{}", op_idx)),
+        };
+        // β = fold(α).
+        let fold_fn = self
+            .module
+            .get_function("omc_fold")
+            .ok_or_else(|| format!("omc_fold not declared (phi_shadow at op{})", op_idx))?;
+        let call = self
+            .builder
+            .build_call(fold_fn, &[alpha_iv.into()], "ps_fold")
+            .map_err(|e| format!("phi_shadow fold call at op{}: {}", op_idx, e))?;
+        let beta_bv = call
+            .try_as_basic_value()
+            .left()
+            .ok_or_else(|| format!("phi_shadow fold no return at op{}", op_idx))?;
+        let beta_iv = match beta_bv {
+            inkwell::values::BasicValueEnum::IntValue(iv) => iv,
+            _ => return Err(format!("phi_shadow: fold returned non-int at op{}", op_idx)),
+        };
+        // Rebuild <2 x i64> = [α, β].
+        let undef = self.v2i64.get_undef();
+        let with_alpha = self
+            .builder
+            .build_insert_element(undef, alpha_iv, i64_type.const_int(0, false), "ps_a")
+            .map_err(|e| format!("phi_shadow insert α at op{}: {}", op_idx, e))?;
+        let with_beta = self
+            .builder
+            .build_insert_element(with_alpha, beta_iv, i64_type.const_int(1, false), "ps_b")
+            .map_err(|e| format!("phi_shadow insert β at op{}: {}", op_idx, e))?;
+        Ok(with_beta)
     }
 
     fn splat(&self, scalar: IntValue<'ctx>, name: &str) -> Result<VectorValue<'ctx>, CodegenError> {
