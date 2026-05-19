@@ -330,6 +330,7 @@ impl Compiler {
             // so we don't claim a return-type tag here.
             Expression::Lambda { .. } => None,
             Expression::IfExpr { .. } => None,
+            Expression::CallExpr { .. } => None,
         }
     }
 
@@ -799,6 +800,9 @@ impl Compiler {
             }
             Expression::IfExpr { .. } => {
                 return Err("IfExpr: not supported in bytecode VM — use tree-walk interpreter".to_string());
+            }
+            Expression::CallExpr { .. } => {
+                return Err("CallExpr: not supported in bytecode VM — use tree-walk interpreter".to_string());
             }
         }
         Ok(())

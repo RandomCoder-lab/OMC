@@ -399,6 +399,15 @@ fn format_expr(expr: &Expression, out: &mut String) {
                 out.push('}');
             }
         }
+        Expression::CallExpr { callee, args, .. } => {
+            format_expr(callee, out);
+            out.push('(');
+            for (i, a) in args.iter().enumerate() {
+                if i > 0 { out.push_str(", "); }
+                format_expr(a, out);
+            }
+            out.push(')');
+        }
     }
 }
 

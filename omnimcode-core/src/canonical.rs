@@ -404,6 +404,11 @@ fn rename_expr(expr: &Expression, scope: &Scope) -> Expression {
             then_body: then_body.iter().map(|s| rename_stmt(s, &mut scope.child())).collect(),
             else_body: else_body.as_ref().map(|b| b.iter().map(|s| rename_stmt(s, &mut scope.child())).collect()),
         },
+        Expression::CallExpr { callee, args, pos } => Expression::CallExpr {
+            callee: Box::new(rename_expr(callee, scope)),
+            args: args.iter().map(|a| rename_expr(a, scope)).collect(),
+            pos: *pos,
+        },
     }
 }
 

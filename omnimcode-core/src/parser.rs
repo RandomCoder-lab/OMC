@@ -1976,16 +1976,38 @@ impl Parser {
                     }
                 }
                 self.expect(Token::RParen)?;
-                // Handle chained index on call result: f(x)["key"], f(x)["a"]["b"]
+                // Handle postfix chains on call result:
+                //   f(x)["key"]   → ChainedIndex
+                //   f(x)(y)       → CallExpr (curried / returned closure)
+                //   f(x)["k"](y)  → CallExpr(ChainedIndex(...))
                 let mut expr = Expression::Call { name, args, pos: callee_pos };
-                while self.current() == Token::LBracket {
-                    self.advance();
-                    let idx = self.parse_expression()?;
-                    self.expect(Token::RBracket)?;
-                    expr = Expression::ChainedIndex {
-                        object: Box::new(expr),
-                        index: Box::new(idx),
-                    };
+                loop {
+                    if self.current() == Token::LBracket {
+                        self.advance();
+                        let idx = self.parse_expression()?;
+                        self.expect(Token::RBracket)?;
+                        expr = Expression::ChainedIndex {
+                            object: Box::new(expr),
+                            index: Box::new(idx),
+                        };
+                    } else if self.current() == Token::LParen {
+                        self.advance();
+                        let mut call_args = Vec::new();
+                        while self.current() != Token::RParen {
+                            call_args.push(self.parse_expression()?);
+                            if self.current() == Token::Comma {
+                                self.advance();
+                            }
+                        }
+                        self.expect(Token::RParen)?;
+                        expr = Expression::CallExpr {
+                            callee: Box::new(expr),
+                            args: call_args,
+                            pos: callee_pos,
+                        };
+                    } else {
+                        break;
+                    }
                 }
                 Ok(expr)
             }
@@ -1997,15 +2019,34 @@ impl Parser {
                     name,
                     index: Box::new(index),
                 };
-                // Handle chained indexing: a["b"][c]["d"] etc.
-                while self.current() == Token::LBracket {
-                    self.advance();
-                    let next_index = self.parse_expression()?;
-                    self.expect(Token::RBracket)?;
-                    expr = Expression::ChainedIndex {
-                        object: Box::new(expr),
-                        index: Box::new(next_index),
-                    };
+                // Handle full postfix chain: a["b"][c]["d"](args) etc.
+                loop {
+                    if self.current() == Token::LBracket {
+                        self.advance();
+                        let next_index = self.parse_expression()?;
+                        self.expect(Token::RBracket)?;
+                        expr = Expression::ChainedIndex {
+                            object: Box::new(expr),
+                            index: Box::new(next_index),
+                        };
+                    } else if self.current() == Token::LParen {
+                        self.advance();
+                        let mut call_args = Vec::new();
+                        while self.current() != Token::RParen {
+                            call_args.push(self.parse_expression()?);
+                            if self.current() == Token::Comma {
+                                self.advance();
+                            }
+                        }
+                        self.expect(Token::RParen)?;
+                        expr = Expression::CallExpr {
+                            callee: Box::new(expr),
+                            args: call_args,
+                            pos: callee_pos,
+                        };
+                    } else {
+                        break;
+                    }
                 }
                 Ok(expr)
             }

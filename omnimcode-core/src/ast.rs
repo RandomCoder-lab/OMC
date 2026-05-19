@@ -265,6 +265,14 @@ pub enum Expression {
         args: Vec<Expression>,
         pos: Pos,
     },
+
+    // Call an expression-valued callee: f(x)(y), make_adder(5)(10).
+    // Callee is any expression that evaluates to a Value::Function.
+    CallExpr {
+        callee: Box<Expression>,
+        args: Vec<Expression>,
+        pos: Pos,
+    },
     
     // Harmonic operations
     Resonance(Box<Expression>),

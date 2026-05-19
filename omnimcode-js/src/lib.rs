@@ -679,6 +679,11 @@ impl Transpiler {
                     cond_js, then_js, else_js
                 )
             }
+            Expression::CallExpr { callee, args, .. } => {
+                let callee_js = self.emit_expr(callee);
+                let args_js: Vec<String> = args.iter().map(|a| self.emit_expr(a)).collect();
+                format!("({})({})", callee_js, args_js.join(", "))
+            }
         }
     }
 

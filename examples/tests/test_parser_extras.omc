@@ -10,49 +10,56 @@ fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
 
 # ---- chained index on call result ----
 
+fn _pair(a, b) { return {"a": a, "b": b}; }
+
 fn test_chained_index_on_call_result() {
-    fn pair(a, b) { return {"a": a, "b": b}; }
-    h p = pair(10, 20);
+    h p = _pair(10, 20);
     assert_eq(p["a"], 10, "dict index via var");
     assert_eq(p["b"], 20, "dict index via var b");
 }
 
+fn _make_val(v) { return {"val": v * 2}; }
+
+fn _doubled(x) { return _make_val(x)["val"]; }
+
 fn test_chained_index_in_return() {
     # Regression: `return call(args)["key"]` correctly returns the field,
     # not the whole dict.
-    fn make_val(v) { return {"val": v * 2}; }
-    fn doubled(x) { return make_val(x)["val"]; }
-    assert_eq(doubled(5), 10, "return call()[key]");
-    assert_eq(doubled(0), 0, "return call()[key] zero");
-    assert_eq(doubled(7), 14, "return call()[key] seven");
+    assert_eq(_doubled(5), 10, "return call()[key]");
+    assert_eq(_doubled(0), 0, "return call()[key] zero");
+    assert_eq(_doubled(7), 14, "return call()[key] seven");
 }
 
+fn _nested_dict() { return {"a": {"b": 99}}; }
+
 fn test_double_chained_index_on_call() {
-    fn nested() { return {"a": {"b": 99}}; }
-    h n = nested();
+    h n = _nested_dict();
     assert_eq(n["a"]["b"], 99, "double index via var");
 }
 
+fn _get_dict() { return {"x": 5}; }
+
 fn test_chained_index_in_assign() {
-    fn get_dict() { return {"x": 5}; }
-    h val = get_dict()["x"];
+    h val = _get_dict()["x"];
     assert_eq(val, 5, "assign from call()[key]");
 }
 
+fn _flags() { return {"ok": 1}; }
+
 fn test_chained_index_in_condition() {
-    fn flags() { return {"ok": 1}; }
     h hit = 0;
-    if flags()["ok"] == 1 { hit = 1; }
+    if _flags()["ok"] == 1 { hit = 1; }
     assert_eq(hit, 1, "if call()[key]");
 }
 
 # ---- throw as return terminator ----
 
+fn _always_throws(msg) { throw msg; }
+
 fn test_throw_only_fn() {
-    fn always_throws(msg) { throw msg; }
     h caught = "";
     try {
-        always_throws("test-error");
+        _always_throws("test-error");
     } catch e {
         caught = e;
     }
@@ -71,4 +78,45 @@ fn test_augmented_assign_divide() {
     h z = 7;
     z /= 1;
     assert_eq(z, 7, "z /= 1");
+}
+
+# ---- curried / expression-valued call: f(x)(y) ----
+
+fn _make_adder(n) {
+    return fn(x) { return x + n; };
+}
+
+fn _compose(f, g) {
+    return fn(x) { return f(g(x)); };
+}
+
+fn _double(x) { return x * 2; }
+fn _inc(x) { return x + 1; }
+
+fn test_call_expr_basic() {
+    assert_eq(_make_adder(5)(10), 15, "make_adder(5)(10)");
+    assert_eq(_make_adder(0)(7), 7, "make_adder(0)(7)");
+    assert_eq(_make_adder(100)(1), 101, "make_adder(100)(1)");
+}
+
+fn test_call_expr_compose() {
+    h double_then_inc = _compose(_inc, _double);
+    assert_eq(double_then_inc(3), 7, "compose: double then inc of 3");
+    assert_eq(_compose(_double, _inc)(4), 10, "compose direct call");
+}
+
+fn test_call_expr_chained_index() {
+    h reg = {"add5": _make_adder(5), "add10": _make_adder(10)};
+    assert_eq(reg["add5"](3), 8, "reg[key](arg) add5");
+    assert_eq(reg["add10"](3), 13, "reg[key](arg) add10");
+}
+
+fn _make_ops() {
+    return [_make_adder(1), _make_adder(2), _make_adder(3)];
+}
+
+fn test_call_expr_array_index() {
+    h ops = _make_ops();
+    assert_eq(ops[0](10), 11, "arr[0](arg)");
+    assert_eq(ops[2](10), 13, "arr[2](arg)");
 }

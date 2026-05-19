@@ -915,6 +915,13 @@ impl Interpreter {
                 Box::new(Self::rewrite_call_expr(*l, module_names, alias)),
                 Box::new(Self::rewrite_call_expr(*r, module_names, alias)),
             ),
+            Expression::CallExpr { callee, args, pos } => Expression::CallExpr {
+                callee: Box::new(Self::rewrite_call_expr(*callee, module_names, alias)),
+                args: args.into_iter()
+                    .map(|a| Self::rewrite_call_expr(a, module_names, alias))
+                    .collect(),
+                pos,
+            },
             // Leaf nodes pass through.
             other => other,
         }
@@ -1469,6 +1476,13 @@ impl Interpreter {
                     }
                 }
             }
+            Expression::CallExpr { callee, args, pos } => Expression::CallExpr {
+                callee: Box::new(Self::heal_expr(*callee, defined, arities, diags)),
+                args: args.into_iter()
+                    .map(|a| Self::heal_expr(a, defined, arities, diags))
+                    .collect(),
+                pos,
+            },
             // Pass-through for leaves and forms that have no expression
             // children we'd want to rewrite at this layer.
             other => other,
@@ -2289,6 +2303,13 @@ impl Interpreter {
                     }
                 }
                 Ok(last)
+            }
+            // Call an expression-valued callee: make_adder(5)(10), get_fn()("arg").
+            Expression::CallExpr { callee, args, .. } => {
+                let fn_val = self.eval_expr(callee)?;
+                let eval_args: Result<Vec<Value>, String> =
+                    args.iter().map(|a| self.eval_expr(a)).collect();
+                self.call_first_class_function(&fn_val, eval_args?)
             }
         }
     }
