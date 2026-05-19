@@ -1,0 +1,346 @@
+# text.omc — text processing: TF-IDF, BM25, edit distance, chunking, tokenizing
+
+# ── Tokenization ────────────────────────────────────────────────────────────
+
+# tokenize(text) → [tokens]
+# Simple whitespace + punctuation tokenizer; lowercases.
+fn tokenize(text) {
+    h lower = str_lower(text)
+    h words = str_split(lower, " ")
+    h tokens = []
+    h i = 0
+    while i < arr_len(words) {
+        h w = str_trim(words[i])
+        h clean = str_replace(w, ".", "")
+        clean = str_replace(clean, ",", "")
+        clean = str_replace(clean, "!", "")
+        clean = str_replace(clean, "?", "")
+        clean = str_replace(clean, ";", "")
+        clean = str_replace(clean, ":", "")
+        clean = str_replace(clean, "\"", "")
+        clean = str_replace(clean, "'", "")
+        clean = str_replace(clean, "(", "")
+        clean = str_replace(clean, ")", "")
+        if str_len(clean) > 0 {
+            arr_push(tokens, clean)
+        }
+        i = i + 1
+    }
+    return tokens
+}
+
+# term_freq(tokens) → {token: count}
+fn term_freq(tokens) {
+    h freq = {}
+    h i = 0
+    while i < arr_len(tokens) {
+        h t = tokens[i]
+        if dict_has(freq, t) {
+            freq[t] = freq[t] + 1
+        } else {
+            freq[t] = 1
+        }
+        i = i + 1
+    }
+    return freq
+}
+
+# ── TF-IDF ──────────────────────────────────────────────────────────────────
+
+# tfidf_corpus(docs) → corpus object for scoring
+# docs: [string, ...]
+fn tfidf_corpus(docs) {
+    h n = arr_len(docs)
+    h doc_freqs = {}
+    h tokenized = []
+    h i = 0
+    while i < n {
+        h tokens = tokenize(docs[i])
+        h freq = term_freq(tokens)
+        arr_push(tokenized, freq)
+        h seen = {}
+        h keys = dict_keys(freq)
+        h j = 0
+        while j < arr_len(keys) {
+            h k = keys[j]
+            if not dict_has(seen, k) {
+                seen[k] = true
+                if dict_has(doc_freqs, k) {
+                    doc_freqs[k] = doc_freqs[k] + 1
+                } else {
+                    doc_freqs[k] = 1
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return {n: n, doc_freqs: doc_freqs, tokenized: tokenized, docs: docs}
+}
+
+# tfidf_score(corpus, query) → [{doc_idx, score}, ...] sorted desc
+fn tfidf_score(corpus, query) {
+    h q_tokens = tokenize(query)
+    h scores = []
+    h i = 0
+    while i < corpus["n"] {
+        h freq = corpus["tokenized"][i]
+        h doc_len = 0
+        h keys = dict_keys(freq)
+        h j = 0
+        while j < arr_len(keys) {
+            doc_len = doc_len + freq[keys[j]]
+            j = j + 1
+        }
+        h score = 0.0
+        h qi = 0
+        while qi < arr_len(q_tokens) {
+            h term = q_tokens[qi]
+            if dict_has(freq, term) {
+                h tf = freq[term] / doc_len
+                h df = 1
+                if dict_has(corpus["doc_freqs"], term) {
+                    df = corpus["doc_freqs"][term]
+                }
+                h idf = math_log((corpus["n"] + 1) / (df + 1))
+                score = score + tf * idf
+            }
+            qi = qi + 1
+        }
+        arr_push(scores, {doc_idx: i, score: score})
+        i = i + 1
+    }
+    # sort by score desc (bubble sort — small corpora)
+    h n = arr_len(scores)
+    h si = 0
+    while si < n {
+        h sj = si + 1
+        while sj < n {
+            if scores[sj]["score"] > scores[si]["score"] {
+                h tmp = scores[si]
+                scores[si] = scores[sj]
+                scores[sj] = tmp
+            }
+            sj = sj + 1
+        }
+        si = si + 1
+    }
+    return scores
+}
+
+# ── BM25 ────────────────────────────────────────────────────────────────────
+
+# bm25_corpus(docs, k1?, b?) → corpus object
+fn bm25_corpus(docs, k1, b) {
+    h K1 = k1
+    if K1 == null { K1 = 1.5 }
+    h B = b
+    if B == null { B = 0.75 }
+    h n = arr_len(docs)
+    h doc_freqs = {}
+    h tokenized = []
+    h lengths = []
+    h total_len = 0
+    h i = 0
+    while i < n {
+        h tokens = tokenize(docs[i])
+        h freq = term_freq(tokens)
+        h dl = arr_len(tokens)
+        arr_push(tokenized, freq)
+        arr_push(lengths, dl)
+        total_len = total_len + dl
+        h seen = {}
+        h keys = dict_keys(freq)
+        h j = 0
+        while j < arr_len(keys) {
+            h k = keys[j]
+            if not dict_has(seen, k) {
+                seen[k] = true
+                if dict_has(doc_freqs, k) {
+                    doc_freqs[k] = doc_freqs[k] + 1
+                } else {
+                    doc_freqs[k] = 1
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    h avgdl = total_len / n
+    return {n: n, doc_freqs: doc_freqs, tokenized: tokenized, lengths: lengths, avgdl: avgdl, k1: K1, b: B, docs: docs}
+}
+
+# bm25_score(corpus, query) → [{doc_idx, score}, ...] sorted desc
+fn bm25_score(corpus, query) {
+    h q_tokens = tokenize(query)
+    h scores = []
+    h i = 0
+    while i < corpus["n"] {
+        h freq = corpus["tokenized"][i]
+        h dl = corpus["lengths"][i]
+        h score = 0.0
+        h qi = 0
+        while qi < arr_len(q_tokens) {
+            h term = q_tokens[qi]
+            h tf = 0
+            if dict_has(freq, term) { tf = freq[term] }
+            h df = 1
+            if dict_has(corpus["doc_freqs"], term) {
+                df = corpus["doc_freqs"][term]
+            }
+            h idf = math_log((corpus["n"] - df + 0.5) / (df + 0.5) + 1)
+            h norm = corpus["k1"] * (1 - corpus["b"] + corpus["b"] * dl / corpus["avgdl"])
+            score = score + idf * (tf * (corpus["k1"] + 1)) / (tf + norm)
+            qi = qi + 1
+        }
+        arr_push(scores, {doc_idx: i, score: score})
+        i = i + 1
+    }
+    # sort desc
+    h n = arr_len(scores)
+    h si = 0
+    while si < n {
+        h sj = si + 1
+        while sj < n {
+            if scores[sj]["score"] > scores[si]["score"] {
+                h tmp = scores[si]
+                scores[si] = scores[sj]
+                scores[sj] = tmp
+            }
+            sj = sj + 1
+        }
+        si = si + 1
+    }
+    return scores
+}
+
+# ── Edit distance (Levenshtein) ──────────────────────────────────────────────
+
+# levenshtein(a, b) → int
+fn levenshtein(a, b) {
+    h la = str_len(a)
+    h lb = str_len(b)
+    if la == 0 { return lb }
+    if lb == 0 { return la }
+    # dp row
+    h prev = []
+    h i = 0
+    while i <= lb {
+        arr_push(prev, i)
+        i = i + 1
+    }
+    h row = 0
+    while row < la {
+        h curr = [row + 1]
+        h col = 0
+        while col < lb {
+            h cost = 1
+            if str_slice(a, row, row + 1) == str_slice(b, col, col + 1) {
+                cost = 0
+            }
+            h del = prev[col + 1] + 1
+            h ins = curr[col] + 1
+            h sub = prev[col] + cost
+            h min_val = del
+            if ins < min_val { min_val = ins }
+            if sub < min_val { min_val = sub }
+            arr_push(curr, min_val)
+            col = col + 1
+        }
+        prev = curr
+        row = row + 1
+    }
+    return prev[lb]
+}
+
+# similarity(a, b) → 0.0..1.0 (1 = identical)
+fn text_similarity(a, b) {
+    h dist = levenshtein(a, b)
+    h max_len = str_len(a)
+    if str_len(b) > max_len { max_len = str_len(b) }
+    if max_len == 0 { return 1.0 }
+    return 1.0 - (dist / max_len)
+}
+
+# closest(query, candidates) → {match, score, idx}
+fn closest(query, candidates) {
+    h best = null
+    h best_score = -1.0
+    h best_idx = -1
+    h i = 0
+    while i < arr_len(candidates) {
+        h s = text_similarity(query, candidates[i])
+        if s > best_score {
+            best_score = s
+            best = candidates[i]
+            best_idx = i
+        }
+        i = i + 1
+    }
+    return {match: best, score: best_score, idx: best_idx}
+}
+
+# ── Chunking ─────────────────────────────────────────────────────────────────
+
+# chunk_fixed(text, size, overlap?) → [string chunks]
+fn chunk_fixed(text, size, overlap) {
+    h ov = overlap
+    if ov == null { ov = 0 }
+    h tokens = tokenize(text)
+    h chunks = []
+    h i = 0
+    while i < arr_len(tokens) {
+        h end = i + size
+        if end > arr_len(tokens) { end = arr_len(tokens) }
+        h chunk_tokens = arr_slice(tokens, i, end)
+        h chunk_str = ""
+        h j = 0
+        while j < arr_len(chunk_tokens) {
+            if j > 0 { chunk_str = str_concat(chunk_str, " ") }
+            chunk_str = str_concat(chunk_str, chunk_tokens[j])
+            j = j + 1
+        }
+        arr_push(chunks, chunk_str)
+        h step = size - ov
+        if step <= 0 { step = 1 }
+        i = i + step
+    }
+    return chunks
+}
+
+# chunk_sentences(text, max_per_chunk?) → [string chunks]
+fn chunk_sentences(text, max_per_chunk) {
+    h max_s = max_per_chunk
+    if max_s == null { max_s = 3 }
+    h sentences = str_split(text, ". ")
+    h chunks = []
+    h i = 0
+    while i < arr_len(sentences) {
+        h end = i + max_s
+        if end > arr_len(sentences) { end = arr_len(sentences) }
+        h chunk = ""
+        h j = i
+        while j < end {
+            if j > i { chunk = str_concat(chunk, ". ") }
+            chunk = str_concat(chunk, sentences[j])
+            j = j + 1
+        }
+        arr_push(chunks, str_trim(chunk))
+        i = i + max_s
+    }
+    return chunks
+}
+
+# ── n-grams ──────────────────────────────────────────────────────────────────
+
+# ngrams(tokens, n) → [[token, ...], ...]
+fn ngrams(tokens, n) {
+    h result = []
+    h i = 0
+    while i <= arr_len(tokens) - n {
+        h gram = arr_slice(tokens, i, i + n)
+        arr_push(result, gram)
+        i = i + 1
+    }
+    return result
+}

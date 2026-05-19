@@ -1,0 +1,248 @@
+# mcp_tool_gen.omc
+# Auto-generate MCP tool definitions from OMC function signatures.
+# Reads OMC source files, extracts fn definitions, generates JSON tool schemas,
+# and writes a ready-to-use MCP tools manifest.
+
+import "examples/lib/llm.omc"
+
+h MODEL = "claude-opus-4-5"
+
+# ── Function signature extraction ────────────────────────────────────────────
+
+fn extract_fn_signatures(code) {
+    h lines = str_split(code, "\n")
+    h signatures = []
+    h i = 0
+    while i < arr_len(lines) {
+        h line = str_trim(lines[i])
+        if str_starts_with(line, "fn ") {
+            h name_start = 3
+            h paren = str_find(line, "(")
+            if paren > 3 {
+                h fn_name = str_trim(str_slice(line, 3, paren))
+                h rest = str_slice(line, paren + 1, str_len(line))
+                h close = str_find(rest, ")")
+                h params_str = ""
+                if close > 0 { params_str = str_trim(str_slice(rest, 0, close)) }
+                h params = []
+                if str_len(params_str) > 0 {
+                    h raw_params = str_split(params_str, ",")
+                    h pi = 0
+                    while pi < arr_len(raw_params) {
+                        h p = str_trim(raw_params[pi])
+                        if str_len(p) > 0 { arr_push(params, p) }
+                        pi = pi + 1
+                    }
+                }
+                # check for preceding comment
+                h doc = ""
+                if i > 0 {
+                    h prev = str_trim(lines[i - 1])
+                    if str_starts_with(prev, "#") {
+                        doc = str_trim(str_slice(prev, 1, str_len(prev)))
+                    }
+                }
+                arr_push(signatures, {name: fn_name, params: params, doc: doc, line: i + 1})
+            }
+        }
+        i = i + 1
+    }
+    return signatures
+}
+
+# ── Schema generation from signature ─────────────────────────────────────────
+
+fn infer_param_schema(param_name) {
+    h lname = str_lower(param_name)
+    if str_contains(lname, "count") or str_contains(lname, "size") or str_contains(lname, "max") or str_contains(lname, "min") or str_contains(lname, "n") {
+        return {type: "integer", description: str_concat("The ", param_name, " value")}
+    }
+    if str_contains(lname, "flag") or str_contains(lname, "enable") or str_contains(lname, "use_") or str_contains(lname, "is_") {
+        return {type: "boolean", description: str_concat("Whether to ", param_name)}
+    }
+    if str_contains(lname, "arr") or str_contains(lname, "list") or str_contains(lname, "items") or str_contains(lname, "values") {
+        return {type: "array", items: {type: "string"}, description: str_concat("Array of ", param_name)}
+    }
+    if str_contains(lname, "dict") or str_contains(lname, "map") or str_contains(lname, "config") or str_contains(lname, "opts") {
+        return {type: "object", description: str_concat("Configuration for ", param_name)}
+    }
+    # default: string
+    return {type: "string", description: str_concat("The ", param_name)}
+}
+
+fn signature_to_mcp_tool(sig, file_path) {
+    h properties = {}
+    h required = []
+    h pi = 0
+    while pi < arr_len(sig["params"]) {
+        h param = sig["params"][pi]
+        properties[param] = infer_param_schema(param)
+        # treat all non-optional params as required (heuristic: last param often optional)
+        if pi < arr_len(sig["params"]) - 1 or arr_len(sig["params"]) == 1 {
+            arr_push(required, param)
+        }
+        pi = pi + 1
+    }
+    h description = sig["doc"]
+    if str_len(description) == 0 {
+        description = str_concat("Call OMC function ", sig["name"])
+    }
+    return {
+        name: sig["name"],
+        description: description,
+        input_schema: {
+            type: "object",
+            properties: properties,
+            required: required
+        },
+        omc_source: file_path,
+        omc_line: sig["line"]
+    }
+}
+
+# ── LLM-enhanced description generation ──────────────────────────────────────
+
+fn enhance_tool_description(tool, code_context) {
+    h prompt = str_concat(
+        "Write a one-sentence description of this OMC function for an MCP tool manifest.\n\n",
+        "Function: ", tool["name"], "\n",
+        "Parameters: ", json_stringify(dict_keys(tool["input_schema"]["properties"])), "\n",
+        "Context from source:\n", code_context, "\n\n",
+        "Write exactly ONE sentence, no markdown, no quotes. Be specific and action-oriented."
+    )
+    h desc = llm_call(prompt, MODEL, null)
+    return str_trim(desc)
+}
+
+# ── MCP manifest builder ──────────────────────────────────────────────────────
+
+fn build_mcp_manifest(tools, manifest_name, version) {
+    h n = manifest_name
+    if n == null { n = "omc-tools" }
+    h v = version
+    if v == null { v = "1.0.0" }
+    return {
+        name: n,
+        version: v,
+        tools: tools,
+        generated_at: unix_time(),
+        generator: "mcp_tool_gen.omc"
+    }
+}
+
+fn manifest_to_claude_tools(manifest) {
+    h claude_tools = []
+    h i = 0
+    while i < arr_len(manifest["tools"]) {
+        h tool = manifest["tools"][i]
+        arr_push(claude_tools, {
+            name: tool["name"],
+            description: tool["description"],
+            input_schema: tool["input_schema"]
+        })
+        i = i + 1
+    }
+    return claude_tools
+}
+
+# ── Process OMC library files ─────────────────────────────────────────────────
+
+fn process_omc_file(path, enhance_with_llm) {
+    h code = file_read(path)
+    if code == null {
+        print(str_concat("  SKIP (not found): ", path))
+        return []
+    }
+
+    h sigs = extract_fn_signatures(code)
+    print(str_concat("  ", path, ": ", to_str(arr_len(sigs)), " functions"))
+
+    h tools = []
+    h i = 0
+    while i < arr_len(sigs) {
+        h sig = sigs[i]
+        # skip private helpers (starting with _)
+        if str_starts_with(sig["name"], "_") {
+            i = i + 1
+            continue
+        }
+        h tool = signature_to_mcp_tool(sig, path)
+
+        if enhance_with_llm and str_len(tool["description"]) < 10 {
+            h context_start = (sig["line"] - 1) * 1
+            h lines = str_split(code, "\n")
+            h context_lines = []
+            h li = sig["line"] - 1
+            h max_li = li + 10
+            if max_li > arr_len(lines) { max_li = arr_len(lines) }
+            while li < max_li {
+                arr_push(context_lines, lines[li])
+                li = li + 1
+            }
+            h context = arr_join(context_lines, "\n")
+            tool["description"] = enhance_tool_description(tool, context)
+        }
+        arr_push(tools, tool)
+        i = i + 1
+    }
+    return tools
+}
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+h LIB_FILES = [
+    "examples/lib/llm.omc",
+    "examples/lib/cache.omc",
+    "examples/lib/graph.omc",
+    "examples/lib/text.omc",
+    "examples/lib/schema.omc",
+    "examples/lib/cli.omc"
+]
+
+h ENHANCE = false
+h enhance_env = env_var("OMC_ENHANCE_TOOLS")
+if enhance_env == "1" { ENHANCE = true }
+
+print("=== MCP Tool Generator ===")
+print(str_concat("Processing ", to_str(arr_len(LIB_FILES)), " OMC library files"))
+print(str_concat("LLM enhancement: ", if ENHANCE { "on" } else { "off (set OMC_ENHANCE_TOOLS=1 to enable)" }))
+print("")
+
+h all_tools = []
+h fi = 0
+while fi < arr_len(LIB_FILES) {
+    h tools = process_omc_file(LIB_FILES[fi], ENHANCE)
+    h ti = 0
+    while ti < arr_len(tools) {
+        arr_push(all_tools, tools[ti])
+        ti = ti + 1
+    }
+    fi = fi + 1
+}
+
+h manifest = build_mcp_manifest(all_tools, "omc-stdlib", "1.3.0")
+h output_path = "/tmp/omc_mcp_tools.json"
+file_write(output_path, json_stringify(manifest))
+
+print("")
+print(str_concat("Generated ", to_str(arr_len(all_tools)), " MCP tool definitions"))
+print(str_concat("Manifest written to: ", output_path))
+print("")
+
+# Show Claude-format tools array
+h claude_tools = manifest_to_claude_tools(manifest)
+print(str_concat("Claude tools array (", to_str(arr_len(claude_tools)), " tools):"))
+h ci = 0
+while ci < arr_len(claude_tools) and ci < 10 {
+    h ct = claude_tools[ci]
+    h param_count = arr_len(dict_keys(ct["input_schema"]["properties"]))
+    print(str_concat(
+        "  ", ct["name"],
+        " (", to_str(param_count), " params) — ",
+        str_slice(ct["description"], 0, 60)
+    ))
+    ci = ci + 1
+}
+if arr_len(claude_tools) > 10 {
+    print(str_concat("  ... and ", to_str(arr_len(claude_tools) - 10), " more"))
+}

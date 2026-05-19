@@ -1,0 +1,253 @@
+# substrate_rag.omc
+# Phi-Pi-Fibonacci RAG (Retrieval-Augmented Generation) using substrate embeddings.
+# Stores documents with substrate-harmonic indexing; retrieves by harmonic distance.
+
+import "examples/lib/text.omc"
+import "examples/lib/llm.omc"
+import "examples/lib/cache.omc"
+
+h MODEL = "claude-opus-4-5"
+h EMBED_CACHE = lru_new(500)
+
+# ── Phi-Pi-Fib substrate embedding (pure OMC) ──────────────────────────────────
+
+h PHI = 1.6180339887
+h PI = 3.14159265358979
+h FIB = [1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144]
+
+fn substrate_encode_char(c, position) {
+    h cp = str_len(c)
+    h fib_idx = position % arr_len(FIB)
+    h freq = FIB[fib_idx] * PHI
+    h phase = position * PI / 7.0
+    h signal = math_sin(freq + phase) * cp
+    return signal
+}
+
+fn substrate_embed(text) {
+    h cache_key = text
+    h cached = lru_get(EMBED_CACHE, cache_key)
+    if cached != null { return cached }
+
+    h tokens = tokenize(text)
+    h dim = arr_len(FIB)
+    h embedding = []
+    h d = 0
+    while d < dim {
+        arr_push(embedding, 0.0)
+        d = d + 1
+    }
+
+    h ti = 0
+    while ti < arr_len(tokens) {
+        h token = tokens[ti]
+        h ci = 0
+        while ci < str_len(token) {
+            h char = str_slice(token, ci, ci + 1)
+            h fib_idx = (ti + ci) % dim
+            h signal = substrate_encode_char(char, ti * 7 + ci)
+            embedding[fib_idx] = embedding[fib_idx] + signal
+            ci = ci + 1
+        }
+        ti = ti + 1
+    }
+
+    # L2 normalize
+    h mag = 0.0
+    h di = 0
+    while di < dim {
+        mag = mag + embedding[di] * embedding[di]
+        di = di + 1
+    }
+    mag = math_sqrt(mag)
+    if mag > 0.0 {
+        di = 0
+        while di < dim {
+            embedding[di] = embedding[di] / mag
+            di = di + 1
+        }
+    }
+
+    lru_put(EMBED_CACHE, cache_key, embedding)
+    return embedding
+}
+
+fn cosine_sim(a, b) {
+    h dot = 0.0
+    h i = 0
+    h min_len = arr_len(a)
+    if arr_len(b) < min_len { min_len = arr_len(b) }
+    while i < min_len {
+        dot = dot + a[i] * b[i]
+        i = i + 1
+    }
+    return dot
+}
+
+# ── Document store ────────────────────────────────────────────────────────────
+
+fn docstore_new() {
+    return {docs: [], embeddings: [], metadata: []}
+}
+
+fn docstore_add(store, text, meta) {
+    h embedding = substrate_embed(text)
+    arr_push(store["docs"], text)
+    arr_push(store["embeddings"], embedding)
+    h m = meta
+    if m == null { m = {} }
+    arr_push(store["metadata"], m)
+}
+
+fn docstore_search(store, query, top_k) {
+    h query_embed = substrate_embed(query)
+    h scores = []
+    h i = 0
+    while i < arr_len(store["docs"]) {
+        h sim = cosine_sim(query_embed, store["embeddings"][i])
+        arr_push(scores, {idx: i, score: sim})
+        i = i + 1
+    }
+    # sort descending
+    h n = arr_len(scores)
+    h si = 0
+    while si < n {
+        h sj = si + 1
+        while sj < n {
+            if scores[sj]["score"] > scores[si]["score"] {
+                h tmp = scores[si]
+                scores[si] = scores[sj]
+                scores[sj] = tmp
+            }
+            sj = sj + 1
+        }
+        si = si + 1
+    }
+    h k = top_k
+    if k > n { k = n }
+    h results = []
+    h ri = 0
+    while ri < k {
+        h idx = scores[ri]["idx"]
+        arr_push(results, {
+            text: store["docs"][idx],
+            score: scores[ri]["score"],
+            metadata: store["metadata"][idx]
+        })
+        ri = ri + 1
+    }
+    return results
+}
+
+# ── RAG pipeline ─────────────────────────────────────────────────────────────
+
+fn rag_answer(store, question, top_k, model) {
+    h m = model
+    if m == null { m = MODEL }
+
+    h retrieved = docstore_search(store, question, top_k)
+
+    h context_parts = []
+    h i = 0
+    while i < arr_len(retrieved) {
+        arr_push(context_parts, str_concat(
+            "[Doc ", to_str(i + 1), " | similarity: ", to_str(retrieved[i]["score"]), "]\n",
+            retrieved[i]["text"]
+        ))
+        i = i + 1
+    }
+    h context = arr_join(context_parts, "\n\n")
+
+    h sys = "You are a helpful assistant. Answer questions based only on the provided context. Be concise."
+    h prompt = str_concat(
+        "Context:\n", context, "\n\n",
+        "Question: ", question, "\n\n",
+        "Answer based only on the context above."
+    )
+
+    h answer = llm_call(prompt, m, sys)
+    return {
+        answer: answer,
+        retrieved: retrieved,
+        question: question
+    }
+}
+
+# ── Knowledge base ────────────────────────────────────────────────────────────
+
+h KB = docstore_new()
+
+h DOCUMENTS = [
+    {
+        text: "OMC (OmniMCode) is a self-hosting harmonic computing language. It uses phi-pi-fibonacci substrate mathematics as its computational foundation. OMC can call external LLMs via llm_call and execute generated code via eval_omc.",
+        meta: {source: "OMC intro", topic: "language"}
+    },
+    {
+        text: "The phi-pi-fibonacci substrate uses Fibonacci numbers [1,1,2,3,5,8,13,21,...], the golden ratio φ=1.618..., and π=3.14159... to create harmonic positional embeddings. These beat sinusoidal encodings in transformerless architectures.",
+        meta: {source: "substrate docs", topic: "math"}
+    },
+    {
+        text: "llm_call(prompt, model, system) is a native OMC builtin that calls the Anthropic Claude API. It reads ANTHROPIC_API_KEY from the environment. The default model is claude-opus-4-5.",
+        meta: {source: "builtins ref", topic: "api"}
+    },
+    {
+        text: "eval_omc(code_string) executes an OMC string at runtime. Combined with llm_call, it enables recursive self-improvement: OMC programs can ask Claude to write new OMC code and then run it.",
+        meta: {source: "builtins ref", topic: "meta"}
+    },
+    {
+        text: "par_map(fn, array) runs fn on each element of array in parallel. OMC also provides par_filter and par_reduce. These are sequential fallbacks since Value uses Rc/RefCell internally.",
+        meta: {source: "stdlib ref", topic: "parallel"}
+    },
+    {
+        text: "The OMC memory system uses fibtier (Fibonacci-tier) bounded storage. It integrates with the OMC proxy (apiproxy) which compresses LLM context windows using substrate-aware tokenization.",
+        meta: {source: "architecture docs", topic: "memory"}
+    },
+    {
+        text: "OMC supports Python interop via PyO3. You can call Python functions from OMC using py_call, py_eval, and py_import. This enables NumPy, Pandas, PyTorch, and sklearn from OMC programs.",
+        meta: {source: "python docs", topic: "interop"}
+    },
+    {
+        text: "The Prometheus engine in OMC is a full neural network training framework. It includes tape-based autograd, substrate-native attention, CRT-Fibonacci positional encoding, and GPU acceleration via wgpu.",
+        meta: {source: "prometheus docs", topic: "ml"}
+    }
+]
+
+# Index documents
+h i = 0
+while i < arr_len(DOCUMENTS) {
+    h doc = DOCUMENTS[i]
+    docstore_add(KB, doc["text"], doc["meta"])
+    i = i + 1
+}
+
+print(str_concat("Indexed ", to_str(arr_len(DOCUMENTS)), " documents with substrate embeddings"))
+print("")
+
+# ── Demo queries ──────────────────────────────────────────────────────────────
+
+h QUESTIONS = [
+    "How does OMC call Claude?",
+    "What is the phi-pi-fibonacci substrate?",
+    "Can OMC use Python libraries?",
+    "How does recursive self-improvement work in OMC?",
+    "What is Prometheus in OMC?"
+]
+
+h qi = 0
+while qi < arr_len(QUESTIONS) {
+    h q = QUESTIONS[qi]
+    print(str_concat("Q: ", q))
+
+    # First show substrate retrieval
+    h retrieved = docstore_search(KB, q, 2)
+    print(str_concat("  Retrieved: '", str_slice(retrieved[0]["text"], 0, 60), "...' (sim=", to_str(retrieved[0]["score"]), ")"))
+
+    # Then get RAG answer
+    h result = rag_answer(KB, q, 2, null)
+    print(str_concat("  A: ", str_slice(result["answer"], 0, 120)))
+    print("")
+
+    qi = qi + 1
+}
+
+print("=== Substrate RAG demo complete ===")

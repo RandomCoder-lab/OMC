@@ -1,0 +1,262 @@
+# population_evolve.omc
+# Genetic programming with Claude as the mutation operator.
+# A population of OMC functions evolves across generations toward a fitness goal.
+
+import "examples/lib/llm.omc"
+import "examples/lib/cache.omc"
+
+h MODEL = "claude-opus-4-5"
+h POP_SIZE = 5
+h GENERATIONS = 4
+h MUTATION_RATE = 0.7
+h ELITE_COUNT = 2
+
+h eval_cache = lru_new(200)
+
+# ── Fitness function ─────────────────────────────────────────────────────────
+
+fn compute_fitness(code, test_cases) {
+    h cache_key = code
+    h cached = lru_get(eval_cache, cache_key)
+    if cached != null { return cached }
+
+    h passed = 0
+    h total = arr_len(test_cases)
+    h i = 0
+    while i < total {
+        h tc = test_cases[i]
+        h test_code = str_concat(
+            code, "\n",
+            "h __result = target_fn(", json_stringify(tc["input"]), ")\n",
+            "__result"
+        )
+        h run = eval_omc(test_code)
+        h ok = false
+        h got = run
+        if type_of(run) == type_of(tc["expected"]) {
+            if run == tc["expected"] { ok = true }
+        }
+        if ok { passed = passed + 1 }
+        i = i + 1
+    }
+    h fitness = passed / total
+    lru_put(eval_cache, cache_key, fitness)
+    return fitness
+}
+
+# ── Population initialization ─────────────────────────────────────────────────
+
+fn spawn_individual(problem_description, index) {
+    h sys = str_concat(
+        "Write an OMC function named target_fn that solves: ", problem_description, "\n",
+        "Use h for bindings, fn for functions, while for loops.\n",
+        "Return ONLY the OMC code, no explanation."
+    )
+    h variety_hint = ["", " Think creatively.", " Use a different algorithm.", " Optimize for readability.", " Use recursion if possible."]
+    h hint = variety_hint[index % arr_len(variety_hint)]
+    h prompt = str_concat("Write target_fn for: ", problem_description, hint)
+    h code = llm_call(prompt, MODEL, sys)
+    if str_contains(code, "```") {
+        h parts = str_split(code, "```")
+        if arr_len(parts) >= 3 { code = str_trim(parts[1]) }
+        if str_starts_with(code, "omc\n") { code = str_slice(code, 4, str_len(code)) }
+    }
+    return str_trim(code)
+}
+
+fn init_population(problem, pop_size) {
+    h population = []
+    h i = 0
+    while i < pop_size {
+        print(str_concat("  Spawning individual ", to_str(i + 1), "/", to_str(pop_size)))
+        h individual = spawn_individual(problem, i)
+        arr_push(population, {code: individual, fitness: 0.0})
+        i = i + 1
+    }
+    return population
+}
+
+# ── Genetic operators ─────────────────────────────────────────────────────────
+
+fn mutate(code, problem_description) {
+    h sys = "You write OMC code. Return ONLY code, no markdown, no explanation."
+    h mutation_types = [
+        "refactor for clarity",
+        "add input validation and edge case handling",
+        "optimize the algorithm",
+        "rewrite using a different approach",
+        "improve variable naming"
+    ]
+    h mt_idx = (str_len(code) % arr_len(mutation_types))
+    h mutation = mutation_types[mt_idx]
+    h prompt = str_concat(
+        "Mutate this OMC function (", mutation, "):\n\n",
+        code, "\n\n",
+        "The function must still solve: ", problem_description, "\n",
+        "Return only the mutated OMC code."
+    )
+    h result = llm_call(prompt, MODEL, sys)
+    if str_contains(result, "```") {
+        h parts = str_split(result, "```")
+        if arr_len(parts) >= 3 { return str_trim(parts[1]) }
+    }
+    return str_trim(result)
+}
+
+fn crossover(code_a, code_b, problem) {
+    h sys = "You write OMC code. Return ONLY code, no markdown, no explanation."
+    h prompt = str_concat(
+        "Combine the best aspects of these two OMC functions into one better implementation.\n\n",
+        "Function A:\n", code_a, "\n\n",
+        "Function B:\n", code_b, "\n\n",
+        "Task: ", problem, "\n",
+        "Return only the combined OMC function named target_fn."
+    )
+    h result = llm_call(prompt, MODEL, sys)
+    if str_contains(result, "```") {
+        h parts = str_split(result, "```")
+        if arr_len(parts) >= 3 { return str_trim(parts[1]) }
+    }
+    return str_trim(result)
+}
+
+# ── Selection ─────────────────────────────────────────────────────────────────
+
+fn evaluate_population(population, test_cases) {
+    h i = 0
+    while i < arr_len(population) {
+        h fitness = compute_fitness(population[i]["code"], test_cases)
+        population[i]["fitness"] = fitness
+        i = i + 1
+    }
+    # sort by fitness descending (bubble sort)
+    h n = arr_len(population)
+    h si = 0
+    while si < n {
+        h sj = si + 1
+        while sj < n {
+            if population[sj]["fitness"] > population[si]["fitness"] {
+                h tmp = population[si]
+                population[si] = population[sj]
+                population[sj] = tmp
+            }
+            sj = sj + 1
+        }
+        si = si + 1
+    }
+    return population
+}
+
+fn tournament_select(population) {
+    # pick 2 random (by modding fitness hash) and return better one
+    h a = population[0]
+    h b = population[1 % arr_len(population)]
+    if a["fitness"] >= b["fitness"] { return a }
+    return b
+}
+
+# ── Main evolution loop ───────────────────────────────────────────────────────
+
+fn evolve(problem, test_cases, pop_size, generations, elite_count) {
+    print(str_concat("Problem: ", problem))
+    print(str_concat("Population: ", to_str(pop_size), " | Generations: ", to_str(generations)))
+    print("")
+
+    print("Initializing population...")
+    h population = init_population(problem, pop_size)
+
+    h best_fitness = 0.0
+    h best_code = ""
+    h stats = []
+
+    h gen = 0
+    while gen < generations {
+        print(str_concat("--- Generation ", to_str(gen + 1), " ---"))
+
+        population = evaluate_population(population, test_cases)
+
+        h gen_best = population[0]["fitness"]
+        h gen_avg = 0.0
+        h gi = 0
+        while gi < arr_len(population) {
+            gen_avg = gen_avg + population[gi]["fitness"]
+            gi = gi + 1
+        }
+        gen_avg = gen_avg / arr_len(population)
+
+        print(str_concat("  Best: ", to_str(gen_best * 100), "% | Avg: ", to_str(gen_avg * 100), "%"))
+
+        if gen_best > best_fitness {
+            best_fitness = gen_best
+            best_code = population[0]["code"]
+        }
+
+        arr_push(stats, {gen: gen + 1, best: gen_best, avg: gen_avg})
+
+        if best_fitness >= 1.0 {
+            print("  ✓ Perfect fitness achieved!")
+            break
+        }
+
+        if gen + 1 >= generations { break }
+
+        # Next generation
+        h next_pop = []
+
+        # Elites survive unchanged
+        h ei = 0
+        while ei < elite_count and ei < arr_len(population) {
+            arr_push(next_pop, population[ei])
+            ei = ei + 1
+        }
+
+        # Fill rest with mutation + crossover
+        h ni = 0
+        while ni < pop_size - elite_count {
+            h parent_a = tournament_select(population)
+            h new_code = ""
+            if ni % 3 == 0 and arr_len(population) >= 2 {
+                h parent_b = tournament_select(population)
+                new_code = crossover(parent_a["code"], parent_b["code"], problem)
+            } else {
+                new_code = mutate(parent_a["code"], problem)
+            }
+            arr_push(next_pop, {code: new_code, fitness: 0.0})
+            ni = ni + 1
+        }
+
+        population = next_pop
+        gen = gen + 1
+    }
+
+    return {
+        best_code: best_code,
+        best_fitness: best_fitness,
+        generations: gen + 1,
+        stats: stats
+    }
+}
+
+# ── Problem definition ────────────────────────────────────────────────────────
+
+h PROBLEM = "Write target_fn(n) that returns the sum of all prime numbers up to n (inclusive)."
+h TEST_CASES = [
+    {input: 10, expected: 17},
+    {input: 20, expected: 77},
+    {input: 5, expected: 5},
+    {input: 2, expected: 2},
+    {input: 1, expected: 0}
+]
+
+print("=== Genetic Programming: Evolving OMC Code with Claude ===")
+print("")
+
+h result = evolve(PROBLEM, TEST_CASES, POP_SIZE, GENERATIONS, ELITE_COUNT)
+
+print("")
+print("=== Evolution Complete ===")
+print(str_concat("Best fitness: ", to_str(result["best_fitness"] * 100), "%"))
+print(str_concat("Generations: ", to_str(result["generations"])))
+print("")
+print("Best evolved code:")
+print(result["best_code"])

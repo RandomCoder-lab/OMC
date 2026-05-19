@@ -1,0 +1,195 @@
+# benchmark_dashboard.omc
+# Performance regression tracker: runs OMC programs, records timing, alerts on regressions.
+
+import "examples/lib/cli.omc"
+
+h BENCH_DB = "/tmp/omc_benchmarks.json"
+h REGRESSION_THRESHOLD = 1.20
+
+fn load_history() {
+    h content = file_read(BENCH_DB)
+    if content == null { return {} }
+    h parsed = json_parse(content)
+    if parsed == null { return {} }
+    return parsed
+}
+
+fn save_history(history) {
+    file_write(BENCH_DB, json_stringify(history))
+}
+
+fn time_ms(fn_to_time) {
+    h start = unix_time_ms()
+    fn_to_time()
+    h end = unix_time_ms()
+    return end - start
+}
+
+fn run_bench(name, code, iterations) {
+    h iters = iterations
+    if iters == null { iters = 5 }
+    h times = []
+    h i = 0
+    while i < iters {
+        h start = unix_time_ms()
+        eval_omc(code)
+        h elapsed = unix_time_ms() - start
+        arr_push(times, elapsed)
+        i = i + 1
+    }
+    # compute stats
+    h total = 0.0
+    h ti = 0
+    while ti < arr_len(times) {
+        total = total + times[ti]
+        ti = ti + 1
+    }
+    h mean = total / arr_len(times)
+    h sorted = times
+    # sort for min/max
+    h n = arr_len(sorted)
+    h si = 0
+    while si < n {
+        h sj = si + 1
+        while sj < n {
+            if sorted[sj] < sorted[si] {
+                h tmp = sorted[si]
+                sorted[si] = sorted[sj]
+                sorted[sj] = tmp
+            }
+            sj = sj + 1
+        }
+        si = si + 1
+    }
+    return {
+        name: name,
+        mean_ms: mean,
+        min_ms: sorted[0],
+        max_ms: sorted[arr_len(sorted) - 1],
+        iterations: iters,
+        timestamp: unix_time()
+    }
+}
+
+fn compare_to_baseline(result, history) {
+    if not dict_has(history, result["name"]) {
+        return {status: "new", baseline: null, delta: null}
+    }
+    h baseline = history[result["name"]]
+    h ratio = result["mean_ms"] / baseline["mean_ms"]
+    h status = "ok"
+    if ratio > REGRESSION_THRESHOLD { status = "regression" }
+    if ratio < 0.8 { status = "improvement" }
+    return {
+        status: status,
+        baseline: baseline["mean_ms"],
+        delta: result["mean_ms"] - baseline["mean_ms"],
+        ratio: ratio
+    }
+}
+
+fn print_bench_row(result, comparison) {
+    h status_icon = "  "
+    if comparison["status"] == "regression" { status_icon = red("!") }
+    elif comparison["status"] == "improvement" { status_icon = green("↑") }
+    elif comparison["status"] == "new" { status_icon = cyan("*") }
+    else { status_icon = green("✓") }
+
+    h baseline_str = "-"
+    if comparison["baseline"] != null {
+        baseline_str = str_concat(to_str(comparison["baseline"]), "ms")
+    }
+
+    h delta_str = ""
+    if comparison["delta"] != null {
+        h d = comparison["delta"]
+        if d > 0 { delta_str = str_concat("+", to_str(d), "ms") }
+        else { delta_str = str_concat(to_str(d), "ms") }
+    }
+
+    print(str_concat(
+        status_icon, " ",
+        _pad_right(result["name"], 30), " ",
+        _pad_left(to_str(result["mean_ms"]), 8), "ms",
+        " baseline=", _pad_left(baseline_str, 10),
+        " delta=", _pad_left(delta_str, 10)
+    ))
+}
+
+# ── Benchmark suite ───────────────────────────────────────────────────────────
+
+h BENCHMARKS = [
+    {
+        name: "fib_30_recursive",
+        code: "fn fib(n) { if n <= 1 { return n } return fib(n-1) + fib(n-2) }\nfib(22)"
+    },
+    {
+        name: "array_sum_1000",
+        code: "h arr = []\nh i = 0\nwhile i < 1000 { arr_push(arr, i)\ni = i + 1 }\nh s = 0\ni = 0\nwhile i < arr_len(arr) { s = s + arr[i]\ni = i + 1 }\ns"
+    },
+    {
+        name: "string_concat_100",
+        code: "h s = \"\"\nh i = 0\nwhile i < 100 { s = str_concat(s, \"hello \")\ni = i + 1 }\nstr_len(s)"
+    },
+    {
+        name: "dict_ops_500",
+        code: "h d = {}\nh i = 0\nwhile i < 500 { d[to_str(i)] = i * 2\ni = i + 1 }\narr_len(dict_keys(d))"
+    },
+    {
+        name: "nested_loops_100x100",
+        code: "h count = 0\nh i = 0\nwhile i < 100 { h j = 0\nwhile j < 100 { count = count + 1\nj = j + 1 }\ni = i + 1 }\ncount"
+    }
+]
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+print("=== OMC Benchmark Dashboard ===")
+print(str_concat("Regression threshold: ", to_str((REGRESSION_THRESHOLD - 1.0) * 100.0), "%"))
+print("")
+
+h history = load_history()
+h new_results = {}
+h regressions = []
+h improvements = []
+
+h bi = 0
+while bi < arr_len(BENCHMARKS) {
+    h bench = BENCHMARKS[bi]
+    h result = run_bench(bench["name"], bench["code"], 3)
+    h comparison = compare_to_baseline(result, history)
+    print_bench_row(result, comparison)
+
+    new_results[bench["name"]] = result
+
+    if comparison["status"] == "regression" {
+        arr_push(regressions, bench["name"])
+    } elif comparison["status"] == "improvement" {
+        arr_push(improvements, bench["name"])
+    }
+
+    bi = bi + 1
+}
+
+save_history(new_results)
+
+print("")
+if arr_len(regressions) > 0 {
+    print(red(str_concat("REGRESSIONS (", to_str(arr_len(regressions)), "): ")))
+    h ri = 0
+    while ri < arr_len(regressions) {
+        print(str_concat("  - ", regressions[ri]))
+        ri = ri + 1
+    }
+}
+if arr_len(improvements) > 0 {
+    print(green(str_concat("IMPROVEMENTS (", to_str(arr_len(improvements)), "): ")))
+    h ii = 0
+    while ii < arr_len(improvements) {
+        print(str_concat("  + ", improvements[ii]))
+        ii = ii + 1
+    }
+}
+if arr_len(regressions) == 0 and arr_len(improvements) == 0 {
+    print(green("All benchmarks within baseline."))
+}
+print(str_concat("Results saved to: ", BENCH_DB))

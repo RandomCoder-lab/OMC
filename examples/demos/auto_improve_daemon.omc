@@ -1,0 +1,216 @@
+# auto_improve_daemon.omc
+# Continuous 24/7 self-improvement daemon.
+# Cycles through OMC programs in a directory, improves each, saves results,
+# and tracks improvement history. Run with OMC_DAEMON=1 for continuous mode.
+
+import "examples/lib/llm.omc"
+import "examples/lib/cache.omc"
+
+h MODEL = "claude-opus-4-5"
+h IMPROVE_DIR = "examples/demos"
+h LOG_FILE = "/tmp/omc_daemon.log"
+h IMPROVEMENT_CACHE = lru_new(50)
+
+# ── Logging ──────────────────────────────────────────────────────────────────
+
+fn log(msg) {
+    h ts = unix_time()
+    h line = str_concat("[", to_str(ts), "] ", msg, "\n")
+    file_append(LOG_FILE, line)
+    print(msg)
+}
+
+# ── Code quality scoring ─────────────────────────────────────────────────────
+
+fn score_code(code) {
+    h lines = str_split(code, "\n")
+    h line_count = arr_len(lines)
+    h fn_count = 0
+    h comment_count = 0
+    h error_handling = 0
+    h i = 0
+    while i < line_count {
+        h line = str_trim(lines[i])
+        if str_starts_with(line, "fn ") { fn_count = fn_count + 1 }
+        if str_starts_with(line, "#") { comment_count = comment_count + 1 }
+        if str_contains(line, "error(") { error_handling = error_handling + 1 }
+        i = i + 1
+    }
+    h score = 0.0
+    if line_count > 0 { score = fn_count * 10.0 + comment_count * 2.0 + error_handling * 5.0 }
+    return {
+        score: score,
+        lines: line_count,
+        functions: fn_count,
+        comments: comment_count,
+        error_handling: error_handling
+    }
+}
+
+# ── Improvement proposal generation ──────────────────────────────────────────
+
+fn propose_improvement(code, history) {
+    h hist_summary = ""
+    if arr_len(history) > 0 {
+        h last = history[arr_len(history) - 1]
+        hist_summary = str_concat(
+            "\nPrevious improvement round score: ", to_str(last["score"]),
+            "\nPrevious issues fixed: ", to_str(last["issues"])
+        )
+    }
+    h prompt = str_concat(
+        "Analyze this OMC code and propose ONE specific improvement:\n\n",
+        code, "\n",
+        hist_summary, "\n",
+        "Respond with JSON: {\"issue\": \"description\", \"fix\": \"what to do\"}"
+    )
+    h response = llm_call(prompt, MODEL, "Respond with valid JSON only, no markdown.")
+    h parsed = json_parse(response)
+    if parsed == null {
+        return {issue: "unknown", fix: "improve overall quality"}
+    }
+    return parsed
+}
+
+fn apply_improvement(code, proposal) {
+    h sys = "You write OMC code. Return ONLY the corrected code, no explanation, no markdown."
+    h prompt = str_concat(
+        "Apply this improvement to the OMC code:\n\n",
+        "Issue: ", proposal["issue"], "\n",
+        "Fix: ", proposal["fix"], "\n\n",
+        "Code:\n", code, "\n\n",
+        "Return only the improved code."
+    )
+    h result = llm_call(prompt, MODEL, sys)
+    if str_contains(result, "```") {
+        h parts = str_split(result, "```")
+        if arr_len(parts) >= 3 { return str_trim(parts[1]) }
+    }
+    return str_trim(result)
+}
+
+# ── Per-file improvement cycle ────────────────────────────────────────────────
+
+fn improve_file(path, rounds) {
+    h code = file_read(path)
+    if code == null {
+        log(str_concat("  SKIP: cannot read ", path))
+        return null
+    }
+
+    log(str_concat("  File: ", path, " (", to_str(str_len(code)), " bytes)"))
+
+    h cache_key = str_concat(path, "|", to_str(str_len(code)))
+    h cached = lru_get(IMPROVEMENT_CACHE, cache_key)
+    if cached != null {
+        log("  Cache hit — skipping")
+        return cached
+    }
+
+    h initial_score = score_code(code)
+    log(str_concat("  Initial score: ", to_str(initial_score["score"])))
+
+    h current = code
+    h history = []
+    h r = 0
+    while r < rounds {
+        h proposal = propose_improvement(current, history)
+        log(str_concat("  Round ", to_str(r + 1), ": ", proposal["issue"]))
+
+        h improved = apply_improvement(current, proposal)
+        h new_score = score_code(improved)
+
+        arr_push(history, {
+            round: r + 1,
+            issue: proposal["issue"],
+            score: new_score["score"],
+            issues: 1
+        })
+
+        if new_score["score"] >= initial_score["score"] {
+            current = improved
+        }
+        r = r + 1
+    }
+
+    h final_score = score_code(current)
+    h improvement = final_score["score"] - initial_score["score"]
+    log(str_concat("  Final score: ", to_str(final_score["score"]), " (delta: +", to_str(improvement), ")"))
+
+    h result = {
+        path: path,
+        original: code,
+        improved: current,
+        initial_score: initial_score,
+        final_score: final_score,
+        improvement: improvement,
+        history: history
+    }
+
+    lru_put(IMPROVEMENT_CACHE, cache_key, result)
+
+    if improvement > 0 {
+        h backup = str_concat(path, ".bak")
+        file_write(backup, code)
+        log(str_concat("  Saved backup to ", backup))
+    }
+
+    return result
+}
+
+# ── Daemon loop ───────────────────────────────────────────────────────────────
+
+fn daemon_cycle(files, rounds_per_file, continuous) {
+    h iteration = 0
+    h keep_running = true
+
+    while keep_running {
+        iteration = iteration + 1
+        log(str_concat("=== Daemon Cycle ", to_str(iteration), " ==="))
+
+        h results = []
+        h fi = 0
+        while fi < arr_len(files) {
+            h result = improve_file(files[fi], rounds_per_file)
+            if result != null {
+                arr_push(results, result)
+            }
+            fi = fi + 1
+        }
+
+        # Summary
+        h total_improvement = 0.0
+        h ri = 0
+        while ri < arr_len(results) {
+            total_improvement = total_improvement + results[ri]["improvement"]
+            ri = ri + 1
+        }
+        log(str_concat("  Cycle ", to_str(iteration), " complete. Total improvement delta: ", to_str(total_improvement)))
+
+        if not continuous { keep_running = false }
+    }
+
+    return {iterations: iteration}
+}
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+h FILES_TO_IMPROVE = [
+    "examples/demos/recursive_loop_demo.omc",
+    "examples/demos/self_improving_agent.omc",
+    "examples/demos/code_gen_loop.omc"
+]
+
+h CONTINUOUS_MODE = false
+h rounds_env = env_var("OMC_CONTINUOUS")
+if rounds_env == "1" or rounds_env == "true" { CONTINUOUS_MODE = true }
+
+print("=== Auto-Improve Daemon ===")
+print(str_concat("Mode: ", if CONTINUOUS_MODE { "continuous" } else { "single-cycle" }))
+print(str_concat("Files: ", to_str(arr_len(FILES_TO_IMPROVE))))
+print(str_concat("Log: ", LOG_FILE))
+print("")
+
+h result = daemon_cycle(FILES_TO_IMPROVE, 2, CONTINUOUS_MODE)
+print(str_concat("\nDaemon ran ", to_str(result["iterations"]), " iteration(s)."))
+print("Check log file for details: ", LOG_FILE)

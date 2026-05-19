@@ -1,0 +1,156 @@
+# code_gen_loop.omc
+# Generate → Run → Evaluate → Improve loop.
+# Each iteration generates OMC code, runs it, measures quality, then asks Claude to improve.
+
+import "examples/lib/llm.omc"
+
+h MODEL = "claude-opus-4-5"
+h GENERATIONS = 4
+
+fn extract_code(text) {
+    if str_contains(text, "```omc") {
+        h parts = str_split(text, "```omc")
+        h after = parts[1]
+        h end = str_split(after, "```")
+        return str_trim(end[0])
+    }
+    if str_contains(text, "```") {
+        h parts = str_split(text, "```")
+        if arr_len(parts) >= 3 { return str_trim(parts[1]) }
+    }
+    return str_trim(text)
+}
+
+fn measure_code(code) {
+    # lines, fn count, loop count, complexity heuristic
+    h lines = str_split(code, "\n")
+    h line_count = arr_len(lines)
+    h fn_count = 0
+    h loop_count = 0
+    h i = 0
+    while i < line_count {
+        h line = str_trim(lines[i])
+        if str_starts_with(line, "fn ") { fn_count = fn_count + 1 }
+        if str_starts_with(line, "while ") { loop_count = loop_count + 1 }
+        i = i + 1
+    }
+    return {
+        lines: line_count,
+        functions: fn_count,
+        loops: loop_count
+    }
+}
+
+fn safe_run(code, test_input) {
+    h test_code = str_concat(code, "\n", test_input)
+    h result = eval_omc(test_code)
+    return {ok: true, result: result}
+}
+
+fn code_gen_loop(task_description, eval_prompt_template, generations) {
+    h sys = str_concat(
+        "You write clean, idiomatic OMC code. Rules:\n",
+        "- h varname = value for bindings\n",
+        "- fn name(args) { body } for functions\n",
+        "- while condition { body } for loops\n",
+        "- arr_push(arr, val), arr_len(arr), arr_slice(arr, start, end) for arrays\n",
+        "- str_concat(a, b, ...) for string concat\n",
+        "- Return ONLY the OMC code, no fences or explanation."
+    )
+
+    print(str_concat("Task: ", task_description))
+    print("")
+
+    h history = []
+    h current_code = llm_call(
+        str_concat("Write OMC code for: ", task_description),
+        MODEL, sys
+    )
+    current_code = extract_code(current_code)
+
+    h gen = 0
+    while gen < generations {
+        print(str_concat("--- Generation ", to_str(gen + 1), " ---"))
+
+        h metrics = measure_code(current_code)
+        print(str_concat(
+            "  Lines: ", to_str(metrics["lines"]),
+            " | Fns: ", to_str(metrics["functions"]),
+            " | Loops: ", to_str(metrics["loops"])
+        ))
+
+        # Try to run it
+        h run_result = safe_run(current_code, "")
+        h run_status = "ok"
+        if not run_result["ok"] { run_status = to_str(run_result["error"]) }
+        print(str_concat("  Run status: ", run_status))
+
+        arr_push(history, {
+            gen: gen + 1,
+            code: current_code,
+            metrics: metrics,
+            status: run_status
+        })
+
+        if gen + 1 >= generations { break }
+
+        # Improve prompt
+        h improve_prompt = str_replace(eval_prompt_template, "{{CODE}}", current_code)
+        h improved = llm_call(improve_prompt, MODEL, sys)
+        current_code = extract_code(improved)
+
+        gen = gen + 1
+    }
+
+    return {code: current_code, history: history, generations: generations}
+}
+
+# ── Example tasks ────────────────────────────────────────────────────────────
+
+# Task 1: Sorting algorithm
+print("=== Task 1: Sorting Algorithm ===")
+h sort_improve = str_concat(
+    "Improve this OMC sorting implementation. Make it more efficient and readable.\n\n",
+    "Current code:\n{{CODE}}\n\n",
+    "Return only the improved OMC code."
+)
+h sort_result = code_gen_loop(
+    "Implement merge sort that returns a sorted copy of an integer array.",
+    sort_improve,
+    GENERATIONS
+)
+print(str_concat("Final code (", to_str(arr_len(str_split(sort_result["code"], "\n"))), " lines)"))
+print("")
+
+# Task 2: String processing
+print("=== Task 2: Word Counter ===")
+h word_improve = str_concat(
+    "Improve this OMC word counter. Add better punctuation handling and return top-N words.\n\n",
+    "Current code:\n{{CODE}}\n\n",
+    "Return only the improved OMC code."
+)
+h wc_result = code_gen_loop(
+    "Count word frequencies in a string and return a dict of {word: count}, lowercased, punctuation stripped.",
+    word_improve,
+    GENERATIONS
+)
+print(str_concat("Final code (", to_str(arr_len(str_split(wc_result["code"], "\n"))), " lines)"))
+print("")
+
+# Task 3: Math utility
+print("=== Task 3: Statistics Library ===")
+h stats_improve = str_concat(
+    "Improve this OMC stats library. Add median, mode, and standard deviation.\n\n",
+    "Current code:\n{{CODE}}\n\n",
+    "Return only the improved OMC code."
+)
+h stats_result = code_gen_loop(
+    "Write mean(arr) and variance(arr) functions for a list of numbers.",
+    stats_improve,
+    GENERATIONS
+)
+print(str_concat("Final code (", to_str(arr_len(str_split(stats_result["code"], "\n"))), " lines)"))
+print("")
+
+print("=== Code Gen Loop Complete ===")
+print(str_concat("Ran ", to_str(GENERATIONS), " generations on each of 3 tasks."))

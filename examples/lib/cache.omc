@@ -1,0 +1,225 @@
+# cache.omc — memoize, LRU cache, TTL cache, disk cache
+
+# ── Simple memoize ──────────────────────────────────────────────────────────
+
+# memoize(fn) → fn
+# Returns a wrapper that caches results keyed by stringified args.
+fn memoize(f) {
+    h store = {}
+    fn memo_wrapper(arg) {
+        h key = to_str(arg)
+        if dict_has(store, key) {
+            return store[key]
+        }
+        h result = f(arg)
+        store[key] = result
+        return result
+    }
+    return memo_wrapper
+}
+
+# memoize2(fn) → fn
+# Two-argument version.
+fn memoize2(f) {
+    h store = {}
+    fn memo2_wrapper(a, b) {
+        h key = str_concat(to_str(a), "|", to_str(b))
+        if dict_has(store, key) {
+            return store[key]
+        }
+        h result = f(a, b)
+        store[key] = result
+        return result
+    }
+    return memo2_wrapper
+}
+
+# ── LRU cache ───────────────────────────────────────────────────────────────
+
+# lru_new(capacity) → lru_cache dict
+fn lru_new(capacity) {
+    return {
+        capacity: capacity,
+        store: {},
+        order: [],
+        hits: 0,
+        misses: 0
+    }
+}
+
+fn _lru_evict(lru) {
+    if arr_len(lru["order"]) >= lru["capacity"] {
+        h oldest = lru["order"][0]
+        lru["order"] = arr_slice(lru["order"], 1, arr_len(lru["order"]))
+        if dict_has(lru["store"], oldest) {
+            dict_delete(lru["store"], oldest)
+        }
+    }
+}
+
+fn _lru_touch(lru, key) {
+    h new_order = []
+    h i = 0
+    while i < arr_len(lru["order"]) {
+        if lru["order"][i] != key {
+            arr_push(new_order, lru["order"][i])
+        }
+        i = i + 1
+    }
+    arr_push(new_order, key)
+    lru["order"] = new_order
+}
+
+# lru_get(lru, key) → value or null
+fn lru_get(lru, key) {
+    h k = to_str(key)
+    if dict_has(lru["store"], k) {
+        _lru_touch(lru, k)
+        lru["hits"] = lru["hits"] + 1
+        return lru["store"][k]
+    }
+    lru["misses"] = lru["misses"] + 1
+    return null
+}
+
+# lru_put(lru, key, value)
+fn lru_put(lru, key, value) {
+    h k = to_str(key)
+    if not dict_has(lru["store"], k) {
+        _lru_evict(lru)
+        arr_push(lru["order"], k)
+    } else {
+        _lru_touch(lru, k)
+    }
+    lru["store"][k] = value
+}
+
+# lru_stats(lru) → {hits, misses, size, capacity, hit_rate}
+fn lru_stats(lru) {
+    h total = lru["hits"] + lru["misses"]
+    h rate = 0.0
+    if total > 0 { rate = lru["hits"] / total }
+    return {
+        hits: lru["hits"],
+        misses: lru["misses"],
+        size: arr_len(lru["order"]),
+        capacity: lru["capacity"],
+        hit_rate: rate
+    }
+}
+
+# lru_memoize(fn, capacity) → fn
+# LRU-backed memoized wrapper.
+fn lru_memoize(f, capacity) {
+    h cache = lru_new(capacity)
+    fn lru_wrapper(arg) {
+        h key = to_str(arg)
+        h cached = lru_get(cache, key)
+        if cached != null { return cached }
+        h result = f(arg)
+        lru_put(cache, key, result)
+        return result
+    }
+    return lru_wrapper
+}
+
+# ── TTL cache ───────────────────────────────────────────────────────────────
+
+# ttl_new(ttl_seconds) → ttl_cache dict
+fn ttl_new(ttl_seconds) {
+    return {ttl: ttl_seconds, store: {}, expires: {}, hits: 0, misses: 0}
+}
+
+# ttl_get(cache, key) → value or null (returns null if expired)
+fn ttl_get(cache, key) {
+    h k = to_str(key)
+    if not dict_has(cache["store"], k) {
+        cache["misses"] = cache["misses"] + 1
+        return null
+    }
+    h now = unix_time()
+    if now > cache["expires"][k] {
+        dict_delete(cache["store"], k)
+        dict_delete(cache["expires"], k)
+        cache["misses"] = cache["misses"] + 1
+        return null
+    }
+    cache["hits"] = cache["hits"] + 1
+    return cache["store"][k]
+}
+
+# ttl_put(cache, key, value)
+fn ttl_put(cache, key, value) {
+    h k = to_str(key)
+    h now = unix_time()
+    cache["store"][k] = value
+    cache["expires"][k] = now + cache["ttl"]
+}
+
+# ttl_memoize(fn, ttl_seconds) → fn
+fn ttl_memoize(f, ttl) {
+    h cache = ttl_new(ttl)
+    fn ttl_wrapper(arg) {
+        h key = to_str(arg)
+        h cached = ttl_get(cache, key)
+        if cached != null { return cached }
+        h result = f(arg)
+        ttl_put(cache, key, result)
+        return result
+    }
+    return ttl_wrapper
+}
+
+# ── Disk cache ──────────────────────────────────────────────────────────────
+
+# disk_cache_get(dir, key) → string or null
+fn disk_cache_get(dir, key) {
+    h safe_key = str_replace(to_str(key), "/", "_")
+    h path = str_concat(dir, "/", safe_key, ".cache")
+    h content = file_read(path)
+    if content == null { return null }
+    return content
+}
+
+# disk_cache_put(dir, key, value)
+fn disk_cache_put(dir, key, value) {
+    h safe_key = str_replace(to_str(key), "/", "_")
+    h path = str_concat(dir, "/", safe_key, ".cache")
+    file_write(path, to_str(value))
+}
+
+# disk_memoize(fn, dir) → fn
+# Persists results to disk; survives process restarts.
+fn disk_memoize(f, dir) {
+    fn disk_wrapper(arg) {
+        h key = to_str(arg)
+        h cached = disk_cache_get(dir, key)
+        if cached != null { return cached }
+        h result = f(arg)
+        disk_cache_put(dir, key, result)
+        return result
+    }
+    return disk_wrapper
+}
+
+# ── Batch cache ─────────────────────────────────────────────────────────────
+
+# batch_cached(fn, keys_array, cache) → [values]
+# For each key: return cached value or call fn(key) and cache it.
+fn batch_cached(f, keys, cache) {
+    h results = []
+    h i = 0
+    while i < arr_len(keys) {
+        h k = keys[i]
+        h cached = lru_get(cache, k)
+        if cached != null {
+            arr_push(results, cached)
+        } else {
+            h v = f(k)
+            lru_put(cache, k, v)
+            arr_push(results, v)
+        }
+        i = i + 1
+    }
+    return results
+}

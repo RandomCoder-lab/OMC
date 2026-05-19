@@ -1,0 +1,271 @@
+# cli.omc — CLI utilities: arg parsing, ANSI colors, progress bars, tables
+
+# ── ANSI colors ─────────────────────────────────────────────────────────────
+
+fn ansi_reset() { return "\x1b[0m" }
+fn ansi_bold() { return "\x1b[1m" }
+fn ansi_dim() { return "\x1b[2m" }
+fn ansi_red() { return "\x1b[31m" }
+fn ansi_green() { return "\x1b[32m" }
+fn ansi_yellow() { return "\x1b[33m" }
+fn ansi_blue() { return "\x1b[34m" }
+fn ansi_magenta() { return "\x1b[35m" }
+fn ansi_cyan() { return "\x1b[36m" }
+fn ansi_white() { return "\x1b[37m" }
+fn ansi_bg_red() { return "\x1b[41m" }
+fn ansi_bg_green() { return "\x1b[42m" }
+fn ansi_bg_yellow() { return "\x1b[43m" }
+fn ansi_bg_blue() { return "\x1b[44m" }
+
+fn color(text, color_code) {
+    return str_concat(color_code, text, ansi_reset())
+}
+
+fn red(text) { return color(text, ansi_red()) }
+fn green(text) { return color(text, ansi_green()) }
+fn yellow(text) { return color(text, ansi_yellow()) }
+fn blue(text) { return color(text, ansi_blue()) }
+fn cyan(text) { return color(text, ansi_cyan()) }
+fn bold(text) { return color(text, ansi_bold()) }
+fn dim(text) { return color(text, ansi_dim()) }
+
+fn success(msg) { print(str_concat(green("✓ "), msg)) }
+fn warn(msg) { print(str_concat(yellow("⚠ "), msg)) }
+fn err(msg) { print(str_concat(red("✗ "), msg)) }
+fn info(msg) { print(str_concat(cyan("ℹ "), msg)) }
+
+# ── Arg parsing ─────────────────────────────────────────────────────────────
+
+# parse_args(args_array) → {flags: {}, positional: []}
+# Handles: --flag, --key=value, --key value, -f, positional args
+fn parse_args(args) {
+    h flags = {}
+    h positional = []
+    h i = 0
+    while i < arr_len(args) {
+        h arg = args[i]
+        if str_starts_with(arg, "--") {
+            h rest = str_slice(arg, 2, str_len(arg))
+            h eq = str_find(rest, "=")
+            if eq >= 0 {
+                h key = str_slice(rest, 0, eq)
+                h val = str_slice(rest, eq + 1, str_len(rest))
+                flags[key] = val
+            } else {
+                # check if next arg is the value
+                if i + 1 < arr_len(args) and not str_starts_with(args[i + 1], "-") {
+                    flags[rest] = args[i + 1]
+                    i = i + 1
+                } else {
+                    flags[rest] = true
+                }
+            }
+        } else if str_starts_with(arg, "-") and str_len(arg) == 2 {
+            h key = str_slice(arg, 1, 2)
+            if i + 1 < arr_len(args) and not str_starts_with(args[i + 1], "-") {
+                flags[key] = args[i + 1]
+                i = i + 1
+            } else {
+                flags[key] = true
+            }
+        } else {
+            arr_push(positional, arg)
+        }
+        i = i + 1
+    }
+    return {flags: flags, positional: positional}
+}
+
+# flag(parsed, name, default?) → value
+fn flag(parsed, name, default_val) {
+    if dict_has(parsed["flags"], name) {
+        return parsed["flags"][name]
+    }
+    return default_val
+}
+
+# ── Progress bar ─────────────────────────────────────────────────────────────
+
+fn progress_bar(current, total, width, label) {
+    h w = width
+    if w == null { w = 40 }
+    h pct = current / total
+    h filled = math_floor(pct * w)
+    h empty = w - filled
+    h bar = ""
+    h i = 0
+    while i < filled {
+        bar = str_concat(bar, "█")
+        i = i + 1
+    }
+    while i < w {
+        bar = str_concat(bar, "░")
+        i = i + 1
+    }
+    h pct_str = to_str(math_floor(pct * 100))
+    h lbl = ""
+    if label != null { lbl = str_concat(label, " ") }
+    return str_concat(lbl, "[", bar, "] ", pct_str, "% (", to_str(current), "/", to_str(total), ")")
+}
+
+fn print_progress(current, total, width, label) {
+    print(str_concat("\r", progress_bar(current, total, width, label)))
+}
+
+# ── Table formatter ──────────────────────────────────────────────────────────
+
+fn _pad_right(s, width) {
+    h str = to_str(s)
+    h len = str_len(str)
+    h out = str
+    h i = len
+    while i < width {
+        out = str_concat(out, " ")
+        i = i + 1
+    }
+    return out
+}
+
+fn _pad_left(s, width) {
+    h str = to_str(s)
+    h len = str_len(str)
+    h out = ""
+    h i = len
+    while i < width {
+        out = str_concat(out, " ")
+        i = i + 1
+    }
+    return str_concat(out, str)
+}
+
+# table(headers, rows) → formatted string
+# headers: [string, ...]
+# rows: [[value, ...], ...]
+fn table(headers, rows) {
+    # compute column widths
+    h widths = []
+    h i = 0
+    while i < arr_len(headers) {
+        arr_push(widths, str_len(to_str(headers[i])))
+        i = i + 1
+    }
+    h ri = 0
+    while ri < arr_len(rows) {
+        h row = rows[ri]
+        h ci = 0
+        while ci < arr_len(row) {
+            if ci < arr_len(widths) {
+                h cell_len = str_len(to_str(row[ci]))
+                if cell_len > widths[ci] { widths[ci] = cell_len }
+            }
+            ci = ci + 1
+        }
+        ri = ri + 1
+    }
+    # build separator
+    h sep = "+"
+    h si = 0
+    while si < arr_len(widths) {
+        h dashes = ""
+        h di = 0
+        while di < widths[si] + 2 {
+            dashes = str_concat(dashes, "-")
+            di = di + 1
+        }
+        sep = str_concat(sep, dashes, "+")
+        si = si + 1
+    }
+    # build header row
+    h header_line = "|"
+    h hi = 0
+    while hi < arr_len(headers) {
+        header_line = str_concat(header_line, " ", _pad_right(headers[hi], widths[hi]), " |")
+        hi = hi + 1
+    }
+    # build output
+    h out = str_concat(sep, "\n", header_line, "\n", sep, "\n")
+    ri = 0
+    while ri < arr_len(rows) {
+        h row = rows[ri]
+        h line = "|"
+        h ci = 0
+        while ci < arr_len(widths) {
+            h cell = ""
+            if ci < arr_len(row) { cell = row[ci] }
+            line = str_concat(line, " ", _pad_right(cell, widths[ci]), " |")
+            ci = ci + 1
+        }
+        out = str_concat(out, line, "\n")
+        ri = ri + 1
+    }
+    out = str_concat(out, sep)
+    return out
+}
+
+fn print_table(headers, rows) {
+    print(table(headers, rows))
+}
+
+# ── Spinner ──────────────────────────────────────────────────────────────────
+
+fn spinner_frames() {
+    return ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+}
+
+fn spinner_frame(tick) {
+    h frames = spinner_frames()
+    return frames[tick % arr_len(frames)]
+}
+
+# ── Input helpers ────────────────────────────────────────────────────────────
+
+fn confirm(question) {
+    h answer = input(str_concat(question, " [y/N] "))
+    h a = str_lower(str_trim(answer))
+    return a == "y" or a == "yes"
+}
+
+fn prompt(question, default_val) {
+    h suffix = ""
+    if default_val != null {
+        suffix = str_concat(" [", to_str(default_val), "]")
+    }
+    h answer = input(str_concat(question, suffix, ": "))
+    h trimmed = str_trim(answer)
+    if str_len(trimmed) == 0 and default_val != null {
+        return default_val
+    }
+    return trimmed
+}
+
+# ── Box drawing ──────────────────────────────────────────────────────────────
+
+fn box(title, content, width) {
+    h w = width
+    if w == null { w = 60 }
+    h top = str_concat("╭", _repeat("─", w - 2), "╮")
+    h bottom = str_concat("╰", _repeat("─", w - 2), "╯")
+    h title_line = str_concat("│ ", bold(title), _repeat(" ", w - str_len(title) - 4), " │")
+    h sep = str_concat("├", _repeat("─", w - 2), "┤")
+    h lines = str_split(content, "\n")
+    h body = ""
+    h i = 0
+    while i < arr_len(lines) {
+        h line = lines[i]
+        h padding = w - str_len(line) - 4
+        if padding < 0 { padding = 0 }
+        body = str_concat(body, "│ ", line, _repeat(" ", padding), " │\n")
+        i = i + 1
+    }
+    return str_concat(top, "\n", title_line, "\n", sep, "\n", body, bottom)
+}
+
+fn _repeat(char, n) {
+    h out = ""
+    h i = 0
+    while i < n {
+        out = str_concat(out, char)
+        i = i + 1
+    }
+    return out
+}

@@ -1,0 +1,227 @@
+# self_improving_agent.omc
+# An OMC agent that writes OMC code, tests it, fixes it, and publishes working solutions.
+# Demonstrates the full recursive improvement loop.
+
+import "examples/lib/llm.omc"
+import "examples/lib/cache.omc"
+
+# ── Configuration ────────────────────────────────────────────────────────────
+
+h MODEL = "claude-opus-4-5"
+h MAX_REPAIR_ATTEMPTS = 5
+h SOLUTION_CACHE = lru_new(100)
+
+# ── Code extraction ──────────────────────────────────────────────────────────
+
+fn extract_omc_code(text) {
+    # try fenced block first
+    if str_contains(text, "```omc") {
+        h parts = str_split(text, "```omc")
+        h after = parts[1]
+        h end_parts = str_split(after, "```")
+        return str_trim(end_parts[0])
+    }
+    if str_contains(text, "```") {
+        h parts = str_split(text, "```")
+        if arr_len(parts) >= 3 {
+            return str_trim(parts[1])
+        }
+    }
+    return str_trim(text)
+}
+
+# ── Safe eval with result capture ────────────────────────────────────────────
+
+fn safe_eval(code) {
+    h result = eval_omc(code)
+    return {ok: true, value: result, error: null}
+}
+
+# ── Test harness ─────────────────────────────────────────────────────────────
+
+fn run_test(code, test_case) {
+    h full_code = str_concat(
+        code, "\n",
+        "h __test_input = ", json_stringify(test_case["input"]), "\n",
+        "h __test_result = ", test_case["call"], "(__test_input)\n",
+        "__test_result"
+    )
+    h result = safe_eval(full_code)
+    if not result["ok"] {
+        return {passed: false, error: result["error"], expected: test_case["expected"], got: null}
+    }
+    h passed = result["value"] == test_case["expected"]
+    return {passed: passed, expected: test_case["expected"], got: result["value"], error: null}
+}
+
+fn run_all_tests(code, tests) {
+    h failures = []
+    h i = 0
+    while i < arr_len(tests) {
+        h r = run_test(code, tests[i])
+        if not r["passed"] {
+            arr_push(failures, {
+                test_idx: i,
+                expected: r["expected"],
+                got: r["got"],
+                error: r["error"]
+            })
+        }
+        i = i + 1
+    }
+    return failures
+}
+
+# ── Generation + repair loop ─────────────────────────────────────────────────
+
+fn generate_solution(problem, tests) {
+    h cached = lru_get(SOLUTION_CACHE, problem)
+    if cached != null {
+        print(str_concat("[cache hit] ", problem))
+        return cached
+    }
+
+    h sys = str_concat(
+        "You are an expert OMC (OmniMCode) programmer. Write clean, correct OMC code.\n",
+        "Rules:\n",
+        "- Use fn to define functions, h for variable binding\n",
+        "- Use arr_push, arr_len, arr_slice for arrays\n",
+        "- Use dict_has, dict_keys for dicts\n",
+        "- Use str_concat, str_split, str_len, str_contains for strings\n",
+        "- Use while loops (no for-in)\n",
+        "- Return values explicitly with return\n",
+        "- No imports needed for basic builtins\n",
+        "Output ONLY the OMC code, no explanation, no markdown fences."
+    )
+
+    h prompt = str_concat("Write OMC code for this task:\n\n", problem)
+    h code = llm_call(prompt, MODEL, sys)
+    code = extract_omc_code(code)
+
+    h attempt = 0
+    while attempt < MAX_REPAIR_ATTEMPTS {
+        h failures = run_all_tests(code, tests)
+        if arr_len(failures) == 0 {
+            lru_put(SOLUTION_CACHE, problem, code)
+            return {code: code, attempts: attempt + 1, solved: true}
+        }
+
+        # Build failure report for Claude
+        h failure_report = "Failures:\n"
+        h fi = 0
+        while fi < arr_len(failures) {
+            h f = failures[fi]
+            failure_report = str_concat(
+                failure_report,
+                "  Test ", to_str(f["test_idx"]), ": expected=",
+                to_str(f["expected"]), " got=", to_str(f["got"])
+            )
+            if f["error"] != null {
+                failure_report = str_concat(failure_report, " error=", to_str(f["error"]))
+            }
+            failure_report = str_concat(failure_report, "\n")
+            fi = fi + 1
+        }
+
+        h fix_prompt = str_concat(
+            "This OMC code has test failures. Fix ALL of them.\n\n",
+            "Code:\n", code, "\n\n",
+            failure_report,
+            "\nReturn ONLY the corrected OMC code."
+        )
+        h fixed = llm_call(fix_prompt, MODEL, sys)
+        code = extract_omc_code(fixed)
+        attempt = attempt + 1
+    }
+
+    return {code: code, attempts: MAX_REPAIR_ATTEMPTS, solved: false}
+}
+
+# ── Problem suite ────────────────────────────────────────────────────────────
+
+h PROBLEMS = [
+    {
+        name: "fizzbuzz",
+        description: "Write a function fizzbuzz(n) that returns 'Fizz' if divisible by 3, 'Buzz' if by 5, 'FizzBuzz' if by 15, else the number as string.",
+        tests: [
+            {input: 3, call: "fizzbuzz", expected: "Fizz"},
+            {input: 5, call: "fizzbuzz", expected: "Buzz"},
+            {input: 15, call: "fizzbuzz", expected: "FizzBuzz"},
+            {input: 7, call: "fizzbuzz", expected: "7"}
+        ]
+    },
+    {
+        name: "fibonacci",
+        description: "Write a function fib(n) that returns the nth Fibonacci number (0-indexed: fib(0)=0, fib(1)=1, fib(2)=1, fib(6)=8).",
+        tests: [
+            {input: 0, call: "fib", expected: 0},
+            {input: 1, call: "fib", expected: 1},
+            {input: 6, call: "fib", expected: 8},
+            {input: 10, call: "fib", expected: 55}
+        ]
+    },
+    {
+        name: "palindrome",
+        description: "Write a function is_palindrome(s) that returns true if the string is a palindrome, false otherwise.",
+        tests: [
+            {input: "racecar", call: "is_palindrome", expected: true},
+            {input: "hello", call: "is_palindrome", expected: false},
+            {input: "a", call: "is_palindrome", expected: true},
+            {input: "abba", call: "is_palindrome", expected: true}
+        ]
+    },
+    {
+        name: "sum_array",
+        description: "Write a function sum_arr(arr) that returns the sum of all numbers in the array.",
+        tests: [
+            {input: [1, 2, 3, 4, 5], call: "sum_arr", expected: 15},
+            {input: [], call: "sum_arr", expected: 0},
+            {input: [42], call: "sum_arr", expected: 42}
+        ]
+    }
+]
+
+# ── Main loop ────────────────────────────────────────────────────────────────
+
+print("=== Self-Improving OMC Agent ===")
+print(str_concat("Model: ", MODEL, " | Max repairs: ", to_str(MAX_REPAIR_ATTEMPTS)))
+print("")
+
+h results = []
+h i = 0
+while i < arr_len(PROBLEMS) {
+    h problem = PROBLEMS[i]
+    print(str_concat("[", to_str(i + 1), "/", to_str(arr_len(PROBLEMS)), "] Solving: ", problem["name"]))
+
+    h result = generate_solution(problem["description"], problem["tests"])
+
+    if result["solved"] {
+        print(str_concat("  ✓ SOLVED in ", to_str(result["attempts"]), " attempt(s)"))
+    } else {
+        print(str_concat("  ✗ FAILED after ", to_str(result["attempts"]), " attempts"))
+    }
+
+    arr_push(results, {
+        name: problem["name"],
+        solved: result["solved"],
+        attempts: result["attempts"],
+        code: result["code"]
+    })
+    i = i + 1
+}
+
+print("")
+print("=== Results ===")
+h solved_count = 0
+h ri = 0
+while ri < arr_len(results) {
+    h r = results[ri]
+    h status = "FAIL"
+    if r["solved"] {
+        status = "PASS"
+        solved_count = solved_count + 1
+    }
+    print(str_concat("  ", status, " ", r["name"], " (", to_str(r["attempts"]), " attempts)"))
+    ri = ri + 1
+}
+print(str_concat("\nSolved: ", to_str(solved_count), "/", to_str(arr_len(results))))

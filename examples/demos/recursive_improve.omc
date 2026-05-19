@@ -1,0 +1,182 @@
+# recursive_improve.omc
+# Meta self-improvement orchestrator: OMC code that improves OMC code that improves OMC code.
+# The loop recurses until the improver itself is good enough to improve other programs.
+
+import "examples/lib/llm.omc"
+import "examples/lib/cache.omc"
+
+h MODEL = "claude-opus-4-5"
+h MEMO_CACHE = lru_new(256)
+
+# ── Core primitives ──────────────────────────────────────────────────────────
+
+fn omc_ask(prompt) {
+    h sys = "You are an expert OMC programmer. Output only valid OMC code, no markdown, no explanation."
+    return llm_call(prompt, MODEL, sys)
+}
+
+fn strip_fences(text) {
+    if str_contains(text, "```omc") {
+        h a = str_split(text, "```omc")
+        h b = str_split(a[1], "```")
+        return str_trim(b[0])
+    }
+    if str_contains(text, "```") {
+        h a = str_split(text, "```")
+        if arr_len(a) >= 3 { return str_trim(a[1]) }
+    }
+    return str_trim(text)
+}
+
+fn run_code(code) {
+    h result = eval_omc(code)
+    return {ok: true, value: result}
+}
+
+# ── Improvement primitives ────────────────────────────────────────────────────
+
+fn improve_once(code, goal) {
+    h prompt = str_concat(
+        "Improve this OMC code to better achieve: ", goal, "\n\n",
+        "Current code:\n", code, "\n\n",
+        "Return only the improved code."
+    )
+    return strip_fences(omc_ask(prompt))
+}
+
+fn critique(code, goal) {
+    h prompt = str_concat(
+        "Analyze this OMC code for: ", goal, "\n\n",
+        "Code:\n", code, "\n\n",
+        "List exactly 3 specific improvements. Be terse."
+    )
+    return llm_call(prompt, MODEL, null)
+}
+
+fn apply_critique(code, critique_text) {
+    h prompt = str_concat(
+        "Apply these improvements to the OMC code:\n\n",
+        "Code:\n", code, "\n\n",
+        "Improvements:\n", critique_text, "\n\n",
+        "Return only the improved OMC code."
+    )
+    return strip_fences(omc_ask(prompt))
+}
+
+# ── Recursive improvement ─────────────────────────────────────────────────────
+
+fn improve_to_convergence(code, goal, max_rounds) {
+    h rounds = max_rounds
+    if rounds == null { rounds = 3 }
+
+    h cache_key = str_concat(code, "|", goal)
+    h cached = lru_get(MEMO_CACHE, cache_key)
+    if cached != null { return cached }
+
+    h current = code
+    h trace = [{round: 0, code: current}]
+
+    h r = 0
+    while r < rounds {
+        h criticism = critique(current, goal)
+        h improved = apply_critique(current, criticism)
+
+        if improved == current {
+            print(str_concat("  Converged at round ", to_str(r + 1)))
+            break
+        }
+
+        current = improved
+        arr_push(trace, {round: r + 1, code: current, critique: criticism})
+        r = r + 1
+    }
+
+    h result = {code: current, rounds: r, trace: trace}
+    lru_put(MEMO_CACHE, cache_key, result)
+    return result
+}
+
+# ── Meta-improvement ──────────────────────────────────────────────────────────
+
+# Improve the improver itself, then use it to improve a target
+fn meta_improve(target_code, target_goal, meta_rounds) {
+    h mr = meta_rounds
+    if mr == null { mr = 2 }
+
+    # Generate a simple improver function
+    h improver_goal = "An OMC function improve_fn(code, goal) that calls llm_call to improve code"
+    h improver_template = str_concat(
+        "fn improve_fn(code, goal) {\n",
+        "    h prompt = str_concat(\"Improve this OMC code for \", goal, \":\\n\", code)\n",
+        "    h improved = llm_call(prompt, null, \"Write only OMC code, no explanation.\")\n",
+        "    return improved\n",
+        "}"
+    )
+
+    print("  Meta: improving the improver...")
+    h improver_result = improve_to_convergence(improver_template, improver_goal, mr)
+    h best_improver = improver_result["code"]
+
+    print("  Meta: running improved improver on target...")
+    h improvement_code = str_concat(
+        best_improver, "\n\n",
+        "improve_fn(", json_stringify(target_code), ", ", json_stringify(target_goal), ")"
+    )
+    h meta_result = run_code(improvement_code)
+    h final_code = target_code
+    if meta_result["ok"] and type_of(meta_result["value"]) == "string" {
+        final_code = strip_fences(meta_result["value"])
+    }
+
+    return {
+        code: final_code,
+        improver: best_improver,
+        meta_rounds: mr
+    }
+}
+
+# ── Programs to improve ───────────────────────────────────────────────────────
+
+h programs = [
+    {
+        name: "Binary Search",
+        code: "fn bsearch(arr, target) {\n    h lo = 0\n    h hi = arr_len(arr) - 1\n    while lo <= hi {\n        h mid = (lo + hi) / 2\n        if arr[mid] == target { return mid }\n        if arr[mid] < target { lo = mid + 1 }\n        else { hi = mid - 1 }\n    }\n    return -1\n}",
+        goal: "Make binary search handle edge cases: empty array, single element, duplicates. Add early-exit optimization."
+    },
+    {
+        name: "String Reverser",
+        code: "fn rev_str(s) {\n    h out = \"\"\n    h i = str_len(s) - 1\n    while i >= 0 {\n        out = str_concat(out, str_slice(s, i, i + 1))\n        i = i - 1\n    }\n    return out\n}",
+        goal: "Make string reversal handle UTF-8 correctly and add word-reversal mode."
+    }
+]
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+print("=== Recursive Self-Improvement Orchestrator ===")
+print(str_concat("Model: ", MODEL))
+print("")
+
+h i = 0
+while i < arr_len(programs) {
+    h prog = programs[i]
+    print(str_concat("--- Improving: ", prog["name"], " ---"))
+    print(str_concat("Goal: ", prog["goal"]))
+    print("")
+
+    print("Pass 1: Direct improvement...")
+    h direct = improve_to_convergence(prog["code"], prog["goal"], 2)
+    print(str_concat("  Done in ", to_str(direct["rounds"]), " rounds"))
+
+    print("Pass 2: Meta-improvement (improve the improver)...")
+    h meta = meta_improve(direct["code"], prog["goal"], 1)
+    print("  Meta-improvement complete")
+
+    h final_lines = arr_len(str_split(meta["code"], "\n"))
+    print(str_concat("  Final code: ", to_str(final_lines), " lines"))
+    print("")
+    i = i + 1
+}
+
+print("=== Recursive improvement complete ===")
+print("The improver improved itself, then improved the programs.")
+print("OMC writing OMC that writes OMC.")

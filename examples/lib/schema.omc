@@ -1,0 +1,263 @@
+# schema.omc — JSON schema validation and coercion
+
+# ── Type checking ───────────────────────────────────────────────────────────
+
+fn schema_type_of(v) {
+    if v == null { return "null" }
+    if type_of(v) == "bool" { return "boolean" }
+    if type_of(v) == "int" or type_of(v) == "float" { return "number" }
+    if type_of(v) == "string" { return "string" }
+    if type_of(v) == "array" { return "array" }
+    if type_of(v) == "dict" { return "object" }
+    return "unknown"
+}
+
+# ── Core validate ───────────────────────────────────────────────────────────
+
+# validate(value, schema) → {ok: bool, errors: [string]}
+fn validate(value, schema) {
+    h errors = []
+    _validate_node(value, schema, "", errors)
+    return {ok: arr_len(errors) == 0, errors: errors}
+}
+
+fn _validate_node(value, schema, path, errors) {
+    # type check
+    if dict_has(schema, "type") {
+        h expected_type = schema["type"]
+        h actual_type = schema_type_of(value)
+        h ok = false
+        if type_of(expected_type) == "array" {
+            h ti = 0
+            while ti < arr_len(expected_type) {
+                if expected_type[ti] == actual_type { ok = true }
+                if expected_type[ti] == "integer" and actual_type == "number" and type_of(value) == "int" { ok = true }
+                ti = ti + 1
+            }
+        } else {
+            if expected_type == actual_type { ok = true }
+            if expected_type == "integer" and actual_type == "number" and type_of(value) == "int" { ok = true }
+            if expected_type == "number" and (actual_type == "number") { ok = true }
+        }
+        if not ok {
+            h loc = path
+            if str_len(loc) == 0 { loc = "(root)" }
+            arr_push(errors, str_concat(loc, ": expected ", to_str(expected_type), ", got ", actual_type))
+        }
+    }
+
+    # enum
+    if dict_has(schema, "enum") {
+        h allowed = schema["enum"]
+        h found = false
+        h ei = 0
+        while ei < arr_len(allowed) {
+            if allowed[ei] == value { found = true }
+            ei = ei + 1
+        }
+        if not found {
+            h loc = path
+            if str_len(loc) == 0 { loc = "(root)" }
+            arr_push(errors, str_concat(loc, ": value not in enum"))
+        }
+    }
+
+    # const
+    if dict_has(schema, "const") {
+        if value != schema["const"] {
+            h loc = path
+            if str_len(loc) == 0 { loc = "(root)" }
+            arr_push(errors, str_concat(loc, ": expected const value"))
+        }
+    }
+
+    # string constraints
+    if schema_type_of(value) == "string" {
+        if dict_has(schema, "minLength") {
+            if str_len(value) < schema["minLength"] {
+                arr_push(errors, str_concat(path, ": string too short (min ", to_str(schema["minLength"]), ")"))
+            }
+        }
+        if dict_has(schema, "maxLength") {
+            if str_len(value) > schema["maxLength"] {
+                arr_push(errors, str_concat(path, ": string too long (max ", to_str(schema["maxLength"]), ")"))
+            }
+        }
+        if dict_has(schema, "pattern") {
+            h pat = schema["pattern"]
+            if not str_contains(value, pat) {
+                arr_push(errors, str_concat(path, ": string does not match pattern"))
+            }
+        }
+    }
+
+    # number constraints
+    if schema_type_of(value) == "number" {
+        if dict_has(schema, "minimum") {
+            if value < schema["minimum"] {
+                arr_push(errors, str_concat(path, ": value < minimum (", to_str(schema["minimum"]), ")"))
+            }
+        }
+        if dict_has(schema, "maximum") {
+            if value > schema["maximum"] {
+                arr_push(errors, str_concat(path, ": value > maximum (", to_str(schema["maximum"]), ")"))
+            }
+        }
+        if dict_has(schema, "exclusiveMinimum") {
+            if value <= schema["exclusiveMinimum"] {
+                arr_push(errors, str_concat(path, ": value <= exclusiveMinimum"))
+            }
+        }
+        if dict_has(schema, "exclusiveMaximum") {
+            if value >= schema["exclusiveMaximum"] {
+                arr_push(errors, str_concat(path, ": value >= exclusiveMaximum"))
+            }
+        }
+        if dict_has(schema, "multipleOf") {
+            h rem = value % schema["multipleOf"]
+            if rem != 0 {
+                arr_push(errors, str_concat(path, ": not a multiple of ", to_str(schema["multipleOf"])))
+            }
+        }
+    }
+
+    # array constraints
+    if schema_type_of(value) == "array" {
+        if dict_has(schema, "minItems") {
+            if arr_len(value) < schema["minItems"] {
+                arr_push(errors, str_concat(path, ": array too short (min ", to_str(schema["minItems"]), ")"))
+            }
+        }
+        if dict_has(schema, "maxItems") {
+            if arr_len(value) > schema["maxItems"] {
+                arr_push(errors, str_concat(path, ": array too long (max ", to_str(schema["maxItems"]), ")"))
+            }
+        }
+        if dict_has(schema, "items") {
+            h item_schema = schema["items"]
+            h ai = 0
+            while ai < arr_len(value) {
+                _validate_node(value[ai], item_schema, str_concat(path, "[", to_str(ai), "]"), errors)
+                ai = ai + 1
+            }
+        }
+        if dict_has(schema, "uniqueItems") and schema["uniqueItems"] {
+            h seen = {}
+            h ui = 0
+            while ui < arr_len(value) {
+                h k = to_str(value[ui])
+                if dict_has(seen, k) {
+                    arr_push(errors, str_concat(path, ": duplicate item at index ", to_str(ui)))
+                }
+                seen[k] = true
+                ui = ui + 1
+            }
+        }
+    }
+
+    # object constraints
+    if schema_type_of(value) == "object" {
+        if dict_has(schema, "required") {
+            h req = schema["required"]
+            h ri = 0
+            while ri < arr_len(req) {
+                if not dict_has(value, req[ri]) {
+                    arr_push(errors, str_concat(path, ": missing required field '", req[ri], "'"))
+                }
+                ri = ri + 1
+            }
+        }
+        if dict_has(schema, "properties") {
+            h props = schema["properties"]
+            h pkeys = dict_keys(props)
+            h pi = 0
+            while pi < arr_len(pkeys) {
+                h pk = pkeys[pi]
+                if dict_has(value, pk) {
+                    _validate_node(value[pk], props[pk], str_concat(path, ".", pk), errors)
+                }
+                pi = pi + 1
+            }
+        }
+        if dict_has(schema, "minProperties") {
+            if arr_len(dict_keys(value)) < schema["minProperties"] {
+                arr_push(errors, str_concat(path, ": too few properties"))
+            }
+        }
+        if dict_has(schema, "maxProperties") {
+            if arr_len(dict_keys(value)) > schema["maxProperties"] {
+                arr_push(errors, str_concat(path, ": too many properties"))
+            }
+        }
+    }
+}
+
+# ── Coerce ──────────────────────────────────────────────────────────────────
+
+# coerce(value, schema) → value (best-effort type coercion)
+fn coerce(value, schema) {
+    if not dict_has(schema, "type") { return value }
+    h t = schema["type"]
+    h actual = schema_type_of(value)
+    if t == "string" and actual != "string" { return to_str(value) }
+    if t == "number" and actual == "string" {
+        h n = str_to_float(value)
+        if n != null { return n }
+    }
+    if t == "integer" and actual == "string" {
+        h n = str_to_int(value)
+        if n != null { return n }
+    }
+    if t == "boolean" {
+        if value == "true" or value == 1 { return true }
+        if value == "false" or value == 0 { return false }
+    }
+    if t == "array" and actual != "array" { return [value] }
+    return value
+}
+
+# ── Schema helpers ──────────────────────────────────────────────────────────
+
+fn schema_string(min_len, max_len) {
+    h s = {type: "string"}
+    if min_len != null { s["minLength"] = min_len }
+    if max_len != null { s["maxLength"] = max_len }
+    return s
+}
+
+fn schema_number(min_val, max_val) {
+    h s = {type: "number"}
+    if min_val != null { s["minimum"] = min_val }
+    if max_val != null { s["maximum"] = max_val }
+    return s
+}
+
+fn schema_object(required_fields, properties) {
+    h s = {type: "object"}
+    if required_fields != null { s["required"] = required_fields }
+    if properties != null { s["properties"] = properties }
+    return s
+}
+
+fn schema_array(item_schema, min_items, max_items) {
+    h s = {type: "array"}
+    if item_schema != null { s["items"] = item_schema }
+    if min_items != null { s["minItems"] = min_items }
+    if max_items != null { s["maxItems"] = max_items }
+    return s
+}
+
+fn schema_enum(values) {
+    return {enum: values}
+}
+
+# ── Validate and throw ──────────────────────────────────────────────────────
+
+# assert_valid(value, schema) — raises error if invalid
+fn assert_valid(value, schema) {
+    h result = validate(value, schema)
+    if not result["ok"] {
+        h msg = str_concat("Schema validation failed:\n", arr_join(result["errors"], "\n"))
+        error(msg)
+    }
+}

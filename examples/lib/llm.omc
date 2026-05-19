@@ -1,0 +1,273 @@
+# llm.omc — high-level LLM patterns built on llm_call/llm_chat
+# Provides: react_agent, cot, cot_verify, chain, few_shot, extract_json
+
+# ── helpers ────────────────────────────────────────────────────────────────
+
+fn _default(v, d) {
+    if v == null { return d }
+    return v
+}
+
+fn _join(arr, sep) {
+    h out = ""
+    h i = 0
+    while i < arr_len(arr) {
+        if i > 0 { out = str_concat(out, sep) }
+        out = str_concat(out, to_str(arr[i]))
+        i = i + 1
+    }
+    return out
+}
+
+# ── Chain-of-Thought ────────────────────────────────────────────────────────
+
+# cot(prompt, model?) → {reasoning, answer}
+# Asks the model to think step-by-step before giving a final answer.
+fn cot(prompt, model) {
+    h sys = "Think step by step. After reasoning, write 'ANSWER:' followed by your final answer on its own line."
+    h full = str_concat("Question: ", prompt, "\n\nReason through this carefully, then write ANSWER: <your answer>")
+    h raw = llm_call(full, _default(model, null), sys)
+    h parts = str_split(raw, "ANSWER:")
+    if arr_len(parts) < 2 {
+        return {reasoning: raw, answer: str_trim(raw)}
+    }
+    return {
+        reasoning: str_trim(parts[0]),
+        answer: str_trim(parts[1])
+    }
+}
+
+# cot_verify(prompt, n, model?) → {answer, confidence, votes}
+# Runs CoT n times and takes the majority answer (self-consistency).
+fn cot_verify(prompt, n, model) {
+    h votes = {}
+    h i = 0
+    while i < n {
+        h res = cot(prompt, model)
+        h ans = str_trim(res["answer"])
+        if dict_has(votes, ans) {
+            votes[ans] = votes[ans] + 1
+        } else {
+            votes[ans] = 1
+        }
+        i = i + 1
+    }
+    h best = ""
+    h best_count = 0
+    h keys = dict_keys(votes)
+    h k = 0
+    while k < arr_len(keys) {
+        h key = keys[k]
+        if votes[key] > best_count {
+            best = key
+            best_count = votes[key]
+        }
+        k = k + 1
+    }
+    return {answer: best, confidence: best_count / n, votes: votes}
+}
+
+# ── Few-Shot ────────────────────────────────────────────────────────────────
+
+# few_shot(examples, query, model?) → string
+# examples is [{input, output}, ...]; builds a prompt from them.
+fn few_shot(examples, query, model) {
+    h parts = []
+    h i = 0
+    while i < arr_len(examples) {
+        h ex = examples[i]
+        arr_push(parts, str_concat("Input: ", ex["input"], "\nOutput: ", ex["output"]))
+        i = i + 1
+    }
+    arr_push(parts, str_concat("Input: ", query, "\nOutput:"))
+    h prompt = _join(parts, "\n\n")
+    return llm_call(prompt, _default(model, null), null)
+}
+
+# ── JSON extraction ─────────────────────────────────────────────────────────
+
+# extract_json(text) → parsed dict/array or null
+# Pulls the first {...} or [...] block from model output.
+fn extract_json(text) {
+    h start_brace = str_find(text, "{")
+    h start_bracket = str_find(text, "[")
+    h start = -1
+    h end_char = "}"
+    if start_brace >= 0 and (start_bracket < 0 or start_brace < start_bracket) {
+        start = start_brace
+        end_char = "}"
+    } else if start_bracket >= 0 {
+        start = start_bracket
+        end_char = "]"
+    }
+    if start < 0 { return null }
+    h last = str_rfind(text, end_char)
+    if last < 0 { return null }
+    h json_str = str_slice(text, start, last + 1)
+    return json_parse(json_str)
+}
+
+# llm_json(prompt, schema_hint, model?) → dict or null
+# Asks the model to respond with JSON matching schema_hint description.
+fn llm_json(prompt, schema_hint, model) {
+    h sys = str_concat(
+        "Respond with valid JSON only — no markdown fences, no explanation. ",
+        "Schema: ", schema_hint
+    )
+    h raw = llm_call(prompt, _default(model, null), sys)
+    return extract_json(raw)
+}
+
+# ── ReAct Agent ────────────────────────────────────────────────────────────
+
+# react_agent(goal, tools, model?, max_steps?) → {answer, trace}
+# tools is a dict: {tool_name: fn(input) → string}
+# Implements the Thought/Action/Observation loop.
+fn react_agent(goal, tools, model, max_steps) {
+    h m = _default(model, null)
+    h steps = _default(max_steps, 10)
+    h tool_names = dict_keys(tools)
+    h tool_desc = _join(tool_names, ", ")
+    h sys = str_concat(
+        "You are a reasoning agent. Available tools: ", tool_desc, ".\n",
+        "On each turn respond with exactly:\n",
+        "Thought: <your reasoning>\n",
+        "Action: <tool_name>(<input>)\n",
+        "or if done:\n",
+        "Thought: <your reasoning>\n",
+        "Answer: <final answer>"
+    )
+    h history = str_concat("Goal: ", goal)
+    h trace = []
+    h step = 0
+    while step < steps {
+        h response = llm_call(history, m, sys)
+        arr_push(trace, response)
+        if str_contains(response, "Answer:") {
+            h parts = str_split(response, "Answer:")
+            h answer = str_trim(parts[arr_len(parts) - 1])
+            return {answer: answer, trace: trace, steps: step + 1}
+        }
+        if str_contains(response, "Action:") {
+            h action_parts = str_split(response, "Action:")
+            h action_str = str_trim(action_parts[arr_len(action_parts) - 1])
+            h paren = str_find(action_str, "(")
+            if paren < 0 {
+                history = str_concat(history, "\n", response, "\nObservation: (no tool found)")
+                step = step + 1
+                continue
+            }
+            h tool_name = str_trim(str_slice(action_str, 0, paren))
+            h rest = str_slice(action_str, paren + 1, str_len(action_str))
+            h close = str_rfind(rest, ")")
+            h tool_input = str_trim(str_slice(rest, 0, close))
+            h observation = "(tool not found)"
+            if dict_has(tools, tool_name) {
+                h tool_fn = tools[tool_name]
+                observation = to_str(tool_fn(tool_input))
+            }
+            history = str_concat(history, "\n", response, "\nObservation: ", observation)
+        } else {
+            history = str_concat(history, "\n", response)
+        }
+        step = step + 1
+    }
+    return {answer: "(max steps reached)", trace: trace, steps: steps}
+}
+
+# ── Chain ───────────────────────────────────────────────────────────────────
+
+# chain(steps_arr, input, model?) → string
+# Runs a sequence of prompts, feeding each output as the next input.
+# steps_arr is [string, ...] — prompt templates where {} is replaced by input.
+fn chain(steps_arr, input, model) {
+    h m = _default(model, null)
+    h current = input
+    h i = 0
+    while i < arr_len(steps_arr) {
+        h template = steps_arr[i]
+        h prompt = str_replace(template, "{}", to_str(current))
+        current = llm_call(prompt, m, null)
+        i = i + 1
+    }
+    return current
+}
+
+# ── Critique + Revise ───────────────────────────────────────────────────────
+
+# critique_revise(draft, criteria, model?) → {draft, critique, revised}
+fn critique_revise(draft, criteria, model) {
+    h m = _default(model, null)
+    h crit_prompt = str_concat(
+        "Critique the following based on: ", criteria,
+        "\n\nText:\n", draft,
+        "\n\nList specific improvements needed."
+    )
+    h critique = llm_call(crit_prompt, m, null)
+    h revise_prompt = str_concat(
+        "Revise the following text based on this critique:\n\n",
+        "Original:\n", draft, "\n\n",
+        "Critique:\n", critique, "\n\n",
+        "Write the improved version only."
+    )
+    h revised = llm_call(revise_prompt, m, null)
+    return {draft: draft, critique: critique, revised: revised}
+}
+
+# ── Summarize ───────────────────────────────────────────────────────────────
+
+# summarize(text, style?, model?) → string
+# style: "bullet" | "paragraph" | "one-line" (default: "paragraph")
+fn summarize(text, style, model) {
+    h s = _default(style, "paragraph")
+    h m = _default(model, null)
+    h instruction = "Summarize the following text"
+    if s == "bullet" {
+        instruction = str_concat(instruction, " as a bulleted list of key points")
+    } else if s == "one-line" {
+        instruction = str_concat(instruction, " in one sentence")
+    } else {
+        instruction = str_concat(instruction, " in a concise paragraph")
+    }
+    h prompt = str_concat(instruction, ":\n\n", text)
+    return llm_call(prompt, m, null)
+}
+
+# ── Classify ────────────────────────────────────────────────────────────────
+
+# classify(text, labels, model?) → string (one of labels)
+fn classify(text, labels, model) {
+    h m = _default(model, null)
+    h label_str = _join(labels, " | ")
+    h sys = str_concat("Respond with exactly one label from: ", label_str, ". No other text.")
+    h prompt = str_concat("Classify this text:\n\n", text)
+    h raw = llm_call(prompt, m, sys)
+    return str_trim(raw)
+}
+
+# ── Self-improving code gen ─────────────────────────────────────────────────
+
+# gen_and_test(description, test_fn, model?, max_attempts?) → {code, passed, attempts}
+# Generates OMC code for description, runs test_fn(code), fixes until passing.
+fn gen_and_test(description, test_fn, model, max_attempts) {
+    h m = _default(model, null)
+    h max_att = _default(max_attempts, 5)
+    h sys = "Write OMC (OmniMCode) code only. No markdown fences. No explanation. Just the code."
+    h prompt = str_concat("Write OMC code for: ", description)
+    h code = llm_call(prompt, m, sys)
+    h attempt = 1
+    while attempt <= max_att {
+        h result = test_fn(code)
+        if result["passed"] {
+            return {code: code, passed: true, attempts: attempt}
+        }
+        h fix_prompt = str_concat(
+            "This OMC code has errors. Fix it.\n\nCode:\n", code,
+            "\n\nError/failures:\n", to_str(result["error"]),
+            "\n\nReturn only the corrected OMC code."
+        )
+        code = llm_call(fix_prompt, m, sys)
+        attempt = attempt + 1
+    }
+    return {code: code, passed: false, attempts: max_att}
+}
