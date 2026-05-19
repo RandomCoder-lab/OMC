@@ -2423,6 +2423,7 @@ impl Interpreter {
             // stdlib-friendly aliases
             | "math_log" | "math_sin" | "math_cos" | "math_tan" | "math_sqrt"
             | "math_floor" | "math_ceil" | "math_round" | "math_abs" | "math_pow"
+            | "math_min" | "math_max"
             | "unix_time" | "unix_time_ms"
             | "str_lower" | "str_upper" | "str_find" | "str_rfind" | "str_strip"
             | "env_var" | "dict_delete" | "dict_remove"
@@ -4266,6 +4267,8 @@ impl Interpreter {
             "math_round" => self.call_function("round", args),
             "math_abs" => self.call_function("abs", args),
             "math_pow" => self.call_function("pow", args),
+            "math_min" => self.call_function("min", args),
+            "math_max" => self.call_function("max", args),
             "unix_time" => self.call_function("now_unix", args),
             "unix_time_ms" => self.call_function("now_ms", args),
             "str_lower" => self.call_function("str_lowercase", args),
