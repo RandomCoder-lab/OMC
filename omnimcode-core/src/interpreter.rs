@@ -2229,6 +2229,9 @@ impl Interpreter {
             | "sha256" | "sha512" | "base64_encode" | "base64_decode"
             // LLM builtins (Anthropic API)
             | "llm_call" | "llm_chat" | "llm_embed"
+            | "batch_llm_call" | "batch_llm_chat"
+            // HTTP builtins
+            | "http_get" | "http_post" | "http_post_json" | "http_put" | "http_delete"
             | "now_iso" | "now_unix" | "format_time" | "parse_time"
             // Arrays
             | "arr_new" | "arr_from_range" | "arr_len" | "arr_get" | "arr_set"
@@ -2311,6 +2314,8 @@ impl Interpreter {
             | "now_ms" | "to_int" | "int" | "to_float" | "float"
             | "to_string" | "string" | "len" | "type_of" | "error"
             | "defined_functions" | "call"
+            // Introspection builtins
+            | "list_defined_fns" | "fn_arity" | "fn_source" | "get_scope_vars"
             // Python-idiom builtins (forgiving aliases for users new to OMC)
             | "range" | "getenv" | "to_hex" | "from_hex"
             | "parse_int" | "parse_float"
@@ -2331,6 +2336,11 @@ impl Interpreter {
             | "eval_omc" | "eval_omc_fresh" | "eval_omc_ctx" | "omc_source"
             // Native LLM builtins
             | "llm_call" | "llm_chat" | "llm_embed" | "llm_models"
+            | "batch_llm_call" | "batch_llm_chat"
+            // Process execution builtins
+            | "omc_spawn" | "omc_pipe"
+            // Native HTTP builtins
+            | "http_get" | "http_post" | "http_post_json" | "http_put" | "http_delete"
         )
     }
 
@@ -4842,6 +4852,60 @@ impl Interpreter {
                 Ok(Value::Array(HArray::from_vec(
                     names.into_iter().map(Value::String).collect(),
                 )))
+            }
+            // list_defined_fns() — alias for defined_functions; returns sorted array of user fn names
+            "list_defined_fns" => {
+                let mut names: Vec<String> = self.functions.keys()
+                    .filter(|n| !n.starts_with("__lambda_") && !n.starts_with("__rt_lambda_"))
+                    .cloned()
+                    .collect();
+                names.sort();
+                Ok(Value::Array(HArray::from_vec(
+                    names.into_iter().map(Value::String).collect(),
+                )))
+            }
+            // fn_arity(name) → int — parameter count of a user-defined function, or null
+            "fn_arity" => {
+                if args.is_empty() {
+                    return Err("fn_arity requires (fn_name)".to_string());
+                }
+                let name_v = self.eval_expr(&args[0])?;
+                let fn_name = match &name_v {
+                    Value::String(s) => s.clone(),
+                    _ => return Err("fn_arity: argument must be a string".to_string()),
+                };
+                if let Some((params, _body)) = self.functions.get(&fn_name) {
+                    Ok(Value::HInt(HInt::new(params.len() as i64)))
+                } else {
+                    Ok(Value::Null)
+                }
+            }
+            // fn_source(name) → string — reconstructed signature of a user-defined function
+            "fn_source" => {
+                if args.is_empty() {
+                    return Err("fn_source requires (fn_name)".to_string());
+                }
+                let name_v = self.eval_expr(&args[0])?;
+                let fn_name = match &name_v {
+                    Value::String(s) => s.clone(),
+                    _ => return Err("fn_source: argument must be a string".to_string()),
+                };
+                if let Some((params, _body)) = self.functions.get(&fn_name) {
+                    let param_str = params.join(", ");
+                    Ok(Value::String(format!("fn {}({}) {{ ... }}", fn_name, param_str)))
+                } else {
+                    Ok(Value::Null)
+                }
+            }
+            // get_scope_vars() → dict — copy of all global variables currently in scope
+            "get_scope_vars" => {
+                let mut map: std::collections::BTreeMap<String, Value> = std::collections::BTreeMap::new();
+                for (k, v) in &self.globals {
+                    if !k.starts_with("__") {
+                        map.insert(k.clone(), v.clone());
+                    }
+                }
+                Ok(Value::dict_from(map))
             }
             // call(fn_or_name, args_array) — dispatch a function value
             // (or function-name string) with an arbitrary argument list
@@ -9374,6 +9438,134 @@ impl Interpreter {
             //   Useful for discovery: `let ms = llm_models()`.
             "llm_models" => {
                 Ok(crate::llm_builtins::llm_models())
+            }
+            // batch_llm_call(prompts, model?, concurrency?) -> string[]
+            //   Send multiple prompts in sequence, return all replies.
+            //   `prompts` is an array of strings or dicts {prompt, system?, model?}.
+            //   `model` overrides the default for all calls; per-prompt model takes precedence.
+            //   `concurrency` is accepted but calls are currently sequential.
+            "batch_llm_call" => {
+                if args.is_empty() {
+                    return Err("batch_llm_call requires (prompts: array)".to_string());
+                }
+                let prompts_val = self.eval_expr(&args[0])?;
+                let default_model = if args.len() > 1 {
+                    let v = self.eval_expr(&args[1])?;
+                    match v {
+                        Value::Null => None,
+                        other => Some(other.to_display_string()),
+                    }
+                } else {
+                    None
+                };
+                let concurrency = if args.len() > 2 {
+                    match self.eval_expr(&args[2])? {
+                        Value::HInt(n) => n.value as usize,
+                        _ => 3,
+                    }
+                } else {
+                    3
+                };
+                crate::llm_builtins::batch_llm_call(
+                    &prompts_val,
+                    default_model.as_deref(),
+                    concurrency,
+                )
+            }
+            // batch_llm_chat(messages_array, model?, concurrency?) -> string[]
+            //   Send multiple chat conversations in sequence, return all replies.
+            //   `messages_array` is an array of arrays (each inner array is one chat's messages).
+            "batch_llm_chat" => {
+                if args.is_empty() {
+                    return Err("batch_llm_chat requires (messages_array: array)".to_string());
+                }
+                let messages_array_val = self.eval_expr(&args[0])?;
+                let default_model = if args.len() > 1 {
+                    let v = self.eval_expr(&args[1])?;
+                    match v {
+                        Value::Null => None,
+                        other => Some(other.to_display_string()),
+                    }
+                } else {
+                    None
+                };
+                let concurrency = if args.len() > 2 {
+                    match self.eval_expr(&args[2])? {
+                        Value::HInt(n) => n.value as usize,
+                        _ => 3,
+                    }
+                } else {
+                    3
+                };
+                crate::llm_builtins::batch_llm_chat(
+                    &messages_array_val,
+                    default_model.as_deref(),
+                    concurrency,
+                )
+            }
+            // ---- Process execution: omc_spawn / omc_pipe ----------------
+            //
+            // omc_spawn(cmd, args?, env_vars?, timeout_ms?) -> dict
+            //   Spawns a subprocess and waits for it to complete.
+            //   Returns {stdout, stderr, exit_code, ok}.
+            //   Critical for self-improvement: OMC can run omc itself.
+            //
+            // omc_pipe(commands) -> dict
+            //   Pipes multiple commands together like shell pipes.
+            //   commands is an array of arrays: [[cmd, arg, ...], ...].
+            //   Returns {stdout, stderr, exit_code, ok}.
+            "omc_spawn" => {
+                let eval_args: Vec<Value> = args.iter()
+                    .map(|a| self.eval_expr(a))
+                    .collect::<Result<Vec<_>, _>>()?;
+                crate::process_builtins::omc_spawn(&eval_args)
+            }
+            "omc_pipe" => {
+                let eval_args: Vec<Value> = args.iter()
+                    .map(|a| self.eval_expr(a))
+                    .collect::<Result<Vec<_>, _>>()?;
+                crate::process_builtins::omc_pipe(&eval_args)
+            }
+            // ---- Native HTTP builtins -------------------------------------------
+            //
+            // http_get(url, headers?)       -> {status, body, ok}
+            // http_post(url, body, headers?) -> {status, body, ok}
+            // http_post_json(url, data, headers?) -> {status, body, ok, json}
+            // http_put(url, body, headers?)  -> {status, body, ok}
+            // http_delete(url, headers?)     -> {status, body, ok}
+            //
+            // headers is an optional dict of {header_name: header_value}.
+            // Passing null for headers is accepted.
+            // ok is true when 200 <= status < 300.
+            "http_get" => {
+                let eargs: Vec<Value> = args.iter()
+                    .map(|a| self.eval_expr(a))
+                    .collect::<Result<_, _>>()?;
+                crate::http_builtins::http_get(&eargs)
+            }
+            "http_post" => {
+                let eargs: Vec<Value> = args.iter()
+                    .map(|a| self.eval_expr(a))
+                    .collect::<Result<_, _>>()?;
+                crate::http_builtins::http_post(&eargs)
+            }
+            "http_post_json" => {
+                let eargs: Vec<Value> = args.iter()
+                    .map(|a| self.eval_expr(a))
+                    .collect::<Result<_, _>>()?;
+                crate::http_builtins::http_post_json(&eargs)
+            }
+            "http_put" => {
+                let eargs: Vec<Value> = args.iter()
+                    .map(|a| self.eval_expr(a))
+                    .collect::<Result<_, _>>()?;
+                crate::http_builtins::http_put(&eargs)
+            }
+            "http_delete" => {
+                let eargs: Vec<Value> = args.iter()
+                    .map(|a| self.eval_expr(a))
+                    .collect::<Result<_, _>>()?;
+                crate::http_builtins::http_delete(&eargs)
             }
             // ---- Substrate-signed messaging (LLM ↔ LLM protocol) ---
             //
@@ -14153,6 +14345,9 @@ pub(crate) const HEAL_BUILTIN_NAMES: &[&str] = &[
     "sha256", "sha512", "base64_encode", "base64_decode",
     // LLM builtins (Anthropic API — enabled with llm-builtins feature)
     "llm_call", "llm_chat", "llm_embed",
+    "batch_llm_call", "batch_llm_chat",
+    // Native HTTP builtins
+    "http_get", "http_post", "http_post_json", "http_put", "http_delete",
     "now_iso", "now_unix", "format_time", "parse_time",
     // Arrays
     "arr_new", "arr_from_range", "arr_len", "arr_get", "arr_set",
@@ -14233,6 +14428,7 @@ pub(crate) const HEAL_BUILTIN_NAMES: &[&str] = &[
     "to_int", "int", "to_float", "float",
     "to_string", "string", "len", "type_of", "error",
     "defined_functions", "call",
+    "list_defined_fns", "fn_arity", "fn_source", "get_scope_vars",
     "test_record_failure", "test_failure_count",
     "test_get_failures", "test_clear_failures",
     "test_set_current", "test_get_current",
@@ -14243,6 +14439,11 @@ pub(crate) const HEAL_BUILTIN_NAMES: &[&str] = &[
     "omc_predict_files", "omc_corpus_size",
     // LLM I/O builtins
     "llm_call", "llm_chat", "llm_embed", "llm_models",
+    "batch_llm_call", "batch_llm_chat",
+    // Process execution builtins
+    "omc_spawn", "omc_pipe",
+    // Native HTTP builtins
+    "http_get", "http_post", "http_post_json", "http_put", "http_delete",
     // Language literals. These are parsed as Variable(...) but get
     // special-cased at runtime — they must never be typo-corrected
     // (a "var_typo" rewriting `null` to a close-spelled name would
