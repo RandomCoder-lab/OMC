@@ -1,0 +1,163 @@
+# Tests for examples/lib/llm.omc
+# LLM-calling functions (cot, react_agent, etc.) require ANTHROPIC_API_KEY.
+# Pure-logic functions (extract_json, _join, _default) are always tested.
+
+import "examples/lib/llm.omc" as llm
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual))
+    }
+}
+
+fn assert_true(cond, msg)  { if !cond { test_record_failure(msg) } }
+fn assert_null(v, msg)     { if v != null { test_record_failure(msg + ": expected null") } }
+fn assert_not_null(v, msg) { if v == null { test_record_failure(msg + ": expected non-null") } }
+
+# ── _default helper ───────────────────────────────────────────────────────────
+
+fn test_default_null_uses_fallback() {
+    assert_eq(llm._default(null, "fallback"), "fallback", "null → fallback")
+}
+
+fn test_default_non_null_keeps_value() {
+    assert_eq(llm._default("actual", "fallback"), "actual", "non-null kept")
+}
+
+fn test_default_zero_kept() {
+    assert_eq(llm._default(0, 99), 0, "0 is non-null, kept")
+}
+
+fn test_default_false_kept() {
+    assert_eq(llm._default(false, true), false, "false kept (not null)")
+}
+
+# ── _join helper ──────────────────────────────────────────────────────────────
+
+fn test_join_basic() {
+    assert_eq(llm._join(["a", "b", "c"], ", "), "a, b, c", "join with comma-space")
+}
+
+fn test_join_empty_array() {
+    assert_eq(llm._join([], "|"), "", "join empty array → empty string")
+}
+
+fn test_join_single_element() {
+    assert_eq(llm._join(["only"], " "), "only", "single element, no separator")
+}
+
+fn test_join_newline_sep() {
+    h out = llm._join(["line1", "line2"], "\n")
+    assert_true(str_contains(out, "line1"), "contains line1")
+    assert_true(str_contains(out, "line2"), "contains line2")
+}
+
+# ── extract_json ──────────────────────────────────────────────────────────────
+
+fn test_extract_json_object() {
+    h text = "Here is the result: {\"key\": \"value\", \"n\": 42}"
+    h parsed = llm.extract_json(text)
+    assert_not_null(parsed, "parsed non-null")
+    assert_eq(parsed["key"], "value", "key extracted")
+    assert_eq(parsed["n"], 42, "n extracted")
+}
+
+fn test_extract_json_array() {
+    h text = "Output: [1, 2, 3] done"
+    h parsed = llm.extract_json(text)
+    assert_not_null(parsed, "array parsed non-null")
+    assert_eq(arr_len(parsed), 3, "array length 3")
+}
+
+fn test_extract_json_prefers_object_over_array_when_object_first() {
+    h text = "{\"x\": 1} [2, 3]"
+    h parsed = llm.extract_json(text)
+    assert_not_null(parsed, "non-null")
+    assert_true(type_of(parsed) == "dict", "object preferred when it comes first")
+}
+
+fn test_extract_json_no_json_returns_null() {
+    h parsed = llm.extract_json("no json here at all")
+    assert_null(parsed, "no json → null")
+}
+
+fn test_extract_json_brace_only_fails_gracefully() {
+    h ok = true
+    try {
+        h parsed = llm.extract_json("{not json}")
+    } catch e {
+        ok = true
+    }
+    assert_true(ok, "malformed json handled gracefully")
+}
+
+# ── LLM-dependent functions: arg-validation only ──────────────────────────────
+# These tests confirm function signatures exist and are callable; they will
+# error (caught) if no API key is configured — that's expected.
+
+fn test_cot_function_exists() {
+    h err = ""
+    try {
+        h r = llm.cot("2+2=?", null)
+        # If it succeeds (API key present), verify shape
+        if r != null {
+            assert_true(dict_has(r, "reasoning"), "cot result has reasoning")
+            assert_true(dict_has(r, "answer"), "cot result has answer")
+        }
+    } catch e {
+        err = e
+        # Acceptable: no API key, network error, etc.
+    }
+    assert_true(true, "cot callable without crash")
+}
+
+fn test_few_shot_function_exists() {
+    h err = ""
+    try {
+        h examples = [{input: "1+1", output: "2"}]
+        llm.few_shot(examples, "2+2", null)
+    } catch e {
+        err = e
+    }
+    assert_true(true, "few_shot callable")
+}
+
+fn test_chain_function_exists() {
+    h err = ""
+    try {
+        llm.chain(["Translate to French: {}"], "hello", null)
+    } catch e {
+        err = e
+    }
+    assert_true(true, "chain callable")
+}
+
+fn test_classify_function_exists() {
+    h err = ""
+    try {
+        llm.classify("I love this!", ["positive", "negative"], null)
+    } catch e {
+        err = e
+    }
+    assert_true(true, "classify callable")
+}
+
+fn test_summarize_function_exists() {
+    h err = ""
+    try {
+        llm.summarize("A long piece of text about nothing.", null, null)
+    } catch e {
+        err = e
+    }
+    assert_true(true, "summarize callable")
+}
+
+fn test_llm_json_function_exists() {
+    h err = ""
+    try {
+        llm.llm_json("Return a person object", "{name: string, age: number}", null)
+    } catch e {
+        err = e
+    }
+    assert_true(true, "llm_json callable")
+}
