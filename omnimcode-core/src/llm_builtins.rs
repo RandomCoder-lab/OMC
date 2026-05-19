@@ -65,6 +65,124 @@ pub fn llm_chat(messages: &[ChatMessage], model_override: Option<&str>) -> Resul
     Ok(Value::String(reply))
 }
 
+/// `batch_llm_call(prompts, model?, concurrency?) -> string[]`
+///
+/// Send multiple prompts to the LLM sequentially and return all responses in
+/// the same order.  `prompts` may be either:
+///   - an array of strings, or
+///   - an array of dicts with keys `prompt` (required), `system` (optional),
+///     and `model` (optional — overrides the function-level `model` arg).
+///
+/// `model` sets a default model for all calls; per-prompt dict entries take
+/// precedence.  `concurrency` is accepted but currently ignored (calls are
+/// sequential with a brief inter-call sleep to respect rate limits).
+#[cfg(feature = "native-llm")]
+pub fn batch_llm_call(
+    prompts_val: &Value,
+    default_model: Option<&str>,
+    _concurrency: usize,
+) -> Result<Value, String> {
+    let items = match prompts_val {
+        Value::Array(a) => a.items.borrow().clone(),
+        _ => {
+            return Err(
+                "batch_llm_call: first argument must be an array of strings or dicts".to_string(),
+            )
+        }
+    };
+
+    let cfg = Config::from_env()?;
+
+    let mut results: Vec<Value> = Vec::with_capacity(items.len());
+    for (i, item) in items.iter().enumerate() {
+        let (prompt, sys_opt, model_str) = match item {
+            Value::String(s) => (s.clone(), None::<String>, None::<String>),
+            Value::Dict(d) => {
+                let d = d.borrow();
+                let prompt = d
+                    .get("prompt")
+                    .map(|v| v.to_display_string())
+                    .ok_or_else(|| {
+                        format!("batch_llm_call: prompts[{i}] dict missing 'prompt' key")
+                    })?;
+                let sys = d.get("system").map(|v| v.to_display_string());
+                let model = d.get("model").map(|v| v.to_display_string());
+                (prompt, sys, model)
+            }
+            _ => {
+                return Err(format!(
+                    "batch_llm_call: prompts[{i}] must be a string or dict"
+                ))
+            }
+        };
+
+        let model = model_str
+            .as_deref()
+            .or(default_model)
+            .unwrap_or(&cfg.model);
+
+        let mut messages: Vec<ChatMessage> = Vec::new();
+        if let Some(sys) = &sys_opt {
+            messages.push(ChatMessage {
+                role: "system".to_string(),
+                content: sys.clone(),
+            });
+        }
+        messages.push(ChatMessage {
+            role: "user".to_string(),
+            content: prompt,
+        });
+
+        let reply = cfg.provider.complete_chat(&cfg, model, &messages)?;
+        results.push(Value::String(reply));
+
+        if i + 1 < items.len() {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    }
+
+    Ok(Value::Array(HArray::from_vec(results)))
+}
+
+/// `batch_llm_chat(messages_array, model?, concurrency?) -> string[]`
+///
+/// Send multiple chat conversations to the LLM sequentially.
+/// `messages_array` is an array of arrays, where each inner array contains
+/// the messages (dicts with `role` and `content`) for one chat call.
+/// Returns an array of reply strings in the same order.
+#[cfg(feature = "native-llm")]
+pub fn batch_llm_chat(
+    messages_array_val: &Value,
+    default_model: Option<&str>,
+    _concurrency: usize,
+) -> Result<Value, String> {
+    let outer = match messages_array_val {
+        Value::Array(a) => a.items.borrow().clone(),
+        _ => {
+            return Err(
+                "batch_llm_chat: first argument must be an array of message arrays".to_string(),
+            )
+        }
+    };
+
+    let cfg = Config::from_env()?;
+    let model = default_model.unwrap_or(&cfg.model);
+
+    let mut results: Vec<Value> = Vec::with_capacity(outer.len());
+    for (i, inner_val) in outer.iter().enumerate() {
+        let messages = parse_messages(inner_val)
+            .map_err(|e| format!("batch_llm_chat: messages_array[{i}]: {e}"))?;
+        let reply = cfg.provider.complete_chat(&cfg, model, &messages)?;
+        results.push(Value::String(reply));
+
+        if i + 1 < outer.len() {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    }
+
+    Ok(Value::Array(HArray::from_vec(results)))
+}
+
 /// `llm_embed(text: string, model?: string) -> float[]`
 ///
 /// Embed `text` and return the embedding vector as an OMC float array.
@@ -437,4 +555,24 @@ pub struct ChatMessage {
 #[cfg(not(feature = "native-llm"))]
 pub fn parse_messages(_v: &Value) -> Result<Vec<ChatMessage>, String> {
     Err("parse_messages: recompile with --features native-llm".to_string())
+}
+
+/// Stub: `batch_llm_call` requires the `native-llm` Cargo feature.
+#[cfg(not(feature = "native-llm"))]
+pub fn batch_llm_call(
+    _prompts_val: &Value,
+    _default_model: Option<&str>,
+    _concurrency: usize,
+) -> Result<Value, String> {
+    Err("batch_llm_call: recompile with --features native-llm".to_string())
+}
+
+/// Stub: `batch_llm_chat` requires the `native-llm` Cargo feature.
+#[cfg(not(feature = "native-llm"))]
+pub fn batch_llm_chat(
+    _messages_array_val: &Value,
+    _default_model: Option<&str>,
+    _concurrency: usize,
+) -> Result<Value, String> {
+    Err("batch_llm_chat: recompile with --features native-llm".to_string())
 }

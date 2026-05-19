@@ -12,6 +12,7 @@ pub mod canonical;
 pub mod code_intel;
 pub mod llm_workflow;
 pub mod llm_builtins;  // llm_call / llm_chat / llm_embed native builtins
+pub mod http_builtins; // http_get / http_post / http_post_json / http_put / http_delete
 pub mod onn;
 pub mod runtime;
 pub mod circuits;      // Genetic logic circuits
@@ -31,6 +32,7 @@ pub mod prometheus;    // Substrate-native ML framework (MVP shipped in OMC; Rus
 pub mod predict;       // Substrate-indexed code completion (v0.3 chapter)
 pub mod memory;        // Substrate-keyed conversation memory (v0.5 chapter)
 pub mod accel;         // Pluggable accelerator hooks for hot tape ops (v0.8.2)
+pub mod process_builtins;  // omc_spawn + omc_pipe process execution builtins
 
 // Embedded CPython: py_* builtins (numpy, pandas, ...). Default-on
 // for desktop builds; downstream WASM / no_std crates can disable

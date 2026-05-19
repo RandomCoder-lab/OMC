@@ -2319,6 +2319,13 @@ impl Interpreter {
             // Python-idiom builtins (forgiving aliases for users new to OMC)
             | "range" | "getenv" | "to_hex" | "from_hex"
             | "parse_int" | "parse_float"
+            // stdlib-friendly aliases
+            | "math_log" | "math_sin" | "math_cos" | "math_tan" | "math_sqrt"
+            | "math_floor" | "math_ceil" | "math_round" | "math_abs" | "math_pow"
+            | "unix_time" | "unix_time_ms"
+            | "str_lower" | "str_upper" | "str_find" | "str_rfind" | "str_strip"
+            | "env_var" | "dict_delete" | "dict_remove"
+            | "file_append" | "file_read" | "file_write"
             // v0.3 symbolic prediction
             | "omc_predict_files" | "omc_corpus_size"
             // Test runner host-state primitives
@@ -4096,6 +4103,53 @@ impl Interpreter {
                     }),
                 }
             }
+            // ── stdlib-friendly aliases ─────────────────────────────────────
+            "math_log" => self.call_function("log", args),
+            "math_sin" => self.call_function("sin", args),
+            "math_cos" => self.call_function("cos", args),
+            "math_tan" => self.call_function("tan", args),
+            "math_sqrt" => self.call_function("sqrt", args),
+            "math_floor" => self.call_function("floor", args),
+            "math_ceil" => self.call_function("ceil", args),
+            "math_round" => self.call_function("round", args),
+            "math_abs" => self.call_function("abs", args),
+            "math_pow" => self.call_function("pow", args),
+            "unix_time" => self.call_function("now_unix", args),
+            "unix_time_ms" => self.call_function("now_ms", args),
+            "str_lower" => self.call_function("str_lowercase", args),
+            "str_upper" => self.call_function("str_uppercase", args),
+            "str_strip" => self.call_function("str_trim", args),
+            "str_find" => self.call_function("str_index_of", args),
+            "str_rfind" => {
+                if args.is_empty() {
+                    return Err("str_rfind requires (str, substr)".to_string());
+                }
+                let s = self.eval_expr(&args[0])?.to_display_string();
+                let sub = if args.len() > 1 { self.eval_expr(&args[1])?.to_display_string() } else { return Err("str_rfind requires (str, substr)".to_string()) };
+                match s.rfind(&sub[..]) {
+                    Some(idx) => Ok(Value::HInt(HInt::new(idx as i64))),
+                    None => Ok(Value::HInt(HInt::new(-1))),
+                }
+            }
+            "env_var" => self.call_function("getenv", args),
+            "dict_delete" | "dict_remove" => self.call_function("dict_del", args),
+            "file_read" => self.call_function("read_file", args),
+            "file_write" => self.call_function("write_file", args),
+            "file_append" => {
+                if args.len() < 2 {
+                    return Err("file_append requires (path, content)".to_string());
+                }
+                let path = self.eval_expr(&args[0])?.to_display_string();
+                let content = self.eval_expr(&args[1])?.to_display_string();
+                let mut file = std::fs::OpenOptions::new()
+                    .append(true).create(true).open(&path)
+                    .map_err(|e| format!("file_append: cannot open '{}': {}", path, e))?;
+                use std::io::Write;
+                file.write_all(content.as_bytes())
+                    .map_err(|e| format!("file_append: write failed: {}", e))?;
+                Ok(Value::Null)
+            }
+            // ── end aliases ─────────────────────────────────────────────────
             "arr_len" => {
                 if args.is_empty() {
                     return Err("arr_len requires 1 argument".to_string());

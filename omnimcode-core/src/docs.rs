@@ -1314,6 +1314,90 @@ pub const BUILTINS: &[BuiltinDoc] = &[
         unique_to_omc: true,
     },
     BuiltinDoc {
+        name: "batch_llm_call", category: "llm_workflow",
+        signature: "(prompts: (string|dict)[], model?: string, concurrency?: int) -> string[]",
+        description: concat!(
+            "Send multiple prompts to the LLM sequentially, return all replies in order. ",
+            "`prompts` is an array of strings or dicts {prompt: string, system?: string, model?: string}. ",
+            "`model` sets a default model for all calls; per-prompt dict `model` takes precedence. ",
+            "`concurrency` is accepted for API compatibility but calls are currently sequential ",
+            "with a 200 ms inter-call sleep to respect rate limits. ",
+            "Uses the same provider/key detection as llm_call."
+        ),
+        example: r#"batch_llm_call(["2+2?", "Capital of France?"], "claude-3-5-haiku-20241022")"#,
+        unique_to_omc: true,
+    },
+    BuiltinDoc {
+        name: "batch_llm_chat", category: "llm_workflow",
+        signature: "(messages_array: dict[][], model?: string, concurrency?: int) -> string[]",
+        description: concat!(
+            "Send multiple chat conversations to the LLM sequentially, return all replies in order. ",
+            "`messages_array` is an array of arrays, where each inner array is the messages ",
+            "(dicts with `role` and `content`) for one chat call. ",
+            "Same provider/key detection and sequential execution as batch_llm_call."
+        ),
+        example: r#"batch_llm_chat([[{"role":"user","content":"hi"}], [{"role":"user","content":"bye"}]])"#,
+        unique_to_omc: true,
+    },
+    // ── HTTP builtins ─────────────────────────────────────────────────────────
+    BuiltinDoc {
+        name: "http_get", category: "http",
+        signature: "(url: string, headers?: dict) -> dict",
+        description: concat!(
+            "Perform a synchronous HTTP GET request. ",
+            "`headers` is an optional dict of {header_name: header_value}; pass null to omit. ",
+            "Returns a dict with keys: `status` (int), `body` (string), `ok` (bool). ",
+            "`ok` is true when 200 <= status < 300. Requires the native-llm Cargo feature (default on)."
+        ),
+        example: r#"let r = http_get("https://httpbin.org/get", null); print(r["status"])"#,
+        unique_to_omc: true,
+    },
+    BuiltinDoc {
+        name: "http_post", category: "http",
+        signature: "(url: string, body: string, headers?: dict) -> dict",
+        description: concat!(
+            "Perform a synchronous HTTP POST request with a raw string body. ",
+            "`body` is sent as-is; set Content-Type via `headers` if needed. ",
+            "Returns {status: int, body: string, ok: bool}."
+        ),
+        example: r#"http_post("https://httpbin.org/post", "hello", {"Content-Type": "text/plain"})"#,
+        unique_to_omc: true,
+    },
+    BuiltinDoc {
+        name: "http_post_json", category: "http",
+        signature: "(url: string, data: dict|array, headers?: dict) -> dict",
+        description: concat!(
+            "Perform a synchronous HTTP POST with a JSON body. ",
+            "`data` (dict or array) is serialised to JSON automatically; ",
+            "Content-Type is set to application/json. ",
+            "Returns {status: int, body: string, ok: bool, json: any}. ",
+            "`json` holds the parsed JSON response body, or null if parsing fails."
+        ),
+        example: r#"let r = http_post_json("https://httpbin.org/post", {key: "value"}, null)"#,
+        unique_to_omc: true,
+    },
+    BuiltinDoc {
+        name: "http_put", category: "http",
+        signature: "(url: string, body: string, headers?: dict) -> dict",
+        description: concat!(
+            "Perform a synchronous HTTP PUT request with a raw string body. ",
+            "Same signature as http_post but uses the PUT method. ",
+            "Returns {status: int, body: string, ok: bool}."
+        ),
+        example: r#"http_put("https://httpbin.org/put", "{\"x\":1}", {"Content-Type":"application/json"})"#,
+        unique_to_omc: true,
+    },
+    BuiltinDoc {
+        name: "http_delete", category: "http",
+        signature: "(url: string, headers?: dict) -> dict",
+        description: concat!(
+            "Perform a synchronous HTTP DELETE request. ",
+            "Returns {status: int, body: string, ok: bool}."
+        ),
+        example: r#"http_delete("https://httpbin.org/delete", null)"#,
+        unique_to_omc: true,
+    },
+    BuiltinDoc {
         name: "omc_token_vocab_dump", category: "tokenizer",
         signature: "(n?: int) -> string",
         description: "First N entries of the token vocabulary as numbered list. Default n=50.",
@@ -1950,6 +2034,21 @@ pub const BUILTINS: &[BuiltinDoc] = &[
         signature: "(omc_fn_name: string) -> handle",
         description: "REVERSE FFI: returns a Python callable that, when invoked from Python with positional args, dispatches to the named OMC fn with auto-converted args and returns the converted result. Enables df.apply(omc_fn) patterns. Lifecycle: callback is valid only while the OMC interpreter is on the stack.",
         example: "h add_one = py_callback(\"add_one\");  py_call(df, \"apply\", [add_one]);",
+        unique_to_omc: true,
+    },
+    // ---- Process execution builtins ----
+    BuiltinDoc {
+        name: "omc_spawn", category: "process",
+        signature: "(cmd: string, args?: string[], env_vars?: dict, timeout_ms?: int) -> dict",
+        description: "Spawn a subprocess and wait for it to complete. Returns {stdout, stderr, exit_code, ok}. Critical for the recursive self-improvement loop: OMC can run omc itself as a subprocess.",
+        example: "h r = omc_spawn(\"echo\", [\"hello\"], null, 5000); print(r[\"stdout\"]);",
+        unique_to_omc: true,
+    },
+    BuiltinDoc {
+        name: "omc_pipe", category: "process",
+        signature: "(commands: array[][]) -> dict",
+        description: "Pipe multiple commands together like a shell pipe (cmd1 | cmd2 | cmd3). Each element is an array whose first item is the program and remaining items are arguments. Returns {stdout, stderr, exit_code, ok} from the final stage.",
+        example: "h r = omc_pipe([[\"echo\", \"hello world\"], [\"tr\", \"a-z\", \"A-Z\"]]); print(r[\"stdout\"]);",
         unique_to_omc: true,
     },
 ];

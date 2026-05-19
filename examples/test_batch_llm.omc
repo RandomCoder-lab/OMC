@@ -1,0 +1,23 @@
+h prompts = [
+    "What is 2+2?",
+    "What is the capital of France?",
+    "Name one programming language."
+]
+
+print("Running batch LLM call (3 prompts)...")
+h results = batch_llm_call(prompts, null, 2)
+print(str_concat("Got ", to_str(arr_len(results)), " results"))
+
+h i = 0
+while i < arr_len(results) {
+    print(str_concat("  [", to_str(i), "] ", str_slice(results[i], 0, 50)))
+    i = i + 1
+}
+
+# With per-prompt system messages
+h prompts_with_sys = [
+    {prompt: "What is 2+2?", system: "Answer in one word."},
+    {prompt: "Capital of France?", system: "Answer in one word."}
+]
+h results2 = batch_llm_call(prompts_with_sys, null, 2)
+print(results2)
