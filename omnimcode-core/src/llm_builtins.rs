@@ -205,6 +205,96 @@ pub fn llm_stream_print(
     Err("llm_stream_print: recompile with --features native-llm".to_string())
 }
 
+/// `llm_judge(responses, criteria, model?) -> dict[]`
+///
+/// Scores each response (array of strings) against `criteria` and returns
+/// an array of `{idx, score, reason}` dicts sorted best-first.
+pub fn llm_judge(
+    responses: &Value,
+    criteria: &str,
+    model_override: Option<&str>,
+) -> Result<Value, String> {
+    let items = match responses {
+        Value::Array(a) => a.items.borrow().clone(),
+        _ => return Err("llm_judge: first arg must be an array of strings".to_string()),
+    };
+
+    let mut prompt = format!(
+        "Score each response below (1-10) based on: {criteria}\n\
+         Return ONLY JSON: [{{\"idx\":0,\"score\":8,\"reason\":\"...\"}}, ...]\n\n"
+    );
+    for (i, item) in items.iter().enumerate() {
+        prompt.push_str(&format!("[{}]: {}\n---\n", i, item.to_display_string()));
+    }
+
+    let sys = "You are a precise evaluator. Output only valid JSON with no extra text.";
+    let raw = llm_call_sys(&prompt, model_override, Some(sys))?;
+    let text = match raw { Value::String(s) => s, _ => return Ok(Value::Array(HArray::from_vec(vec![]))) };
+
+    // Find first '[' and scan for the array
+    let bytes = text.as_bytes();
+    for start in 0..bytes.len() {
+        if bytes[start] == b'[' {
+            for end in (start + 1..=bytes.len()).rev() {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text[start..end]) {
+                    return Ok(json_to_value(&v));
+                }
+            }
+        }
+    }
+    Ok(Value::Array(HArray::from_vec(vec![])))
+}
+
+#[cfg(not(feature = "native-llm"))]
+pub fn llm_judge(
+    _responses: &Value,
+    _criteria: &str,
+    _model_override: Option<&str>,
+) -> Result<Value, String> {
+    Err("llm_judge: recompile with --features native-llm".to_string())
+}
+
+/// `llm_compare(a, b, criteria, model?) -> dict`
+///
+/// Compares two responses and returns `{winner: "A"|"B", reason: "..."}`.
+pub fn llm_compare(
+    a: &str,
+    b: &str,
+    criteria: &str,
+    model_override: Option<&str>,
+) -> Result<Value, String> {
+    let prompt = format!(
+        "Compare these two responses based on: {criteria}\n\n\
+         [A]: {a}\n\n[B]: {b}\n\n\
+         Return ONLY JSON: {{\"winner\":\"A\",\"reason\":\"...\"}}"
+    );
+    let sys = "You are an impartial judge. Output only valid JSON.";
+    let raw = llm_call_sys(&prompt, model_override, Some(sys))?;
+    let text = match raw { Value::String(s) => s, _ => return Ok(Value::Null) };
+
+    let bytes = text.as_bytes();
+    for start in 0..bytes.len() {
+        if bytes[start] == b'{' {
+            for end in (start + 1..=bytes.len()).rev() {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text[start..end]) {
+                    return Ok(json_to_value(&v));
+                }
+            }
+        }
+    }
+    Ok(Value::Null)
+}
+
+#[cfg(not(feature = "native-llm"))]
+pub fn llm_compare(
+    _a: &str,
+    _b: &str,
+    _criteria: &str,
+    _model_override: Option<&str>,
+) -> Result<Value, String> {
+    Err("llm_compare: recompile with --features native-llm".to_string())
+}
+
 /// `batch_llm_call(prompts, model?, concurrency?) -> string[]`
 ///
 /// Send multiple prompts to the LLM sequentially and return all responses in

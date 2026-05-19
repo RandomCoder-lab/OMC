@@ -2229,9 +2229,11 @@ impl Interpreter {
             | "sha256" | "sha512" | "base64_encode" | "base64_decode"
             // LLM builtins
             | "llm_call" | "llm_chat" | "llm_embed" | "llm_models" | "llm_system"
-            | "llm_stream_print"
+            | "llm_stream_print" | "llm_judge" | "llm_compare"
             | "llm_tools" | "substrate_embed"
             | "batch_llm_call" | "batch_llm_chat"
+            // File utilities
+            | "file_ls"
             // HTTP builtins
             | "http_get" | "http_post" | "http_post_json" | "http_put" | "http_delete"
             | "now_iso" | "now_unix" | "format_time" | "parse_time"
@@ -4866,6 +4868,22 @@ impl Interpreter {
                 let path = self.eval_expr(&args[0])?.to_string();
                 let exists = std::path::Path::new(&path).exists();
                 Ok(Value::HInt(HInt::new(if exists { 1 } else { 0 })))
+            }
+            "file_ls" => {
+                let path = if args.is_empty() {
+                    ".".to_string()
+                } else {
+                    self.eval_expr(&args[0])?.to_display_string()
+                };
+                let entries = std::fs::read_dir(&path)
+                    .map_err(|e| format!("file_ls: {}", e))?;
+                let mut names: Vec<Value> = Vec::new();
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    names.push(Value::String(name));
+                }
+                names.sort_by(|a, b| a.to_display_string().cmp(&b.to_display_string()));
+                Ok(Value::Array(HArray::from_vec(names)))
             }
             // Introspection and utility.
             "type_of" => {
@@ -9600,6 +9618,39 @@ impl Interpreter {
                     None
                 };
                 crate::llm_builtins::llm_stream_print(&prompt, system.as_deref(), model.as_deref())
+            }
+            // llm_judge(responses, criteria, model?) -> dict[]
+            //   Score each response in an array; returns [{idx, score, reason}] sorted best-first.
+            "llm_judge" => {
+                if args.len() < 2 {
+                    return Err("llm_judge requires (responses, criteria, model?)".to_string());
+                }
+                let responses = self.eval_expr(&args[0])?;
+                let criteria = self.eval_expr(&args[1])?.to_display_string();
+                let model = if args.len() > 2 {
+                    match self.eval_expr(&args[2])? {
+                        Value::Null => None,
+                        v => Some(v.to_display_string()),
+                    }
+                } else { None };
+                crate::llm_builtins::llm_judge(&responses, &criteria, model.as_deref())
+            }
+            // llm_compare(a, b, criteria, model?) -> dict
+            //   Pick the better of two responses; returns {winner: "A"|"B", reason: "..."}.
+            "llm_compare" => {
+                if args.len() < 3 {
+                    return Err("llm_compare requires (a, b, criteria, model?)".to_string());
+                }
+                let a = self.eval_expr(&args[0])?.to_display_string();
+                let b = self.eval_expr(&args[1])?.to_display_string();
+                let criteria = self.eval_expr(&args[2])?.to_display_string();
+                let model = if args.len() > 3 {
+                    match self.eval_expr(&args[3])? {
+                        Value::Null => None,
+                        v => Some(v.to_display_string()),
+                    }
+                } else { None };
+                crate::llm_builtins::llm_compare(&a, &b, &criteria, model.as_deref())
             }
             // llm_models() -> dict[]
             //   Returns the list of models available from the active provider.
@@ -14555,8 +14606,10 @@ pub(crate) const HEAL_BUILTIN_NAMES: &[&str] = &[
     "re_match", "re_find", "re_find_all", "re_replace", "re_split",
     "json_parse", "json_stringify", "json_extract", "str_format",
     "sha256", "sha512", "base64_encode", "base64_decode",
-    // LLM builtins (Anthropic API — enabled with llm-builtins feature)
-    "llm_call", "llm_chat", "llm_embed",
+    // LLM builtins
+    "llm_call", "llm_chat", "llm_embed", "llm_models", "llm_system",
+    "llm_stream_print", "llm_judge", "llm_compare",
+    "llm_tools", "substrate_embed",
     "batch_llm_call", "batch_llm_chat",
     // Native HTTP builtins
     "http_get", "http_post", "http_post_json", "http_put", "http_delete",
@@ -14633,7 +14686,7 @@ pub(crate) const HEAL_BUILTIN_NAMES: &[&str] = &[
     "is_singularity", "ensure_clean", "collapse", "invert",
     "quantize", "quantization_ratio",
     // I/O
-    "read_file", "write_file", "file_exists", "print",
+    "read_file", "write_file", "file_exists", "file_ls", "print",
     "println", "print_raw",
     // Time / random / conversion / introspection
     "now_ms", "random_int", "random_float", "random_seed",
