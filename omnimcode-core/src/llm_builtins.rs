@@ -523,6 +523,279 @@ fn ok_flag() -> Value {
 }
 
 // ---------------------------------------------------------------------------
+// llm_tools — structured tool-calling (function calling)
+// ---------------------------------------------------------------------------
+
+/// Convert an OMC `Value` to a `serde_json::Value` for embedding in API requests.
+#[cfg(feature = "native-llm")]
+fn value_to_json(v: &Value) -> serde_json::Value {
+    match v {
+        Value::Null => serde_json::Value::Null,
+        Value::Bool(b) => serde_json::Value::Bool(*b),
+        Value::HInt(n) => serde_json::json!(n.value),
+        Value::HFloat(f) => serde_json::json!(f),
+        Value::String(s) => serde_json::Value::String(s.clone()),
+        Value::Array(a) => {
+            serde_json::Value::Array(a.items.borrow().iter().map(value_to_json).collect())
+        }
+        Value::Dict(d) => {
+            let map: serde_json::Map<String, serde_json::Value> =
+                d.borrow().iter().map(|(k, v)| (k.clone(), value_to_json(v))).collect();
+            serde_json::Value::Object(map)
+        }
+        _ => serde_json::Value::Null,
+    }
+}
+
+/// Convert a `serde_json::Value` back to an OMC `Value`.
+#[cfg(feature = "native-llm")]
+fn json_to_value(j: &serde_json::Value) -> Value {
+    match j {
+        serde_json::Value::Null => Value::Null,
+        serde_json::Value::Bool(b) => Value::Bool(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Value::HInt(HInt::new(i))
+            } else {
+                Value::HFloat(n.as_f64().unwrap_or(0.0))
+            }
+        }
+        serde_json::Value::String(s) => Value::String(s.clone()),
+        serde_json::Value::Array(arr) => {
+            Value::Array(HArray::from_vec(arr.iter().map(json_to_value).collect()))
+        }
+        serde_json::Value::Object(map) => {
+            let mut btree = BTreeMap::new();
+            for (k, v) in map {
+                btree.insert(k.clone(), json_to_value(v));
+            }
+            Value::dict_from(btree)
+        }
+    }
+}
+
+/// `llm_tools(messages, tools, model?) -> dict`
+///
+/// Send messages with tool definitions. Returns a dict:
+/// - `{type: "text", content: "...", stop_reason: "end_turn"}` for text responses
+/// - `{type: "tool_use", id: "...", name: "...", input: {...}, stop_reason: "tool_use"}` for tool calls
+///
+/// Tool definitions are dicts with: `{name, description, parameters}` where
+/// `parameters` is a JSON Schema object.
+#[cfg(feature = "native-llm")]
+pub fn llm_tools(
+    messages_val: &Value,
+    tools_val: &Value,
+    model_override: Option<&str>,
+) -> Result<Value, String> {
+    let cfg = Config::from_env()?;
+    let model = model_override.unwrap_or(&cfg.model).to_string();
+    let messages = parse_messages(messages_val)?;
+
+    let tools_json: Vec<serde_json::Value> = match tools_val {
+        Value::Array(a) => a.items.borrow().iter().map(value_to_json).collect(),
+        _ => return Err("llm_tools: second arg must be array of tool dicts".to_string()),
+    };
+
+    match cfg.provider {
+        Provider::Anthropic => complete_anthropic_tools(&cfg, &model, &messages, &tools_json),
+        Provider::OpenAI => complete_openai_tools(&cfg, &model, &messages, &tools_json),
+    }
+}
+
+#[cfg(feature = "native-llm")]
+fn complete_anthropic_tools(
+    cfg: &Config,
+    model: &str,
+    messages: &[ChatMessage],
+    tools: &[serde_json::Value],
+) -> Result<Value, String> {
+    let mut system_parts: Vec<String> = Vec::new();
+    let mut msgs_json: Vec<serde_json::Value> = Vec::new();
+    for m in messages {
+        if m.role == "system" {
+            system_parts.push(m.content.clone());
+        } else {
+            msgs_json.push(serde_json::json!({"role": m.role, "content": m.content}));
+        }
+    }
+
+    // Anthropic uses `input_schema` instead of `parameters`
+    let anthropic_tools: Vec<serde_json::Value> = tools
+        .iter()
+        .map(|t| {
+            let mut tool = t.clone();
+            if let Some(obj) = tool.as_object_mut() {
+                if let Some(params) = obj.remove("parameters") {
+                    obj.insert("input_schema".to_string(), params);
+                }
+            }
+            tool
+        })
+        .collect();
+
+    let mut body = serde_json::json!({
+        "model": model,
+        "max_tokens": 4096,
+        "messages": msgs_json,
+        "tools": anthropic_tools,
+    });
+    if !system_parts.is_empty() {
+        body["system"] = serde_json::Value::String(system_parts.join("\n\n"));
+    }
+
+    let extra = Some(vec![
+        ("anthropic-version".to_string(), "2023-06-01".to_string()),
+        ("x-api-key".to_string(), cfg.api_key.clone()),
+    ]);
+    let resp: serde_json::Value = post_json(&cfg.base_url, &cfg.api_key, extra, body)?;
+
+    let stop_reason = resp["stop_reason"].as_str().unwrap_or("end_turn").to_string();
+    let content = resp["content"].as_array().ok_or_else(|| {
+        format!("llm_tools: unexpected Anthropic response: {}", resp)
+    })?;
+
+    let mut result = BTreeMap::new();
+    result.insert("stop_reason".to_string(), Value::String(stop_reason.clone()));
+
+    if stop_reason == "tool_use" {
+        for block in content {
+            if block["type"].as_str() == Some("tool_use") {
+                result.insert("type".to_string(), Value::String("tool_use".to_string()));
+                result.insert(
+                    "id".to_string(),
+                    Value::String(block["id"].as_str().unwrap_or("").to_string()),
+                );
+                result.insert(
+                    "name".to_string(),
+                    Value::String(block["name"].as_str().unwrap_or("").to_string()),
+                );
+                result.insert("input".to_string(), json_to_value(&block["input"]));
+                result.insert("content".to_string(), Value::Null);
+                return Ok(Value::dict_from(result));
+            }
+        }
+    }
+
+    let text = content
+        .iter()
+        .find_map(|b| {
+            if b["type"].as_str() == Some("text") {
+                b["text"].as_str().map(|s| s.to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default();
+
+    result.insert("type".to_string(), Value::String("text".to_string()));
+    result.insert("content".to_string(), Value::String(text));
+    result.insert("name".to_string(), Value::Null);
+    result.insert("id".to_string(), Value::Null);
+    result.insert("input".to_string(), Value::Null);
+    Ok(Value::dict_from(result))
+}
+
+#[cfg(feature = "native-llm")]
+fn complete_openai_tools(
+    cfg: &Config,
+    model: &str,
+    messages: &[ChatMessage],
+    tools: &[serde_json::Value],
+) -> Result<Value, String> {
+    let msgs_json: Vec<serde_json::Value> = messages
+        .iter()
+        .map(|m| serde_json::json!({"role": m.role, "content": m.content}))
+        .collect();
+
+    let openai_tools: Vec<serde_json::Value> = tools
+        .iter()
+        .map(|t| serde_json::json!({"type": "function", "function": t}))
+        .collect();
+
+    let body = serde_json::json!({
+        "model": model,
+        "messages": msgs_json,
+        "tools": openai_tools,
+    });
+
+    let resp: serde_json::Value = post_json(&cfg.base_url, &cfg.api_key, None, body)?;
+    let choice = &resp["choices"][0];
+    let finish_reason = choice["finish_reason"].as_str().unwrap_or("stop").to_string();
+    let message = &choice["message"];
+
+    let mut result = BTreeMap::new();
+    result.insert("stop_reason".to_string(), Value::String(finish_reason.clone()));
+
+    if finish_reason == "tool_calls" {
+        if let Some(calls) = message["tool_calls"].as_array() {
+            if let Some(call) = calls.first() {
+                let fn_obj = &call["function"];
+                let name = fn_obj["name"].as_str().unwrap_or("").to_string();
+                let args_str = fn_obj["arguments"].as_str().unwrap_or("{}");
+                let input: serde_json::Value =
+                    serde_json::from_str(args_str).unwrap_or(serde_json::json!({}));
+                result.insert("type".to_string(), Value::String("tool_use".to_string()));
+                result.insert(
+                    "id".to_string(),
+                    Value::String(call["id"].as_str().unwrap_or("").to_string()),
+                );
+                result.insert("name".to_string(), Value::String(name));
+                result.insert("input".to_string(), json_to_value(&input));
+                result.insert("content".to_string(), Value::Null);
+                return Ok(Value::dict_from(result));
+            }
+        }
+    }
+
+    let text = message["content"].as_str().unwrap_or("").to_string();
+    result.insert("type".to_string(), Value::String("text".to_string()));
+    result.insert("content".to_string(), Value::String(text));
+    result.insert("name".to_string(), Value::Null);
+    result.insert("id".to_string(), Value::Null);
+    result.insert("input".to_string(), Value::Null);
+    Ok(Value::dict_from(result))
+}
+
+// ---------------------------------------------------------------------------
+// substrate_embed — phi-pi-fib harmonic text embedding (no API call)
+// ---------------------------------------------------------------------------
+
+/// `substrate_embed(text, dims?) -> float[]`
+///
+/// Creates a harmonic embedding of `text` using Fibonacci-indexed phi/pi
+/// frequencies. Returns an L2-normalised float array of length `dims`
+/// (default 16). Works offline — no API key required.
+pub fn substrate_embed(text: &str, dims: usize) -> Value {
+    const PHI: f64 = 1.618_033_988_749_895;
+    let pi = std::f64::consts::PI;
+
+    let mut fibs: Vec<f64> = vec![1.0, 1.0];
+    while fibs.len() < dims + 2 {
+        let n = fibs.len();
+        fibs.push(fibs[n - 1] + fibs[n - 2]);
+    }
+
+    let mut vec = vec![0.0f64; dims];
+    for ch in text.chars() {
+        let c = ch as u32 as f64;
+        for (j, v) in vec.iter_mut().enumerate() {
+            let freq = fibs[j] * PHI / pi;
+            *v += (freq * c).sin();
+        }
+    }
+
+    let norm: f64 = vec.iter().map(|x| x * x).sum::<f64>().sqrt();
+    if norm > 1e-9 {
+        for x in &mut vec {
+            *x /= norm;
+        }
+    }
+
+    Value::Array(HArray::from_vec(vec.into_iter().map(Value::HFloat).collect()))
+}
+
+// ---------------------------------------------------------------------------
 // Stubs when `native-llm` feature is disabled (WASM / embedded builds)
 // ---------------------------------------------------------------------------
 
@@ -575,4 +848,41 @@ pub fn batch_llm_chat(
     _concurrency: usize,
 ) -> Result<Value, String> {
     Err("batch_llm_chat: recompile with --features native-llm".to_string())
+}
+
+/// Stub: `llm_tools` requires the `native-llm` Cargo feature.
+#[cfg(not(feature = "native-llm"))]
+pub fn llm_tools(
+    _messages_val: &Value,
+    _tools_val: &Value,
+    _model_override: Option<&str>,
+) -> Result<Value, String> {
+    Err("llm_tools: recompile with --features native-llm".to_string())
+}
+
+/// `substrate_embed` is always available (no API call, pure math).
+#[cfg(not(feature = "native-llm"))]
+pub fn substrate_embed(text: &str, dims: usize) -> Value {
+    const PHI: f64 = 1.618_033_988_749_895;
+    let pi = std::f64::consts::PI;
+    let mut fibs: Vec<f64> = vec![1.0, 1.0];
+    while fibs.len() < dims + 2 {
+        let n = fibs.len();
+        fibs.push(fibs[n - 1] + fibs[n - 2]);
+    }
+    let mut vec = vec![0.0f64; dims];
+    for ch in text.chars() {
+        let c = ch as u32 as f64;
+        for (j, v) in vec.iter_mut().enumerate() {
+            let freq = fibs[j] * PHI / pi;
+            *v += (freq * c).sin();
+        }
+    }
+    let norm: f64 = vec.iter().map(|x| x * x).sum::<f64>().sqrt();
+    if norm > 1e-9 {
+        for x in &mut vec {
+            *x /= norm;
+        }
+    }
+    Value::Array(HArray::from_vec(vec.into_iter().map(Value::HFloat).collect()))
 }

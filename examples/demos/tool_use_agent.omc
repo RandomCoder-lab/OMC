@@ -1,0 +1,149 @@
+# tool_use_agent.omc — ReAct-style agent using llm_tools + substrate_embed
+#
+# Demonstrates:
+#   1. substrate_embed — offline phi-pi-fib RAG (no API key needed)
+#   2. llm_tools — structured tool calling with Anthropic/OpenAI
+
+# ── Part 1: substrate_embed — semantic similarity without an API ─────────────
+
+fn cosine_sim(a, b) {
+    h dot = 0.0
+    h i = 0
+    while i < arr_len(a) {
+        dot = dot + a[i] * b[i]
+        i = i + 1
+    }
+    return dot
+}
+
+fn closest_doc(query, docs, texts) {
+    h qv = substrate_embed(query, 16)
+    h best_score = -2.0
+    h best_idx = 0
+    h i = 0
+    while i < arr_len(docs) {
+        h score = cosine_sim(qv, docs[i])
+        if score > best_score {
+            best_score = score
+            best_idx = i
+        }
+        i = i + 1
+    }
+    return texts[best_idx]
+}
+
+h knowledge = [
+    "Paris is the capital of France.",
+    "Python is a popular programming language invented by Guido van Rossum.",
+    "The speed of light is approximately 299,792,458 metres per second.",
+    "OMC is a self-hosting harmonic computing language.",
+    "The Fibonacci sequence starts 1, 1, 2, 3, 5, 8, 13, 21..."
+]
+
+print("=== substrate_embed RAG demo (offline) ===")
+h doc_vecs = par_map(knowledge, fn(text) { return substrate_embed(text, 16) })
+
+h q1 = "What is the capital of France?"
+h q2 = "Tell me about programming languages."
+h q3 = "What is the speed of light?"
+
+print(str_concat("Q: ", q1))
+print(str_concat("A: ", closest_doc(q1, doc_vecs, knowledge)))
+print("")
+print(str_concat("Q: ", q2))
+print(str_concat("A: ", closest_doc(q2, doc_vecs, knowledge)))
+print("")
+print(str_concat("Q: ", q3))
+print(str_concat("A: ", closest_doc(q3, doc_vecs, knowledge)))
+
+# ── Part 2: llm_tools — structured tool calling ───────────────────────────────
+
+print("")
+print("=== llm_tools structured tool calling ===")
+
+fn calculator(op, a, b) {
+    if op == "add" { return a + b }
+    if op == "subtract" { return a - b }
+    if op == "multiply" { return a * b }
+    if op == "divide" {
+        if b == 0 { return "Error: division by zero" }
+        return a / b
+    }
+    return "Error: unknown op"
+}
+
+h tools = [
+    {
+        name: "calculator",
+        description: "Perform arithmetic: add, subtract, multiply, divide.",
+        parameters: {
+            type: "object",
+            properties: {
+                operation: {type: "string", enum: ["add", "subtract", "multiply", "divide"]},
+                a: {type: "number", description: "First operand"},
+                b: {type: "number", description: "Second operand"}
+            },
+            required: ["operation", "a", "b"]
+        }
+    },
+    {
+        name: "rag_search",
+        description: "Search the local knowledge base for a fact.",
+        parameters: {
+            type: "object",
+            properties: {
+                query: {type: "string", description: "The question to look up"}
+            },
+            required: ["query"]
+        }
+    }
+]
+
+fn run_tool(name, input) {
+    if name == "calculator" {
+        h result = calculator(input["operation"], input["a"], input["b"])
+        return to_str(result)
+    }
+    if name == "rag_search" {
+        return closest_doc(input["query"], doc_vecs, knowledge)
+    }
+    return str_concat("Unknown tool: ", name)
+}
+
+fn tool_agent(user_question, max_turns) {
+    h messages = [{role: "user", content: user_question}]
+    h turn = 0
+    while turn < max_turns {
+        h result = llm_tools(messages, tools)
+        if result["type"] == "text" {
+            return result["content"]
+        }
+        h tool_name = result["name"]
+        h tool_input = result["input"]
+        h tool_result = run_tool(tool_name, tool_input)
+        print(str_concat("  [tool] ", tool_name, " -> ", str_slice(tool_result, 0, 60)))
+        arr_push(messages, {role: "assistant", content: str_concat("Called ", tool_name)})
+        arr_push(messages, {
+            role: "user",
+            content: str_concat("Tool result: ", tool_result, ". Now answer the question.")
+        })
+        turn = turn + 1
+    }
+    return "Max turns reached"
+}
+
+h questions = [
+    "What is 137 multiplied by 42?",
+    "Who invented Python?",
+    "What is 1000 divided by 7?"
+]
+
+h i = 0
+while i < arr_len(questions) {
+    h q = questions[i]
+    print(str_concat("Q: ", q))
+    h answer = tool_agent(q, 3)
+    print(str_concat("A: ", answer))
+    print("")
+    i = i + 1
+}

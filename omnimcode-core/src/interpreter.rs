@@ -2230,6 +2230,7 @@ impl Interpreter {
             // LLM builtins (Anthropic API)
             | "llm_call" | "llm_chat" | "llm_embed"
             | "batch_llm_call" | "batch_llm_chat"
+            | "llm_tools" | "substrate_embed"
             // HTTP builtins
             | "http_get" | "http_post" | "http_post_json" | "http_put" | "http_delete"
             | "now_iso" | "now_unix" | "format_time" | "parse_time"
@@ -2344,6 +2345,7 @@ impl Interpreter {
             // Native LLM builtins
             | "llm_call" | "llm_chat" | "llm_embed" | "llm_models"
             | "batch_llm_call" | "batch_llm_chat"
+            | "llm_tools" | "substrate_embed"
             // Process execution builtins
             | "omc_spawn" | "omc_pipe"
             // Native HTTP builtins
@@ -9557,6 +9559,49 @@ impl Interpreter {
                     concurrency,
                 )
             }
+            // llm_tools(messages, tools, model?) -> dict
+            //   Structured tool-calling. Returns {type, content, name, id, input, stop_reason}.
+            //   Works with both Anthropic and OpenAI tool-calling APIs.
+            "llm_tools" => {
+                if args.len() < 2 {
+                    return Err("llm_tools requires (messages, tools, model?)".to_string());
+                }
+                let messages_val = self.eval_expr(&args[0])?;
+                let tools_val = self.eval_expr(&args[1])?;
+                let model_override = if args.len() > 2 {
+                    match self.eval_expr(&args[2])? {
+                        Value::String(s) => Some(s),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                crate::llm_builtins::llm_tools(
+                    &messages_val,
+                    &tools_val,
+                    model_override.as_deref(),
+                )
+            }
+            // substrate_embed(text, dims?) -> float[]
+            //   Phi-Pi-Fib harmonic text embedding. L2-normalised. No API call needed.
+            "substrate_embed" => {
+                if args.is_empty() {
+                    return Err("substrate_embed requires (text, dims?)".to_string());
+                }
+                let text = match self.eval_expr(&args[0])? {
+                    Value::String(s) => s,
+                    other => other.to_display_string(),
+                };
+                let dims = if args.len() > 1 {
+                    match self.eval_expr(&args[1])? {
+                        Value::HInt(n) => n.value as usize,
+                        _ => 16,
+                    }
+                } else {
+                    16
+                };
+                Ok(crate::llm_builtins::substrate_embed(&text, dims))
+            }
             // ---- Process execution: omc_spawn / omc_pipe ----------------
             //
             // omc_spawn(cmd, args?, env_vars?, timeout_ms?) -> dict
@@ -14494,6 +14539,7 @@ pub(crate) const HEAL_BUILTIN_NAMES: &[&str] = &[
     // LLM I/O builtins
     "llm_call", "llm_chat", "llm_embed", "llm_models",
     "batch_llm_call", "batch_llm_chat",
+    "llm_tools", "substrate_embed",
     // Process execution builtins
     "omc_spawn", "omc_pipe",
     // Native HTTP builtins

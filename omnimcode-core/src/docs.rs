@@ -1339,6 +1339,37 @@ pub const BUILTINS: &[BuiltinDoc] = &[
         example: r#"batch_llm_chat([[{"role":"user","content":"hi"}], [{"role":"user","content":"bye"}]])"#,
         unique_to_omc: true,
     },
+    BuiltinDoc {
+        name: "llm_tools", category: "llm_workflow",
+        signature: "(messages: dict[], tools: dict[], model?: string) -> dict",
+        description: concat!(
+            "Structured tool-calling (function calling) via the LLM API. ",
+            "`messages` is an array of role/content dicts. ",
+            "`tools` is an array of tool dicts, each with `name`, `description`, and `parameters` (JSON Schema object). ",
+            "Returns a dict: `{type, content, name, id, input, stop_reason}`. ",
+            "When `type` is `\"text\"`, `content` has the text reply. ",
+            "When `type` is `\"tool_use\"`, `name`/`id`/`input` describe the tool call. ",
+            "Works with both Anthropic and OpenAI (auto-detected via LLM_PROVIDER env var)."
+        ),
+        example: r#"h tools = [{name:"add", description:"Add two numbers", parameters:{type:"object", properties:{a:{type:"number"}, b:{type:"number"}}, required:["a","b"]}}]
+h r = llm_tools([{role:"user",content:"What is 2+3?"}], tools)
+print(r["type"])   # "tool_use" or "text""#,
+        unique_to_omc: true,
+    },
+    BuiltinDoc {
+        name: "substrate_embed", category: "llm_workflow",
+        signature: "(text: string, dims?: int) -> float[]",
+        description: concat!(
+            "Phi-Pi-Fibonacci harmonic text embedding. No API call, no API key required. ",
+            "Produces an L2-normalised float vector of length `dims` (default 16). ",
+            "Each dimension uses a Fibonacci-indexed phi/pi frequency applied to each character codepoint. ",
+            "Useful for similarity search, RAG, and substrate-native retrieval without external embedding APIs."
+        ),
+        example: r#"h v1 = substrate_embed("hello world", 16)
+h v2 = substrate_embed("hello there", 16)
+# compute cosine similarity in OMC..."#,
+        unique_to_omc: true,
+    },
     // ── HTTP builtins ─────────────────────────────────────────────────────────
     BuiltinDoc {
         name: "http_get", category: "http",
