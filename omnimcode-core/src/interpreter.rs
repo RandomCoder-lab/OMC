@@ -2225,7 +2225,7 @@ impl Interpreter {
             | "str_split_lines" | "str_count" | "str_is_empty"
             | "str_to_int" | "str_to_float" | "str_capitalize"
             | "re_match" | "re_find" | "re_find_all" | "re_replace" | "re_split"
-            | "json_parse" | "json_stringify"
+            | "json_parse" | "json_stringify" | "json_extract" | "str_format"
             | "sha256" | "sha512" | "base64_encode" | "base64_decode"
             // LLM builtins (Anthropic API)
             | "llm_call" | "llm_chat" | "llm_embed"
@@ -3546,6 +3546,57 @@ impl Interpreter {
                     Ok(out) => Ok(Value::String(out)),
                     Err(e) => Err(format!("json_stringify: {}", e)),
                 }
+            }
+            // json_extract(text) -> Value | null
+            //   Extracts the first valid JSON object {} or array [] from a string.
+            //   Useful for parsing LLM responses that embed JSON inside prose.
+            "json_extract" => {
+                if args.is_empty() {
+                    return Err("json_extract requires (text)".to_string());
+                }
+                let text = self.eval_expr(&args[0])?.to_display_string();
+                let bytes = text.as_bytes();
+                let mut result = Value::Null;
+                'outer: for start in 0..bytes.len() {
+                    if bytes[start] == b'{' || bytes[start] == b'[' {
+                        for end in (start + 1..=bytes.len()).rev() {
+                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text[start..end]) {
+                                result = json_to_value(v);
+                                break 'outer;
+                            }
+                        }
+                    }
+                }
+                Ok(result)
+            }
+            // str_format(template, values) -> string
+            //   Replace {key} placeholders with dict values, or {0},{1} with positional args.
+            //   Example: str_format("Hello, {name}!", {name: "World"}) -> "Hello, World!"
+            "str_format" => {
+                if args.len() < 2 {
+                    return Err("str_format requires (template, values)".to_string());
+                }
+                let template = self.eval_expr(&args[0])?.to_display_string();
+                let values = self.eval_expr(&args[1])?;
+                let mut result = template.clone();
+                match &values {
+                    Value::Dict(d) => {
+                        for (k, v) in d.borrow().iter() {
+                            let placeholder = format!("{{{}}}", k);
+                            result = result.replace(&placeholder, &v.to_display_string());
+                        }
+                    }
+                    Value::Array(a) => {
+                        for (i, v) in a.items.borrow().iter().enumerate() {
+                            let placeholder = format!("{{{}}}", i);
+                            result = result.replace(&placeholder, &v.to_display_string());
+                        }
+                    }
+                    other => {
+                        result = result.replace("{0}", &other.to_display_string());
+                    }
+                }
+                Ok(Value::String(result))
             }
             "csv_parse" => {
                 if args.is_empty() {
@@ -14440,7 +14491,7 @@ pub(crate) const HEAL_BUILTIN_NAMES: &[&str] = &[
     "str_split_lines", "str_count", "str_is_empty",
     "str_to_int", "str_to_float", "str_capitalize",
     "re_match", "re_find", "re_find_all", "re_replace", "re_split",
-    "json_parse", "json_stringify",
+    "json_parse", "json_stringify", "json_extract", "str_format",
     "sha256", "sha512", "base64_encode", "base64_decode",
     // LLM builtins (Anthropic API — enabled with llm-builtins feature)
     "llm_call", "llm_chat", "llm_embed",
