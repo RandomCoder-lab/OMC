@@ -1378,7 +1378,7 @@ fn lint_source(content: &str) -> Vec<LintHint> {
                                 if k < len {
                                     let op = bytes[k];
                                     let nx = if k + 1 < len { bytes[k + 1] } else { 0 };
-                                    if (op == b'+' || op == b'-' || op == b'*')
+                                    if (op == b'+' || op == b'-' || op == b'*' || op == b'/')
                                         && nx != b'=' && nx != op
                                     {
                                         hints.push((Some(ln), "style",
@@ -1431,6 +1431,13 @@ fn lint_ast_stmts(stmts: &[Statement], in_fn: Option<&str>, hints: &mut Vec<Lint
                 lint_ast_stmts(body, Some(name.as_str()), hints);
             }
             Statement::If { then_body, elif_parts, else_body, .. } => {
+                // Empty then-body with a non-empty else is always better written
+                // with the condition negated: `if !cond { ... }`.
+                if then_body.is_empty() && else_body.as_ref().is_some_and(|b| !b.is_empty()) {
+                    hints.push((None, "style",
+                        format!("empty `if` branch with non-empty `else` in `{}` — negate the condition",
+                            ctx)));
+                }
                 lint_ast_stmts(then_body, in_fn, hints);
                 for (_, body) in elif_parts { lint_ast_stmts(body, in_fn, hints); }
                 if let Some(b) = else_body { lint_ast_stmts(b, in_fn, hints); }

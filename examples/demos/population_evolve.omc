@@ -147,7 +147,7 @@ fn evolve(problem, test_cases, pop_size, generations, elite_count) {
             gen_avg += population[gi]["fitness"]
             gi += 1
         }
-        gen_avg = gen_avg / arr_len(population)
+        gen_avg /= arr_len(population)
 
         print(str_concat("  Best: ", to_string(gen_best * 100), "% | Avg: ", to_string(gen_avg * 100), "%"))
 
