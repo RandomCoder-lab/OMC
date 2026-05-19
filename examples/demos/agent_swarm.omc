@@ -1,0 +1,208 @@
+# agent_swarm.omc — Parallel agent swarm for recursive self-improvement
+#
+# Architecture:
+#   - Orchestrator decomposes a goal into N sub-tasks
+#   - Swarm of worker agents processes tasks in parallel (batch_llm_call)
+#   - Results are aggregated and synthesized
+#   - Output is evaluated, lowest-scoring results are revised
+#   - Loop repeats for multiple rounds
+#
+# Requires: ANTHROPIC_API_KEY or LLM_PROVIDER=anthropic
+
+print("=== OMC Agent Swarm: Recursive Self-Improvement ===")
+print("")
+
+# ── Configuration ─────────────────────────────────────────────────────────────
+
+h MODEL = "claude-3-5-haiku-20241022"
+h SWARM_SIZE = 4
+h ROUNDS = 2
+
+# ── Orchestrator: decompose goal into tasks ───────────────────────────────────
+
+fn decompose_goal(goal, n, model) {
+    h prompt = str_format(
+        "Break this goal into exactly {n} parallel independent sub-tasks. Each task should be completable in one LLM call.\n\nGoal: {goal}\n\nRespond with JSON: {{\"tasks\": [\"task1\", \"task2\", ...]}}",
+        {goal: goal, n: to_str(n)}
+    )
+    h raw = llm_call(prompt, model)
+    h parsed = json_extract(raw)
+    if parsed == null {
+        return arr_fill(goal, n)
+    }
+    h tasks = parsed["tasks"]
+    if tasks == null { return arr_fill(goal, n) }
+    return tasks
+}
+
+# ── Worker: execute a single task ─────────────────────────────────────────────
+
+fn worker_execute(task, context, model) {
+    h prompt = if str_len(context) > 0 {
+        str_format(
+            "Context:\n{ctx}\n\nYour task: {task}\n\nProvide a detailed, concrete response.",
+            {ctx: context, task: task}
+        )
+    } else {
+        str_concat("Your task: ", task, "\n\nProvide a detailed, concrete response.")
+    }
+    return prompt
+}
+
+# ── Evaluator: score outputs ───────────────────────────────────────────────────
+
+fn evaluate_output(task, output, model) {
+    h prompt = str_format(
+        "Rate this output for the task (0-10). Be strict.\n\nTask: {task}\n\nOutput: {out}\n\nRespond with JSON: {{\"score\": N, \"issues\": [\"...\"]}}",
+        {task: task, out: str_slice(output, 0, 300)}
+    )
+    h raw = llm_call(prompt, model)
+    h parsed = json_extract(raw)
+    if parsed == null { return {score: 5, issues: []} }
+    return parsed
+}
+
+# ── Synthesizer: combine all outputs ─────────────────────────────────────────
+
+fn synthesize_outputs(goal, tasks, outputs, model) {
+    h parts = []
+    h i = 0
+    while i < arr_len(tasks) {
+        arr_push(parts, str_format("TASK {n}: {t}\nOUTPUT: {o}", {
+            n: to_str(i + 1),
+            t: tasks[i],
+            o: outputs[i]
+        }))
+        i = i + 1
+    }
+    h combined = arr_join(parts, "\n\n---\n\n")
+    h prompt = str_format(
+        "Goal: {goal}\n\nYou have {n} completed sub-tasks:\n\n{combined}\n\nSynthesize all outputs into a coherent final result:",
+        {goal: goal, n: to_str(arr_len(tasks)), combined: combined}
+    )
+    return llm_call(prompt, model)
+}
+
+# ── Repair: fix low-scoring outputs ──────────────────────────────────────────
+
+fn repair_output(task, output, issues, model) {
+    h issues_text = arr_join(issues, "\n- ")
+    h prompt = str_format(
+        "Fix this output addressing the issues.\n\nTask: {task}\n\nCurrent output: {out}\n\nIssues:\n- {issues}\n\nFixed output:",
+        {task: task, out: output, issues: issues_text}
+    )
+    return llm_call(prompt, model)
+}
+
+# ── Main Swarm Loop ───────────────────────────────────────────────────────────
+
+fn run_swarm(goal, swarm_size, rounds, model) {
+    print(str_concat("Goal: ", goal))
+    print(str_concat("Swarm size: ", to_str(swarm_size), " workers, ", to_str(rounds), " rounds"))
+    print("")
+
+    # Decompose
+    print("Phase 1: Decomposing goal into sub-tasks...")
+    h tasks = decompose_goal(goal, swarm_size, model)
+    print(str_concat("  Created ", to_str(arr_len(tasks)), " tasks"))
+    h i = 0
+    while i < arr_len(tasks) {
+        print(str_concat("  [", to_str(i + 1), "] ", str_slice(tasks[i], 0, 70)))
+        i = i + 1
+    }
+    print("")
+
+    # Round loop
+    h outputs = arr_fill("", swarm_size)
+    h round = 0
+    while round < rounds {
+        print(str_concat("Phase 2.", to_str(round + 1), ": Parallel execution (swarm)..."))
+
+        # Build prompts for all workers
+        h context = if round == 0 { "" } else {
+            str_concat("Previous round context: ", str_slice(arr_join(outputs, " | "), 0, 200))
+        }
+        h prompts = par_map(tasks, fn(task) {
+            return worker_execute(task, context, model)
+        })
+
+        # Run all workers in parallel
+        h new_outputs = batch_llm_call(prompts, model)
+        outputs = new_outputs
+
+        print(str_concat("  Got ", to_str(arr_len(outputs)), " outputs"))
+
+        if round < rounds - 1 {
+            # Evaluate and repair low-scoring outputs
+            print("Phase 3: Evaluating and repairing...")
+            h eval_prompts = []
+            h j = 0
+            while j < arr_len(tasks) {
+                arr_push(eval_prompts, str_format(
+                    "Rate (0-10) and list issues. Task: {t}\nOutput: {o}\nJSON: {{\"score\":N,\"issues\":[]}}",
+                    {t: tasks[j], o: str_slice(outputs[j], 0, 200)}
+                ))
+                j = j + 1
+            }
+            h eval_raws = batch_llm_call(eval_prompts, model)
+            h evals = par_map(eval_raws, fn(raw) {
+                h j = json_extract(raw)
+                if j != null { return j }
+                return {score: 7, issues: []}
+            })
+
+            h repair_prompts = []
+            h k = 0
+            while k < arr_len(tasks) {
+                h ev = evals[k]
+                h score = to_float(to_str(ev["score"]))
+                if score < 6.0 {
+                    h issues = ev["issues"]
+                    h issues_text = if issues != null { arr_join(issues, "; ") } else { "Needs improvement" }
+                    arr_push(repair_prompts, {
+                        idx: k,
+                        prompt: str_format(
+                            "Fix this output.\nTask: {t}\nOutput: {o}\nIssues: {i}\nFixed:",
+                            {t: tasks[k], o: str_slice(outputs[k], 0, 200), i: issues_text}
+                        )
+                    })
+                    print(str_concat("  Repairing task ", to_str(k + 1), " (score=", to_str(score), ")"))
+                }
+                k = k + 1
+            }
+
+            if arr_len(repair_prompts) > 0 {
+                h repair_ps = par_map(repair_prompts, fn(r) { return r["prompt"] })
+                h repaired = batch_llm_call(repair_ps, model)
+                h m = 0
+                while m < arr_len(repair_prompts) {
+                    h idx = repair_prompts[m]["idx"]
+                    outputs[idx] = repaired[m]
+                    m = m + 1
+                }
+            }
+        }
+        round = round + 1
+    }
+
+    # Synthesize
+    print("")
+    print("Phase 4: Synthesizing final result...")
+    h final = synthesize_outputs(goal, tasks, outputs, model)
+    print("Done!")
+    return {
+        final: final,
+        tasks: tasks,
+        outputs: outputs
+    }
+}
+
+# ── Run the swarm ─────────────────────────────────────────────────────────────
+
+h goal = "Design a complete OMC program that implements a self-improving code optimizer"
+
+h result = run_swarm(goal, SWARM_SIZE, ROUNDS, MODEL)
+
+print("")
+print("=== FINAL SYNTHESIZED RESULT ===")
+print(result["final"])
