@@ -53,7 +53,7 @@ fn describe_ancestry(lineage) {
     h descriptions = []
     h i = 0
     while i < arr_len(lineage) {
-        arr_push(descriptions, str_concat("gen", to_str(lineage[i]["generation"])))
+        arr_push(descriptions, str_concat("gen", to_string(lineage[i]["generation"])))
         i = i + 1
     }
     h i2 = 0
@@ -83,7 +83,7 @@ fn spawn_generation(parent_code, parent_score, goal, generation, branch_id) {
     h prompt = str_concat(
         "Evolution directive: ", vector, "\n\n",
         "Goal: ", goal, "\n\n",
-        "Parent code (generation ", to_str(generation - 1), "):\n",
+        "Parent code (generation ", to_string(generation - 1), "):\n",
         parent_code, "\n\n",
         "Write the next-generation code that improves on the parent. Return only OMC code."
     )
@@ -120,7 +120,7 @@ fn evolve_lineage(seed_code, goal, depth, branches) {
 
     h gen = 1
     while gen <= depth {
-        print(str_concat("  Generation ", to_str(gen), "..."))
+        print(str_concat("  Generation ", to_string(gen), "..."))
         h next_generation = []
         h pi = 0
         while pi < arr_len(current_generation) {
@@ -139,9 +139,9 @@ fn evolve_lineage(seed_code, goal, depth, branches) {
                 h delta_sign = "+"
                 if child["improvement"] < 0 { delta_sign = "" }
                 print(str_concat(
-                    "    Branch ", to_str(bi + 1),
-                    " | score: ", to_str(child["score"]["composite"]),
-                    " (", delta_sign, to_str(child["improvement"]), ")",
+                    "    Branch ", to_string(bi + 1),
+                    " | score: ", to_string(child["score"]["composite"]),
+                    " (", delta_sign, to_string(child["improvement"]), ")",
                     " | ", child["vector"]
                 ))
                 bi = bi + 1
@@ -180,9 +180,9 @@ fn crossbreed(lineage_a_best, lineage_b_best, goal) {
     h sys = "You write OMC code only, no markdown, no explanation."
     h prompt = str_concat(
         "Crossbreed these two evolved OMC implementations into a superior hybrid:\n\n",
-        "Lineage A (score: ", to_str(lineage_a_best["score"]["composite"]), "):\n",
+        "Lineage A (score: ", to_string(lineage_a_best["score"]["composite"]), "):\n",
         lineage_a_best["code"], "\n\n",
-        "Lineage B (score: ", to_str(lineage_b_best["score"]["composite"]), "):\n",
+        "Lineage B (score: ", to_string(lineage_b_best["score"]["composite"]), "):\n",
         lineage_b_best["code"], "\n\n",
         "Goal: ", goal, "\n",
         "Combine the strongest parts of both. Return only OMC code."
@@ -221,8 +221,8 @@ h SEED = str_concat(
 
 print("=== Multi-Generation Code Evolution ===")
 print(str_concat("Goal: ", GOAL))
-print(str_concat("Seed: ", to_str(arr_len(str_split(SEED, "\n"))), " lines"))
-print(str_concat("Depth: ", to_str(LINEAGE_DEPTH), " | Branches: ", to_str(BRANCHES)))
+print(str_concat("Seed: ", to_string(arr_len(str_split(SEED, "\n"))), " lines"))
+print(str_concat("Depth: ", to_string(LINEAGE_DEPTH), " | Branches: ", to_string(BRANCHES)))
 print("")
 
 # Run two independent lineages
@@ -236,14 +236,14 @@ h lineage_b = evolve_lineage(SEED, str_concat(GOAL, " Focus on performance."), L
 print("")
 print("--- Crossbreeding Lineage A × Lineage B ---")
 h hybrid = crossbreed(lineage_a["best"], lineage_b["best"], GOAL)
-print(str_concat("  Hybrid score: ", to_str(hybrid["score"]["composite"])))
+print(str_concat("  Hybrid score: ", to_string(hybrid["score"]["composite"])))
 
 print("")
 print("=== Evolution Summary ===")
-print(str_concat("Seed score:     ", to_str(code_score(SEED)["composite"])))
-print(str_concat("Lineage A best: ", to_str(lineage_a["best"]["score"]["composite"])))
-print(str_concat("Lineage B best: ", to_str(lineage_b["best"]["score"]["composite"])))
-print(str_concat("Hybrid score:   ", to_str(hybrid["score"]["composite"])))
+print(str_concat("Seed score:     ", to_string(code_score(SEED)["composite"])))
+print(str_concat("Lineage A best: ", to_string(lineage_a["best"]["score"]["composite"])))
+print(str_concat("Lineage B best: ", to_string(lineage_b["best"]["score"]["composite"])))
+print(str_concat("Hybrid score:   ", to_string(hybrid["score"]["composite"])))
 
 h winner = "hybrid"
 h winner_score = hybrid["score"]["composite"]
@@ -255,5 +255,5 @@ if lineage_b["best"]["score"]["composite"] > winner_score {
     winner = "Lineage B"
     winner_score = lineage_b["best"]["score"]["composite"]
 }
-print(str_concat("\nWinner: ", winner, " (score: ", to_str(winner_score), ")"))
-print(str_concat("Improvement over seed: +", to_str(winner_score - code_score(SEED)["composite"])))
+print(str_concat("\nWinner: ", winner, " (score: ", to_string(winner_score), ")"))
+print(str_concat("Improvement over seed: +", to_string(winner_score - code_score(SEED)["composite"])))

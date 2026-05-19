@@ -63,7 +63,7 @@ fn init_population(problem, pop_size) {
         arr_push(prompts, {prompt: p, system: sys})
         i = i + 1
     }
-    print(str_concat("  Spawning ", to_str(pop_size), " individuals in parallel..."))
+    print(str_concat("  Spawning ", to_string(pop_size), " individuals in parallel..."))
     h raw_codes = batch_llm_call(prompts, MODEL)
     h population = []
     h ci = 0
@@ -124,7 +124,7 @@ fn tournament_select(population) {
 
 fn evolve(problem, test_cases, pop_size, generations, elite_count) {
     print(str_concat("Problem: ", problem))
-    print(str_concat("Population: ", to_str(pop_size), " | Generations: ", to_str(generations)))
+    print(str_concat("Population: ", to_string(pop_size), " | Generations: ", to_string(generations)))
     print("")
 
     print("Initializing population...")
@@ -136,7 +136,7 @@ fn evolve(problem, test_cases, pop_size, generations, elite_count) {
 
     h gen = 0
     while gen < generations {
-        print(str_concat("--- Generation ", to_str(gen + 1), " ---"))
+        print(str_concat("--- Generation ", to_string(gen + 1), " ---"))
 
         population = evaluate_population(population, test_cases)
 
@@ -149,7 +149,7 @@ fn evolve(problem, test_cases, pop_size, generations, elite_count) {
         }
         gen_avg = gen_avg / arr_len(population)
 
-        print(str_concat("  Best: ", to_str(gen_best * 100), "% | Avg: ", to_str(gen_avg * 100), "%"))
+        print(str_concat("  Best: ", to_string(gen_best * 100), "% | Avg: ", to_string(gen_avg * 100), "%"))
 
         if gen_best > best_fitness {
             best_fitness = gen_best
@@ -247,8 +247,8 @@ h result = evolve(PROBLEM, TEST_CASES, POP_SIZE, GENERATIONS, ELITE_COUNT)
 
 print("")
 print("=== Evolution Complete ===")
-print(str_concat("Best fitness: ", to_str(result["best_fitness"] * 100), "%"))
-print(str_concat("Generations: ", to_str(result["generations"])))
+print(str_concat("Best fitness: ", to_string(result["best_fitness"] * 100), "%"))
+print(str_concat("Generations: ", to_string(result["generations"])))
 print("")
 print("Best evolved code:")
 print(result["best_code"])

@@ -15,7 +15,7 @@ h IMPROVEMENT_CACHE = lru_new(50)
 
 fn log(msg) {
     h ts = unix_time()
-    h line = str_concat("[", to_str(ts), "] ", msg, "\n")
+    h line = str_concat("[", to_string(ts), "] ", msg, "\n")
     file_append(LOG_FILE, line)
     print(msg)
 }
@@ -54,8 +54,8 @@ fn propose_improvement(code, history) {
     if arr_len(history) > 0 {
         h last = history[arr_len(history) - 1]
         hist_summary = str_concat(
-            "\nPrevious improvement round score: ", to_str(last["score"]),
-            "\nPrevious issues fixed: ", to_str(last["issues"])
+            "\nPrevious improvement round score: ", to_string(last["score"]),
+            "\nPrevious issues fixed: ", to_string(last["issues"])
         )
     }
     h prompt = str_concat(
@@ -98,9 +98,9 @@ fn improve_file(path, rounds) {
         return null
     }
 
-    log(str_concat("  File: ", path, " (", to_str(str_len(code)), " bytes)"))
+    log(str_concat("  File: ", path, " (", to_string(str_len(code)), " bytes)"))
 
-    h cache_key = str_concat(path, "|", to_str(str_len(code)))
+    h cache_key = str_concat(path, "|", to_string(str_len(code)))
     h cached = lru_get(IMPROVEMENT_CACHE, cache_key)
     if cached != null {
         log("  Cache hit — skipping")
@@ -108,14 +108,14 @@ fn improve_file(path, rounds) {
     }
 
     h initial_score = score_code(code)
-    log(str_concat("  Initial score: ", to_str(initial_score["score"])))
+    log(str_concat("  Initial score: ", to_string(initial_score["score"])))
 
     h current = code
     h history = []
     h r = 0
     while r < rounds {
         h proposal = propose_improvement(current, history)
-        log(str_concat("  Round ", to_str(r + 1), ": ", proposal["issue"]))
+        log(str_concat("  Round ", to_string(r + 1), ": ", proposal["issue"]))
 
         h improved = apply_improvement(current, proposal)
         h new_score = score_code(improved)
@@ -135,7 +135,7 @@ fn improve_file(path, rounds) {
 
     h final_score = score_code(current)
     h improvement = final_score["score"] - initial_score["score"]
-    log(str_concat("  Final score: ", to_str(final_score["score"]), " (delta: +", to_str(improvement), ")"))
+    log(str_concat("  Final score: ", to_string(final_score["score"]), " (delta: +", to_string(improvement), ")"))
 
     h result = {
         path: path,
@@ -166,7 +166,7 @@ fn daemon_cycle(files, rounds_per_file, continuous) {
 
     while keep_running {
         iteration = iteration + 1
-        log(str_concat("=== Daemon Cycle ", to_str(iteration), " ==="))
+        log(str_concat("=== Daemon Cycle ", to_string(iteration), " ==="))
 
         h results = []
         h fi = 0
@@ -185,7 +185,7 @@ fn daemon_cycle(files, rounds_per_file, continuous) {
             total_improvement = total_improvement + results[ri]["improvement"]
             ri = ri + 1
         }
-        log(str_concat("  Cycle ", to_str(iteration), " complete. Total improvement delta: ", to_str(total_improvement)))
+        log(str_concat("  Cycle ", to_string(iteration), " complete. Total improvement delta: ", to_string(total_improvement)))
 
         if not continuous { keep_running = false }
     }
@@ -209,10 +209,10 @@ print("=== Auto-Improve Daemon ===")
 h mode_str = "single-cycle"
 if CONTINUOUS_MODE { mode_str = "continuous" }
 print(str_concat("Mode: ", mode_str))
-print(str_concat("Files: ", to_str(arr_len(FILES_TO_IMPROVE))))
+print(str_concat("Files: ", to_string(arr_len(FILES_TO_IMPROVE))))
 print(str_concat("Log: ", LOG_FILE))
 print("")
 
 h result = daemon_cycle(FILES_TO_IMPROVE, 2, CONTINUOUS_MODE)
-print(str_concat("\nDaemon ran ", to_str(result["iterations"]), " iteration(s)."))
+print(str_concat("\nDaemon ran ", to_string(result["iterations"]), " iteration(s)."))
 print(str_concat("Check log file for details: ", LOG_FILE))

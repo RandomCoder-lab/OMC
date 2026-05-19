@@ -148,14 +148,15 @@ fn manifest_to_claude_tools(manifest) {
 # ── Process OMC library files ─────────────────────────────────────────────────
 
 fn process_omc_file(path, enhance_with_llm) {
-    h code = file_read(path)
-    if code == null {
+    h code = null
+    try { code = file_read(path) } catch e {
         print(str_concat("  SKIP (not found): ", path))
         return []
     }
+    if code == null { return [] }
 
     h sigs = extract_fn_signatures(code)
-    print(str_concat("  ", path, ": ", to_str(arr_len(sigs)), " functions"))
+    print(str_concat("  ", path, ": ", to_string(arr_len(sigs)), " functions"))
 
     h tools = []
     h i = 0
@@ -204,7 +205,7 @@ h enhance_env = env_var("OMC_ENHANCE_TOOLS")
 if enhance_env == "1" { ENHANCE = true }
 
 print("=== MCP Tool Generator ===")
-print(str_concat("Processing ", to_str(arr_len(LIB_FILES)), " OMC library files"))
+print(str_concat("Processing ", to_string(arr_len(LIB_FILES)), " OMC library files"))
 print(str_concat("LLM enhancement: ", if ENHANCE { "on" } else { "off (set OMC_ENHANCE_TOOLS=1 to enable)" }))
 print("")
 
@@ -225,24 +226,24 @@ h output_path = "/tmp/omc_mcp_tools.json"
 file_write(output_path, json_stringify(manifest))
 
 print("")
-print(str_concat("Generated ", to_str(arr_len(all_tools)), " MCP tool definitions"))
+print(str_concat("Generated ", to_string(arr_len(all_tools)), " MCP tool definitions"))
 print(str_concat("Manifest written to: ", output_path))
 print("")
 
 # Show Claude-format tools array
 h claude_tools = manifest_to_claude_tools(manifest)
-print(str_concat("Claude tools array (", to_str(arr_len(claude_tools)), " tools):"))
+print(str_concat("Claude tools array (", to_string(arr_len(claude_tools)), " tools):"))
 h ci = 0
 while ci < arr_len(claude_tools) and ci < 10 {
     h ct = claude_tools[ci]
     h param_count = arr_len(dict_keys(ct["input_schema"]["properties"]))
     print(str_concat(
         "  ", ct["name"],
-        " (", to_str(param_count), " params) — ",
+        " (", to_string(param_count), " params) — ",
         str_slice(ct["description"], 0, 60)
     ))
     ci = ci + 1
 }
 if arr_len(claude_tools) > 10 {
-    print(str_concat("  ... and ", to_str(arr_len(claude_tools) - 10), " more"))
+    print(str_concat("  ... and ", to_string(arr_len(claude_tools) - 10), " more"))
 }
