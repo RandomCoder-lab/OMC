@@ -1,0 +1,107 @@
+# Tests for `omc --check` static lint rules.
+# Verifies the lint is wired up by running omc_spawn("omc", ["--check", path])
+# on fixture files.  Each fixture lives in examples/tests/fixtures/.
+
+fn assert_true(cond, msg)  { if !cond { test_record_failure(msg) } }
+fn assert_false(cond, msg) { if cond  { test_record_failure(msg) } }
+fn assert_eq(a, b, msg)    { if a != b { test_record_failure(msg + ": expected " + to_string(b) + " got " + to_string(a)) } }
+
+# ── helpers ────────────────────────────────────────────────────────────────────
+
+fn omc_bin() {
+    h candidates = [
+        "./target/debug/omnimcode-standalone",
+        "omc"
+    ]
+    h i = 0
+    while i < arr_len(candidates) {
+        h r = omc_spawn("test", ["-f", candidates[i]])
+        if r["ok"] { return candidates[i] }
+        i = i + 1
+    }
+    return "./target/debug/omnimcode-standalone"
+}
+
+fn check_file(path) {
+    h bin = omc_bin()
+    return omc_spawn(bin, ["--check", path])
+}
+
+fn write_fixture(content) {
+    h r = omc_spawn("sh", ["-c", "cat > /tmp/_omc_lint_fixture.omc << 'OEOF'\n" + content + "\nOEOF"])
+    return "/tmp/_omc_lint_fixture.omc"
+}
+
+# ── clean file → exit 0 ────────────────────────────────────────────────────────
+
+fn test_clean_file_exits_zero() {
+    h r = omc_spawn("sh", ["-c",
+        "printf 'fn add(a, b) { return a + b }\\n' > /tmp/_lint_clean.omc"])
+    h result = check_file("/tmp/_lint_clean.omc")
+    assert_true(result["ok"], "clean file → exit 0")
+    assert_true(str_contains(result["stdout"], "clean"), "output says clean")
+}
+
+# ── `not` keyword → style lint ─────────────────────────────────────────────────
+
+fn test_not_keyword_flagged() {
+    h r = omc_spawn("sh", ["-c",
+        "printf 'fn f(x) { if not x { return 1 } return 0 }\\n' > /tmp/_lint_not.omc"])
+    h result = check_file("/tmp/_lint_not.omc")
+    assert_false(result["ok"], "not-keyword file fails check")
+    assert_true(str_contains(result["stdout"], "style"), "style hint emitted")
+    assert_true(str_contains(result["stdout"], "not"), "`not` mentioned in output")
+}
+
+fn test_not_inside_string_not_flagged() {
+    h r = omc_spawn("sh", ["-c",
+        "printf 'fn f() { return \"not a bug\" }\\n' > /tmp/_lint_notstr.omc"])
+    h result = check_file("/tmp/_lint_notstr.omc")
+    assert_true(result["ok"], "`not` in string is not flagged")
+}
+
+fn test_not_in_comment_not_flagged() {
+    h r = omc_spawn("sh", ["-c",
+        "printf '# this is not a lint target\\nfn f() { return 1 }\\n' > /tmp/_lint_notcmt.omc"])
+    h result = check_file("/tmp/_lint_notcmt.omc")
+    assert_true(result["ok"], "`not` in comment is not flagged")
+}
+
+# ── nested fn → structural lint ────────────────────────────────────────────────
+
+fn test_nested_fn_flagged() {
+    h r = omc_spawn("sh", ["-c",
+        "printf 'fn outer() { fn inner() { return 1 } return inner() }\\n' > /tmp/_lint_nested.omc"])
+    h result = check_file("/tmp/_lint_nested.omc")
+    assert_false(result["ok"], "nested fn fails check")
+    assert_true(str_contains(result["stdout"], "nested-fn"), "nested-fn hint emitted")
+    assert_true(str_contains(result["stdout"], "inner"), "inner fn named in output")
+    assert_true(str_contains(result["stdout"], "outer"), "outer fn named in output")
+}
+
+# ── to_str() → deprecated lint ─────────────────────────────────────────────────
+
+fn test_to_str_deprecated_flagged() {
+    h r = omc_spawn("sh", ["-c",
+        "printf 'fn f(n) { return to_str(n) }\\n' > /tmp/_lint_tostr.omc"])
+    h result = check_file("/tmp/_lint_tostr.omc")
+    assert_false(result["ok"], "to_str() fails check")
+    assert_true(str_contains(result["stdout"], "deprecated"), "deprecated hint emitted")
+}
+
+fn test_to_string_not_flagged() {
+    h r = omc_spawn("sh", ["-c",
+        "printf 'fn f(n) { return to_string(n) }\\n' > /tmp/_lint_tostring.omc"])
+    h result = check_file("/tmp/_lint_tostring.omc")
+    assert_true(result["ok"], "to_string() is fine")
+}
+
+# ── parse error → exit 1 with message ─────────────────────────────────────────
+
+fn test_parse_error_exits_one() {
+    h r = omc_spawn("sh", ["-c",
+        "printf 'fn broken( { return 1 }\\n' > /tmp/_lint_parse.omc"])
+    h result = check_file("/tmp/_lint_parse.omc")
+    assert_false(result["ok"], "parse error → exit 1")
+    assert_true(str_len(result["stderr"]) > 0 or str_len(result["stdout"]) > 0, "error output present")
+}

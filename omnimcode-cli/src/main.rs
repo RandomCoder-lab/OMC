@@ -2,6 +2,7 @@
 
 use omnimcode_core::parser::Parser;
 use omnimcode_core::interpreter::Interpreter;
+use omnimcode_core::ast::Statement;
 
 use std::env;
 use std::fs;
@@ -936,9 +937,125 @@ fn read_and_run(path: &str) -> Result<(), String> {
     execute_program(&content)
 }
 
-/// `--check`: parse, run heal_ast_until_fixpoint, print diagnostics to
-/// stdout, never execute. Exit code is the number of diagnostics
-/// (clamped to 1). Useful for CI / lint workflows.
+// ── Static lint rules ────────────────────────────────────────────────────────
+
+fn is_ident_char(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || c == b'_'
+}
+
+/// Strip the inline comment portion of a source line (everything from a `#`
+/// that is not inside a string literal). Returns a slice of the original.
+fn strip_line_comment(line: &str) -> &str {
+    let bytes = line.as_bytes();
+    let mut in_str = false;
+    let mut str_ch = b'"';
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_str {
+            if c == b'\\' { i += 2; continue; }
+            if c == str_ch { in_str = false; }
+        } else {
+            match c {
+                b'"' | b'\'' => { in_str = true; str_ch = c; }
+                b'#' => return &line[..i],
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    line
+}
+
+/// (line_number, kind, message).  line_number is None for AST-level hints.
+type LintHint = (Option<usize>, &'static str, String);
+
+/// Source-text lint: scan line-by-line for common OMC style/deprecation issues.
+/// String literal contents are skipped to avoid false positives.
+fn lint_source(content: &str) -> Vec<LintHint> {
+    let mut hints: Vec<LintHint> = Vec::new();
+    for (idx, raw) in content.lines().enumerate() {
+        let ln = idx + 1;
+        let code = strip_line_comment(raw);
+        let bytes = code.as_bytes();
+        let len = bytes.len();
+
+        // Walk the line outside string literals, checking for patterns.
+        let mut in_str = false;
+        let mut str_ch = b'"';
+        let mut i = 0;
+        while i < len {
+            let c = bytes[i];
+            if in_str {
+                if c == b'\\' { i += 2; continue; }
+                if c == str_ch { in_str = false; }
+                i += 1; continue;
+            }
+            if c == b'"' || c == b'\'' { in_str = true; str_ch = c; i += 1; continue; }
+
+            // Detect bare `not` keyword used as logical negation (prefer `!`).
+            if i + 3 <= len && &bytes[i..i + 3] == b"not" {
+                let before_ok = i == 0 || !is_ident_char(bytes[i - 1]);
+                let after_ok  = i + 3 >= len || !is_ident_char(bytes[i + 3]);
+                if before_ok && after_ok {
+                    hints.push((Some(ln), "style",
+                        format!("use `!` instead of `not` keyword (col {})", i + 1)));
+                }
+            }
+
+            // Detect deprecated `to_str(` alias (prefer `to_string()`).
+            if i + 7 <= len && &bytes[i..i + 7] == b"to_str(" {
+                hints.push((Some(ln), "deprecated",
+                    format!("`to_str()` is deprecated; use `to_string()` (col {})", i + 1)));
+            }
+
+            i += 1;
+        }
+    }
+    hints
+}
+
+/// AST-level lint: walk the statement tree looking for structural issues.
+fn lint_ast_stmts(stmts: &[Statement], in_fn: Option<&str>, hints: &mut Vec<LintHint>) {
+    for stmt in stmts {
+        match stmt {
+            Statement::FunctionDef { name, body, .. } => {
+                if let Some(outer) = in_fn {
+                    hints.push((None, "nested-fn",
+                        format!("fn `{}` is defined inside `{}` — move to top level", name, outer)));
+                }
+                lint_ast_stmts(body, Some(name.as_str()), hints);
+            }
+            Statement::If { then_body, elif_parts, else_body, .. } => {
+                lint_ast_stmts(then_body, in_fn, hints);
+                for (_, body) in elif_parts { lint_ast_stmts(body, in_fn, hints); }
+                if let Some(b) = else_body { lint_ast_stmts(b, in_fn, hints); }
+            }
+            Statement::While { body, .. } | Statement::For { body, .. } =>
+                lint_ast_stmts(body, in_fn, hints),
+            Statement::Try { body, handler, finally, .. } => {
+                lint_ast_stmts(body, in_fn, hints);
+                lint_ast_stmts(handler, in_fn, hints);
+                if let Some(f) = finally { lint_ast_stmts(f, in_fn, hints); }
+            }
+            Statement::ClassDef { methods, .. } => {
+                for m in methods {
+                    if let Statement::FunctionDef { name: mn, body, .. } = m {
+                        lint_ast_stmts(body, Some(mn.as_str()), hints);
+                    }
+                }
+            }
+            Statement::Match { arms, .. } => {
+                for arm in arms { lint_ast_stmts(&arm.body, in_fn, hints); }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// `--check`: parse, run heal_ast_until_fixpoint, run static lint rules,
+/// print all issues to stdout, never execute. Exit code 1 if any issues
+/// (including lint hints), 0 if clean. Useful for CI / pre-commit hooks.
 fn check_program(path: &str) -> i32 {
     let content = match fs::read_to_string(path) {
         Ok(c) => c,
@@ -950,17 +1067,29 @@ fn check_program(path: &str) -> i32 {
         Err(e) => { eprintln!("parse error: {}", e); return 1; }
     };
     let interpreter = Interpreter::new();
-    let (_healed, diagnostics, iters, outcome) =
+    let (healed, diagnostics, iters, outcome) =
         interpreter.heal_ast_until_fixpoint(statements, 5);
-    if diagnostics.is_empty() {
+
+    let mut lint = lint_source(&content);
+    lint_ast_stmts(&healed, None, &mut lint);
+
+    let total = diagnostics.len() + lint.len();
+    if total == 0 {
         println!("{}: clean ({} iteration{})", path, iters,
                  if iters == 1 { "" } else { "s" });
         return 0;
     }
-    println!("{}: {} diagnostic(s) over {} iteration(s) ({})",
-             path, diagnostics.len(), iters, outcome);
+    println!("{}: {} issue(s) ({} heal, {} lint) — {} iteration(s) ({})",
+             path, total, diagnostics.len(), lint.len(), iters, outcome);
     for d in &diagnostics {
-        println!("  {}", d);
+        println!("  heal: {}", d);
+    }
+    for (line, kind, msg) in &lint {
+        if let Some(ln) = line {
+            println!("  {}:{}: [{}] {}", path, ln, kind, msg);
+        } else {
+            println!("  {}: [{}] {}", path, kind, msg);
+        }
     }
     1
 }
