@@ -6,6 +6,7 @@ OMC is built around **φ** (the golden ratio) and a canonical 40-entry Fibonacci
 
 [![Latest release](https://img.shields.io/github/v/release/RandomCoder-lab/OMC?label=latest&color=blue)](https://github.com/RandomCoder-lab/OMC/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![SafeSkill 89/100](https://img.shields.io/badge/SafeSkill-89%2F100_Passes%20with%20Notes-yellow)](https://safeskill.dev/scan/randomcoder-lab-omc)
 
 ---
 
