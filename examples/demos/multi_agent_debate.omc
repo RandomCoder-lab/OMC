@@ -1,0 +1,90 @@
+# multi_agent_debate.omc — agents argue a topic, judge selects the winner
+#
+# Pattern:
+#   1. Decompose topic into FOR/AGAINST positions
+#   2. Run N debate rounds via batch_llm_call
+#   3. Judge evaluates all arguments and picks winner
+#   4. Report verdict + confidence
+
+fn build_debater_prompt(position, topic, round, prior_args) {
+    h sys = str_concat("You are a rigorous debater arguing the ", position, " side. Be concise, logical, and make exactly 2 strong points.")
+    h prompt = str_concat(
+        "Topic: ", topic,
+        "\nYour position: ", position,
+        "\nRound: ", to_str(round)
+    )
+    if arr_len(prior_args) > 0 {
+        prompt = str_concat(prompt, "\nPrior arguments:\n", arr_join(prior_args, "\n"))
+    }
+    prompt = str_concat(prompt, "\n\nMake your 2 best arguments for the ", position, " side.")
+    return {prompt: prompt, system: sys}
+}
+
+fn judge_debate(topic, for_args, against_args) {
+    h sys = "You are an impartial judge. Evaluate the quality of arguments on both sides. Respond in JSON: {winner: 'FOR'|'AGAINST', confidence: 1-10, reasoning: '...'}"
+    h combined_for = arr_join(for_args, "\n---\n")
+    h combined_against = arr_join(against_args, "\n---\n")
+    h prompt = str_concat(
+        "Topic: ", topic,
+        "\n\nFOR arguments:\n", combined_for,
+        "\n\nAGAINST arguments:\n", combined_against,
+        "\n\nWho made the stronger case? Reply with JSON only."
+    )
+    h raw = llm_call(prompt, null, sys)
+    return json_extract(raw)
+}
+
+fn run_debate(topic, rounds) {
+    print(str_concat("=== Debate: ", topic, " ==="))
+    print(str_concat("Rounds: ", to_str(rounds)))
+    print("")
+
+    h for_args = []
+    h against_args = []
+
+    h round = 0
+    while round < rounds {
+        print(str_concat("--- Round ", to_str(round + 1), " ---"))
+
+        h for_prompt = build_debater_prompt("FOR", topic, round + 1, against_args)
+        h against_prompt = build_debater_prompt("AGAINST", topic, round + 1, for_args)
+
+        h responses = batch_llm_call([for_prompt, against_prompt])
+
+        h for_arg = responses[0]
+        h against_arg = responses[1]
+
+        arr_push(for_args, str_concat("[FOR R", to_str(round + 1), "] ", for_arg))
+        arr_push(against_args, str_concat("[AGAINST R", to_str(round + 1), "] ", against_arg))
+
+        print(str_concat("FOR: ", str_slice(for_arg, 0, 100), "..."))
+        print(str_concat("AGAINST: ", str_slice(against_arg, 0, 100), "..."))
+        print("")
+
+        round = round + 1
+    }
+
+    print("=== JUDGING ===")
+    h verdict = judge_debate(topic, for_args, against_args)
+    if verdict == null {
+        print("Judge could not parse verdict")
+        return null
+    }
+    h winner = verdict["winner"]
+    h confidence = verdict["confidence"]
+    h reasoning = verdict["reasoning"]
+    print(str_concat("Winner: ", to_str(winner)))
+    print(str_concat("Confidence: ", to_str(confidence), "/10"))
+    print(str_concat("Reasoning: ", to_str(reasoning)))
+    return verdict
+}
+
+# ── Debate 1: AI regulation ──────────────────────────────────────────────────
+h result1 = run_debate("AI systems should be regulated like pharmaceutical drugs", 2)
+print("")
+
+# ── Debate 2: Remote work ────────────────────────────────────────────────────
+h result2 = run_debate("Remote work is better than office work for productivity", 2)
+print("")
+
+print("=== Debate series complete ===")

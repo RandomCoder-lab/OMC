@@ -46,9 +46,25 @@ use std::collections::BTreeMap;
 /// `model` overrides `LLM_MODEL` for this call only.
 #[cfg(feature = "native-llm")]
 pub fn llm_call(prompt: &str, model_override: Option<&str>) -> Result<Value, String> {
+    llm_call_sys(prompt, model_override, None)
+}
+
+pub fn llm_call_sys(
+    prompt: &str,
+    model_override: Option<&str>,
+    system: Option<&str>,
+) -> Result<Value, String> {
     let cfg = Config::from_env()?;
     let model = model_override.unwrap_or(&cfg.model).to_string();
-    let reply = cfg.provider.complete_single(&cfg, &model, prompt)?;
+    let reply = if let Some(sys) = system {
+        let msgs = vec![
+            ChatMessage { role: "system".to_string(), content: sys.to_string() },
+            ChatMessage { role: "user".to_string(), content: prompt.to_string() },
+        ];
+        cfg.provider.complete_chat(&cfg, &model, &msgs)?
+    } else {
+        cfg.provider.complete_single(&cfg, &model, prompt)?
+    };
     Ok(Value::String(reply))
 }
 
@@ -63,6 +79,17 @@ pub fn llm_chat(messages: &[ChatMessage], model_override: Option<&str>) -> Resul
     let model = model_override.unwrap_or(&cfg.model).to_string();
     let reply = cfg.provider.complete_chat(&cfg, &model, messages)?;
     Ok(Value::String(reply))
+}
+
+/// `llm_system(prompt, system, model?) -> string`
+///
+/// Convenience wrapper for llm_call with a system prompt.
+pub fn llm_system(
+    prompt: &str,
+    system: &str,
+    model_override: Option<&str>,
+) -> Result<Value, String> {
+    llm_call_sys(prompt, model_override, Some(system))
 }
 
 /// `batch_llm_call(prompts, model?, concurrency?) -> string[]`
@@ -802,6 +829,15 @@ pub fn substrate_embed(text: &str, dims: usize) -> Value {
 /// Stub: `llm_call` requires the `native-llm` Cargo feature.
 #[cfg(not(feature = "native-llm"))]
 pub fn llm_call(_prompt: &str, _model_override: Option<&str>) -> Result<Value, String> {
+    Err("llm_call: recompile with --features native-llm".to_string())
+}
+
+#[cfg(not(feature = "native-llm"))]
+pub fn llm_call_sys(
+    _prompt: &str,
+    _model_override: Option<&str>,
+    _system: Option<&str>,
+) -> Result<Value, String> {
     Err("llm_call: recompile with --features native-llm".to_string())
 }
 

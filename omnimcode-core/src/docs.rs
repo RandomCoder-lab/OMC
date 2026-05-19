@@ -1340,6 +1340,19 @@ pub const BUILTINS: &[BuiltinDoc] = &[
         unique_to_omc: true,
     },
     BuiltinDoc {
+        name: "llm_system", category: "llm_workflow",
+        signature: "(prompt: string, system: string, model?: string) -> string",
+        description: concat!(
+            "Convenience wrapper for a single user prompt with a system instruction. ",
+            "Equivalent to `llm_call(prompt, model, system)` or calling `llm_chat` with a system message prepended. ",
+            "Model defaults to the active provider default (claude-3-5-haiku-latest for Anthropic). ",
+            "Reads ANTHROPIC_API_KEY or OPENAI_API_KEY from environment."
+        ),
+        example: r#"h answer = llm_system("List 3 Fibonacci numbers", "You are a concise math tutor. Reply in one sentence.")
+print(answer)"#,
+        unique_to_omc: true,
+    },
+    BuiltinDoc {
         name: "llm_tools", category: "llm_workflow",
         signature: "(messages: dict[], tools: dict[], model?: string) -> dict",
         description: concat!(

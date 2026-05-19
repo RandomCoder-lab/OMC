@@ -2227,10 +2227,10 @@ impl Interpreter {
             | "re_match" | "re_find" | "re_find_all" | "re_replace" | "re_split"
             | "json_parse" | "json_stringify" | "json_extract" | "str_format"
             | "sha256" | "sha512" | "base64_encode" | "base64_decode"
-            // LLM builtins (Anthropic API)
-            | "llm_call" | "llm_chat" | "llm_embed"
-            | "batch_llm_call" | "batch_llm_chat"
+            // LLM builtins
+            | "llm_call" | "llm_chat" | "llm_embed" | "llm_models" | "llm_system"
             | "llm_tools" | "substrate_embed"
+            | "batch_llm_call" | "batch_llm_chat"
             // HTTP builtins
             | "http_get" | "http_post" | "http_post_json" | "http_put" | "http_delete"
             | "now_iso" | "now_unix" | "format_time" | "parse_time"
@@ -2342,14 +2342,8 @@ impl Interpreter {
             | "arr_enumerate" | "arr_window"
             // Meta-evaluation
             | "eval_omc" | "eval_omc_fresh" | "eval_omc_ctx" | "omc_source"
-            // Native LLM builtins
-            | "llm_call" | "llm_chat" | "llm_embed" | "llm_models"
-            | "batch_llm_call" | "batch_llm_chat"
-            | "llm_tools" | "substrate_embed"
             // Process execution builtins
             | "omc_spawn" | "omc_pipe"
-            // Native HTTP builtins
-            | "http_get" | "http_post" | "http_post_json" | "http_put" | "http_delete"
         )
     }
 
@@ -3632,6 +3626,9 @@ impl Interpreter {
             //   returns the assistant's text reply as a String.
             //   Model defaults to "claude-3-5-haiku-latest".
             //   Reads API key from env var ANTHROPIC_API_KEY.
+            // NOTE: cfg-gated so modern native-llm arms at the bottom fire when
+            //       llm-builtins is not in the feature set (default build).
+            #[cfg(feature = "llm-builtins")]
             "llm_call" => {
                 #[cfg(feature = "llm-builtins")]
                 {
@@ -3687,6 +3684,7 @@ impl Interpreter {
             //   Multi-turn chat. `messages` is an OMC array of dicts, each with
             //   keys "role" ("user" | "assistant") and "content" (String).
             //   Returns the assistant's reply String.
+            #[cfg(feature = "llm-builtins")]
             "llm_chat" => {
                 #[cfg(feature = "llm-builtins")]
                 {
@@ -3767,6 +3765,7 @@ impl Interpreter {
             //   the voyage-3-lite model. If VOYAGE_API_KEY is not set and
             //   ANTHROPIC_API_KEY is not set, returns an error.
             //   Model defaults to "voyage-3-lite".
+            #[cfg(feature = "llm-builtins")]
             "llm_embed" => {
                 #[cfg(feature = "llm-builtins")]
                 {
@@ -9515,11 +9514,22 @@ impl Interpreter {
                 }
                 let prompt = self.eval_expr(&args[0])?.to_display_string();
                 let model = if args.len() > 1 {
-                    Some(self.eval_expr(&args[1])?.to_display_string())
+                    match self.eval_expr(&args[1])? {
+                        Value::Null => None,
+                        v => Some(v.to_display_string()),
+                    }
                 } else {
                     None
                 };
-                crate::llm_builtins::llm_call(&prompt, model.as_deref())
+                let system = if args.len() > 2 {
+                    match self.eval_expr(&args[2])? {
+                        Value::Null => None,
+                        v => Some(v.to_display_string()),
+                    }
+                } else {
+                    None
+                };
+                crate::llm_builtins::llm_call_sys(&prompt, model.as_deref(), system.as_deref())
             }
             #[cfg(feature = "native-llm")]
             "llm_chat" => {
@@ -9548,6 +9558,21 @@ impl Interpreter {
                 };
                 let floats = crate::llm_builtins::llm_embed(&text, model.as_deref())?;
                 Ok(floats)
+            }
+            // llm_system(prompt, system, model?) -> string
+            //   Convenience: send a user prompt with a system instruction in one call.
+            "llm_system" => {
+                if args.len() < 2 {
+                    return Err("llm_system requires (prompt, system, model?)".to_string());
+                }
+                let prompt = self.eval_expr(&args[0])?.to_display_string();
+                let system = self.eval_expr(&args[1])?.to_display_string();
+                let model = if args.len() > 2 {
+                    Some(self.eval_expr(&args[2])?.to_display_string())
+                } else {
+                    None
+                };
+                crate::llm_builtins::llm_system(&prompt, &system, model.as_deref())
             }
             // llm_models() -> dict[]
             //   Returns the list of models available from the active provider.
