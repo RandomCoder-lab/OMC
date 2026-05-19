@@ -188,6 +188,7 @@ fn collect_expr_calls(e: &Expression, out: &mut BTreeSet<String>) {
         Expression::Array(items) => for i in items { collect_expr_calls(i, out); }
         Expression::Dict(pairs) => for (k, v) in pairs { collect_expr_calls(k, out); collect_expr_calls(v, out); }
         Expression::Index { index, .. } => collect_expr_calls(index, out),
+        Expression::ChainedIndex { object, index } => { collect_expr_calls(object, out); collect_expr_calls(index, out); }
         Expression::Add(a, b) | Expression::Sub(a, b) | Expression::Mul(a, b) | Expression::Div(a, b) | Expression::Mod(a, b)
         | Expression::Eq(a, b) | Expression::Ne(a, b) | Expression::Lt(a, b) | Expression::Le(a, b) | Expression::Gt(a, b) | Expression::Ge(a, b)
         | Expression::And(a, b) | Expression::Or(a, b)
@@ -290,6 +291,7 @@ pub fn ast_size(source: &str) -> Result<i64, String> {
             Expression::Array(items) => for i in items { walk_e(i, count); }
             Expression::Dict(pairs) => for (k, v) in pairs { walk_e(k, count); walk_e(v, count); }
             Expression::Index { index, .. } => walk_e(index, count),
+            Expression::ChainedIndex { object, index } => { walk_e(object, count); walk_e(index, count); }
             Expression::Add(a, b) | Expression::Sub(a, b) | Expression::Mul(a, b) | Expression::Div(a, b) | Expression::Mod(a, b)
             | Expression::Eq(a, b) | Expression::Ne(a, b) | Expression::Lt(a, b) | Expression::Le(a, b) | Expression::Gt(a, b) | Expression::Ge(a, b)
             | Expression::And(a, b) | Expression::Or(a, b)

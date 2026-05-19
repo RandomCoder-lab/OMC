@@ -1,0 +1,148 @@
+# Tests for substrate_embed, str_similarity, sleep, file_ls, omc_eval_file
+# Run with: omc --test examples/tests/test_substrate_embed_builtins.omc
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(str_concat(msg, ": expected ", to_string(expected), " got ", to_string(actual)));
+    }
+}
+
+fn assert_true(cond, msg) {
+    if !cond { test_record_failure(msg); }
+}
+
+fn assert_false(cond, msg) {
+    if cond { test_record_failure(msg); }
+}
+
+fn assert_near(a, b, tol, msg) {
+    h diff = a - b
+    if diff < 0.0 { diff = 0.0 - diff }
+    if diff > tol { test_record_failure(str_concat(msg, ": |", to_string(a), " - ", to_string(b), "| > ", to_string(tol))); }
+}
+
+# ── substrate_embed ───────────────────────────────────────────────────────────
+
+fn test_substrate_embed_returns_array() {
+    h v = substrate_embed("hello world", 16)
+    assert_eq(type_of(v), "array", "substrate_embed returns array")
+}
+
+fn test_substrate_embed_correct_dims() {
+    h v = substrate_embed("test", 8)
+    assert_eq(arr_len(v), 8, "substrate_embed respects dims arg")
+}
+
+fn test_substrate_embed_normalized() {
+    h v = substrate_embed("normalize me", 16)
+    h dot = 0.0
+    h i = 0
+    while i < arr_len(v) {
+        h x = v[i]
+        dot = dot + x * x
+        i = i + 1
+    }
+    assert_near(dot, 1.0, 0.01, "substrate_embed is L2-normalized")
+}
+
+fn test_substrate_embed_deterministic() {
+    h a = substrate_embed("hello", 8)
+    h b = substrate_embed("hello", 8)
+    h match_all = true
+    h i = 0
+    while i < arr_len(a) {
+        if a[i] != b[i] { match_all = false }
+        i = i + 1
+    }
+    assert_true(match_all, "substrate_embed is deterministic")
+}
+
+fn test_substrate_embed_differs_for_different_texts() {
+    h a = substrate_embed("apple", 8)
+    h b = substrate_embed("orange", 8)
+    h same = true
+    h i = 0
+    while i < arr_len(a) {
+        if a[i] != b[i] { same = false }
+        i = i + 1
+    }
+    assert_false(same, "substrate_embed differs for different texts")
+}
+
+# ── str_similarity ─────────────────────────────────────────────────────────────
+
+fn test_str_similarity_self_is_one() {
+    h sim = str_similarity("hello world", "hello world")
+    assert_near(sim, 1.0, 0.01, "str_similarity of identical strings is ~1.0")
+}
+
+fn test_str_similarity_in_range() {
+    h sim = str_similarity("apple", "orange")
+    assert_true(sim >= -1.0, "str_similarity >= -1")
+    assert_true(sim <= 1.0, "str_similarity <= 1")
+}
+
+fn test_str_similarity_symmetric() {
+    h s1 = str_similarity("hello world", "world hello")
+    h s2 = str_similarity("world hello", "hello world")
+    assert_near(s1, s2, 0.001, "str_similarity is symmetric")
+}
+
+# ── sleep ─────────────────────────────────────────────────────────────────────
+
+fn test_sleep_returns_null() {
+    h result = sleep(0)
+    assert_eq(result, null, "sleep(0) returns null")
+}
+
+fn test_sleep_short_delay() {
+    h t0 = now_ms()
+    sleep(50)
+    h t1 = now_ms()
+    h elapsed = t1 - t0
+    assert_true(elapsed >= 40, "sleep(50) waits at least ~40ms")
+}
+
+# ── file_ls ───────────────────────────────────────────────────────────────────
+
+fn test_file_ls_returns_array() {
+    h files = file_ls("examples/tests")
+    assert_eq(type_of(files), "array", "file_ls returns array")
+}
+
+fn test_file_ls_nonempty() {
+    h files = file_ls("examples/tests")
+    assert_true(arr_len(files) > 0, "file_ls finds files in examples/tests")
+}
+
+fn test_file_ls_contains_known_file() {
+    h files = file_ls("examples/tests")
+    h found = false
+    h i = 0
+    while i < arr_len(files) {
+        if files[i] == "test_substrate_embed_builtins.omc" { found = true }
+        i = i + 1
+    }
+    assert_true(found, "file_ls finds this test file itself")
+}
+
+fn test_file_ls_sorted() {
+    h files = file_ls("examples/tests")
+    h sorted = true
+    h i = 1
+    while i < arr_len(files) {
+        if files[i] < files[i - 1] { sorted = false }
+        i = i + 1
+    }
+    assert_true(sorted, "file_ls returns sorted results")
+}
+
+# ── omc_eval_file ─────────────────────────────────────────────────────────────
+
+fn test_omc_eval_file_loads_functions() {
+    omc_eval_file("examples/lib/cache.omc")
+    h cache = lru_new(10)
+    lru_put(cache, "key", "value")
+    h got = lru_get(cache, "key")
+    assert_eq(got, "value", "omc_eval_file loads lib file and makes functions available")
+}

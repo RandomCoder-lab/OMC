@@ -318,7 +318,7 @@ impl Compiler {
                     }
                 })
             }
-            Expression::Index { .. } => None,
+            Expression::Index { .. } | Expression::ChainedIndex { .. } => None,
             // H.5: `safe <expr>` evaluates to the same type as the inner
             // expression after self-healing dispatch. For Div the result is
             // int-or-float same as Div itself; for arr_get/arr_set the
@@ -385,6 +385,11 @@ impl Compiler {
             }
             Expression::Index { name, index } => {
                 self.emit(Op::LoadVar(name.clone()));
+                self.compile_expr(index)?;
+                self.emit(Op::ArrayIndex);
+            }
+            Expression::ChainedIndex { object, index } => {
+                self.compile_expr(object)?;
                 self.compile_expr(index)?;
                 self.emit(Op::ArrayIndex);
             }
@@ -825,6 +830,10 @@ impl Compiler {
                 self.compile_expr(value)?;
                 self.compile_expr(index)?;
                 self.emit(Op::ArrayIndexAssign(name.clone()));
+            }
+            Statement::ChainedIndexAssignment { .. } => {
+                // Fall through to interpreter for chained index assignment.
+                return Err("ChainedIndexAssignment: not supported in bytecode VM, use tree-walk".to_string());
             }
             Statement::If {
                 condition,

@@ -792,6 +792,12 @@ impl Parser {
         }
     }
 
+    fn eat_semi(&mut self) {
+        if self.current() == Token::Semicolon {
+            self.advance();
+        }
+    }
+
     pub fn parse(&mut self) -> Result<Vec<Statement>, String> {
         let mut statements = Vec::new();
         
@@ -889,7 +895,7 @@ impl Parser {
                     let size_expr = self.parse_expression()?;
                     self.expect(Token::RBracket)?;
                     let name = self.parse_ident()?;
-                    self.expect(Token::Semicolon)?;
+                    self.eat_semi();
                     return Ok(Statement::VarDecl {
                         name,
                         value: Expression::Call {
@@ -903,7 +909,7 @@ impl Parser {
                 let name = self.parse_ident()?;
                 self.expect(Token::Eq)?;
                 let value = self.parse_expression()?;
-                self.expect(Token::Semicolon)?;
+                self.eat_semi();
                 Ok(Statement::VarDecl {
                     name,
                     value,
@@ -923,7 +929,7 @@ impl Parser {
                 // error handler (which prints + exits the program).
                 self.advance(); // consume `throw`
                 let expr = self.parse_expression()?;
-                self.expect(Token::Semicolon)?;
+                self.eat_semi();
                 Ok(Statement::Throw(expr))
             }
             Token::Yield => {
@@ -932,7 +938,7 @@ impl Parser {
                 // that the call boundary turns into a Value::Array.
                 self.advance();
                 let expr = self.parse_expression()?;
-                self.expect(Token::Semicolon)?;
+                self.eat_semi();
                 Ok(Statement::Yield(expr))
             }
             Token::Match => self.parse_match_stmt(),
@@ -961,7 +967,7 @@ impl Parser {
                 } else {
                     None
                 };
-                self.expect(Token::Semicolon)?;
+                self.eat_semi();
                 Ok(Statement::Import { module, alias, selected: None })
             }
             // Selective import: `from "path" import name1, name2;`.
@@ -987,7 +993,7 @@ impl Parser {
                     self.advance();
                     names.push(self.parse_ident()?);
                 }
-                self.expect(Token::Semicolon)?;
+                self.eat_semi();
                 Ok(Statement::Import {
                     module,
                     alias: None,
@@ -1001,18 +1007,18 @@ impl Parser {
                     Ok(Statement::Return(None))
                 } else {
                     let expr = self.parse_expression()?;
-                    self.expect(Token::Semicolon)?;
+                    self.eat_semi();
                     Ok(Statement::Return(Some(expr)))
                 }
             }
             Token::Break => {
                 self.advance();
-                self.expect(Token::Semicolon)?;
+                self.eat_semi();
                 Ok(Statement::Break)
             }
             Token::Continue => {
                 self.advance();
-                self.expect(Token::Semicolon)?;
+                self.eat_semi();
                 Ok(Statement::Continue)
             }
             Token::Print => {
@@ -1020,7 +1026,7 @@ impl Parser {
                 self.expect(Token::LParen)?;
                 let expr = self.parse_expression()?;
                 self.expect(Token::RParen)?;
-                self.expect(Token::Semicolon)?;
+                self.eat_semi();
                 Ok(Statement::Print(expr))
             }
             Token::Ident(_) => {
@@ -1032,7 +1038,7 @@ impl Parser {
                     Token::Eq => {
                         self.advance();
                         let value = self.parse_expression()?;
-                        self.expect(Token::Semicolon)?;
+                        self.eat_semi();
                         Ok(Statement::Assignment {
                             name: ident,
                             value,
@@ -1048,7 +1054,7 @@ impl Parser {
                         let op = self.current();
                         self.advance();
                         let rhs = self.parse_expression()?;
-                        self.expect(Token::Semicolon)?;
+                        self.eat_semi();
                         let lhs = Expression::Variable(ident.clone());
                         let value = match op {
                             Token::PlusEq => Expression::Add(Box::new(lhs), Box::new(rhs)),
@@ -1061,12 +1067,9 @@ impl Parser {
                         Ok(Statement::Assignment { name: ident, value })
                     }
                     Token::LBracket => {
-                        // Could be `arr[idx] = value;` (IndexAssignment) or
-                        // `arr[idx];` / `arr[idx] + 1;` (expression statement).
-                        // Distinguish by what follows the `]`. If `=`, it's
-                        // an assignment; otherwise rewind and re-parse as
-                        // an expression statement so dict / array indexing
-                        // works in expression position too.
+                        // Could be `arr[idx] = value;` (IndexAssignment),
+                        // `arr[idx][idx2] = value` (ChainedIndexAssignment),
+                        // or `arr[idx];` / `arr[idx] + 1;` (expression statement).
                         let pre_lbracket = checkpoint.clone();
                         self.advance();
                         let index = self.parse_expression()?;
@@ -1074,18 +1077,39 @@ impl Parser {
                         if self.current() == Token::Eq {
                             self.advance();
                             let value = self.parse_expression()?;
-                            self.expect(Token::Semicolon)?;
+                            self.eat_semi();
                             Ok(Statement::IndexAssignment {
                                 name: ident,
                                 index,
                                 value,
                             })
+                        } else if self.current() == Token::LBracket {
+                            // Chained: ident[idx][idx2] = value or expression
+                            let pre_chain = self.tokens.clone();
+                            self.advance();
+                            let index2 = self.parse_expression()?;
+                            self.expect(Token::RBracket)?;
+                            if self.current() == Token::Eq {
+                                self.advance();
+                                let value = self.parse_expression()?;
+                                self.eat_semi();
+                                Ok(Statement::ChainedIndexAssignment {
+                                    name: ident,
+                                    first_index: index,
+                                    second_index: index2,
+                                    value,
+                                })
+                            } else {
+                                self.tokens = pre_lbracket;
+                                let expr = self.parse_expression()?;
+                                self.eat_semi();
+                                Ok(Statement::Expression(expr))
+                            }
                         } else {
-                            // Rewind and treat the whole thing as an
-                            // expression statement.
+                            // Rewind and treat the whole thing as an expression.
                             self.tokens = pre_lbracket;
                             let expr = self.parse_expression()?;
-                            self.expect(Token::Semicolon)?;
+                            self.eat_semi();
                             Ok(Statement::Expression(expr))
                         }
                     }
@@ -1093,14 +1117,14 @@ impl Parser {
                         // Parse as expression statement
                         self.tokens = checkpoint;
                         let expr = self.parse_expression()?;
-                        self.expect(Token::Semicolon)?;
+                        self.eat_semi();
                         Ok(Statement::Expression(expr))
                     }
                 }
             }
             _ => {
                 let expr = self.parse_expression()?;
-                self.expect(Token::Semicolon)?;
+                self.eat_semi();
                 Ok(Statement::Expression(expr))
             }
         }
@@ -1206,7 +1230,7 @@ impl Parser {
                 // positional ordering matches the constructor's
                 // parameter list.
                 let f = self.parse_ident()?;
-                self.expect(Token::Semicolon)?;
+                self.eat_semi();
                 fields.push(f);
             }
         }
@@ -1924,10 +1948,21 @@ impl Parser {
                 self.advance();
                 let index = self.parse_expression()?;
                 self.expect(Token::RBracket)?;
-                Ok(Expression::Index {
+                let mut expr = Expression::Index {
                     name,
                     index: Box::new(index),
-                })
+                };
+                // Handle chained indexing: a["b"][c]["d"] etc.
+                while self.current() == Token::LBracket {
+                    self.advance();
+                    let next_index = self.parse_expression()?;
+                    self.expect(Token::RBracket)?;
+                    expr = Expression::ChainedIndex {
+                        object: Box::new(expr),
+                        index: Box::new(next_index),
+                    };
+                }
+                Ok(expr)
             }
             _ => Ok(Expression::Variable(name)),
         }
@@ -1956,7 +1991,21 @@ impl Parser {
         self.expect(Token::LBrace)?;
         let mut pairs = Vec::new();
         while self.current() != Token::RBrace {
-            let key = self.parse_expression()?;
+            // Bare ident followed by colon → treat as string key (JS-style).
+            // {foo: val} means key "foo", not variable foo.
+            let key = if let Token::Ident(s) = self.current() {
+                let s = s.clone();
+                let saved = self.tokens.clone();
+                self.advance();
+                if self.current() == Token::Colon {
+                    Expression::String(s)
+                } else {
+                    self.tokens = saved;
+                    self.parse_expression()?
+                }
+            } else {
+                self.parse_expression()?
+            };
             self.expect(Token::Colon)?;
             let val = self.parse_expression()?;
             pairs.push((key, val));

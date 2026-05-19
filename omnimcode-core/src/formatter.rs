@@ -70,6 +70,16 @@ fn format_stmt(stmt: &Statement, level: usize, out: &mut String) {
             format_expr(value, out);
             out.push_str(";\n");
         }
+        Statement::ChainedIndexAssignment { name, first_index, second_index, value } => {
+            out.push_str(name);
+            out.push('[');
+            format_expr(first_index, out);
+            out.push_str("][");
+            format_expr(second_index, out);
+            out.push_str("] = ");
+            format_expr(value, out);
+            out.push_str(";\n");
+        }
         Statement::If { condition, then_body, elif_parts, else_body } => {
             out.push_str("if ");
             format_expr(condition, out);
@@ -296,6 +306,12 @@ fn format_expr(expr: &Expression, out: &mut String) {
         Expression::Variable(name) => out.push_str(name),
         Expression::Index { name, index } => {
             out.push_str(name);
+            out.push('[');
+            format_expr(index, out);
+            out.push(']');
+        }
+        Expression::ChainedIndex { object, index } => {
+            format_expr(object, out);
             out.push('[');
             format_expr(index, out);
             out.push(']');

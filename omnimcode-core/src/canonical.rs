@@ -179,6 +179,14 @@ fn rename_stmt(stmt: &Statement, scope: &mut Scope) -> Statement {
                 value: new_value,
             }
         }
+        Statement::ChainedIndexAssignment { name, first_index, second_index, value } => {
+            Statement::ChainedIndexAssignment {
+                name: scope.resolve(name),
+                first_index: rename_expr(first_index, scope),
+                second_index: rename_expr(second_index, scope),
+                value: rename_expr(value, scope),
+            }
+        }
         Statement::If { condition, then_body, elif_parts, else_body } => {
             let new_cond = rename_expr(condition, scope);
             // Each branch gets its own scope so a var declared in one
@@ -325,6 +333,10 @@ fn rename_expr(expr: &Expression, scope: &Scope) -> Expression {
         Expression::Variable(name) => Expression::Variable(scope.resolve(name)),
         Expression::Index { name, index } => Expression::Index {
             name: scope.resolve(name),
+            index: Box::new(rename_expr(index, scope)),
+        },
+        Expression::ChainedIndex { object, index } => Expression::ChainedIndex {
+            object: Box::new(rename_expr(object, scope)),
             index: Box::new(rename_expr(index, scope)),
         },
 

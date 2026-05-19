@@ -602,6 +602,9 @@ impl Transpiler {
             Expression::Index { name, index } => {
                 format!("{}[{}]", name, self.emit_expr(index))
             }
+            Expression::ChainedIndex { object, index } => {
+                format!("{}[{}]", self.emit_expr(object), self.emit_expr(index))
+            }
 
             // arithmetic
             Expression::Add(l, r) => format!("({} + {})",  self.emit_expr(l), self.emit_expr(r)),

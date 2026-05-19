@@ -865,6 +865,10 @@ impl Interpreter {
                 name,
                 index: Box::new(Self::rewrite_call_expr(*index, module_names, alias)),
             },
+            Expression::ChainedIndex { object, index } => Expression::ChainedIndex {
+                object: Box::new(Self::rewrite_call_expr(*object, module_names, alias)),
+                index: Box::new(Self::rewrite_call_expr(*index, module_names, alias)),
+            },
             Expression::Resonance(e) => Expression::Resonance(Box::new(
                 Self::rewrite_call_expr(*e, module_names, alias),
             )),
@@ -1434,6 +1438,10 @@ impl Interpreter {
                     index: Box::new(healed_index),
                 }
             }
+            Expression::ChainedIndex { object, index } => Expression::ChainedIndex {
+                object: Box::new(Self::heal_expr(*object, defined, arities, diags)),
+                index: Box::new(Self::heal_expr(*index, defined, arities, diags)),
+            },
             // Variable-position typo. Mirrors the call-site typo logic
             // (substrate-bucketed close-name lookup), but fires when a
             // bare identifier is referenced rather than called. Only
@@ -1537,14 +1545,56 @@ impl Interpreter {
                 index,
                 value,
             } => {
-                let idx = self.eval_expr(index)?.to_int() as usize;
+                let idx_v = self.eval_expr(index)?;
                 let val = self.eval_expr(value)?;
-                
-                if let Some(Value::Array(arr)) = self.get_var(name) {
-                    let mut items = arr.items.borrow_mut();
-                    if idx < items.len() {
-                        items[idx] = val;
+                match self.get_var(name) {
+                    Some(Value::Array(arr)) => {
+                        let len = arr.items.borrow().len() as i64;
+                        let raw = idx_v.to_int();
+                        let resolved = if raw < 0 { (len + raw) as usize } else { raw as usize };
+                        let mut items = arr.items.borrow_mut();
+                        if resolved < items.len() {
+                            items[resolved] = val;
+                        }
                     }
+                    Some(Value::Dict(d)) => {
+                        let key = idx_v.to_display_string();
+                        d.borrow_mut().insert(key, val);
+                    }
+                    _ => {}
+                }
+                Ok(())
+            }
+            Statement::ChainedIndexAssignment { name, first_index, second_index, value } => {
+                let first_key = self.eval_expr(first_index)?;
+                let second_key = self.eval_expr(second_index)?;
+                let val = self.eval_expr(value)?;
+                let container = match self.get_var(name) {
+                    Some(Value::Array(arr)) => {
+                        let len = arr.items.borrow().len() as i64;
+                        let raw = first_key.to_int();
+                        let idx = if raw < 0 { (len + raw) as usize } else { raw as usize };
+                        arr.items.borrow().get(idx).cloned()
+                    }
+                    Some(Value::Dict(d)) => {
+                        let k = first_key.to_display_string();
+                        d.borrow().get(&k).cloned()
+                    }
+                    _ => None,
+                };
+                match container {
+                    Some(Value::Array(arr)) => {
+                        let len = arr.items.borrow().len() as i64;
+                        let raw = second_key.to_int();
+                        let idx = if raw < 0 { (len + raw) as usize } else { raw as usize };
+                        let mut items = arr.items.borrow_mut();
+                        if idx < items.len() { items[idx] = val; }
+                    }
+                    Some(Value::Dict(d)) => {
+                        let k = second_key.to_display_string();
+                        d.borrow_mut().insert(k, val);
+                    }
+                    _ => {}
                 }
                 Ok(())
             }
@@ -1928,6 +1978,30 @@ impl Interpreter {
                     )),
                 }
             }
+            Expression::ChainedIndex { object, index } => {
+                let idx_v = self.eval_expr(index)?;
+                let container = self.eval_expr(object)?;
+                match container {
+                    Value::Array(arr) => {
+                        let items = arr.items.borrow();
+                        let len = items.len() as i64;
+                        let raw = idx_v.to_int();
+                        let resolved = if raw < 0 { len + raw } else { raw };
+                        if resolved < 0 || resolved >= len {
+                            return Err(format!(
+                                "Index out of bounds: [{}] (length {})",
+                                raw, len
+                            ));
+                        }
+                        Ok(items[resolved as usize].clone())
+                    }
+                    Value::Dict(d) => {
+                        let key = idx_v.to_display_string();
+                        Ok(d.borrow().get(&key).cloned().unwrap_or(Value::Null))
+                    }
+                    _ => Err("Cannot index value: not an array or dict".to_string()),
+                }
+            }
             Expression::Add(l, r) => {
                 let lv = self.eval_expr(l)?;
                 let rv = self.eval_expr(r)?;
@@ -1946,7 +2020,7 @@ impl Interpreter {
                 } else if lv.is_float() || rv.is_float() {
                     Ok(Value::HFloat(lv.to_float() + rv.to_float()))
                 } else {
-                    Ok(Value::HInt(HInt::new(lv.to_int() + rv.to_int())))
+                    Ok(Value::HInt(HInt::new(lv.to_int().wrapping_add(rv.to_int()))))
                 }
             }
             Expression::Sub(l, r) => {
@@ -1955,7 +2029,7 @@ impl Interpreter {
                 if lv.is_float() || rv.is_float() {
                     Ok(Value::HFloat(lv.to_float() - rv.to_float()))
                 } else {
-                    Ok(Value::HInt(HInt::new(lv.to_int() - rv.to_int())))
+                    Ok(Value::HInt(HInt::new(lv.to_int().wrapping_sub(rv.to_int()))))
                 }
             }
             Expression::Mul(l, r) => {
@@ -1964,7 +2038,7 @@ impl Interpreter {
                 if lv.is_float() || rv.is_float() {
                     Ok(Value::HFloat(lv.to_float() * rv.to_float()))
                 } else {
-                    Ok(Value::HInt(HInt::new(lv.to_int() * rv.to_int())))
+                    Ok(Value::HInt(HInt::new(lv.to_int().wrapping_mul(rv.to_int()))))
                 }
             }
             Expression::Div(l, r) => {
@@ -2317,7 +2391,7 @@ impl Interpreter {
             // Time, sleep, conversion, introspection
             | "sleep" | "str_similarity" | "omc_eval_file"
             | "now_ms" | "to_int" | "int" | "to_float" | "float"
-            | "to_string" | "string" | "len" | "type_of" | "error"
+            | "to_string" | "to_str" | "string" | "len" | "type_of" | "error"
             | "defined_functions" | "call"
             // Introspection builtins
             | "list_defined_fns" | "fn_arity" | "fn_source" | "get_scope_vars"
@@ -3256,7 +3330,7 @@ impl Interpreter {
             // --- Type coercion ---
             "to_int" => Ok(Value::HInt(HInt::new(self.eval_expr(&args[0])?.to_int()))),
             "to_float" => Ok(Value::HFloat(self.eval_expr(&args[0])?.to_float())),
-            "to_string" => {
+            "to_string" | "to_str" => {
                 // Render the bare value, NOT the HInt-with-resonance display.
                 // This is what canonical Python OMC's to_string returns.
                 let v = self.eval_expr(&args[0])?;
@@ -4231,21 +4305,21 @@ impl Interpreter {
                 if args.len() < 2 {
                     return Err("arr_push requires (array_name, value)".to_string());
                 }
-                // Mutates by name. First arg must be a Variable reference so we can write back.
-                // Use assign_var (walks outward for existing binding) instead of
-                // set_var (always innermost) — otherwise pushes inside a closure
-                // body would land in the closure's call scope, not the captured
-                // env where the array actually lives, and the mutation would be
-                // discarded on return.
                 let val = self.eval_expr(&args[1])?;
+                // Fast path: bare variable — avoids the eval clone.
                 if let Expression::Variable(name) = &args[0] {
                     if let Some(Value::Array(arr)) = self.get_var(name) {
-                        // With Rc<RefCell> HArray, the borrow_mut hits the
-                        // shared collection — no assign_var write-back is
-                        // needed, the caller's binding sees the push.
                         arr.items.borrow_mut().push(val);
                         return Ok(Value::Null);
                     }
+                }
+                // General path: any expression that evaluates to an array.
+                // Works for arr_push(dict["key"], v) etc. because arrays are
+                // Rc-shared — pushing through the returned Rc mutates in place.
+                let arr_v = self.eval_expr(&args[0])?;
+                if let Value::Array(arr) = arr_v {
+                    arr.items.borrow_mut().push(val);
+                    return Ok(Value::Null);
                 }
                 Err("arr_push: first argument must be an array variable".to_string())
             }
@@ -13088,7 +13162,7 @@ fn vm_fast_dispatch(name: &str, args: &[Value]) -> Option<Result<Value, String>>
         ("to_float", 1) | ("float", 1) => {
             Some(Ok(Value::HFloat(args[0].to_float())))
         }
-        ("to_string", 1) | ("string", 1) => {
+        ("to_string", 1) | ("to_str", 1) | ("string", 1) => {
             Some(Ok(Value::String(args[0].to_display_string())))
         }
         // ---- println / print: handled by the Interpreter method (needs self) ----

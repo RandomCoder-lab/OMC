@@ -49,6 +49,13 @@ pub enum Statement {
         index: Expression,
         value: Expression,
     },
+    // a[key1][key2] = value — covers dict[key][subkey] and arr[i][field]
+    ChainedIndexAssignment {
+        name: String,
+        first_index: Expression,
+        second_index: Expression,
+        value: Expression,
+    },
     If {
         condition: Expression,
         then_body: Vec<Statement>,
@@ -215,6 +222,10 @@ pub enum Expression {
     Variable(String),
     Index {
         name: String,
+        index: Box<Expression>,
+    },
+    ChainedIndex {
+        object: Box<Expression>,
         index: Box<Expression>,
     },
     
