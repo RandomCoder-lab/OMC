@@ -2,7 +2,7 @@
 
 use omnimcode_core::parser::Parser;
 use omnimcode_core::interpreter::Interpreter;
-use omnimcode_core::ast::Statement;
+use omnimcode_core::ast::{Expression, Statement};
 
 use std::env;
 use std::fs;
@@ -1430,13 +1430,29 @@ fn lint_ast_stmts(stmts: &[Statement], in_fn: Option<&str>, hints: &mut Vec<Lint
                 }
                 lint_ast_stmts(body, Some(name.as_str()), hints);
             }
-            Statement::If { then_body, elif_parts, else_body, .. } => {
+            Statement::If { condition, then_body, elif_parts, else_body, .. } => {
                 // Empty then-body with a non-empty else is always better written
                 // with the condition negated: `if !cond { ... }`.
                 if then_body.is_empty() && else_body.as_ref().is_some_and(|b| !b.is_empty()) {
                     hints.push((None, "style",
                         format!("empty `if` branch with non-empty `else` in `{}` — negate the condition",
                             ctx)));
+                }
+                // Constant condition: `if true` / `if false` (true/false are Variable("true") in AST).
+                match condition {
+                    Expression::Variable(name) if name == "true" =>
+                        hints.push((None, "const-condition",
+                            format!("`if true` in `{}` — branch is always taken; remove the condition", ctx))),
+                    Expression::Variable(name) if name == "false" =>
+                        hints.push((None, "const-condition",
+                            format!("`if false` in `{}` — branch is never taken; remove the dead block", ctx))),
+                    Expression::Boolean(true) =>
+                        hints.push((None, "const-condition",
+                            format!("`if true` in `{}` — branch is always taken; remove the condition", ctx))),
+                    Expression::Boolean(false) =>
+                        hints.push((None, "const-condition",
+                            format!("`if false` in `{}` — branch is never taken; remove the dead block", ctx))),
+                    _ => {}
                 }
                 lint_ast_stmts(then_body, in_fn, hints);
                 for (_, body) in elif_parts { lint_ast_stmts(body, in_fn, hints); }
