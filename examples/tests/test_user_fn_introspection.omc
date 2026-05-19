@@ -1,0 +1,165 @@
+# Tests for user-defined-function introspection builtins.
+#
+# list_fns() / list_defined_fns()  → sorted array of user fn names
+# fn_arity(name)                   → param count or null
+# fn_source(name)                  → formatted source or null
+# get_scope_vars()                 → dict of global variables
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+
+fn assert_null(v, msg) { if v != null { test_record_failure(msg + ": expected null, got " + to_string(v)); } }
+
+# Helpers used as subjects for introspection tests below.
+
+fn add(a, b) { a + b }
+
+fn greet(name) {
+    str_concat("Hello, ", name)
+}
+
+fn no_args_fn() { 42 }
+
+fn five_args(a, b, c, d, e) { a + b + c + d + e }
+
+# ── list_fns ──────────────────────────────────────────────────────────────────
+
+fn test_list_fns_is_array() {
+    h fns = list_fns()
+    assert_true(type_of(fns) == "array", "list_fns returns array")
+}
+
+fn test_list_fns_contains_defined() {
+    h fns = list_fns()
+    h has_add = 0
+    h has_greet = 0
+    h i = 0
+    while i < arr_len(fns) {
+        if arr_get(fns, i) == "add"   { has_add = 1 }
+        if arr_get(fns, i) == "greet" { has_greet = 1 }
+        i = i + 1
+    }
+    assert_eq(has_add, 1, "list_fns contains add")
+    assert_eq(has_greet, 1, "list_fns contains greet")
+}
+
+fn test_list_fns_sorted() {
+    h fns = list_fns()
+    h sorted_ok = 1
+    h i = 1
+    while i < arr_len(fns) {
+        if arr_get(fns, i - 1) > arr_get(fns, i) { sorted_ok = 0 }
+        i = i + 1
+    }
+    assert_eq(sorted_ok, 1, "list_fns output is sorted")
+}
+
+fn test_list_fns_excludes_lambdas() {
+    # Lambdas should be hidden from list_fns.
+    h lam = fn(x) (x * 2)
+    h fns = list_fns()
+    h found_lambda = 0
+    h i = 0
+    while i < arr_len(fns) {
+        h n = arr_get(fns, i)
+        if str_starts_with(n, "__lambda") { found_lambda = 1 }
+        if str_starts_with(n, "__rt_lambda") { found_lambda = 1 }
+        i = i + 1
+    }
+    assert_eq(found_lambda, 0, "lambdas not in list_fns")
+}
+
+fn test_list_defined_fns_alias() {
+    # list_defined_fns and list_fns must return identical results.
+    h a = list_fns()
+    h b = list_defined_fns()
+    assert_eq(arr_len(a), arr_len(b), "same length")
+    h i = 0
+    while i < arr_len(a) {
+        assert_eq(arr_get(a, i), arr_get(b, i), str_concat("element ", to_string(i)))
+        i = i + 1
+    }
+}
+
+# ── fn_arity ──────────────────────────────────────────────────────────────────
+
+fn test_fn_arity_zero() {
+    assert_eq(fn_arity("no_args_fn"), 0, "no_args_fn arity 0")
+}
+
+fn test_fn_arity_one() {
+    assert_eq(fn_arity("greet"), 1, "greet arity 1")
+}
+
+fn test_fn_arity_two() {
+    assert_eq(fn_arity("add"), 2, "add arity 2")
+}
+
+fn test_fn_arity_five() {
+    assert_eq(fn_arity("five_args"), 5, "five_args arity 5")
+}
+
+fn test_fn_arity_unknown_returns_null() {
+    assert_null(fn_arity("this_fn_does_not_exist_xyzzy"), "unknown → null")
+}
+
+# ── fn_source ─────────────────────────────────────────────────────────────────
+
+fn test_fn_source_returns_string() {
+    h src = fn_source("add")
+    assert_true(type_of(src) == "string", "fn_source returns string")
+    assert_true(str_len(src) > 0, "non-empty source")
+}
+
+fn test_fn_source_contains_name() {
+    h src = fn_source("add")
+    assert_true(re_match("add", src) == 1, "source contains function name")
+}
+
+fn test_fn_source_contains_params() {
+    h src = fn_source("add")
+    assert_true(re_match("a", src) == 1 and re_match("b", src) == 1, "source contains params a and b")
+}
+
+fn test_fn_source_contains_fn_keyword() {
+    h src = fn_source("greet")
+    assert_true(re_match("fn", src) == 1, "source starts with fn keyword")
+}
+
+fn test_fn_source_unknown_returns_null() {
+    assert_null(fn_source("totally_undefined_fn_abc"), "unknown → null")
+}
+
+# ── get_scope_vars ────────────────────────────────────────────────────────────
+
+h GLOBAL_CONST = 123
+h GLOBAL_STR = "hello"
+
+fn test_get_scope_vars_returns_dict() {
+    h sv = get_scope_vars()
+    assert_true(type_of(sv) == "dict", "get_scope_vars returns dict")
+}
+
+fn test_get_scope_vars_contains_globals() {
+    h sv = get_scope_vars()
+    assert_eq(dict_get(sv, "GLOBAL_CONST"), 123, "GLOBAL_CONST visible")
+    assert_eq(dict_get(sv, "GLOBAL_STR"), "hello", "GLOBAL_STR visible")
+}
+
+fn test_get_scope_vars_excludes_double_underscore() {
+    h sv = get_scope_vars()
+    # Keys starting with __ must not appear.
+    h bad = 0
+    h keys = dict_keys(sv)
+    h i = 0
+    while i < arr_len(keys) {
+        if str_starts_with(arr_get(keys, i), "__") { bad = 1 }
+        i = i + 1
+    }
+    assert_eq(bad, 0, "no __ prefixed keys in get_scope_vars")
+}
