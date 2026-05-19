@@ -46,79 +46,44 @@ fn compute_fitness(code, test_cases) {
 
 # ── Population initialization ─────────────────────────────────────────────────
 
-fn spawn_individual(problem_description, index) {
+
+fn init_population(problem, pop_size) {
+    # Build all spawn prompts at once and fire in parallel via batch_llm_call
+    h variety_hint = ["", " Think creatively.", " Use a different algorithm.", " Optimize for readability.", " Use recursion if possible."]
     h sys = str_concat(
-        "Write an OMC function named target_fn that solves: ", problem_description, "\n",
+        "Write an OMC function named target_fn that solves: ", problem, "\n",
         "Use h for bindings, fn for functions, while for loops.\n",
         "Return ONLY the OMC code, no explanation."
     )
-    h variety_hint = ["", " Think creatively.", " Use a different algorithm.", " Optimize for readability.", " Use recursion if possible."]
-    h hint = variety_hint[index % arr_len(variety_hint)]
-    h prompt = str_concat("Write target_fn for: ", problem_description, hint)
-    h code = llm_call(prompt, MODEL, sys)
-    if str_contains(code, "```") {
-        h parts = str_split(code, "```")
-        if arr_len(parts) >= 3 { code = str_trim(parts[1]) }
-        if str_starts_with(code, "omc\n") { code = str_slice(code, 4, str_len(code)) }
-    }
-    return str_trim(code)
-}
-
-fn init_population(problem, pop_size) {
-    h population = []
+    h prompts = []
     h i = 0
     while i < pop_size {
-        print(str_concat("  Spawning individual ", to_str(i + 1), "/", to_str(pop_size)))
-        h individual = spawn_individual(problem, i)
-        arr_push(population, {code: individual, fitness: 0.0})
+        h hint = variety_hint[i % arr_len(variety_hint)]
+        h p = str_concat("Write target_fn for: ", problem, hint)
+        arr_push(prompts, {prompt: p, system: sys})
         i = i + 1
+    }
+    print(str_concat("  Spawning ", to_str(pop_size), " individuals in parallel..."))
+    h raw_codes = batch_llm_call(prompts, MODEL)
+    h population = []
+    h ci = 0
+    while ci < arr_len(raw_codes) {
+        h code = raw_codes[ci]
+        if str_contains(code, "```") {
+            h parts = str_split(code, "```")
+            if arr_len(parts) >= 3 {
+                code = str_trim(parts[1])
+                if str_starts_with(code, "omc\n") { code = str_slice(code, 4, str_len(code)) }
+            }
+        }
+        arr_push(population, {code: str_trim(code), fitness: 0.0})
+        ci = ci + 1
     }
     return population
 }
 
 # ── Genetic operators ─────────────────────────────────────────────────────────
 
-fn mutate(code, problem_description) {
-    h sys = "You write OMC code. Return ONLY code, no markdown, no explanation."
-    h mutation_types = [
-        "refactor for clarity",
-        "add input validation and edge case handling",
-        "optimize the algorithm",
-        "rewrite using a different approach",
-        "improve variable naming"
-    ]
-    h mt_idx = (str_len(code) % arr_len(mutation_types))
-    h mutation = mutation_types[mt_idx]
-    h prompt = str_concat(
-        "Mutate this OMC function (", mutation, "):\n\n",
-        code, "\n\n",
-        "The function must still solve: ", problem_description, "\n",
-        "Return only the mutated OMC code."
-    )
-    h result = llm_call(prompt, MODEL, sys)
-    if str_contains(result, "```") {
-        h parts = str_split(result, "```")
-        if arr_len(parts) >= 3 { return str_trim(parts[1]) }
-    }
-    return str_trim(result)
-}
-
-fn crossover(code_a, code_b, problem) {
-    h sys = "You write OMC code. Return ONLY code, no markdown, no explanation."
-    h prompt = str_concat(
-        "Combine the best aspects of these two OMC functions into one better implementation.\n\n",
-        "Function A:\n", code_a, "\n\n",
-        "Function B:\n", code_b, "\n\n",
-        "Task: ", problem, "\n",
-        "Return only the combined OMC function named target_fn."
-    )
-    h result = llm_call(prompt, MODEL, sys)
-    if str_contains(result, "```") {
-        h parts = str_split(result, "```")
-        if arr_len(parts) >= 3 { return str_trim(parts[1]) }
-    }
-    return str_trim(result)
-}
 
 # ── Selection ─────────────────────────────────────────────────────────────────
 
@@ -210,19 +175,46 @@ fn evolve(problem, test_cases, pop_size, generations, elite_count) {
             ei = ei + 1
         }
 
-        # Fill rest with mutation + crossover
+        # Build mutation/crossover prompts in batch for parallelism
+        h mutation_types = ["refactor for clarity", "add edge case handling", "optimize the algorithm", "rewrite using a different approach", "improve variable naming"]
+        h mut_sys = "You write OMC code. Return ONLY code, no markdown, no explanation."
+        h batch_prompts = []
         h ni = 0
         while ni < pop_size - elite_count {
             h parent_a = tournament_select(population)
-            h new_code = ""
+            h mut_type = mutation_types[ni % arr_len(mutation_types)]
+            h p = ""
             if ni % 3 == 0 and arr_len(population) >= 2 {
                 h parent_b = tournament_select(population)
-                new_code = crossover(parent_a["code"], parent_b["code"], problem)
+                p = str_concat(
+                    "Combine the best aspects of these two OMC functions into one better implementation.\n\n",
+                    "Function A:\n", parent_a["code"], "\n\n",
+                    "Function B:\n", parent_b["code"], "\n\n",
+                    "Task: ", problem, "\n",
+                    "Return only the combined OMC function named target_fn."
+                )
             } else {
-                new_code = mutate(parent_a["code"], problem)
+                p = str_concat(
+                    "Mutate this OMC function (", mut_type, "):\n\n",
+                    parent_a["code"], "\n\n",
+                    "Must still solve: ", problem, "\nReturn only the mutated OMC code."
+                )
             }
-            arr_push(next_pop, {code: new_code, fitness: 0.0})
+            arr_push(batch_prompts, {prompt: p, system: mut_sys})
             ni = ni + 1
+        }
+
+        # Fire all mutations/crossovers in parallel
+        h mut_results = batch_llm_call(batch_prompts, MODEL)
+        h mri = 0
+        while mri < arr_len(mut_results) {
+            h code = mut_results[mri]
+            if str_contains(code, "```") {
+                h parts = str_split(code, "```")
+                if arr_len(parts) >= 3 { code = str_trim(parts[1]) }
+            }
+            arr_push(next_pop, {code: str_trim(code), fitness: 0.0})
+            mri = mri + 1
         }
 
         population = next_pop
