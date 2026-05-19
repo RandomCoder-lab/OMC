@@ -11,7 +11,7 @@ fn build_debater_prompt(position, topic, round, prior_args) {
     h prompt = str_concat(
         "Topic: ", topic,
         "\nYour position: ", position,
-        "\nRound: ", to_str(round)
+        "\nRound: ", to_string(round)
     )
     if arr_len(prior_args) > 0 {
         prompt = str_concat(prompt, "\nPrior arguments:\n", arr_join(prior_args, "\n"))
@@ -36,7 +36,7 @@ fn judge_debate(topic, for_args, against_args) {
 
 fn run_debate(topic, rounds) {
     print(str_concat("=== Debate: ", topic, " ==="))
-    print(str_concat("Rounds: ", to_str(rounds)))
+    print(str_concat("Rounds: ", to_string(rounds)))
     print("")
 
     h for_args = []
@@ -44,7 +44,7 @@ fn run_debate(topic, rounds) {
 
     h round = 0
     while round < rounds {
-        print(str_concat("--- Round ", to_str(round + 1), " ---"))
+        print(str_concat("--- Round ", to_string(round + 1), " ---"))
 
         h for_prompt = build_debater_prompt("FOR", topic, round + 1, against_args)
         h against_prompt = build_debater_prompt("AGAINST", topic, round + 1, for_args)
@@ -54,8 +54,8 @@ fn run_debate(topic, rounds) {
         h for_arg = responses[0]
         h against_arg = responses[1]
 
-        arr_push(for_args, str_concat("[FOR R", to_str(round + 1), "] ", for_arg))
-        arr_push(against_args, str_concat("[AGAINST R", to_str(round + 1), "] ", against_arg))
+        arr_push(for_args, str_concat("[FOR R", to_string(round + 1), "] ", for_arg))
+        arr_push(against_args, str_concat("[AGAINST R", to_string(round + 1), "] ", against_arg))
 
         print(str_concat("FOR: ", str_slice(for_arg, 0, 100), "..."))
         print(str_concat("AGAINST: ", str_slice(against_arg, 0, 100), "..."))
@@ -73,9 +73,9 @@ fn run_debate(topic, rounds) {
     h winner = verdict["winner"]
     h confidence = verdict["confidence"]
     h reasoning = verdict["reasoning"]
-    print(str_concat("Winner: ", to_str(winner)))
-    print(str_concat("Confidence: ", to_str(confidence), "/10"))
-    print(str_concat("Reasoning: ", to_str(reasoning)))
+    print(str_concat("Winner: ", to_string(winner)))
+    print(str_concat("Confidence: ", to_string(confidence), "/10"))
+    print(str_concat("Reasoning: ", to_string(reasoning)))
     return verdict
 }
 

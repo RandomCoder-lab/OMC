@@ -82,7 +82,7 @@ fn improve_to_convergence(code, goal, max_rounds) {
         h improved = apply_critique(current, criticism)
 
         if improved == current {
-            print(str_concat("  Converged at round ", to_str(r + 1)))
+            print(str_concat("  Converged at round ", to_string(r + 1)))
             break
         }
 
@@ -165,14 +165,14 @@ while i < arr_len(programs) {
 
     print("Pass 1: Direct improvement...")
     h direct = improve_to_convergence(prog["code"], prog["goal"], 2)
-    print(str_concat("  Done in ", to_str(direct["rounds"]), " rounds"))
+    print(str_concat("  Done in ", to_string(direct["rounds"]), " rounds"))
 
     print("Pass 2: Meta-improvement (improve the improver)...")
     h meta = meta_improve(direct["code"], prog["goal"], 1)
     print("  Meta-improvement complete")
 
     h final_lines = arr_len(str_split(meta["code"], "\n"))
-    print(str_concat("  Final code: ", to_str(final_lines), " lines"))
+    print(str_concat("  Final code: ", to_string(final_lines), " lines"))
     print("")
     i = i + 1
 }

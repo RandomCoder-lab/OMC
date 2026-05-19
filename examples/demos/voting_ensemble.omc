@@ -51,7 +51,7 @@ fn find_winner(counts) {
 fn vote_ensemble(question, choices, n_agents, system_prompt) {
     print(str_concat("Question: ", question))
     print(str_concat("Choices: ", arr_join(choices, " | ")))
-    print(str_concat("Agents: ", to_str(n_agents)))
+    print(str_concat("Agents: ", to_string(n_agents)))
     print("")
 
     h choice_str = arr_join(choices, ", ")
@@ -81,7 +81,7 @@ fn vote_ensemble(question, choices, n_agents, system_prompt) {
         h c = choices[i]
         h cnt = 0
         if dict_has(counts, c) { cnt = counts[c] }
-        print(str_concat("  ", c, ": ", to_str(cnt), "/", to_str(n_agents)))
+        print(str_concat("  ", c, ": ", to_string(cnt), "/", to_string(n_agents)))
         i = i + 1
     }
     print(str_concat("Winner: ", winner))

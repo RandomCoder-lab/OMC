@@ -13,7 +13,7 @@ fn _join(arr, sep) {
     h i = 0
     while i < arr_len(arr) {
         if i > 0 { out = str_concat(out, sep) }
-        out = str_concat(out, to_str(arr[i]))
+        out = str_concat(out, to_string(arr[i]))
         i = i + 1
     }
     return out
@@ -164,7 +164,7 @@ fn react_agent(goal, tools, model, max_steps) {
             h observation = "(tool not found)"
             if dict_has(tools, tool_name) {
                 h tool_fn = tools[tool_name]
-                observation = to_str(tool_fn(tool_input))
+                observation = to_string(tool_fn(tool_input))
             }
             history = str_concat(history, "\n", response, "\nObservation: ", observation)
         } else {
@@ -186,7 +186,7 @@ fn chain(steps_arr, input, model) {
     h i = 0
     while i < arr_len(steps_arr) {
         h template = steps_arr[i]
-        h prompt = str_replace(template, "{}", to_str(current))
+        h prompt = str_replace(template, "{}", to_string(current))
         current = llm_call(prompt, m, null)
         i = i + 1
     }
@@ -263,7 +263,7 @@ fn gen_and_test(description, test_fn, model, max_attempts) {
         }
         h fix_prompt = str_concat(
             "This OMC code has errors. Fix it.\n\nCode:\n", code,
-            "\n\nError/failures:\n", to_str(result["error"]),
+            "\n\nError/failures:\n", to_string(result["error"]),
             "\n\nReturn only the corrected OMC code."
         )
         code = llm_call(fix_prompt, m, sys)

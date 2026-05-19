@@ -42,7 +42,7 @@ fn _validate_node(value, schema, path, errors) {
         if !ok {
             h loc = path
             if str_len(loc) == 0 { loc = "(root)" }
-            arr_push(errors, str_concat(loc, ": expected ", to_str(expected_type), ", got ", actual_type))
+            arr_push(errors, str_concat(loc, ": expected ", to_string(expected_type), ", got ", actual_type))
         }
     }
 
@@ -75,12 +75,12 @@ fn _validate_node(value, schema, path, errors) {
     if schema_type_of(value) == "string" {
         if dict_has(schema, "minLength") {
             if str_len(value) < schema["minLength"] {
-                arr_push(errors, str_concat(path, ": string too short (min ", to_str(schema["minLength"]), ")"))
+                arr_push(errors, str_concat(path, ": string too short (min ", to_string(schema["minLength"]), ")"))
             }
         }
         if dict_has(schema, "maxLength") {
             if str_len(value) > schema["maxLength"] {
-                arr_push(errors, str_concat(path, ": string too long (max ", to_str(schema["maxLength"]), ")"))
+                arr_push(errors, str_concat(path, ": string too long (max ", to_string(schema["maxLength"]), ")"))
             }
         }
         if dict_has(schema, "pattern") {
@@ -95,12 +95,12 @@ fn _validate_node(value, schema, path, errors) {
     if schema_type_of(value) == "number" {
         if dict_has(schema, "minimum") {
             if value < schema["minimum"] {
-                arr_push(errors, str_concat(path, ": value < minimum (", to_str(schema["minimum"]), ")"))
+                arr_push(errors, str_concat(path, ": value < minimum (", to_string(schema["minimum"]), ")"))
             }
         }
         if dict_has(schema, "maximum") {
             if value > schema["maximum"] {
-                arr_push(errors, str_concat(path, ": value > maximum (", to_str(schema["maximum"]), ")"))
+                arr_push(errors, str_concat(path, ": value > maximum (", to_string(schema["maximum"]), ")"))
             }
         }
         if dict_has(schema, "exclusiveMinimum") {
@@ -116,7 +116,7 @@ fn _validate_node(value, schema, path, errors) {
         if dict_has(schema, "multipleOf") {
             h rem = value % schema["multipleOf"]
             if rem != 0 {
-                arr_push(errors, str_concat(path, ": not a multiple of ", to_str(schema["multipleOf"])))
+                arr_push(errors, str_concat(path, ": not a multiple of ", to_string(schema["multipleOf"])))
             }
         }
     }
@@ -125,19 +125,19 @@ fn _validate_node(value, schema, path, errors) {
     if schema_type_of(value) == "array" {
         if dict_has(schema, "minItems") {
             if arr_len(value) < schema["minItems"] {
-                arr_push(errors, str_concat(path, ": array too short (min ", to_str(schema["minItems"]), ")"))
+                arr_push(errors, str_concat(path, ": array too short (min ", to_string(schema["minItems"]), ")"))
             }
         }
         if dict_has(schema, "maxItems") {
             if arr_len(value) > schema["maxItems"] {
-                arr_push(errors, str_concat(path, ": array too long (max ", to_str(schema["maxItems"]), ")"))
+                arr_push(errors, str_concat(path, ": array too long (max ", to_string(schema["maxItems"]), ")"))
             }
         }
         if dict_has(schema, "items") {
             h item_schema = schema["items"]
             h ai = 0
             while ai < arr_len(value) {
-                _validate_node(value[ai], item_schema, str_concat(path, "[", to_str(ai), "]"), errors)
+                _validate_node(value[ai], item_schema, str_concat(path, "[", to_string(ai), "]"), errors)
                 ai = ai + 1
             }
         }
@@ -145,9 +145,9 @@ fn _validate_node(value, schema, path, errors) {
             h seen = {}
             h ui = 0
             while ui < arr_len(value) {
-                h k = to_str(value[ui])
+                h k = to_string(value[ui])
                 if dict_has(seen, k) {
-                    arr_push(errors, str_concat(path, ": duplicate item at index ", to_str(ui)))
+                    arr_push(errors, str_concat(path, ": duplicate item at index ", to_string(ui)))
                 }
                 seen[k] = true
                 ui = ui + 1
@@ -199,7 +199,7 @@ fn coerce(value, schema) {
     if !dict_has(schema, "type") { return value }
     h t = schema["type"]
     h actual = schema_type_of(value)
-    if t == "string" and actual != "string" { return to_str(value) }
+    if t == "string" and actual != "string" { return to_string(value) }
     if t == "number" and actual == "string" {
         h n = str_to_float(value)
         if n != null { return n }

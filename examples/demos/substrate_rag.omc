@@ -95,7 +95,7 @@ fn rag_answer(store, question, top_k, model) {
     h i = 0
     while i < arr_len(retrieved) {
         arr_push(context_parts, str_concat(
-            "[Doc ", to_str(i + 1), " | sim=", to_str(retrieved[i]["score"]), "]\n",
+            "[Doc ", to_string(i + 1), " | sim=", to_string(retrieved[i]["score"]), "]\n",
             retrieved[i]["text"]
         ))
         i = i + 1
@@ -159,7 +159,7 @@ while i < arr_len(DOCUMENTS) {
     docstore_add(KB, doc["text"], doc["meta"])
     i = i + 1
 }
-print(str_concat("Indexed ", to_str(arr_len(DOCUMENTS)), " documents"))
+print(str_concat("Indexed ", to_string(arr_len(DOCUMENTS)), " documents"))
 print("")
 
 # ── Part 1: Pure substrate retrieval (offline) ────────────────────────────────
@@ -178,7 +178,7 @@ while qi < arr_len(QUERIES) {
     h retrieved = docstore_search(KB, q, 1)
     h top = retrieved[0]
     print(str_concat("Q: ", q))
-    print(str_concat("  Best match (sim=", to_str(top["score"]), "): '", str_slice(top["text"], 0, 80), "...'"))
+    print(str_concat("  Best match (sim=", to_string(top["score"]), "): '", str_slice(top["text"], 0, 80), "...'"))
     print("")
     qi = qi + 1
 }
@@ -196,7 +196,7 @@ h pi2 = 0
 while pi2 < arr_len(pairs) {
     h pair = pairs[pi2]
     h sim = str_similarity(pair[0], pair[1])
-    print(str_concat("  '", str_slice(pair[0], 0, 35), "' vs '", str_slice(pair[1], 0, 35), "' => ", to_str(sim)))
+    print(str_concat("  '", str_slice(pair[0], 0, 35), "' vs '", str_slice(pair[1], 0, 35), "' => ", to_string(sim)))
     pi2 = pi2 + 1
 }
 print("")

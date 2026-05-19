@@ -70,19 +70,19 @@ fn code_gen_loop(task_description, eval_prompt_template, generations) {
 
     h gen = 0
     while gen < generations {
-        print(str_concat("--- Generation ", to_str(gen + 1), " ---"))
+        print(str_concat("--- Generation ", to_string(gen + 1), " ---"))
 
         h metrics = measure_code(current_code)
         print(str_concat(
-            "  Lines: ", to_str(metrics["lines"]),
-            " | Fns: ", to_str(metrics["functions"]),
-            " | Loops: ", to_str(metrics["loops"])
+            "  Lines: ", to_string(metrics["lines"]),
+            " | Fns: ", to_string(metrics["functions"]),
+            " | Loops: ", to_string(metrics["loops"])
         ))
 
         # Try to run it
         h run_result = safe_run(current_code, "")
         h run_status = "ok"
-        if !run_result["ok"] { run_status = to_str(run_result["error"]) }
+        if !run_result["ok"] { run_status = to_string(run_result["error"]) }
         print(str_concat("  Run status: ", run_status))
 
         arr_push(history, {
@@ -119,7 +119,7 @@ h sort_result = code_gen_loop(
     sort_improve,
     GENERATIONS
 )
-print(str_concat("Final code (", to_str(arr_len(str_split(sort_result["code"], "\n"))), " lines)"))
+print(str_concat("Final code (", to_string(arr_len(str_split(sort_result["code"], "\n"))), " lines)"))
 print("")
 
 # Task 2: String processing
@@ -134,7 +134,7 @@ h wc_result = code_gen_loop(
     word_improve,
     GENERATIONS
 )
-print(str_concat("Final code (", to_str(arr_len(str_split(wc_result["code"], "\n"))), " lines)"))
+print(str_concat("Final code (", to_string(arr_len(str_split(wc_result["code"], "\n"))), " lines)"))
 print("")
 
 # Task 3: Math utility
@@ -149,8 +149,8 @@ h stats_result = code_gen_loop(
     stats_improve,
     GENERATIONS
 )
-print(str_concat("Final code (", to_str(arr_len(str_split(stats_result["code"], "\n"))), " lines)"))
+print(str_concat("Final code (", to_string(arr_len(str_split(stats_result["code"], "\n"))), " lines)"))
 print("")
 
 print("=== Code Gen Loop Complete ===")
-print(str_concat("Ran ", to_str(GENERATIONS), " generations on each of 3 tasks."))
+print(str_concat("Ran ", to_string(GENERATIONS), " generations on each of 3 tasks."))

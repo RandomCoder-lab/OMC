@@ -102,7 +102,7 @@ h tools = [
 fn run_tool(name, input) {
     if name == "calculator" {
         h result = calculator(input["operation"], input["a"], input["b"])
-        return to_str(result)
+        return to_string(result)
     }
     if name == "rag_search" {
         return closest_doc(input["query"], doc_vecs, knowledge)

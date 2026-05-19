@@ -187,7 +187,7 @@ fn daemon_cycle(files, rounds_per_file, continuous) {
         }
         log(str_concat("  Cycle ", to_string(iteration), " complete. Total improvement delta: ", to_string(total_improvement)))
 
-        if not continuous { keep_running = false }
+        if !continuous { keep_running = false }
     }
 
     return {iterations: iteration}

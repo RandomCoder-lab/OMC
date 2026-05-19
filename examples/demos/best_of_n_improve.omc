@@ -50,7 +50,7 @@ fn get_best(scored) {
 
 fn best_of_n_improve(task, n_candidates, criteria, max_rounds, threshold) {
     print(str_concat("=== Task: ", task, " ==="))
-    print(str_concat("N candidates: ", to_str(n_candidates), "  Max rounds: ", to_str(max_rounds)))
+    print(str_concat("N candidates: ", to_string(n_candidates), "  Max rounds: ", to_string(max_rounds)))
     print("")
 
     h sys = "You are an expert OMC programmer. OMC uses h for variables (h x = 5), fn for functions. Write complete runnable code. Put code in ```omc blocks."
@@ -62,11 +62,11 @@ fn best_of_n_improve(task, n_candidates, criteria, max_rounds, threshold) {
         h prompt = str_concat("Write OMC code to: ", task)
         if best_code != "" {
             prompt = str_concat(prompt,
-                "\n\nPrevious best attempt (score ", to_str(best_score), "/10):\n```omc\n",
+                "\n\nPrevious best attempt (score ", to_string(best_score), "/10):\n```omc\n",
                 best_code, "\n```\nImprove it.")
         }
 
-        print(str_concat("Round ", to_str(round + 1), ": generating ", to_str(n_candidates), " candidates..."))
+        print(str_concat("Round ", to_string(round + 1), ": generating ", to_string(n_candidates), " candidates..."))
 
         h prompts = arr_fill({prompt: prompt, system: sys}, n_candidates)
         h responses = batch_llm_call(prompts)
@@ -87,7 +87,7 @@ fn best_of_n_improve(task, n_candidates, criteria, max_rounds, threshold) {
         h new_idx = best["idx"]
         h new_code = candidates[new_idx]
 
-        print(str_concat("Best this round: score=", to_str(new_score), "/10"))
+        print(str_concat("Best this round: score=", to_string(new_score), "/10"))
         print(str_concat("Code preview: ", str_slice(new_code, 0, 80)))
 
         if new_score > best_score {
@@ -96,14 +96,14 @@ fn best_of_n_improve(task, n_candidates, criteria, max_rounds, threshold) {
         }
 
         if best_score >= threshold {
-            print(str_concat("CONVERGED at score ", to_str(best_score), "/10"))
+            print(str_concat("CONVERGED at score ", to_string(best_score), "/10"))
             return {code: best_code, score: best_score, rounds: round + 1}
         }
 
         round = round + 1
     }
 
-    print(str_concat("Max rounds reached. Final score: ", to_str(best_score), "/10"))
+    print(str_concat("Max rounds reached. Final score: ", to_string(best_score), "/10"))
     return {code: best_code, score: best_score, rounds: max_rounds}
 }
 
@@ -115,7 +115,7 @@ h r1 = best_of_n_improve(
     3,
     8
 )
-print(str_concat("Final code (", to_str(str_len(r1["code"])), " chars):"))
+print(str_concat("Final code (", to_string(str_len(r1["code"])), " chars):"))
 print(r1["code"])
 print("")
 
@@ -127,7 +127,7 @@ h r2 = best_of_n_improve(
     2,
     8
 )
-print(str_concat("Final code (", to_str(str_len(r2["code"])), " chars):"))
+print(str_concat("Final code (", to_string(str_len(r2["code"])), " chars):"))
 print(r2["code"])
 print("")
 

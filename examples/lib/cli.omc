@@ -102,10 +102,10 @@ fn progress_bar(current, total, width, label) {
         bar = str_concat(bar, "░")
         i = i + 1
     }
-    h pct_str = to_str(math_floor(pct * 100))
+    h pct_str = to_string(math_floor(pct * 100))
     h lbl = ""
     if label != null { lbl = str_concat(label, " ") }
-    return str_concat(lbl, "[", bar, "] ", pct_str, "% (", to_str(current), "/", to_str(total), ")")
+    return str_concat(lbl, "[", bar, "] ", pct_str, "% (", to_string(current), "/", to_string(total), ")")
 }
 
 fn print_progress(current, total, width, label) {
@@ -115,7 +115,7 @@ fn print_progress(current, total, width, label) {
 # ── Table formatter ──────────────────────────────────────────────────────────
 
 fn _pad_right(s, width) {
-    h str = to_str(s)
+    h str = to_string(s)
     h len = str_len(str)
     h out = str
     h i = len
@@ -127,7 +127,7 @@ fn _pad_right(s, width) {
 }
 
 fn _pad_left(s, width) {
-    h str = to_str(s)
+    h str = to_string(s)
     h len = str_len(str)
     h out = ""
     h i = len
@@ -146,7 +146,7 @@ fn table(headers, rows) {
     h widths = []
     h i = 0
     while i < arr_len(headers) {
-        arr_push(widths, str_len(to_str(headers[i])))
+        arr_push(widths, str_len(to_string(headers[i])))
         i = i + 1
     }
     h ri = 0
@@ -155,7 +155,7 @@ fn table(headers, rows) {
         h ci = 0
         while ci < arr_len(row) {
             if ci < arr_len(widths) {
-                h cell_len = str_len(to_str(row[ci]))
+                h cell_len = str_len(to_string(row[ci]))
                 if cell_len > widths[ci] { widths[ci] = cell_len }
             }
             ci = ci + 1
@@ -228,7 +228,7 @@ fn confirm(question) {
 fn prompt(question, default_val) {
     h suffix = ""
     if default_val != null {
-        suffix = str_concat(" [", to_str(default_val), "]")
+        suffix = str_concat(" [", to_string(default_val), "]")
     }
     h answer = input(str_concat(question, suffix, ": "))
     h trimmed = str_trim(answer)

@@ -113,11 +113,11 @@ fn generate_solution(problem, tests) {
             h f = failures[fi]
             failure_report = str_concat(
                 failure_report,
-                "  Test ", to_str(f["test_idx"]), ": expected=",
-                to_str(f["expected"]), " got=", to_str(f["got"])
+                "  Test ", to_string(f["test_idx"]), ": expected=",
+                to_string(f["expected"]), " got=", to_string(f["got"])
             )
             if f["error"] != null {
-                failure_report = str_concat(failure_report, " error=", to_str(f["error"]))
+                failure_report = str_concat(failure_report, " error=", to_string(f["error"]))
             }
             failure_report = str_concat(failure_report, "\n")
             fi = fi + 1
@@ -184,21 +184,21 @@ h PROBLEMS = [
 # ── Main loop ────────────────────────────────────────────────────────────────
 
 print("=== Self-Improving OMC Agent ===")
-print(str_concat("Model: ", MODEL, " | Max repairs: ", to_str(MAX_REPAIR_ATTEMPTS)))
+print(str_concat("Model: ", MODEL, " | Max repairs: ", to_string(MAX_REPAIR_ATTEMPTS)))
 print("")
 
 h results = []
 h i = 0
 while i < arr_len(PROBLEMS) {
     h problem = PROBLEMS[i]
-    print(str_concat("[", to_str(i + 1), "/", to_str(arr_len(PROBLEMS)), "] Solving: ", problem["name"]))
+    print(str_concat("[", to_string(i + 1), "/", to_string(arr_len(PROBLEMS)), "] Solving: ", problem["name"]))
 
     h result = generate_solution(problem["description"], problem["tests"])
 
     if result["solved"] {
-        print(str_concat("  ✓ SOLVED in ", to_str(result["attempts"]), " attempt(s)"))
+        print(str_concat("  ✓ SOLVED in ", to_string(result["attempts"]), " attempt(s)"))
     } else {
-        print(str_concat("  ✗ FAILED after ", to_str(result["attempts"]), " attempts"))
+        print(str_concat("  ✗ FAILED after ", to_string(result["attempts"]), " attempts"))
     }
 
     arr_push(results, {
@@ -221,7 +221,7 @@ while ri < arr_len(results) {
         status = "PASS"
         solved_count = solved_count + 1
     }
-    print(str_concat("  ", status, " ", r["name"], " (", to_str(r["attempts"]), " attempts)"))
+    print(str_concat("  ", status, " ", r["name"], " (", to_string(r["attempts"]), " attempts)"))
     ri = ri + 1
 }
-print(str_concat("\nSolved: ", to_str(solved_count), "/", to_str(arr_len(results))))
+print(str_concat("\nSolved: ", to_string(solved_count), "/", to_string(arr_len(results))))

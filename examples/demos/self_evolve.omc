@@ -72,7 +72,7 @@ fn generate_variants(source_code, n) {
         arr_push(prompts, {prompt: p, system: sys})
         i = i + 1
     }
-    print(str_concat("Generating ", to_str(n), " variants in parallel..."))
+    print(str_concat("Generating ", to_string(n), " variants in parallel..."))
     h raw = batch_llm_call(prompts, MODEL)
     h variants = []
     h ri = 0
@@ -103,7 +103,7 @@ fn pick_best_variant(source, variants) {
         "Penalize heavily for missing functions or broken syntax."
     )
 
-    print(str_concat("Judging ", to_str(arr_len(candidates)), " candidates (including original)..."))
+    print(str_concat("Judging ", to_string(arr_len(candidates)), " candidates (including original)..."))
     h scores = llm_judge(candidates, criteria, MODEL)
 
     # Find best non-original
@@ -114,7 +114,7 @@ fn pick_best_variant(source, variants) {
         h entry = scores[si]
         h idx = entry["idx"]
         h score = entry["score"]
-        print(str_concat("  Candidate ", to_str(idx), " score: ", to_str(score)))
+        print(str_concat("  Candidate ", to_string(idx), " score: ", to_string(score)))
         if idx > 0 and score > best_score {
             best_score = score
             best_idx = idx
@@ -129,8 +129,8 @@ fn pick_best_variant(source, variants) {
         oi = oi + 1
     }
 
-    print(str_concat("Original score: ", to_str(original_score)))
-    print(str_concat("Best variant score: ", to_str(best_score), " (idx=", to_str(best_idx), ")"))
+    print(str_concat("Original score: ", to_string(original_score)))
+    print(str_concat("Best variant score: ", to_string(best_score), " (idx=", to_string(best_idx), ")"))
 
     if best_score > original_score {
         return {improved: true, code: candidates[best_idx], score: best_score, delta: best_score - original_score}
@@ -142,12 +142,12 @@ fn pick_best_variant(source, variants) {
 
 print("=== OMC Recursive Self-Evolution ===")
 print(str_concat("Target: ", TARGET_FILE))
-print(str_concat("Variants: ", to_str(N_VARIANTS)))
+print(str_concat("Variants: ", to_string(N_VARIANTS)))
 print("")
 
 h source = read_file(TARGET_FILE)
 h initial = measure_quality(source)
-print(str_concat("Source: ", to_str(initial["lines"]), " lines, ", to_str(initial["functions"]), " functions"))
+print(str_concat("Source: ", to_string(initial["lines"]), " lines, ", to_string(initial["functions"]), " functions"))
 print("")
 
 h variants = generate_variants(source, N_VARIANTS)
@@ -158,15 +158,15 @@ print("")
 
 if result["improved"] {
     h final = measure_quality(result["code"])
-    print(str_concat("Improvement delta: +", to_str(result["delta"]), " points"))
-    print(str_concat("Improved: ", to_str(final["lines"]), " lines, ", to_str(final["functions"]), " functions"))
+    print(str_concat("Improvement delta: +", to_string(result["delta"]), " points"))
+    print(str_concat("Improved: ", to_string(final["lines"]), " lines, ", to_string(final["functions"]), " functions"))
     print("")
     print("Writing improved version...")
     write_file(TARGET_FILE, result["code"])
     print("Done. The file has improved itself.")
 } else {
     print("No variant beat the original — source unchanged.")
-    print(str_concat("Original score: ", to_str(result["score"])))
+    print(str_concat("Original score: ", to_string(result["score"])))
 }
 
 print("")
