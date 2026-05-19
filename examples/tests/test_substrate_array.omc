@@ -96,7 +96,7 @@ fn test_arr_resonance_vec_attractors() {
     while i < arr_len(r) {
         assert_true(approx_eq(arr_get(r, i), 1.0, 0.001),
             "Fibonacci has resonance ~1.0");
-        i = i + 1;
+        i += 1;
     }
 }
 
@@ -106,7 +106,7 @@ fn test_arr_resonance_vec_off_attractor() {
     h i = 0;
     while i < arr_len(r) {
         assert_true(arr_get(r, i) < 1.0, "off-attractor resonance < 1");
-        i = i + 1;
+        i += 1;
     }
 }
 
@@ -117,7 +117,7 @@ fn test_arr_him_vec() {
     while i < arr_len(h_attr) {
         assert_true(arr_get(h_attr, i) < 0.5,
             "on-attractor HIM < 0.5");
-        i = i + 1;
+        i += 1;
     }
 }
 
@@ -134,7 +134,7 @@ fn test_arr_fold_all() {
         if is_attractor(arr_get(folded, i)) == 0 {
             all_attractors = 0;
         }
-        i = i + 1;
+        i += 1;
     }
     assert_eq(all_attractors, 1, "all folded elements on attractors");
 }
@@ -157,8 +157,8 @@ fn test_pipeline_substrate_aware_features() {
     h s = 0.0;
     h i = 0;
     while i < arr_len(resonance) {
-        s = s + arr_get(resonance, i);
-        i = i + 1;
+        s += arr_get(resonance, i);
+        i += 1;
     }
     assert_true(s > 5.5, "pipeline output stays substrate-coherent");
 }

@@ -31,10 +31,10 @@ fn score_code(code) {
     h i = 0
     while i < line_count {
         h line = str_trim(lines[i])
-        if str_starts_with(line, "fn ") { fn_count = fn_count + 1 }
-        if str_starts_with(line, "#") { comment_count = comment_count + 1 }
-        if str_contains(line, "error(") { error_handling = error_handling + 1 }
-        i = i + 1
+        if str_starts_with(line, "fn ") { fn_count += 1}
+        if str_starts_with(line, "#") { comment_count += 1}
+        if str_contains(line, "error(") { error_handling += 1}
+        i += 1
     }
     h score = 0.0
     if line_count > 0 { score = fn_count * 10.0 + comment_count * 2.0 + error_handling * 5.0 }
@@ -130,7 +130,7 @@ fn improve_file(path, rounds) {
         if new_score["score"] >= initial_score["score"] {
             current = improved
         }
-        r = r + 1
+        r += 1
     }
 
     h final_score = score_code(current)
@@ -165,7 +165,7 @@ fn daemon_cycle(files, rounds_per_file, continuous) {
     h keep_running = true
 
     while keep_running {
-        iteration = iteration + 1
+        iteration += 1
         log(str_concat("=== Daemon Cycle ", to_string(iteration), " ==="))
 
         h results = []
@@ -175,15 +175,15 @@ fn daemon_cycle(files, rounds_per_file, continuous) {
             if result != null {
                 arr_push(results, result)
             }
-            fi = fi + 1
+            fi += 1
         }
 
         # Summary
         h total_improvement = 0.0
         h ri = 0
         while ri < arr_len(results) {
-            total_improvement = total_improvement + results[ri]["improvement"]
-            ri = ri + 1
+            total_improvement += results[ri]["improvement"]
+            ri += 1
         }
         log(str_concat("  Cycle ", to_string(iteration), " complete. Total improvement delta: ", to_string(total_improvement)))
 

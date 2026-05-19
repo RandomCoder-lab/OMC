@@ -24,8 +24,8 @@ fn cosine_sim(a, b) {
     h min_len = arr_len(a)
     if arr_len(b) < min_len { min_len = arr_len(b) }
     while i < min_len {
-        dot = dot + a[i] * b[i]
-        i = i + 1
+        dot += a[i] * b[i]
+        i += 1
     }
     return dot
 }
@@ -52,7 +52,7 @@ fn docstore_search(store, query, top_k) {
     while i < arr_len(store["docs"]) {
         h sim = cosine_sim(query_embed, store["embeddings"][i])
         arr_push(scores, {idx: i, score: sim})
-        i = i + 1
+        i += 1
     }
     # bubble-sort descending
     h n = arr_len(scores)
@@ -65,9 +65,9 @@ fn docstore_search(store, query, top_k) {
                 scores[si] = scores[sj]
                 scores[sj] = tmp
             }
-            sj = sj + 1
+            sj += 1
         }
-        si = si + 1
+        si += 1
     }
     h k = top_k
     if k > n { k = n }
@@ -80,7 +80,7 @@ fn docstore_search(store, query, top_k) {
             score: scores[ri]["score"],
             metadata: store["metadata"][idx]
         })
-        ri = ri + 1
+        ri += 1
     }
     return results
 }
@@ -98,7 +98,7 @@ fn rag_answer(store, question, top_k, model) {
             "[Doc ", to_string(i + 1), " | sim=", to_string(retrieved[i]["score"]), "]\n",
             retrieved[i]["text"]
         ))
-        i = i + 1
+        i += 1
     }
     h context = arr_join(context_parts, "\n\n")
     h sys = "You are a helpful assistant. Answer questions based only on the provided context. Be concise."
@@ -157,7 +157,7 @@ h i = 0
 while i < arr_len(DOCUMENTS) {
     h doc = DOCUMENTS[i]
     docstore_add(KB, doc["text"], doc["meta"])
-    i = i + 1
+    i += 1
 }
 print(str_concat("Indexed ", to_string(arr_len(DOCUMENTS)), " documents"))
 print("")
@@ -180,7 +180,7 @@ while qi < arr_len(QUERIES) {
     print(str_concat("Q: ", q))
     print(str_concat("  Best match (sim=", to_string(top["score"]), "): '", str_slice(top["text"], 0, 80), "...'"))
     print("")
-    qi = qi + 1
+    qi += 1
 }
 
 # ── Part 2: str_similarity demo (uses same substrate math) ───────────────────
@@ -197,7 +197,7 @@ while pi2 < arr_len(pairs) {
     h pair = pairs[pi2]
     h sim = str_similarity(pair[0], pair[1])
     print(str_concat("  '", str_slice(pair[0], 0, 35), "' vs '", str_slice(pair[1], 0, 35), "' => ", to_string(sim)))
-    pi2 = pi2 + 1
+    pi2 += 1
 }
 print("")
 
@@ -215,7 +215,7 @@ while lqi < arr_len(LLM_QUESTIONS) {
     h result = rag_answer(KB, q, 2, null)
     print(str_concat("A: ", str_slice(result["answer"], 0, 200)))
     print("")
-    lqi = lqi + 1
+    lqi += 1
 }
 
 print("=== Substrate RAG complete ===")

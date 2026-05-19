@@ -37,14 +37,14 @@ fn run_bench(name, code, iterations) {
         eval_omc(code)
         h elapsed = unix_time_ms() - start
         arr_push(times, elapsed)
-        i = i + 1
+        i += 1
     }
     # compute stats
     h total = 0.0
     h ti = 0
     while ti < arr_len(times) {
-        total = total + times[ti]
-        ti = ti + 1
+        total += times[ti]
+        ti += 1
     }
     h mean = total / arr_len(times)
     h sorted = times
@@ -59,9 +59,9 @@ fn run_bench(name, code, iterations) {
                 sorted[si] = sorted[sj]
                 sorted[sj] = tmp
             }
-            sj = sj + 1
+            sj += 1
         }
-        si = si + 1
+        si += 1
     }
     return {
         name: name,
@@ -127,7 +127,7 @@ h BENCHMARKS = [
     },
     {
         name: "array_sum_1000",
-        code: "h arr = []\nh i = 0\nwhile i < 1000 { arr_push(arr, i)\ni = i + 1 }\nh s = 0\ni = 0\nwhile i < arr_len(arr) { s = s + arr[i]\ni = i + 1 }\ns"
+        code: "h arr = []\nh i = 0\nwhile i < 1000 { arr_push(arr, i)\ni = i + 1 }\nh s = 0\ni = 0\nwhile i < arr_len(arr) { s += arr[i]\ni = i + 1}\ns"
     },
     {
         name: "string_concat_100",
@@ -139,7 +139,7 @@ h BENCHMARKS = [
     },
     {
         name: "nested_loops_100x100",
-        code: "h count = 0\nh i = 0\nwhile i < 100 { h j = 0\nwhile j < 100 { count = count + 1\nj = j + 1 }\ni = i + 1 }\ncount"
+        code: "h count = 0\nh i = 0\nwhile i < 100 { h j = 0\nwhile j < 100 { count += 1\nj = j + 1}\ni = i + 1 }\ncount"
     }
 ]
 
@@ -169,7 +169,7 @@ while bi < arr_len(BENCHMARKS) {
         arr_push(improvements, bench["name"])
     }
 
-    bi = bi + 1
+    bi += 1
 }
 
 save_history(new_results)
@@ -180,7 +180,7 @@ if arr_len(regressions) > 0 {
     h ri = 0
     while ri < arr_len(regressions) {
         print(str_concat("  - ", regressions[ri]))
-        ri = ri + 1
+        ri += 1
     }
 }
 if arr_len(improvements) > 0 {
@@ -188,7 +188,7 @@ if arr_len(improvements) > 0 {
     h ii = 0
     while ii < arr_len(improvements) {
         print(str_concat("  + ", improvements[ii]))
-        ii = ii + 1
+        ii += 1
     }
 }
 if arr_len(regressions) == 0 and arr_len(improvements) == 0 {

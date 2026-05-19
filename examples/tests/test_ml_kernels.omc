@@ -26,8 +26,8 @@ fn test_softmax_sums_to_one() {
     h total = 0.0;
     h i = 0;
     while i < arr_len(s) {
-        total = total + arr_get(s, i);
-        i = i + 1;
+        total += arr_get(s, i);
+        i += 1;
     }
     assert_true(approx_eq(total, 1.0, 0.001), "softmax sums to 1");
 }
@@ -51,8 +51,8 @@ fn test_layer_norm_zero_mean() {
     h total = 0.0;
     h i = 0;
     while i < arr_len(ln) {
-        total = total + arr_get(ln, i);
-        i = i + 1;
+        total += arr_get(ln, i);
+        i += 1;
     }
     assert_true(approx_eq(total, 0.0, 0.001), "layer norm has zero mean");
 }
@@ -64,8 +64,8 @@ fn test_layer_norm_unit_variance() {
     h i = 0;
     while i < n {
         h v = arr_get(ln, i);
-        sq = sq + v * v;
-        i = i + 1;
+        sq += v * v;
+        i += 1;
     }
     h variance = sq / n;
     assert_true(approx_eq(variance, 1.0, 0.01), "layer norm has unit variance");

@@ -30,13 +30,13 @@ fn test_elif() {
 # While loop
 fn test_while_counts() {
     h n = 0;
-    while n < 10 { n = n + 1; }
+    while n < 10 { n += 1; }
     assert_eq(n, 10, "while counts to 10");
 }
 
 fn test_while_zero_iters() {
     h n = 0;
-    while n < 0 { n = n + 1; }
+    while n < 0 { n += 1; }
     assert_eq(n, 0, "no iterations");
 }
 
@@ -45,7 +45,7 @@ fn test_break() {
     h n = 0;
     while n < 100 {
         if n == 5 { break; }
-        n = n + 1;
+        n += 1;
     }
     assert_eq(n, 5, "broke at 5");
 }
@@ -54,9 +54,9 @@ fn test_continue() {
     h sum = 0;
     h i = 0;
     while i < 10 {
-        i = i + 1;
+        i += 1;
         if i == 5 { continue; }
-        sum = sum + i;
+        sum += i;
     }
     # 1+2+3+4+6+7+8+9+10 = 50
     assert_eq(sum, 50, "skipped 5");
@@ -93,7 +93,7 @@ fn test_mutual_recursion() {
 fn make_counter() {
     h count = 0;
     return fn() {
-        count = count + 1;
+        count += 1;
         return count;
     };
 }
@@ -118,7 +118,7 @@ fn first_positive(arr) {
     h i = 0;
     while i < arr_len(arr) {
         if arr_get(arr, i) > 0 { return arr_get(arr, i); }
-        i = i + 1;
+        i += 1;
     }
     return 0 - 1;
 }

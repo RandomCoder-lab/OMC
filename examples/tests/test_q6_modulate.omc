@@ -27,9 +27,9 @@ fn approx_eq_mat(a, b, tol, msg) {
                 test_record_failure(msg + " mismatch at [" + to_string(i) + "][" + to_string(j) + "]: " + to_string(va) + " vs " + to_string(vb));
                 return;
             }
-            j = j + 1;
+            j += 1;
         }
-        i = i + 1;
+        i += 1;
     }
 }
 

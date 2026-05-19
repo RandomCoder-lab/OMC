@@ -86,7 +86,7 @@ fn fit(rec) {
             h bkt = fold(to_int(r * 10));
             h key = concat_many("", bkt);
             dict_set(bucket_counts, key, dict_get(bucket_counts, key, 0) + 1);
-            u = u + 1;
+            u += 1;
         }
         # Find the bucket with the highest count = the item's signature.
         h bkts = dict_keys(bucket_counts);
@@ -97,7 +97,7 @@ fn fit(rec) {
             h bk = arr_get(bkts, b);
             h c = dict_get(bucket_counts, bk);
             if c > best_cnt { best_cnt = c; best_bkt = bk; }
-            b = b + 1;
+            b += 1;
         }
         dict_set(sigs, item, best_bkt);
 
@@ -107,7 +107,7 @@ fn fit(rec) {
         arr_push(existing, item);
         dict_set(sig_index, best_bkt, existing);
 
-        k = k + 1;
+        k += 1;
     }
 
     dict_set(rec, "item_signatures", sigs);
@@ -145,7 +145,7 @@ fn suggest_for(rec, user_id, k) {
                 dict_set(target_sigs, sig, 1);
             }
         }
-        i = i + 1;
+        i += 1;
     }
 
     # Gather candidate items from those signatures.
@@ -162,9 +162,9 @@ fn suggest_for(rec, user_id, k) {
             if dict_has(u_items, cand) == 0 {
                 arr_push(candidates, cand);
             }
-            ii = ii + 1;
+            ii += 1;
         }
-        s = s + 1;
+        s += 1;
     }
 
     # Truncate to top-K.
@@ -172,7 +172,7 @@ fn suggest_for(rec, user_id, k) {
     h c = 0;
     while c < k {
         if c < arr_len(candidates) { arr_push(out, arr_get(candidates, c)); }
-        c = c + 1;
+        c += 1;
     }
     return out;
 }

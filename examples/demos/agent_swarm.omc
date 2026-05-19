@@ -72,7 +72,7 @@ fn synthesize_outputs(goal, tasks, outputs, model) {
             t: tasks[i],
             o: outputs[i]
         }))
-        i = i + 1
+        i += 1
     }
     h combined = arr_join(parts, "\n\n---\n\n")
     h prompt = str_format(
@@ -107,7 +107,7 @@ fn run_swarm(goal, swarm_size, rounds, model) {
     h i = 0
     while i < arr_len(tasks) {
         print(str_concat("  [", to_string(i + 1), "] ", str_slice(tasks[i], 0, 70)))
-        i = i + 1
+        i += 1
     }
     print("")
 
@@ -141,7 +141,7 @@ fn run_swarm(goal, swarm_size, rounds, model) {
                     "Rate (0-10) and list issues. Task: {t}\nOutput: {o}\nJSON: {{\"score\":N,\"issues\":[]}}",
                     {t: tasks[j], o: str_slice(outputs[j], 0, 200)}
                 ))
-                j = j + 1
+                j += 1
             }
             h eval_raws = batch_llm_call(eval_prompts, model)
             h evals = par_map(eval_raws, fn(raw) {
@@ -167,7 +167,7 @@ fn run_swarm(goal, swarm_size, rounds, model) {
                     })
                     print(str_concat("  Repairing task ", to_string(k + 1), " (score=", to_string(score), ")"))
                 }
-                k = k + 1
+                k += 1
             }
 
             if arr_len(repair_prompts) > 0 {
@@ -177,11 +177,11 @@ fn run_swarm(goal, swarm_size, rounds, model) {
                 while m < arr_len(repair_prompts) {
                     h idx = repair_prompts[m]["idx"]
                     outputs[idx] = repaired[m]
-                    m = m + 1
+                    m += 1
                 }
             }
         }
-        round = round + 1
+        round += 1
     }
 
     # Synthesize

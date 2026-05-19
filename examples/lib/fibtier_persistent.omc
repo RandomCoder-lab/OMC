@@ -64,7 +64,7 @@ fn _serialize_entry(entry) {
     h i = 0;
     while i < arr_len(srcs) {
         arr_push(sources_strs, to_string(arr_get(srcs, i)));
-        i = i + 1;
+        i += 1;
     }
     h s = dict_new();
     dict_set(s, "content", dict_get(entry, "content"));
@@ -83,7 +83,7 @@ fn _deserialize_entry(s) {
     while i < arr_len(srcs_strs) {
         # Re-parse string back to int.
         arr_push(srcs, to_int(arr_get(srcs_strs, i)));
-        i = i + 1;
+        i += 1;
     }
     h entry = dict_new();
     dict_set(entry, "content", dict_get(s, "content"));
@@ -115,7 +115,7 @@ fn _ensure_root_exists(name) {
     while i <= max_tiers {
         h cmd2 = concat_many("import os; os.makedirs('", _fibtier_tier_dir(name, i), "', exist_ok=True)");
         py_exec(cmd2);
-        i = i + 1;
+        i += 1;
     }
 }
 
@@ -156,10 +156,10 @@ fn fibtier_persistent_load(name) {
         h ei = 0;
         while ei < arr_len(tier_entries) {
             arr_push(restored, _deserialize_entry(arr_get(tier_entries, ei)));
-            ei = ei + 1;
+            ei += 1;
         }
         arr_set(tiers, ti, restored);
-        ti = ti + 1;
+        ti += 1;
     }
     return mem;
 }
@@ -176,10 +176,10 @@ fn _fibtier_save_manifest(mem) {
         h ei = 0;
         while ei < arr_len(tier) {
             arr_push(serialized_tier, _serialize_entry(arr_get(tier, ei)));
-            ei = ei + 1;
+            ei += 1;
         }
         arr_push(tier_data, serialized_tier);
-        ti = ti + 1;
+        ti += 1;
     }
     h manifest = dict_new();
     dict_set(manifest, "version", 1);

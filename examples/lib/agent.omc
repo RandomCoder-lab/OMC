@@ -77,7 +77,7 @@ fn _agent_respond(agent, input_text) {
         if re_match(key, input_text) == 1 {
             return dict_get(kn, key);
         }
-        i = i + 1;
+        i += 1;
     }
     # Fallback: query memory for closest related entry.
     h hits = fibtier_query(dict_get(agent, "memory"), input_text, 1);

@@ -16,8 +16,8 @@ fn test_help_on_all_documented() {
     while i < arr_len(names) {
         h n = arr_get(names, i);
         h hd = omc_help(n);
-        if str_len(dict_get(hd, "signature")) == 0 { failures = failures + 1; }
-        i = i + 1;
+        if str_len(dict_get(hd, "signature")) == 0 { failures += 1; }
+        i += 1;
     }
     assert_eq(failures, 0, "every builtin has help");
 }
@@ -36,10 +36,10 @@ fn test_known_categories_present() {
         h j = 0;
         while j < arr_len(cats) {
             if arr_get(cats, j) == target { found = 1; }
-            j = j + 1;
+            j += 1;
         }
         assert_eq(found, 1, concat_many("category ", target, " present"));
-        i = i + 1;
+        i += 1;
     }
 }
 
@@ -52,11 +52,11 @@ fn test_is_attractor_first_50() {
         h j = 0;
         while j < arr_len(fibs) {
             if arr_get(fibs, j) == i { is_fib = 1; }
-            j = j + 1;
+            j += 1;
         }
         assert_eq(is_attractor(i), is_fib,
             concat_many("is_attractor(", to_string(i), ")"));
-        i = i + 1;
+        i += 1;
     }
 }
 
@@ -71,7 +71,7 @@ fn test_resonance_on_all_fibs() {
         if diff < 0.0 { diff = 0.0 - diff; }
         assert_true(diff < 0.001,
             concat_many("res ", to_string(arr_get(fibs, i)), " ≈ 1"));
-        i = i + 1;
+        i += 1;
     }
 }
 
@@ -101,7 +101,7 @@ fn test_token_roundtrip_30() {
         "omc_token_encode(s)",
         "omc_token_decode(ids)",
         "if x > 0 { return 1; }",
-        "while i < n { i = i + 1; }",
+        "while i < n { i += 1; }",
         "for v in xs { print(v); }",
         "h sum = arr_sum_int(xs);",
         "h len = arr_len(xs);",
@@ -114,7 +114,7 @@ fn test_token_roundtrip_30() {
         h c = arr_get(corpus, i);
         h back = omc_token_decode(omc_token_encode(c));
         assert_eq(back, c, concat_many("rt[", to_string(i), "]"));
-        i = i + 1;
+        i += 1;
     }
 }
 
@@ -139,7 +139,7 @@ fn test_explain_12_errors() {
         h ex = omc_explain_error(arr_get(cases, i));
         assert_eq(dict_get(ex, "matched"), 1,
             concat_many("err ", to_string(i), " matched"));
-        i = i + 1;
+        i += 1;
     }
 }
 
@@ -163,11 +163,11 @@ fn test_did_you_mean_8_typos() {
         h j = 0;
         while j < arr_len(suggestions) {
             if arr_get(suggestions, j) == arr_get(pair, 1) { has = 1; }
-            j = j + 1;
+            j += 1;
         }
         assert_eq(has, 1,
             concat_many("typo ", to_string(i), " → ", arr_get(pair, 1)));
-        i = i + 1;
+        i += 1;
     }
 }
 
@@ -187,7 +187,7 @@ fn test_quick_help_30() {
         h sig = omc_help_signature(n);
         assert_true(str_len(sig) > 0,
             concat_many(n, " has sig"));
-        i = i + 1;
+        i += 1;
     }
 }
 
@@ -204,11 +204,11 @@ fn test_unique_categories_known() {
         h j = 0;
         while j < arr_len(known_cats) {
             if arr_get(known_cats, j) == cat { is_known = 1; }
-            j = j + 1;
+            j += 1;
         }
         assert_eq(is_known, 1,
             concat_many("unique cat ", arr_get(unique, i)));
-        i = i + 1;
+        i += 1;
     }
 }
 
@@ -219,7 +219,7 @@ fn test_is_unique_consistent() {
     while i < arr_len(unique) {
         assert_eq(omc_is_unique(arr_get(unique, i)), 1,
             concat_many(arr_get(unique, i), " marked"));
-        i = i + 1;
+        i += 1;
     }
 }
 
@@ -231,7 +231,7 @@ fn test_count_in_each_category() {
         h c = arr_get(cats, i);
         h n = omc_count_in_category(c);
         assert_true(n > 0, concat_many("cat ", c, " populated"));
-        i = i + 1;
+        i += 1;
     }
 }
 
@@ -242,7 +242,7 @@ fn test_canonical_hash_equivalents_10() {
         "fn add(a, b) { return a + b; }",
         "h x = 1;",
         "if cond { return 1; }",
-        "while i < n { i = i + 1; }",
+        "while i < n { i += 1; }",
         "fn loss(p, t) { return (p - t) * (p - t); }",
         "fn map_sq(xs) { return arr_map(xs, fn(x) { return x * x; }); }",
         "fn count(xs) { h n = arr_len(xs); return n; }",
@@ -254,7 +254,7 @@ fn test_canonical_hash_equivalents_10() {
         "fn add(p, q) { return p + q; }",
         "h x = 1;",  # same code
         "if cond { return 1; }",
-        "while j < n { j = j + 1; }",
+        "while j < n { j += 1; }",
         "fn loss(pred, target) { return (pred - target) * (pred - target); }",
         "fn map_sq(items) { return arr_map(items, fn(z) { return z * z; }); }",
         "fn count(arr) { h c = arr_len(arr); return c; }",
@@ -267,7 +267,7 @@ fn test_canonical_hash_equivalents_10() {
         h h2 = omc_canonical_hash(arr_get(pairs_b, i));
         assert_eq(dict_get(h1, "raw"), dict_get(h2, "raw"),
             concat_many("hash equiv ", to_string(i)));
-        i = i + 1;
+        i += 1;
     }
 }
 
@@ -283,6 +283,6 @@ fn test_omc_id_stability() {
         h id1 = omc_id(arr_get(cases, i));
         h id2 = omc_id(arr_get(cases, i));
         assert_eq(id1, id2, concat_many("id ", to_string(i)));
-        i = i + 1;
+        i += 1;
     }
 }

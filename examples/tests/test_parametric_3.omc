@@ -21,7 +21,7 @@ fn test_is_attractor_table() {
     while i < arr_len(fibs) {
         assert_eq(is_attractor(arr_get(fibs, i)), 1,
             concat_many("fib ", to_string(arr_get(fibs, i))));
-        i = i + 1;
+        i += 1;
     }
 }
 
@@ -33,7 +33,7 @@ fn test_non_attractor_table() {
     while i < arr_len(non) {
         assert_eq(is_attractor(arr_get(non, i)), 0,
             concat_many("non-fib ", to_string(arr_get(non, i))));
-        i = i + 1;
+        i += 1;
     }
 }
 
@@ -44,7 +44,7 @@ fn test_distance_zero_on_fibs() {
     while i < arr_len(fibs) {
         assert_eq(attractor_distance(arr_get(fibs, i)), 0,
             concat_many("d(", to_string(arr_get(fibs, i)), ") = 0"));
-        i = i + 1;
+        i += 1;
     }
 }
 
@@ -66,7 +66,7 @@ fn test_arr_dot_table() {
         h d = arr_dot(arr_get(pairs_a, i), arr_get(pairs_b, i));
         assert_true(approx_eq(d, arr_get(expected, i), 0.001),
             concat_many("dot ", to_string(i)));
-        i = i + 1;
+        i += 1;
     }
 }
 
@@ -84,7 +84,7 @@ fn test_arr_sum_int_table() {
     while i < arr_len(arrays) {
         h s = arr_sum_int(arr_get(arrays, i));
         assert_eq(s, arr_get(expected, i), concat_many("sum ", to_string(i)));
-        i = i + 1;
+        i += 1;
     }
 }
 
@@ -103,7 +103,7 @@ fn test_arr_minmax_table() {
             concat_many("max ", to_string(i)));
         assert_eq(arr_min_int(arr_get(arrays, i)), arr_get(min_expected, i),
             concat_many("min ", to_string(i)));
-        i = i + 1;
+        i += 1;
     }
 }
 
@@ -115,7 +115,7 @@ fn test_str_len_table() {
     while i < arr_len(strings) {
         assert_eq(str_len(arr_get(strings, i)), arr_get(expected, i),
             concat_many("len ", to_string(i)));
-        i = i + 1;
+        i += 1;
     }
 }
 
@@ -138,7 +138,7 @@ fn test_resonance_table() {
         h d = v - 1.0;
         if d < 0.0 { d = 0.0 - d; }
         assert_true(d < 0.001, concat_many("r ", to_string(i)));
-        i = i + 1;
+        i += 1;
     }
 }
 
@@ -153,7 +153,7 @@ fn test_unique_categories_make_sense() {
         # All unique builtins should have a category
         assert_true(str_len(cat) > 0,
             concat_many(n, " has cat"));
-        i = i + 1;
+        i += 1;
     }
 }
 
@@ -170,7 +170,7 @@ fn test_canonical_hash_deterministic() {
         h h2 = omc_canonical_hash(arr_get(cases, i));
         assert_eq(dict_get(h1, "raw"), dict_get(h2, "raw"),
             concat_many("hash ", to_string(i)));
-        i = i + 1;
+        i += 1;
     }
 }
 

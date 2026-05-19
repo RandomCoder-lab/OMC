@@ -88,7 +88,7 @@ fn improve_to_convergence(code, goal, max_rounds) {
 
         current = improved
         arr_push(trace, {round: r + 1, code: current, critique: criticism})
-        r = r + 1
+        r += 1
     }
 
     h result = {code: current, rounds: r, trace: trace}
@@ -145,7 +145,7 @@ h programs = [
     },
     {
         name: "String Reverser",
-        code: "fn rev_str(s) {\n    h out = \"\"\n    h i = str_len(s) - 1\n    while i >= 0 {\n        out = str_concat(out, str_slice(s, i, i + 1))\n        i = i - 1\n    }\n    return out\n}",
+        code: "fn rev_str(s) {\n    h out = \"\"\n    h i = str_len(s) - 1\n    while i >= 0 {\n        out = str_concat(out, str_slice(s, i, i + 1))\n        i -= 1\n}\n    return out\n}",
         goal: "Make string reversal handle UTF-8 correctly and add word-reversal mode."
     }
 ]
@@ -174,7 +174,7 @@ while i < arr_len(programs) {
     h final_lines = arr_len(str_split(meta["code"], "\n"))
     print(str_concat("  Final code: ", to_string(final_lines), " lines"))
     print("")
-    i = i + 1
+    i += 1
 }
 
 print("=== Recursive improvement complete ===")

@@ -63,7 +63,7 @@ fn fibtier_new_with_strategy(max_tiers, fold_strategy) {
     h i = 0;
     while i < max_tiers {
         arr_push(tiers, []);     # each tier is an array of entries
-        i = i + 1;
+        i += 1;
     }
     h mem = dict_new();
     dict_set(mem, "tiers", tiers);
@@ -111,12 +111,12 @@ fn fibtier_fold_default(entry_a, entry_b) {
     h i = 0;
     while i < arr_len(sources_a) {
         arr_push(all_sources, arr_get(sources_a, i));
-        i = i + 1;
+        i += 1;
     }
     i = 0;
     while i < arr_len(sources_b) {
         arr_push(all_sources, arr_get(sources_b, i));
-        i = i + 1;
+        i += 1;
     }
     return _fibtier_make_entry(combined, all_sources);
 }
@@ -136,7 +136,7 @@ fn _fibtier_cascade_overflow(mem, tier_idx) {
         h oldest = arr_get(tier, 0);
         h new_tier = [];
         h k = 1;
-        while k < arr_len(tier) { arr_push(new_tier, arr_get(tier, k)); k = k + 1; }
+        while k < arr_len(tier) { arr_push(new_tier, arr_get(tier, k)); k += 1; }
         arr_set(tiers, tier_idx - 1, new_tier);
         tier = new_tier;
 
@@ -174,7 +174,7 @@ fn _fibtier_cascade_overflow_with_fold(mem, tier_idx) {
         if arr_len(tier) < 2 {
             h new_tier = [];
             h k = 1;
-            while k < arr_len(tier) { arr_push(new_tier, arr_get(tier, k)); k = k + 1; }
+            while k < arr_len(tier) { arr_push(new_tier, arr_get(tier, k)); k += 1; }
             arr_set(tiers, tier_idx - 1, new_tier);
             tier = new_tier;
             dict_set(mem, "evicted", dict_get(mem, "evicted") + 1);
@@ -194,7 +194,7 @@ fn _fibtier_cascade_overflow_with_fold(mem, tier_idx) {
                 if k != ia && k != ib {
                     arr_push(new_tier, arr_get(tier, k));
                 }
-                k = k + 1;
+                k += 1;
             }
             arr_set(tiers, tier_idx - 1, new_tier);
             tier = new_tier;
@@ -237,9 +237,9 @@ fn _fibtier_pick_fold_pair(tier, strategy) {
                 } elif d < best_dist {
                     best_i = i; best_j = j; best_dist = d;
                 }
-                j = j + 1;
+                j += 1;
             }
-            i = i + 1;
+            i += 1;
         }
         return [best_i, best_j];
     }
@@ -278,8 +278,8 @@ fn fibtier_stats(mem) {
     while i < arr_len(tiers) {
         h n = arr_len(arr_get(tiers, i));
         arr_push(occupancy, n);
-        total = total + n;
-        i = i + 1;
+        total += n;
+        i += 1;
     }
     h s = dict_new();
     dict_set(s, "occupancy", occupancy);
@@ -306,10 +306,10 @@ fn fibtier_render(mem) {
             while j < arr_len(tier) {
                 h entry = arr_get(tier, j);
                 out = concat_many(out, "  - ", dict_get(entry, "content"), "\n");
-                j = j + 1;
+                j += 1;
             }
         }
-        i = i + 1;
+        i += 1;
     }
     return out;
 }
@@ -333,9 +333,9 @@ fn fibtier_query(mem, query_text, top_k) {
             dict_set(r, "entry", entry);
             dict_set(r, "distance", dist);
             arr_push(scored, r);
-            j = j + 1;
+            j += 1;
         }
-        i = i + 1;
+        i += 1;
     }
     # Sort by distance ascending — return top_k closest.
     # Pure-OMC sort: simple selection sort (corpus is small).
@@ -360,13 +360,13 @@ fn fibtier_query(mem, query_text, top_k) {
                     best_idx = ii;
                 }
             }
-            ii = ii + 1;
+            ii += 1;
         }
         if best_idx >= 0 {
             arr_push(sorted, arr_get(scored, best_idx));
             dict_set(taken, to_string(best_idx), true);
         }
-        k = k + 1;
+        k += 1;
     }
     return sorted;
 }

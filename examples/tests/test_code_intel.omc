@@ -34,7 +34,7 @@ fn test_summary_collects_calls() {
         h c = arr_get(calls, i);
         if c == "arr_softmax" { has_softmax = 1; }
         if c == "arr_neg" { has_neg = 1; }
-        i = i + 1;
+        i += 1;
     }
     assert_eq(has_softmax, 1, "arr_softmax detected");
     assert_eq(has_neg, 1, "arr_neg detected");

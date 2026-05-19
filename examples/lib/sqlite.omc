@@ -105,7 +105,7 @@ fn tables(conn) {
     h i = 0;
     while i < arr_len(rows) {
         arr_push(out, arr_get(arr_get(rows, i), 0));
-        i = i + 1;
+        i += 1;
     }
     return out;
 }

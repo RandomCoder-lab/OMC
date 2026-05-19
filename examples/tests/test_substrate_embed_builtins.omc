@@ -39,8 +39,8 @@ fn test_substrate_embed_normalized() {
     h i = 0
     while i < arr_len(v) {
         h x = v[i]
-        dot = dot + x * x
-        i = i + 1
+        dot += x * x
+        i += 1
     }
     assert_near(dot, 1.0, 0.01, "substrate_embed is L2-normalized")
 }
@@ -52,7 +52,7 @@ fn test_substrate_embed_deterministic() {
     h i = 0
     while i < arr_len(a) {
         if a[i] != b[i] { match_all = false }
-        i = i + 1
+        i += 1
     }
     assert_true(match_all, "substrate_embed is deterministic")
 }
@@ -64,7 +64,7 @@ fn test_substrate_embed_differs_for_different_texts() {
     h i = 0
     while i < arr_len(a) {
         if a[i] != b[i] { same = false }
-        i = i + 1
+        i += 1
     }
     assert_false(same, "substrate_embed differs for different texts")
 }
@@ -121,7 +121,7 @@ fn test_file_ls_contains_known_file() {
     h i = 0
     while i < arr_len(files) {
         if files[i] == "test_substrate_embed_builtins.omc" { found = true }
-        i = i + 1
+        i += 1
     }
     assert_true(found, "file_ls finds this test file itself")
 }
@@ -132,7 +132,7 @@ fn test_file_ls_sorted() {
     h i = 1
     while i < arr_len(files) {
         if files[i] < files[i - 1] { sorted = false }
-        i = i + 1
+        i += 1
     }
     assert_true(sorted, "file_ls returns sorted results")
 }

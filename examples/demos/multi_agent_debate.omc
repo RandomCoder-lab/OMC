@@ -61,7 +61,7 @@ fn run_debate(topic, rounds) {
         print(str_concat("AGAINST: ", str_slice(against_arg, 0, 100), "..."))
         print("")
 
-        round = round + 1
+        round += 1
     }
 
     print("=== JUDGING ===")

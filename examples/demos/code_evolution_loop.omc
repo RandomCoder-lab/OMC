@@ -32,11 +32,11 @@ fn code_score(code) {
     h i = 0
     while i < n {
         h line = str_trim(lines[i])
-        if str_starts_with(line, "fn ") { fns = fns + 1 }
-        if str_starts_with(line, "#") { comments = comments + 1 }
-        if str_contains(line, "error(") { error_handling = error_handling + 1 }
-        if str_contains(line, "return ") { returns = returns + 1 }
-        i = i + 1
+        if str_starts_with(line, "fn ") { fns += 1}
+        if str_starts_with(line, "#") { comments += 1}
+        if str_contains(line, "error(") { error_handling += 1}
+        if str_contains(line, "return ") { returns += 1}
+        i += 1
     }
     return {
         lines: n,
@@ -54,14 +54,14 @@ fn describe_ancestry(lineage) {
     h i = 0
     while i < arr_len(lineage) {
         arr_push(descriptions, str_concat("gen", to_string(lineage[i]["generation"])))
-        i = i + 1
+        i += 1
     }
     h i2 = 0
     h out = ""
     while i2 < arr_len(descriptions) {
         if i2 > 0 { out = str_concat(out, " → ") }
         out = str_concat(out, descriptions[i2])
-        i2 = i2 + 1
+        i2 += 1
     }
     return out
 }
@@ -144,9 +144,9 @@ fn evolve_lineage(seed_code, goal, depth, branches) {
                     " (", delta_sign, to_string(child["improvement"]), ")",
                     " | ", child["vector"]
                 ))
-                bi = bi + 1
+                bi += 1
             }
-            pi = pi + 1
+            pi += 1
         }
         # Select best from next generation for next round
         h best = next_generation[0]
@@ -155,10 +155,10 @@ fn evolve_lineage(seed_code, goal, depth, branches) {
             if next_generation[ni]["score"]["composite"] > best["score"]["composite"] {
                 best = next_generation[ni]
             }
-            ni = ni + 1
+            ni += 1
         }
         current_generation = [best]
-        gen = gen + 1
+        gen += 1
     }
 
     # Find overall best
@@ -168,7 +168,7 @@ fn evolve_lineage(seed_code, goal, depth, branches) {
         if tree[ti]["score"]["composite"] > best["score"]["composite"] {
             best = tree[ti]
         }
-        ti = ti + 1
+        ti += 1
     }
 
     return {tree: tree, best: best, depth: depth}
@@ -213,7 +213,7 @@ h SEED = str_concat(
     "        h w = words[i]\n",
     "        if dict_has(freq, w) { freq[w] = freq[w] + 1 }\n",
     "        else { freq[w] = 1 }\n",
-    "        i = i + 1\n",
+    "        i += 1\n",
     "    }\n",
     "    return freq\n",
     "}"

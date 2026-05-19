@@ -17,7 +17,7 @@ fn test_categories_have_builtins() {
         h items = omc_list_builtins(cat);
         assert_true(arr_len(items) >= 1,
             concat_many("category ", cat, " has builtins"));
-        i = i + 1;
+        i += 1;
     }
 }
 
@@ -32,10 +32,10 @@ fn test_unique_subset_of_all() {
         h j = 0;
         while j < arr_len(all) {
             if arr_get(all, j) == u { found = 1; }
-            j = j + 1;
+            j += 1;
         }
         assert_eq(found, 1, concat_many(u, " in all"));
-        i = i + 1;
+        i += 1;
     }
 }
 
@@ -50,9 +50,9 @@ fn test_help_returns_signature() {
             h hd = omc_help(arr_get(all, i));
             assert_true(str_len(dict_get(hd, "signature")) > 0,
                 concat_many(arr_get(all, i), " sig"));
-            checked = checked + 1;
+            checked += 1;
         }
-        i = i + 1;
+        i += 1;
     }
     assert_true(checked > 50, "checked many");
 }
@@ -64,7 +64,7 @@ fn test_tokenizer_corpus_roundtrip() {
         "h x = 1;",
         "h y = arr_get(xs, 0);",
         "if x > 0 { return 1; }",
-        "while i < n { i = i + 1; }",
+        "while i < n { i += 1; }",
         "for v in xs { print(v); }",
         "arr_softmax([1.0, 2.0])",
         "h d = dict_new();",
@@ -86,7 +86,7 @@ fn test_tokenizer_corpus_roundtrip() {
         h c = arr_get(corpus, i);
         h back = omc_token_decode(omc_token_encode(c));
         assert_eq(back, c, concat_many("rt[", to_string(i), "]"));
-        i = i + 1;
+        i += 1;
     }
 }
 
@@ -104,7 +104,7 @@ fn test_compression_on_builtin_heavy_code() {
         h r = omc_token_compression_ratio(arr_get(cases, i));
         assert_true(r > 1.0,
             concat_many("case ", to_string(i), " ratio > 1"));
-        i = i + 1;
+        i += 1;
     }
 }
 
@@ -113,8 +113,8 @@ fn test_alpha_equivalence_table() {
     h pairs = [
         ["fn f(a) { return a; }", "fn f(b) { return b; }"],
         ["fn add(x, y) { return x + y; }", "fn add(p, q) { return p + q; }"],
-        ["fn loop(n) { h i = 0; while i < n { i = i + 1; } return i; }",
-         "fn loop(n) { h k = 0; while k < n { k = k + 1; } return k; }"],
+        ["fn loop(n) { h i = 0; while i < n { i += 1; } return i; }",
+         "fn loop(n) { h k = 0; while k < n { k += 1; } return k; }"],
         ["fn lookup(d, key) { return dict_get(d, key); }",
          "fn lookup(dt, k) { return dict_get(dt, k); }"],
     ];
@@ -123,7 +123,7 @@ fn test_alpha_equivalence_table() {
         h p = arr_get(pairs, i);
         h r = omc_code_equivalent(arr_get(p, 0), arr_get(p, 1));
         assert_eq(r, 1, concat_many("equiv pair ", to_string(i)));
-        i = i + 1;
+        i += 1;
     }
 }
 
@@ -142,7 +142,7 @@ fn test_explain_error_real_table() {
         h ex = omc_explain_error(arr_get(cases, i));
         assert_eq(dict_get(ex, "matched"), 1,
             concat_many("err ", to_string(i), " matched"));
-        i = i + 1;
+        i += 1;
     }
 }
 

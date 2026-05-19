@@ -30,7 +30,7 @@ fn assert_in(needle, haystack, msg) {
     h k = 0;
     while k < arr_len(haystack) {
         if arr_get(haystack, k) == needle { return 1; }
-        k = k + 1;
+        k += 1;
     }
     error(concat_many("FAIL ", msg, ": ", needle, " not in ", haystack));
 }
@@ -45,14 +45,14 @@ fn test_anomaly_detect_credential_stuffing() {
     h i = 0;
     while i < 100 {
         arr_push(rows, [40, 200, 0, 14]);   # latency, status, endpoint, hour
-        i = i + 1;
+        i += 1;
     }
     h attack_indices = [];
     h j = 0;
     while j < 5 {
         arr_push(attack_indices, arr_len(rows));
         arr_push(rows, [15, 401, 8, 3]);    # the structural attack
-        j = j + 1;
+        j += 1;
     }
 
     h det = ha.new(["latency", "status", "endpoint", "hour"]);
@@ -67,7 +67,7 @@ fn test_anomaly_detect_credential_stuffing() {
     while k < arr_len(top) {
         assert_in(arr_get(top, k), attack_indices,
             concat_many("attack at top ", k));
-        k = k + 1;
+        k += 1;
     }
 }
 
@@ -125,7 +125,7 @@ fn test_clustering_predict_assigns_existing_rows() {
     while k < arr_len(labels) {
         assert_true(arr_get(labels, k) >= 0,
             concat_many("row ", k, " gets a cluster"));
-        k = k + 1;
+        k += 1;
     }
 }
 
@@ -170,7 +170,7 @@ fn test_recommend_basic_suggestion() {
         h s = arr_get(suggestions, k);
         assert_true(s != "movie_1", "no already-rated movie_1");
         assert_true(s != "movie_2", "no already-rated movie_2");
-        k = k + 1;
+        k += 1;
     }
 }
 

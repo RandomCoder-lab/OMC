@@ -55,10 +55,10 @@ fn _prom_random_matrix(rows, cols, bound, state) {
             h step = _prom_uniform(s, bound);
             s = dict_get(step, "state");
             arr_push(row, dict_get(step, "value"));
-            j = j + 1;
+            j += 1;
         }
         arr_push(matrix, row);
-        i = i + 1;
+        i += 1;
     }
     h node = tape_var(matrix);   # register the whole matrix as one variable
     h out = dict_new();
@@ -93,7 +93,7 @@ fn _prom_zeros_row(cols) {
     h j = 0;
     while j < cols {
         arr_push(row, 0.0);
-        j = j + 1;
+        j += 1;
     }
     h matrix = [row];   # 1 x cols
     return tape_var(matrix);
@@ -162,7 +162,7 @@ fn prom_sgd_step(params, lr) {
     h i = 0;
     while i < arr_len(params) {
         tape_update(arr_get(params, i), lr);
-        i = i + 1;
+        i += 1;
     }
 }
 
@@ -191,7 +191,7 @@ fn prom_one_hot(idx, vocab) {
     while i < vocab {
         if i == idx { arr_push(row, 1.0); }
         else { arr_push(row, 0.0); }
-        i = i + 1;
+        i += 1;
     }
     return tape_const([row]);    # [1, vocab]
 }
@@ -211,7 +211,7 @@ fn prom_argmax_row(logits) {
     while i < arr_len(row) {
         h v = arr_get(row, i);
         if v > best_val { best_val = v; best = i; }
-        i = i + 1;
+        i += 1;
     }
     return best;
 }
@@ -232,9 +232,9 @@ fn prom_collect_params(layers) {
         h j = 0;
         while j < arr_len(ps) {
             arr_push(out, arr_get(ps, j));
-            j = j + 1;
+            j += 1;
         }
-        i = i + 1;
+        i += 1;
     }
     return out;
 }
@@ -285,7 +285,7 @@ fn prom_serialize_model(model, layer_names) {
         dict_set(entry, "name", name);
         dict_set(entry, "data", _prom_serialize_linear(layer));
         arr_push(out_layers, entry);
-        i = i + 1;
+        i += 1;
     }
     h bundle = dict_new();
     dict_set(bundle, "format", "prometheus_model_v1");
@@ -335,7 +335,7 @@ fn prom_load_model(bundle) {
         h entry = arr_get(layers, i);
         h name = dict_get(entry, "name");
         dict_set(model, name, _prom_load_linear(entry));
-        i = i + 1;
+        i += 1;
     }
     return model;
 }
@@ -385,8 +385,8 @@ fn prom_geodesic_distance(i, j) {
         h rj = j - (j / m) * m;
         h d_circ = _prom_circular_dist(ri, rj, m);
         # Force float division — OMC int/int truncates.
-        total = total + (d_circ * 1.0) / (m * 1.0);
-        k = k + 1;
+        total += (d_circ * 1.0) / (m * 1.0);
+        k += 1;
     }
     return total;
 }
@@ -407,13 +407,13 @@ fn prom_geodesic_bias_matrix(seq_len) {
             h d = prom_geodesic_distance(i, j);
             arr_push(row, d);
             if i != j {
-                offdiag_sum = offdiag_sum + d;
-                offdiag_count = offdiag_count + 1;
+                offdiag_sum += d;
+                offdiag_count += 1;
             }
-            j = j + 1;
+            j += 1;
         }
         arr_push(table, row);
-        i = i + 1;
+        i += 1;
     }
     h mean_off = 1.0;
     if offdiag_count > 0 {
@@ -428,10 +428,10 @@ fn prom_geodesic_bias_matrix(seq_len) {
         h j = 0;
         while j < seq_len {
             arr_push(nr, arr_get(row, j) / mean_off);
-            j = j + 1;
+            j += 1;
         }
         arr_push(normed, nr);
-        i = i + 1;
+        i += 1;
     }
     return normed;
 }
@@ -468,14 +468,14 @@ fn _prom_grad_magnitude(g) {
                 while j < arr_len(v) {
                     h e = arr_get(v, j);
                     if e < 0.0 { e = 0.0 - e; }
-                    total = total + e;
-                    j = j + 1;
+                    total += e;
+                    j += 1;
                 }
             } else {
                 if v < 0.0 { v = 0.0 - v; }
-                total = total + v;
+                total += v;
             }
-            i = i + 1;
+            i += 1;
         }
         return total;
     }
@@ -509,7 +509,7 @@ fn prom_harmonic_sgd_step(params, lr, alpha) {
         h gmag = _prom_grad_magnitude(g);
         h scale = _prom_harmonic_scale(gmag, alpha);
         tape_update(p, lr * scale);
-        i = i + 1;
+        i += 1;
     }
 }
 
@@ -584,7 +584,7 @@ fn prom_generate_greedy(forward_fn, model, seed_idx, length, vocab) {
         h next_idx = prom_argmax_row(logits);
         arr_push(out, next_idx);
         current = next_idx;
-        step = step + 1;
+        step += 1;
     }
     return out;
 }
@@ -595,7 +595,7 @@ fn prom_decode_indices(indices, chars) {
     h i = 0;
     while i < arr_len(indices) {
         out = concat_many(out, arr_get(chars, arr_get(indices, i)));
-        i = i + 1;
+        i += 1;
     }
     return out;
 }
@@ -624,7 +624,7 @@ fn prom_cross_entropy_loss(logits_id, target_idx, vocab) {
     while i < vocab {
         if i == target_idx { arr_push(mask_row, -1.0); }
         else { arr_push(mask_row, 0.0); }
-        i = i + 1;
+        i += 1;
     }
     h mask = tape_const([mask_row]);
     h selected = tape_mul(log_probs, mask);
@@ -691,10 +691,10 @@ fn prom_attention_forward(layer, x_id) {
             h j = 0;
             while j < seq_len {
                 arr_push(new_row, 0.0 - alpha * arr_get(row, j));
-                j = j + 1;
+                j += 1;
             }
             arr_push(neg_bias_scaled, new_row);
-            i = i + 1;
+            i += 1;
         }
         h bias_node = tape_const(neg_bias_scaled);
         scores = tape_add(scores, bias_node);
@@ -999,7 +999,7 @@ fn prom_attention_substrate_k_mh_new(d_model, seq_len, n_heads, rng_state) {
         dict_set(head, "W_O", dict_get(W_O, "node"));
         dict_set(head, "K_const", prom_crt_pe_matrix(seq_len, d_head));
         arr_push(heads, head);
-        hi = hi + 1;
+        hi += 1;
     }
     h layer = dict_new();
     dict_set(layer, "kind", "attention");
@@ -1052,7 +1052,7 @@ fn prom_attention_substrate_k_mh_forward(layer, x_id) {
         } else {
             sum_proj = tape_add(sum_proj, proj_h);
         }
-        hi = hi + 1;
+        hi += 1;
     }
     return sum_proj;
 }
@@ -1066,7 +1066,7 @@ fn prom_attention_substrate_k_mh_params(layer) {
         arr_push(out, dict_get(head, "Q"));
         arr_push(out, dict_get(head, "V"));
         arr_push(out, dict_get(head, "W_O"));
-        hi = hi + 1;
+        hi += 1;
     }
     return out;
 }
@@ -1133,7 +1133,7 @@ fn _prom_zeros_like(v) {
             } else {
                 arr_push(out, 0.0);
             }
-            i = i + 1;
+            i += 1;
         }
         return out;
     }
@@ -1147,7 +1147,7 @@ fn _prom_zip(a, b, op) {
         h i = 0;
         while i < arr_len(a) {
             arr_push(out, _prom_zip(arr_get(a, i), arr_get(b, i), op));
-            i = i + 1;
+            i += 1;
         }
         return out;
     }
@@ -1165,7 +1165,7 @@ fn _prom_scale(v, s, op) {
         h i = 0;
         while i < arr_len(v) {
             arr_push(out, _prom_scale(arr_get(v, i), s, op));
-            i = i + 1;
+            i += 1;
         }
         return out;
     }
@@ -1181,7 +1181,7 @@ fn _prom_sqrt_eps(v, eps) {
         h i = 0;
         while i < arr_len(v) {
             arr_push(out, _prom_sqrt_eps(arr_get(v, i), eps));
-            i = i + 1;
+            i += 1;
         }
         return out;
     }
@@ -1209,7 +1209,7 @@ fn prom_adamw_step(state) {
             h g = tape_grad(arr_get(params, i));
             arr_push(m, _prom_zeros_like(g));
             arr_push(v, _prom_zeros_like(g));
-            i = i + 1;
+            i += 1;
         }
         dict_set(state, "m", m);
         dict_set(state, "v", v);
@@ -1234,7 +1234,7 @@ fn prom_adamw_step(state) {
         h new_val = substrate_adamw_update(cur, g, m_old, v_old,
                                             lr, b1, b2, eps, wd, step);
         tape_set_value(p, new_val);
-        i = i + 1;
+        i += 1;
     }
 }
 
@@ -1312,7 +1312,7 @@ fn prom_layernorm_new(d_model, rng_state) {
     while i < d_model {
         arr_push(gamma_row, 1.0);
         arr_push(beta_row, 0.0);
-        i = i + 1;
+        i += 1;
     }
     h gamma = tape_var([gamma_row]);
     h beta = tape_var([beta_row]);
@@ -1365,14 +1365,14 @@ fn prom_crt_pe_matrix(seq_len, d_model) {
             h angle = 6.283185307179586 * residue / (m * 1.0);
             arr_push(row, sin(angle));
             arr_push(row, cos(angle));
-            i = i + 1;
+            i += 1;
         }
         # If d_model is odd, pad final cell with 0.
         if (n_pairs * 2) < d_model {
             arr_push(row, 0.0);
         }
         arr_push(table, row);
-        pos = pos + 1;
+        pos += 1;
     }
     return table;
 }
@@ -1401,7 +1401,7 @@ fn prom_sequential_forward(model, x_id) {
         elif kind == "attention" { cur = prom_attention_forward(L, cur); }
         elif kind == "relu" { cur = prom_relu(cur); }
         elif kind == "sigmoid" { cur = prom_sigmoid(cur); }
-        i = i + 1;
+        i += 1;
     }
     return cur;
 }
@@ -1429,9 +1429,9 @@ fn prom_collect_params_v2(layers) {
         h j = 0;
         while j < arr_len(ps) {
             arr_push(out, arr_get(ps, j));
-            j = j + 1;
+            j += 1;
         }
-        i = i + 1;
+        i += 1;
     }
     return out;
 }

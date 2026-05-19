@@ -17,7 +17,7 @@ fn omc_bin() {
     while i < arr_len(candidates) {
         h r = omc_spawn("test", ["-f", candidates[i]])
         if r["ok"] { return candidates[i] }
-        i = i + 1
+        i += 1
     }
     return "./target/debug/omnimcode-standalone"
 }

@@ -28,7 +28,7 @@ fn main() {
         h c = arr_get(cats, i);
         h items = omc_list_builtins(c);
         print(concat_many("  ", c, ": ", to_string(arr_len(items)), " builtins"));
-        i = i + 1;
+        i += 1;
         if i >= 8 { i = arr_len(cats); }  # limit output
     }
     print("");
@@ -41,7 +41,7 @@ fn main() {
         if k < 8 {
             print(concat_many("  - ", arr_get(unique, k)));
         }
-        k = k + 1;
+        k += 1;
     }
     if k > 8 { print(concat_many("  ... +", to_string(k - 8), " more")); }
     print("");

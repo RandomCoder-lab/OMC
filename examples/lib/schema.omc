@@ -32,7 +32,7 @@ fn _validate_node(value, schema, path, errors) {
             while ti < arr_len(expected_type) {
                 if expected_type[ti] == actual_type { ok = true }
                 if expected_type[ti] == "integer" and actual_type == "number" and type_of(value) == "int" { ok = true }
-                ti = ti + 1
+                ti += 1
             }
         } else {
             if expected_type == actual_type { ok = true }
@@ -53,7 +53,7 @@ fn _validate_node(value, schema, path, errors) {
         h ei = 0
         while ei < arr_len(allowed) {
             if allowed[ei] == value { found = true }
-            ei = ei + 1
+            ei += 1
         }
         if !found {
             h loc = path
@@ -138,7 +138,7 @@ fn _validate_node(value, schema, path, errors) {
             h ai = 0
             while ai < arr_len(value) {
                 _validate_node(value[ai], item_schema, str_concat(path, "[", to_string(ai), "]"), errors)
-                ai = ai + 1
+                ai += 1
             }
         }
         if dict_has(schema, "uniqueItems") and schema["uniqueItems"] {
@@ -150,7 +150,7 @@ fn _validate_node(value, schema, path, errors) {
                     arr_push(errors, str_concat(path, ": duplicate item at index ", to_string(ui)))
                 }
                 seen[k] = true
-                ui = ui + 1
+                ui += 1
             }
         }
     }
@@ -164,7 +164,7 @@ fn _validate_node(value, schema, path, errors) {
                 if !dict_has(value, req[ri]) {
                     arr_push(errors, str_concat(path, ": missing required field '", req[ri], "'"))
                 }
-                ri = ri + 1
+                ri += 1
             }
         }
         if dict_has(schema, "properties") {
@@ -176,7 +176,7 @@ fn _validate_node(value, schema, path, errors) {
                 if dict_has(value, pk) {
                     _validate_node(value[pk], props[pk], str_concat(path, ".", pk), errors)
                 }
-                pi = pi + 1
+                pi += 1
             }
         }
         if dict_has(schema, "minProperties") {

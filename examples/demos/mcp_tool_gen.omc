@@ -31,7 +31,7 @@ fn extract_fn_signatures(code) {
                     while pi < arr_len(raw_params) {
                         h p = str_trim(raw_params[pi])
                         if str_len(p) > 0 { arr_push(params, p) }
-                        pi = pi + 1
+                        pi += 1
                     }
                 }
                 # check for preceding comment
@@ -45,7 +45,7 @@ fn extract_fn_signatures(code) {
                 arr_push(signatures, {name: fn_name, params: params, doc: doc, line: i + 1})
             }
         }
-        i = i + 1
+        i += 1
     }
     return signatures
 }
@@ -81,7 +81,7 @@ fn signature_to_mcp_tool(sig, file_path) {
         if pi < arr_len(sig["params"]) - 1 or arr_len(sig["params"]) == 1 {
             arr_push(required, param)
         }
-        pi = pi + 1
+        pi += 1
     }
     h description = sig["doc"]
     if str_len(description) == 0 {
@@ -140,7 +140,7 @@ fn manifest_to_claude_tools(manifest) {
             description: tool["description"],
             input_schema: tool["input_schema"]
         })
-        i = i + 1
+        i += 1
     }
     return claude_tools
 }
@@ -164,7 +164,7 @@ fn process_omc_file(path, enhance_with_llm) {
         h sig = sigs[i]
         # skip private helpers (starting with _)
         if str_starts_with(sig["name"], "_") {
-            i = i + 1
+            i += 1
             continue
         }
         h tool = signature_to_mcp_tool(sig, path)
@@ -178,13 +178,13 @@ fn process_omc_file(path, enhance_with_llm) {
             if max_li > arr_len(lines) { max_li = arr_len(lines) }
             while li < max_li {
                 arr_push(context_lines, lines[li])
-                li = li + 1
+                li += 1
             }
             h context = arr_join(context_lines, "\n")
             tool["description"] = enhance_tool_description(tool, context)
         }
         arr_push(tools, tool)
-        i = i + 1
+        i += 1
     }
     return tools
 }
@@ -216,9 +216,9 @@ while fi < arr_len(LIB_FILES) {
     h ti = 0
     while ti < arr_len(tools) {
         arr_push(all_tools, tools[ti])
-        ti = ti + 1
+        ti += 1
     }
-    fi = fi + 1
+    fi += 1
 }
 
 h manifest = build_mcp_manifest(all_tools, "omc-stdlib", "1.3.0")
@@ -242,7 +242,7 @@ while ci < arr_len(claude_tools) and ci < 10 {
         " (", to_string(param_count), " params) — ",
         str_slice(ct["description"], 0, 60)
     ))
-    ci = ci + 1
+    ci += 1
 }
 if arr_len(claude_tools) > 10 {
     print(str_concat("  ... and ", to_string(arr_len(claude_tools) - 10), " more"))

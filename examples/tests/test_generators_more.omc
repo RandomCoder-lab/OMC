@@ -12,7 +12,7 @@ fn squares_to(n) {
     h i = 1;
     while i <= n {
         yield i * i;
-        i = i + 1;
+        i += 1;
     }
 }
 

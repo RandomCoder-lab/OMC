@@ -185,7 +185,7 @@ fn test_sgd_training_converges() {
             h err = tape_sub(pred, yi);
             h sq = tape_mul(err, err);
             L = tape_add(L, sq);
-            i = i + 1;
+            i += 1;
         }
         tape_backward(L);
         h gw = tape_grad(w);
@@ -194,8 +194,8 @@ fn test_sgd_training_converges() {
             converged = 1;
             step = max_steps;
         } else {
-            w_value = w_value - lr * gw;
-            step = step + 1;
+            w_value -= lr * gw;
+            step += 1;
         }
     }
     assert_eq(converged, 1, "SGD converged on y=2x");

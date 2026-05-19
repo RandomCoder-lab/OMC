@@ -17,9 +17,9 @@ fn main() {
 
     h corpus = [
         "fn loss(pred, target) { return (pred - target) * (pred - target); }",
-        "fn sum_array(xs) { h s = 0; h i = 0; while i < arr_len(xs) { s = s + arr_get(xs, i); i = i + 1; } return s; }",
+        "fn sum_array(xs) { h s = 0; h i = 0; while i < arr_len(xs) { s += arr_get(xs, i); i += 1; } return s; }",
         "fn min_max_normalize(xs) { h mn = arr_min_int(xs); h mx = arr_max_int(xs); h rng = mx - mn; return arr_map(xs, fn(v) { return (v - mn) / rng; }); }",
-        "fn dot_product(a, b) { h s = 0; h i = 0; while i < arr_len(a) { s = s + arr_get(a, i) * arr_get(b, i); i = i + 1; } return s; }",
+        "fn dot_product(a, b) { h s = 0; h i = 0; while i < arr_len(a) { s += arr_get(a, i) * arr_get(b, i); i += 1; } return s; }",
         "fn relu_arr(xs) { return arr_map(xs, fn(v) { if v > 0 { return v; } return 0; }); }",
         "fn sigmoid_arr(xs) { return arr_map(xs, fn(v) { return 1 / (1 + exp(0 - v)); }); }",
         "fn fibonacci(n) { if n <= 1 { return n; } return fibonacci(n - 1) + fibonacci(n - 2); }",
@@ -35,7 +35,7 @@ fn main() {
         print(concat_many("  rank ", to_string(i),
             "  index=", to_string(dict_get(hit, "index")),
             "  distance=", to_string(dict_get(hit, "distance"))));
-        i = i + 1;
+        i += 1;
     }
     print("  → top hit at index 0 (loss with rename), distance 0");
 
@@ -48,7 +48,7 @@ fn main() {
         print(concat_many("  rank ", to_string(i),
             "  index=", to_string(dict_get(hit, "index")),
             "  distance=", to_string(dict_get(hit, "distance"))));
-        i = i + 1;
+        i += 1;
     }
     print("  → top hit at index 1 (sum_array), distance 0");
 
@@ -61,7 +61,7 @@ fn main() {
         print(concat_many("  rank ", to_string(i),
             "  index=", to_string(dict_get(hit, "index")),
             "  distance=", to_string(dict_get(hit, "distance"))));
-        i = i + 1;
+        i += 1;
     }
     print("  → top hits are factorial / fibonacci (other recursive single-int fns)");
 

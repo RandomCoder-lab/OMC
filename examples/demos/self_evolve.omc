@@ -33,9 +33,9 @@ fn measure_quality(code) {
     h i = 0
     while i < n {
         h line = str_trim(lines[i])
-        if str_starts_with(line, "fn ") { fn_count = fn_count + 1 }
-        if str_starts_with(line, "#") { comment_count = comment_count + 1 }
-        i = i + 1
+        if str_starts_with(line, "fn ") { fn_count += 1}
+        if str_starts_with(line, "#") { comment_count += 1}
+        i += 1
     }
     return {lines: n, functions: fn_count, comments: comment_count}
 }
@@ -70,7 +70,7 @@ fn generate_variants(source_code, n) {
             source_code
         )
         arr_push(prompts, {prompt: p, system: sys})
-        i = i + 1
+        i += 1
     }
     print(str_concat("Generating ", to_string(n), " variants in parallel..."))
     h raw = batch_llm_call(prompts, MODEL)
@@ -78,7 +78,7 @@ fn generate_variants(source_code, n) {
     h ri = 0
     while ri < arr_len(raw) {
         arr_push(variants, strip_fences(raw[ri]))
-        ri = ri + 1
+        ri += 1
     }
     return variants
 }
@@ -91,7 +91,7 @@ fn pick_best_variant(source, variants) {
     h vi = 0
     while vi < arr_len(variants) {
         arr_push(candidates, variants[vi])
-        vi = vi + 1
+        vi += 1
     }
 
     h criteria = str_concat(
@@ -119,14 +119,14 @@ fn pick_best_variant(source, variants) {
             best_score = score
             best_idx = idx
         }
-        si = si + 1
+        si += 1
     }
 
     h original_score = 0.0
     h oi = 0
     while oi < arr_len(scores) {
         if scores[oi]["idx"] == 0 { original_score = scores[oi]["score"] }
-        oi = oi + 1
+        oi += 1
     }
 
     print(str_concat("Original score: ", to_string(original_score)))

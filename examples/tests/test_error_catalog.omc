@@ -83,7 +83,7 @@ fn test_error_categories() {
         h c = arr_get(cats, i);
         if c == "arrays" { has_arrays = 1; }
         if c == "dispatch" { has_dispatch = 1; }
-        i = i + 1;
+        i += 1;
     }
     assert_eq(has_arrays, 1, "has 'arrays' category");
     assert_eq(has_dispatch, 1, "has 'dispatch' category");

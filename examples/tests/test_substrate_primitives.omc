@@ -52,7 +52,7 @@ fn test_zeckendorf_roundtrip() {
         h z = zeckendorf(n);
         h back = from_zeckendorf(z);
         assert_eq(back, n, "round-trip " + to_string(n));
-        i = i + 1;
+        i += 1;
     }
 }
 
@@ -305,7 +305,7 @@ fn test_substrate_vs_int_consistency() {
         h a = substrate_search(arr, target);
         h b = int_binary_search(arr, target);
         assert_eq(a, b, "substrate vs int_binary at " + to_string(target));
-        i = i + 1;
+        i += 1;
     }
 }
 

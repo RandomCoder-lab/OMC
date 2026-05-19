@@ -23,7 +23,7 @@ fn naturals(n) {
     h i = 0;
     while i < n {
         yield i;
-        i = i + 1;
+        i += 1;
     }
 }
 
@@ -45,7 +45,7 @@ fn squares(n) {
     h i = 1;
     while i <= n {
         yield i * i;
-        i = i + 1;
+        i += 1;
     }
 }
 
@@ -63,7 +63,7 @@ fn even_only(n) {
         if i % 2 == 0 {
             yield i;
         }
-        i = i + 1;
+        i += 1;
     }
 }
 
@@ -81,7 +81,7 @@ fn pairs(n) {
     while i < n {
         yield i;
         yield i * 10;
-        i = i + 1;
+        i += 1;
     }
 }
 
@@ -105,14 +105,14 @@ fn fibs(n) {
         h t = a + b;
         a = b;
         b = t;
-        k = k + 1;
+        k += 1;
     }
 }
 
 fn test_generator_with_for() {
     h sum = 0;
     for v in fibs(10) {
-        sum = sum + v;
+        sum += v;
     }
     # fib(0..9) = 0,1,1,2,3,5,8,13,21,34 — sum = 88
     assert_eq(sum, 88, "sum of first 10 Fibonaccis");
@@ -125,7 +125,7 @@ fn outer(n) {
     h k = 0;
     while k < arr_len(r) {
         yield arr_get(r, k) * 2;
-        k = k + 1;
+        k += 1;
     }
 }
 
@@ -142,7 +142,7 @@ fn substrate_aligned_fibs(n) {
     h i = 0;
     while i < n {
         yield nth_fibonacci(i);
-        i = i + 1;
+        i += 1;
     }
 }
 

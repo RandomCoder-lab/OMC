@@ -98,7 +98,7 @@ fn test_hex_round_trip() {
     while i < arr_len(vals) {
         h v = arr_get(vals, i);
         assert_eq(from_hex(to_hex(v)), v, "round-trip " + to_string(v));
-        i = i + 1;
+        i += 1;
     }
 }
 

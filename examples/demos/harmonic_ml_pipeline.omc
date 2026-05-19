@@ -45,8 +45,8 @@ fn substrate_score(arr) {
     h s = 0.0;
     h i = 0;
     while i < arr_len(r) {
-        s = s + arr_get(r, i);
-        i = i + 1;
+        s += arr_get(r, i);
+        i += 1;
     }
     return s / arr_len(r);
 }
@@ -66,7 +66,7 @@ fn loss_and_grad(w_value, xs, ys) {
         h pred = dual_mul(w, xi);
         h err = dual_sub(pred, yi);
         L = dual_add(L, dual_mul(err, err));
-        i = i + 1;
+        i += 1;
     }
     return L;
 }
@@ -117,14 +117,14 @@ fn main() {
                   ", loss=" + to_string(Lv));
             step = max_steps;
         } else {
-            w = w - lr * dLdw;
+            w -= lr * dLdw;
             if step % 25 == 0 {
                 print("    step " + to_string(step) +
                       "  w=" + to_string(w) +
                       "  loss=" + to_string(Lv) +
                       "  dL/dw=" + to_string(dLdw));
             }
-            step = step + 1;
+            step += 1;
         }
     }
 

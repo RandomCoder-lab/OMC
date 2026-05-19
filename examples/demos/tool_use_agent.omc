@@ -10,8 +10,8 @@ fn cosine_sim(a, b) {
     h dot = 0.0
     h i = 0
     while i < arr_len(a) {
-        dot = dot + a[i] * b[i]
-        i = i + 1
+        dot += a[i] * b[i]
+        i += 1
     }
     return dot
 }
@@ -27,7 +27,7 @@ fn closest_doc(query, docs, texts) {
             best_score = score
             best_idx = i
         }
-        i = i + 1
+        i += 1
     }
     return texts[best_idx]
 }
@@ -127,7 +127,7 @@ fn tool_agent(user_question, max_turns) {
             role: "user",
             content: str_concat("Tool result: ", tool_result, ". Now answer the question.")
         })
-        turn = turn + 1
+        turn += 1
     }
     return "Max turns reached"
 }
@@ -145,5 +145,5 @@ while i < arr_len(questions) {
     h answer = tool_agent(q, 3)
     print(str_concat("A: ", answer))
     print("")
-    i = i + 1
+    i += 1
 }

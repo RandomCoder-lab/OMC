@@ -42,7 +42,7 @@ fn test_list_fns_contains_defined() {
     while i < arr_len(fns) {
         if arr_get(fns, i) == "add"   { has_add = 1 }
         if arr_get(fns, i) == "greet" { has_greet = 1 }
-        i = i + 1
+        i += 1
     }
     assert_eq(has_add, 1, "list_fns contains add")
     assert_eq(has_greet, 1, "list_fns contains greet")
@@ -54,7 +54,7 @@ fn test_list_fns_sorted() {
     h i = 1
     while i < arr_len(fns) {
         if arr_get(fns, i - 1) > arr_get(fns, i) { sorted_ok = 0 }
-        i = i + 1
+        i += 1
     }
     assert_eq(sorted_ok, 1, "list_fns output is sorted")
 }
@@ -69,7 +69,7 @@ fn test_list_fns_excludes_lambdas() {
         h n = arr_get(fns, i)
         if str_starts_with(n, "__lambda") { found_lambda = 1 }
         if str_starts_with(n, "__rt_lambda") { found_lambda = 1 }
-        i = i + 1
+        i += 1
     }
     assert_eq(found_lambda, 0, "lambdas not in list_fns")
 }
@@ -82,7 +82,7 @@ fn test_list_defined_fns_alias() {
     h i = 0
     while i < arr_len(a) {
         assert_eq(arr_get(a, i), arr_get(b, i), str_concat("element ", to_string(i)))
-        i = i + 1
+        i += 1
     }
 }
 
@@ -159,7 +159,7 @@ fn test_get_scope_vars_excludes_double_underscore() {
     h i = 0
     while i < arr_len(keys) {
         if str_starts_with(arr_get(keys, i), "__") { bad = 1 }
-        i = i + 1
+        i += 1
     }
     assert_eq(bad, 0, "no __ prefixed keys in get_scope_vars")
 }

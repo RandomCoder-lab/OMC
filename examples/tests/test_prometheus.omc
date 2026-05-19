@@ -59,7 +59,7 @@ fn test_mse_loss_decreases_under_sgd() {
         prom_sgd_step(params, 0.05);
         if step == 0 { loss_first = tape_value(loss); }
         if step == 29 { loss_last = tape_value(loss); }
-        step = step + 1;
+        step += 1;
     }
     assert_true(loss_last < loss_first, "loss decreased over 30 SGD steps");
 }
@@ -98,7 +98,7 @@ fn test_checkpoint_round_trip_preserves_predictions() {
     while i < arr_len(pred_a) {
         assert_true(approx_eq(arr_get(pred_a, i), arr_get(pred_b, i), 1e-12),
                     "pred elem " + to_string(i) + " matches");
-        i = i + 1;
+        i += 1;
     }
 }
 
@@ -110,7 +110,7 @@ fn test_geodesic_bias_diagonal_zero() {
     while i < 8 {
         h d = arr_get(arr_get(bias, i), i);
         assert_eq(d, 0.0, "diag[" + to_string(i) + "] = 0");
-        i = i + 1;
+        i += 1;
     }
 }
 
@@ -123,9 +123,9 @@ fn test_geodesic_bias_symmetric() {
             h a = arr_get(arr_get(bias, i), j);
             h b = arr_get(arr_get(bias, j), i);
             assert_true(approx_eq(a, b, 1e-9), "bias[" + to_string(i) + "][" + to_string(j) + "] symmetric");
-            j = j + 1;
+            j += 1;
         }
-        i = i + 1;
+        i += 1;
     }
 }
 
@@ -138,12 +138,12 @@ fn test_geodesic_bias_normalized_mean() {
         h j = 0;
         while j < 8 {
             if i != j {
-                sum = sum + arr_get(arr_get(bias, i), j);
-                count = count + 1;
+                sum += arr_get(arr_get(bias, i), j);
+                count += 1;
             }
-            j = j + 1;
+            j += 1;
         }
-        i = i + 1;
+        i += 1;
     }
     h mean = sum / count;
     assert_true(approx_eq(mean, 1.0, 0.01), "mean off-diagonal ~ 1.0");
@@ -177,7 +177,7 @@ fn test_harmonic_scale_bounded() {
         h scale = _prom_harmonic_scale(mag, alpha);
         assert_true(scale >= 1.0 - alpha, "scale >= 1-alpha");
         assert_true(scale <= 1.0 + alpha, "scale <= 1+alpha");
-        k = k + 1;
+        k += 1;
     }
 }
 
@@ -192,7 +192,7 @@ fn _grad_nonzero(g) {
         h i = 0;
         while i < arr_len(g) {
             if _grad_nonzero(arr_get(g, i)) { return true; }
-            i = i + 1;
+            i += 1;
         }
         return false;
     }
@@ -243,9 +243,9 @@ fn test_tape_transpose_backward() {
         h j = 0;
         while j < 2 {
             assert_eq(arr_get(row, j), 1.0, "transpose backward elem");
-            j = j + 1;
+            j += 1;
         }
-        i = i + 1;
+        i += 1;
     }
 }
 
@@ -332,9 +332,9 @@ fn test_substrate_resample_backward_flows_to_v() {
         while j < 2 {
             assert_true(arr_get(row, j) > 0.0,
                 "v gradient cell [" + to_string(i) + "][" + to_string(j) + "] non-zero");
-            j = j + 1;
+            j += 1;
         }
-        i = i + 1;
+        i += 1;
     }
 }
 
@@ -348,9 +348,9 @@ fn test_substrate_softmax_alpha_positive_still_sums_to_one() {
         h row = arr_get(v, i);
         h s = 0.0;
         h j = 0;
-        while j < arr_len(row) { s = s + arr_get(row, j); j = j + 1; }
+        while j < arr_len(row) { s += arr_get(row, j); j += 1; }
         assert_true(approx_eq(s, 1.0, 0.001),
             "row " + to_string(i) + " sums to 1 after renormalize");
-        i = i + 1;
+        i += 1;
     }
 }

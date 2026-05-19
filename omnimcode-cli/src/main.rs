@@ -1347,6 +1347,53 @@ fn lint_source(content: &str) -> Vec<LintHint> {
                     format!("`to_str()` is deprecated; use `to_string()` (col {})", i + 1)));
             }
 
+            // Detect `VAR = VAR OP expr` (where OP is +, -, or *) which
+            // can be written as `VAR OP= expr`. Skip `h VAR = ...` declarations.
+            if c == b'=' {
+                let prev = if i > 0 { bytes[i - 1] } else { 0 };
+                let next = if i + 1 < len { bytes[i + 1] } else { 0 };
+                if prev != b'!' && prev != b'<' && prev != b'>' && prev != b'='
+                    && next != b'='
+                {
+                    // Find LHS identifier (scan backward past spaces).
+                    let mut lhs_e = i;
+                    while lhs_e > 0 && bytes[lhs_e - 1] == b' ' { lhs_e -= 1; }
+                    let mut lhs_s = lhs_e;
+                    while lhs_s > 0 && is_ident_char(bytes[lhs_s - 1]) { lhs_s -= 1; }
+                    if lhs_s < lhs_e {
+                        // Skip declarations: `h VAR = ...`
+                        let mut pre = lhs_s;
+                        while pre > 0 && bytes[pre - 1] == b' ' { pre -= 1; }
+                        let is_decl = pre >= 1 && bytes[pre - 1] == b'h'
+                            && (pre < 2 || !is_ident_char(bytes[pre - 2]));
+                        if !is_decl {
+                            let lhs = &code[lhs_s..lhs_e];
+                            // Scan RHS: skip spaces, then match same identifier + op.
+                            let mut k = i + 1;
+                            while k < len && bytes[k] == b' ' { k += 1; }
+                            let rhs_s = k;
+                            while k < len && is_ident_char(bytes[k]) { k += 1; }
+                            if &code[rhs_s..k] == lhs {
+                                while k < len && bytes[k] == b' ' { k += 1; }
+                                if k < len {
+                                    let op = bytes[k];
+                                    let nx = if k + 1 < len { bytes[k + 1] } else { 0 };
+                                    if (op == b'+' || op == b'-' || op == b'*')
+                                        && nx != b'=' && nx != op
+                                    {
+                                        hints.push((Some(ln), "style",
+                                            format!(
+                                                "`{} = {} {}...` → use `{} {}= ...` (col {})",
+                                                lhs, lhs, op as char, lhs, op as char, lhs_s + 1
+                                            )));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             i += 1;
         }
     }

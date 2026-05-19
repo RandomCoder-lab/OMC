@@ -67,7 +67,7 @@ fn run_all_tests(code, tests) {
                 error: r["error"]
             })
         }
-        i = i + 1
+        i += 1
     }
     return failures
 }
@@ -120,7 +120,7 @@ fn generate_solution(problem, tests) {
                 failure_report = str_concat(failure_report, " error=", to_string(f["error"]))
             }
             failure_report = str_concat(failure_report, "\n")
-            fi = fi + 1
+            fi += 1
         }
 
         h fix_prompt = str_concat(
@@ -131,7 +131,7 @@ fn generate_solution(problem, tests) {
         )
         h fixed = llm_call(fix_prompt, MODEL, sys)
         code = extract_omc_code(fixed)
-        attempt = attempt + 1
+        attempt += 1
     }
 
     return {code: code, attempts: MAX_REPAIR_ATTEMPTS, solved: false}
@@ -207,7 +207,7 @@ while i < arr_len(PROBLEMS) {
         attempts: result["attempts"],
         code: result["code"]
     })
-    i = i + 1
+    i += 1
 }
 
 print("")
@@ -219,9 +219,9 @@ while ri < arr_len(results) {
     h status = "FAIL"
     if r["solved"] {
         status = "PASS"
-        solved_count = solved_count + 1
+        solved_count += 1
     }
     print(str_concat("  ", status, " ", r["name"], " (", to_string(r["attempts"]), " attempts)"))
-    ri = ri + 1
+    ri += 1
 }
 print(str_concat("\nSolved: ", to_string(solved_count), "/", to_string(arr_len(results))))

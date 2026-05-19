@@ -59,7 +59,7 @@ fn test_resonance_vec_attractors_all_one() {
     h all_one = 1;
     while i < arr_len(r) {
         if !approx_eq(arr_get(r, i), 1.0, 0.001) { all_one = 0; }
-        i = i + 1;
+        i += 1;
     }
     assert_eq(all_one, 1, "all attractors → resonance 1");
 }
@@ -72,7 +72,7 @@ fn test_fold_all_snaps_to_nearest() {
     h all_on = 1;
     while i < arr_len(folded) {
         if !is_attractor(arr_get(folded, i)) { all_on = 0; }
-        i = i + 1;
+        i += 1;
     }
     assert_eq(all_on, 1, "all folded → on attractors");
 }

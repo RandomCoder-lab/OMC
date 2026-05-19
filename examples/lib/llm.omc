@@ -14,7 +14,7 @@ fn _join(arr, sep) {
     while i < arr_len(arr) {
         if i > 0 { out = str_concat(out, sep) }
         out = str_concat(out, to_string(arr[i]))
-        i = i + 1
+        i += 1
     }
     return out
 }
@@ -50,7 +50,7 @@ fn cot_verify(prompt, n, model) {
         } else {
             votes[ans] = 1
         }
-        i = i + 1
+        i += 1
     }
     h best = ""
     h best_count = 0
@@ -62,7 +62,7 @@ fn cot_verify(prompt, n, model) {
             best = key
             best_count = votes[key]
         }
-        k = k + 1
+        k += 1
     }
     return {answer: best, confidence: best_count / n, votes: votes}
 }
@@ -77,7 +77,7 @@ fn few_shot(examples, query, model) {
     while i < arr_len(examples) {
         h ex = examples[i]
         arr_push(parts, str_concat("Input: ", ex["input"], "\nOutput: ", ex["output"]))
-        i = i + 1
+        i += 1
     }
     arr_push(parts, str_concat("Input: ", query, "\nOutput:"))
     h prompt = _join(parts, "\n\n")
@@ -154,7 +154,7 @@ fn react_agent(goal, tools, model, max_steps) {
             h paren = str_find(action_str, "(")
             if paren < 0 {
                 history = str_concat(history, "\n", response, "\nObservation: (no tool found)")
-                step = step + 1
+                step += 1
                 continue
             }
             h tool_name = str_trim(str_slice(action_str, 0, paren))
@@ -170,7 +170,7 @@ fn react_agent(goal, tools, model, max_steps) {
         } else {
             history = str_concat(history, "\n", response)
         }
-        step = step + 1
+        step += 1
     }
     return {answer: "(max steps reached)", trace: trace, steps: steps}
 }
@@ -188,7 +188,7 @@ fn chain(steps_arr, input, model) {
         h template = steps_arr[i]
         h prompt = str_replace(template, "{}", to_string(current))
         current = llm_call(prompt, m, null)
-        i = i + 1
+        i += 1
     }
     return current
 }
@@ -267,7 +267,7 @@ fn gen_and_test(description, test_fn, model, max_attempts) {
             "\n\nReturn only the corrected OMC code."
         )
         code = llm_call(fix_prompt, m, sys)
-        attempt = attempt + 1
+        attempt += 1
     }
     return {code: code, passed: false, attempts: max_att}
 }
@@ -290,7 +290,7 @@ fn best_of_n(prompt, n, criteria, system, model) {
             best_score = scores[i]["score"]
             best_idx = scores[i]["idx"]
         }
-        i = i + 1
+        i += 1
     }
     return {answer: responses[best_idx], score: best_score, idx: best_idx}
 }
@@ -323,7 +323,7 @@ fn parallel_cot(prompt, n, model) {
         } else {
             votes[short_ans] = 1
         }
-        i = i + 1
+        i += 1
     }
     h best = ""
     h best_count = 0
@@ -334,7 +334,7 @@ fn parallel_cot(prompt, n, model) {
             best = keys[k]
             best_count = votes[keys[k]]
         }
-        k = k + 1
+        k += 1
     }
     return {answer: best, confidence: best_count / n, all_answers: all_answers, votes: votes}
 }
@@ -361,7 +361,7 @@ fn improve_until(text, criteria, threshold, max_rounds, model) {
         while ji < arr_len(judgment) {
             if judgment[ji]["idx"] == 0 { original_score = judgment[ji]["score"] }
             if judgment[ji]["idx"] == 1 { candidate_score = judgment[ji]["score"] }
-            ji = ji + 1
+            ji += 1
         }
         if candidate_score > original_score {
             current = candidate
@@ -370,7 +370,7 @@ fn improve_until(text, criteria, threshold, max_rounds, model) {
             score = original_score
         }
         if score >= threshold { break }
-        round = round + 1
+        round += 1
     }
     return {text: current, score: score, rounds: round + 1}
 }
@@ -399,7 +399,7 @@ fn debate(topic, rounds, model) {
         arr_push(for_args, both[0])
         arr_push(against_args, both[1])
         arr_push(transcript, {round: r + 1, "for": both[0], against: both[1]})
-        r = r + 1
+        r += 1
     }
     h judge_sys = "You are an impartial debate judge. Output JSON: {\"winner\": \"for\" or \"against\", \"reasoning\": \"...\"}"
     h judge_prompt = str_concat(

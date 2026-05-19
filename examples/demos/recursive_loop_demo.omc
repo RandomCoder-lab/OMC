@@ -83,7 +83,7 @@ fn improve_until_passing(problem, tests, max_iters) {
 
     h iter = 0
     while iter < max_iters {
-        iter = iter + 1
+        iter += 1
         print(str_concat("\n── Iteration ", json_stringify(iter), " ──"))
 
         h failures = test_suite(code, tests)

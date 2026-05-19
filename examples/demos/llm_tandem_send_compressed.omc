@@ -49,9 +49,9 @@ fn main() {
     measure(payload, 3);
     measure(payload, 5);
     h larger = concat_many(payload, "\n",
-        "fn variance(xs) { h m = compute_mean(xs); h n = arr_len(xs); h s = 0.0; h i = 0; while i < n { h d = arr_get(xs, i) - m; s = s + d * d; i = i + 1; } return s / n; }", "\n",
+        "fn variance(xs) { h m = compute_mean(xs); h n = arr_len(xs); h s = 0.0; h i = 0; while i < n { h d = arr_get(xs, i) - m; s += d * d; i += 1; } return s / n; }", "\n",
         "fn std_dev(xs) { return sqrt(variance(xs)); }", "\n",
-        "fn covariance(a, b) { h ma = compute_mean(a); h mb = compute_mean(b); h n = arr_len(a); h s = 0.0; h i = 0; while i < n { s = s + (arr_get(a, i) - ma) * (arr_get(b, i) - mb); i = i + 1; } return s / n; }");
+        "fn covariance(a, b) { h ma = compute_mean(a); h mb = compute_mean(b); h n = arr_len(a); h s = 0.0; h i = 0; while i < n { s += (arr_get(a, i) - ma) * (arr_get(b, i) - mb); i += 1; } return s / n; }");
     measure(larger, 5);
     measure(larger, 8);
 

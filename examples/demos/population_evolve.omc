@@ -36,8 +36,8 @@ fn compute_fitness(code, test_cases) {
         if type_of(run) == type_of(tc["expected"]) {
             if run == tc["expected"] { ok = true }
         }
-        if ok { passed = passed + 1 }
-        i = i + 1
+        if ok { passed += 1}
+        i += 1
     }
     h fitness = passed / total
     lru_put(eval_cache, cache_key, fitness)
@@ -61,7 +61,7 @@ fn init_population(problem, pop_size) {
         h hint = variety_hint[i % arr_len(variety_hint)]
         h p = str_concat("Write target_fn for: ", problem, hint)
         arr_push(prompts, {prompt: p, system: sys})
-        i = i + 1
+        i += 1
     }
     print(str_concat("  Spawning ", to_string(pop_size), " individuals in parallel..."))
     h raw_codes = batch_llm_call(prompts, MODEL)
@@ -77,7 +77,7 @@ fn init_population(problem, pop_size) {
             }
         }
         arr_push(population, {code: str_trim(code), fitness: 0.0})
-        ci = ci + 1
+        ci += 1
     }
     return population
 }
@@ -92,7 +92,7 @@ fn evaluate_population(population, test_cases) {
     while i < arr_len(population) {
         h fitness = compute_fitness(population[i]["code"], test_cases)
         population[i]["fitness"] = fitness
-        i = i + 1
+        i += 1
     }
     # sort by fitness descending (bubble sort)
     h n = arr_len(population)
@@ -105,9 +105,9 @@ fn evaluate_population(population, test_cases) {
                 population[si] = population[sj]
                 population[sj] = tmp
             }
-            sj = sj + 1
+            sj += 1
         }
-        si = si + 1
+        si += 1
     }
     return population
 }
@@ -144,8 +144,8 @@ fn evolve(problem, test_cases, pop_size, generations, elite_count) {
         h gen_avg = 0.0
         h gi = 0
         while gi < arr_len(population) {
-            gen_avg = gen_avg + population[gi]["fitness"]
-            gi = gi + 1
+            gen_avg += population[gi]["fitness"]
+            gi += 1
         }
         gen_avg = gen_avg / arr_len(population)
 
@@ -172,7 +172,7 @@ fn evolve(problem, test_cases, pop_size, generations, elite_count) {
         h ei = 0
         while ei < elite_count and ei < arr_len(population) {
             arr_push(next_pop, population[ei])
-            ei = ei + 1
+            ei += 1
         }
 
         # Build mutation/crossover prompts in batch for parallelism
@@ -201,7 +201,7 @@ fn evolve(problem, test_cases, pop_size, generations, elite_count) {
                 )
             }
             arr_push(batch_prompts, {prompt: p, system: mut_sys})
-            ni = ni + 1
+            ni += 1
         }
 
         # Fire all mutations/crossovers in parallel
@@ -214,11 +214,11 @@ fn evolve(problem, test_cases, pop_size, generations, elite_count) {
                 if arr_len(parts) >= 3 { code = str_trim(parts[1]) }
             }
             arr_push(next_pop, {code: str_trim(code), fitness: 0.0})
-            mri = mri + 1
+            mri += 1
         }
 
         population = next_pop
-        gen = gen + 1
+        gen += 1
     }
 
     return {

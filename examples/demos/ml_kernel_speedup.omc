@@ -17,13 +17,13 @@ fn matmul_naive_omc(A, B) {
             h k = 0;
             while k < ac {
                 h Bk = arr_get(B, k);
-                s = s + arr_get(Ai, k) * arr_get(Bk, j);
-                k = k + 1;
+                s += arr_get(Ai, k) * arr_get(Bk, j);
+                k += 1;
             }
             arr_set(Ci, j, s);
-            j = j + 1;
+            j += 1;
         }
-        i = i + 1;
+        i += 1;
     }
     return C;
 }
@@ -36,10 +36,10 @@ fn build_matrix(n, m) {
         h j = 0;
         while j < m {
             arr_push(row, (i + j) % 7);
-            j = j + 1;
+            j += 1;
         }
         arr_push(M, row);
-        i = i + 1;
+        i += 1;
     }
     return M;
 }
@@ -52,7 +52,7 @@ fn softmax_naive_omc(arr) {
     while i < n {
         h v = arr_get(arr, i);
         if v > m { m = v; }
-        i = i + 1;
+        i += 1;
     }
     # Exp + sum
     h ex = [];
@@ -61,15 +61,15 @@ fn softmax_naive_omc(arr) {
     while i < n {
         h e = exp(arr_get(arr, i) - m);
         arr_push(ex, e);
-        s = s + e;
-        i = i + 1;
+        s += e;
+        i += 1;
     }
     # Normalize
     h out = [];
     i = 0;
     while i < n {
         arr_push(out, arr_get(ex, i) / s);
-        i = i + 1;
+        i += 1;
     }
     return out;
 }
@@ -114,7 +114,7 @@ fn main() {
     h i = 0;
     while i < SN {
         arr_push(xs, (i % 17) - 8);
-        i = i + 1;
+        i += 1;
     }
 
     h t5 = now_unix();
@@ -122,7 +122,7 @@ fn main() {
     h k = 0;
     while k < iters {
         h _ = softmax_naive_omc(xs);
-        k = k + 1;
+        k += 1;
     }
     h t6 = now_unix();
 
@@ -130,7 +130,7 @@ fn main() {
     k = 0;
     while k < iters {
         h _ = arr_softmax(xs);
-        k = k + 1;
+        k += 1;
     }
     h t8 = now_unix();
 

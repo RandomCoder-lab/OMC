@@ -55,7 +55,7 @@ fn parse_args(args) {
                 # check if next arg is the value
                 if i + 1 < arr_len(args) and !str_starts_with(args[i + 1], "-") {
                     flags[rest] = args[i + 1]
-                    i = i + 1
+                    i += 1
                 } else {
                     flags[rest] = true
                 }
@@ -64,14 +64,14 @@ fn parse_args(args) {
             h key = str_slice(arg, 1, 2)
             if i + 1 < arr_len(args) and !str_starts_with(args[i + 1], "-") {
                 flags[key] = args[i + 1]
-                i = i + 1
+                i += 1
             } else {
                 flags[key] = true
             }
         } else {
             arr_push(positional, arg)
         }
-        i = i + 1
+        i += 1
     }
     return {flags: flags, positional: positional}
 }
@@ -96,11 +96,11 @@ fn progress_bar(current, total, width, label) {
     h i = 0
     while i < filled {
         bar = str_concat(bar, "█")
-        i = i + 1
+        i += 1
     }
     while i < w {
         bar = str_concat(bar, "░")
-        i = i + 1
+        i += 1
     }
     h pct_str = to_string(math_floor(pct * 100))
     h lbl = ""
@@ -121,7 +121,7 @@ fn _pad_right(s, width) {
     h i = len
     while i < width {
         out = str_concat(out, " ")
-        i = i + 1
+        i += 1
     }
     return out
 }
@@ -133,7 +133,7 @@ fn _pad_left(s, width) {
     h i = len
     while i < width {
         out = str_concat(out, " ")
-        i = i + 1
+        i += 1
     }
     return str_concat(out, str)
 }
@@ -147,7 +147,7 @@ fn table(headers, rows) {
     h i = 0
     while i < arr_len(headers) {
         arr_push(widths, str_len(to_string(headers[i])))
-        i = i + 1
+        i += 1
     }
     h ri = 0
     while ri < arr_len(rows) {
@@ -158,9 +158,9 @@ fn table(headers, rows) {
                 h cell_len = str_len(to_string(row[ci]))
                 if cell_len > widths[ci] { widths[ci] = cell_len }
             }
-            ci = ci + 1
+            ci += 1
         }
-        ri = ri + 1
+        ri += 1
     }
     # build separator
     h sep = "+"
@@ -170,17 +170,17 @@ fn table(headers, rows) {
         h di = 0
         while di < widths[si] + 2 {
             dashes = str_concat(dashes, "-")
-            di = di + 1
+            di += 1
         }
         sep = str_concat(sep, dashes, "+")
-        si = si + 1
+        si += 1
     }
     # build header row
     h header_line = "|"
     h hi = 0
     while hi < arr_len(headers) {
         header_line = str_concat(header_line, " ", _pad_right(headers[hi], widths[hi]), " |")
-        hi = hi + 1
+        hi += 1
     }
     # build output
     h out = str_concat(sep, "\n", header_line, "\n", sep, "\n")
@@ -193,10 +193,10 @@ fn table(headers, rows) {
             h cell = ""
             if ci < arr_len(row) { cell = row[ci] }
             line = str_concat(line, " ", _pad_right(cell, widths[ci]), " |")
-            ci = ci + 1
+            ci += 1
         }
         out = str_concat(out, line, "\n")
-        ri = ri + 1
+        ri += 1
     }
     out = str_concat(out, sep)
     return out
@@ -255,7 +255,7 @@ fn box(title, content, width) {
         h padding = w - str_len(line) - 4
         if padding < 0 { padding = 0 }
         body = str_concat(body, "│ ", line, _repeat(" ", padding), " │\n")
-        i = i + 1
+        i += 1
     }
     return str_concat(top, "\n", title_line, "\n", sep, "\n", body, bottom)
 }
@@ -265,7 +265,7 @@ fn _repeat(char, n) {
     h i = 0
     while i < n {
         out = str_concat(out, char)
-        i = i + 1
+        i += 1
     }
     return out
 }

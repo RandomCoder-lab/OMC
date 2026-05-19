@@ -20,7 +20,7 @@ fn extract_code(text) {
                 h i = 1
                 while i < arr_len(lines) {
                     arr_push(rest, lines[i])
-                    i = i + 1
+                    i += 1
                 }
                 return str_trim(arr_join(rest, "\n"))
             }
@@ -43,7 +43,7 @@ fn get_best(scored) {
             best_score = s
             best_idx = i
         }
-        i = i + 1
+        i += 1
     }
     return {idx: best_idx, score: best_score}
 }
@@ -79,7 +79,7 @@ fn best_of_n_improve(task, n_candidates, criteria, max_rounds, threshold) {
         h best = get_best(scores)
         if best == null {
             print("Judge failed to score, skipping round")
-            round = round + 1
+            round += 1
             continue
         }
 
@@ -100,7 +100,7 @@ fn best_of_n_improve(task, n_candidates, criteria, max_rounds, threshold) {
             return {code: best_code, score: best_score, rounds: round + 1}
         }
 
-        round = round + 1
+        round += 1
     }
 
     print(str_concat("Max rounds reached. Final score: ", to_string(best_score), "/10"))

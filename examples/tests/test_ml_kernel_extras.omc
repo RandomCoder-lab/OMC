@@ -32,8 +32,8 @@ fn test_softmax_sums_one_floats() {
     h total = 0.0;
     h i = 0;
     while i < arr_len(s) {
-        total = total + arr_get(s, i);
-        i = i + 1;
+        total += arr_get(s, i);
+        i += 1;
     }
     assert_true(approx_eq(total, 1.0, 0.001), "sums to 1");
 }
@@ -50,14 +50,14 @@ fn test_layer_norm_big() {
     h i = 0;
     while i < 20 {
         arr_push(xs, i);
-        i = i + 1;
+        i += 1;
     }
     h ln = arr_layer_norm(xs, 0.00001);
     h total = 0.0;
     i = 0;
     while i < arr_len(ln) {
-        total = total + arr_get(ln, i);
-        i = i + 1;
+        total += arr_get(ln, i);
+        i += 1;
     }
     assert_true(approx_eq(total, 0.0, 0.001), "zero mean big");
 }

@@ -111,7 +111,7 @@ fn _find_key(keys, target) {
     h i = 0;
     while i < n {
         if arr_get(keys, i) == target { return i; }
-        i = i + 1;
+        i += 1;
     }
     return 0 - 1;
 }
@@ -129,7 +129,7 @@ fn new(dim_names) {
     h k = 0;
     while k < n_dims {
         arr_push(strategies, 0);
-        k = k + 1;
+        k += 1;
     }
     h freq_keys = [];
     h freq_counts = [];
@@ -137,7 +137,7 @@ fn new(dim_names) {
     while d < n_dims {
         arr_push(freq_keys, []);
         arr_push(freq_counts, []);
-        d = d + 1;
+        d += 1;
     }
     h det = [];
     arr_push(det, n_dims);
@@ -183,9 +183,9 @@ fn fit(detector, rows) {
             } else {
                 arr_set(counts, idx, arr_get(counts, idx) + 1);
             }
-            di = di + 1;
+            di += 1;
         }
-        r = r + 1;
+        r += 1;
     }
     arr_set(detector, 4, n_rows);
     return detector;
@@ -224,8 +224,8 @@ fn score(detector, row) {
         # units as resonance/HIM elsewhere in OMC. Monotonic transform
         # of natural log — ranking preserved, absolute scores in
         # substrate units.
-        total = total + log_phi_pi_fibonacci(1.0 / p);
-        di = di + 1;
+        total += log_phi_pi_fibonacci(1.0 / p);
+        di += 1;
     }
     return total;
 }
@@ -236,7 +236,7 @@ fn score_all(detector, rows) {
     h k = 0;
     while k < arr_len(rows) {
         arr_push(out, score(detector, arr_get(rows, k)));
-        k = k + 1;
+        k += 1;
     }
     return out;
 }
@@ -248,14 +248,14 @@ fn top_k(detector, rows, k) {
     h i = 0;
     while i < arr_len(scores) {
         arr_push(neg, 0 - arr_get(scores, i));
-        i = i + 1;
+        i += 1;
     }
     h sorted = np.argsort(neg);
     h out = [];
     h j = 0;
     while j < k {
         if j < arr_len(sorted) { arr_push(out, arr_get(sorted, j)); }
-        j = j + 1;
+        j += 1;
     }
     return out;
 }

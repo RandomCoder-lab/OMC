@@ -153,8 +153,8 @@ fn test_capacity_growth_geometric() {
     h total = 0;
     h i = 1;
     while i <= 6 {
-        total = total + fibtier_capacity(i);
-        i = i + 1;
+        total += fibtier_capacity(i);
+        i += 1;
     }
     assert_eq(total, 32, "sum of caps 1..6 = 32");
 }

@@ -15,7 +15,7 @@ fn make_long_history(n) {
         arr_push(hist, concat_many("turn ", to_string(i),
             ": user discusses topic ", to_string(i % 5),
             " with assistant; result was outcome ", to_string(i % 3)));
-        i = i + 1;
+        i += 1;
     }
     return hist;
 }
@@ -49,7 +49,7 @@ fn main() {
             "  items=", to_string(dict_get(m, "item_count")),
             "  attractor=", to_string(dict_get(m, "dominant_attractor")),
             "  → ", dict_get(m, "prompt_path")));
-        i = i + 1;
+        i += 1;
     }
 
     section("What an orchestrator does next");

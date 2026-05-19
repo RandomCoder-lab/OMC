@@ -62,7 +62,7 @@ fn research_and_synthesize(topic, sub_questions, model) {
     h i = 0
     while i < arr_len(sub_questions) {
         arr_push(parts, str_format("Q: {q}\nA: {a}", {q: sub_questions[i], a: answers[i]}))
-        i = i + 1
+        i += 1
     }
     h research = arr_join(parts, "\n\n")
     h prompt = str_format(
@@ -84,7 +84,7 @@ fn react_agent(goal, tools, model, max_turns) {
     h i = 0
     while i < arr_len(tools) {
         dict_set(tool_map, tools[i]["name"], tools[i]["fn"])
-        i = i + 1
+        i += 1
     }
 
     h messages = [{role: "user", content: goal}]
@@ -111,7 +111,7 @@ fn react_agent(goal, tools, model, max_turns) {
         arr_push(trace, str_format("  -> {r}", {r: str_slice(to_str(tool_result), 0, 100)}))
         arr_push(messages, {role: "assistant", content: str_format("Used: {n}", {n: tool_name})})
         arr_push(messages, {role: "user", content: str_format("Tool result: {r}. Continue.", {r: to_str(tool_result)})})
-        turn = turn + 1
+        turn += 1
     }
 
     return {answer: "Max turns reached", trace: trace, turns: turn}
@@ -153,14 +153,14 @@ fn code_agent(task, tests, model, max_attempts) {
                 all_pass = false
                 arr_push(failures, str_format("Test {i}: {e}", {i: to_str(i), e: res["error"]}))
             }
-            i = i + 1
+            i += 1
         }
 
         if all_pass {
             return {ok: true, code: code, attempts: attempt + 1}
         }
         last_error = arr_join(failures, "\n")
-        attempt = attempt + 1
+        attempt += 1
     }
     return {ok: false, code: last_code, error: last_error, attempts: max_attempts}
 }
@@ -195,7 +195,7 @@ fn best_of_n(task, n, model) {
             best_score = sv
             best_idx = i
         }
-        i = i + 1
+        i += 1
     }
     return {solution: solutions[best_idx], score: best_score, all_solutions: solutions}
 }
@@ -225,11 +225,11 @@ fn mem_recall(agent, query, top_k) {
         h dot = 0.0
         h j = 0
         while j < arr_len(ev) {
-            dot = dot + ev[j] * qv[j]
-            j = j + 1
+            dot += ev[j] * qv[j]
+            j += 1
         }
         arr_push(scored, {score: dot, text: agent["memories"][i]})
-        i = i + 1
+        i += 1
     }
 
     h sorted = arr_sort(scored, fn(a, b) {
@@ -242,7 +242,7 @@ fn mem_recall(agent, query, top_k) {
     h k = 0
     while k < min(top_k, arr_len(sorted)) {
         arr_push(result, sorted[k]["text"])
-        k = k + 1
+        k += 1
     }
     return result
 }

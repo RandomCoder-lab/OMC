@@ -37,7 +37,7 @@ fn test_substrate_embed_values_are_floats() {
     while i < arr_len(v) {
         h t = type_of(v[i])
         assert_true(t == "float" or t == "int", "element is numeric")
-        i = i + 1
+        i += 1
     }
 }
 
@@ -46,8 +46,8 @@ fn test_substrate_embed_is_normalized() {
     h dot = 0.0
     h i = 0
     while i < arr_len(v) {
-        dot = dot + v[i] * v[i]
-        i = i + 1
+        dot += v[i] * v[i]
+        i += 1
     }
     assert_true(dot > 0.9 and dot < 1.1, "L2 norm ≈ 1.0")
 }
@@ -59,7 +59,7 @@ fn test_substrate_embed_different_texts_differ() {
     h i = 0
     while i < 8 {
         if v1[i] != v2[i] { same = false }
-        i = i + 1
+        i += 1
     }
     assert_false(same, "different texts produce different embeddings")
 }
@@ -70,7 +70,7 @@ fn test_substrate_embed_same_text_identical() {
     h i = 0
     while i < 8 {
         assert_eq(v1[i], v2[i], "same text → same vector element")
-        i = i + 1
+        i += 1
     }
 }
 

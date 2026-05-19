@@ -22,7 +22,7 @@ fn test_him_fibonacci_small() {
         h v = arr_get(hv, i);
         assert_true(v < 0.5,
             concat_many("him ", to_string(i), " < 0.5"));
-        i = i + 1;
+        i += 1;
     }
 }
 
@@ -57,7 +57,7 @@ fn test_crt_recover_patterns() {
     while i < arr_len(cases_residues) {
         h r = crt_recover(arr_get(cases_residues, i));
         assert_true(r >= 0, concat_many("CRT ", to_string(i), " non-negative"));
-        i = i + 1;
+        i += 1;
     }
 }
 
@@ -104,7 +104,7 @@ fn test_attractor_pattern() {
     while i < arr_len(vals) {
         assert_eq(is_attractor(arr_get(vals, i)), 1,
             concat_many("attractor ", to_string(arr_get(vals, i))));
-        i = i + 1;
+        i += 1;
     }
 }
 
@@ -126,7 +126,7 @@ fn test_distance_off_by_one() {
         if d_down >= 1 { ok_dn = 1; }
         if is_attractor(f - 1) == 1 { ok_dn = 1; }
         assert_eq(ok_dn, 1, concat_many("f-1 ", to_string(f)));
-        i = i + 1;
+        i += 1;
     }
 }
 
@@ -141,6 +141,6 @@ fn test_resonance_range() {
             concat_many("res ", to_string(i), " >= 0"));
         assert_true(v <= 1.0,
             concat_many("res ", to_string(i), " <= 1"));
-        i = i + 1;
+        i += 1;
     }
 }

@@ -33,7 +33,7 @@ fn test_dependencies_nested_call() {
         h c = arr_get(deps, i);
         if c == "arr_softmax" { has_sm = 1; }
         if c == "arr_neg" { has_neg = 1; }
-        i = i + 1;
+        i += 1;
     }
     assert_eq(has_sm, 1, "softmax found");
     assert_eq(has_neg, 1, "neg found");
@@ -48,7 +48,7 @@ fn test_dependencies_class_methods() {
     h i = 0;
     while i < arr_len(deps) {
         if arr_get(deps, i) == "dict_get" { has = 1; }
-        i = i + 1;
+        i += 1;
     }
     assert_eq(has, 1, "dict_get in class method deps");
 }
@@ -90,7 +90,7 @@ fn test_fingerprint_stability_many() {
         h fp1 = omc_code_fingerprint(c);
         h fp2 = omc_code_fingerprint(c);
         assert_eq(fp1, fp2, concat_many("fp ", to_string(i)));
-        i = i + 1;
+        i += 1;
     }
 }
 

@@ -26,7 +26,7 @@ fn is_prime_local(n) {
     h i = 3;
     while i * i <= n {
         if n % i == 0 { return 0; }
-        i = i + 2;
+        i += 2;
     }
     return 1;
 }
@@ -39,11 +39,11 @@ fn mean_res_primes(n) {
     h last = 0;
     while count < n {
         if is_prime_local(candidate) == 1 {
-            total = total + res(candidate);
-            count = count + 1;
+            total += res(candidate);
+            count += 1;
             last = candidate;
         }
-        candidate = candidate + 1;
+        candidate += 1;
     }
     h d = dict_new();
     dict_set(d, "mean", total / count);
@@ -61,12 +61,12 @@ fn mean_res_composites(n) {
     while count < n {
         if is_prime_local(candidate) == 0 {
             if candidate >= 2 {
-                total = total + res(candidate);
-                count = count + 1;
+                total += res(candidate);
+                count += 1;
                 last = candidate;
             }
         }
-        candidate = candidate + 1;
+        candidate += 1;
     }
     h d = dict_new();
     dict_set(d, "mean", total / count);
@@ -83,8 +83,8 @@ fn mean_res_random_in_range(n, max_val) {
     h count = 0;
     while count < n {
         h v = random_int(2, max_val);
-        total = total + res(v);
-        count = count + 1;
+        total += res(v);
+        count += 1;
     }
     h d = dict_new();
     dict_set(d, "mean", total / count);
@@ -98,9 +98,9 @@ fn mean_res_all_in_range(max_val) {
     h count = 0;
     h i = 2;
     while i <= max_val {
-        total = total + res(i);
-        count = count + 1;
-        i = i + 1;
+        total += res(i);
+        count += 1;
+        i += 1;
     }
     h d = dict_new();
     dict_set(d, "mean", total / count);

@@ -24,7 +24,7 @@ fn tokenize(text) {
         if str_len(clean) > 0 {
             arr_push(tokens, clean)
         }
-        i = i + 1
+        i += 1
     }
     return tokens
 }
@@ -40,7 +40,7 @@ fn term_freq(tokens) {
         } else {
             freq[t] = 1
         }
-        i = i + 1
+        i += 1
     }
     return freq
 }
@@ -71,9 +71,9 @@ fn tfidf_corpus(docs) {
                     doc_freqs[k] = 1
                 }
             }
-            j = j + 1
+            j += 1
         }
-        i = i + 1
+        i += 1
     }
     return {n: n, doc_freqs: doc_freqs, tokenized: tokenized, docs: docs}
 }
@@ -89,8 +89,8 @@ fn tfidf_score(corpus, query) {
         h keys = dict_keys(freq)
         h j = 0
         while j < arr_len(keys) {
-            doc_len = doc_len + freq[keys[j]]
-            j = j + 1
+            doc_len += freq[keys[j]]
+            j += 1
         }
         h score = 0.0
         h qi = 0
@@ -103,12 +103,12 @@ fn tfidf_score(corpus, query) {
                     df = corpus["doc_freqs"][term]
                 }
                 h idf = math_log((corpus["n"] + 1) / (df + 1))
-                score = score + tf * idf
+                score += tf * idf
             }
-            qi = qi + 1
+            qi += 1
         }
         arr_push(scores, {doc_idx: i, score: score})
-        i = i + 1
+        i += 1
     }
     # sort by score desc (bubble sort — small corpora)
     h n = arr_len(scores)
@@ -121,9 +121,9 @@ fn tfidf_score(corpus, query) {
                 scores[si] = scores[sj]
                 scores[sj] = tmp
             }
-            sj = sj + 1
+            sj += 1
         }
-        si = si + 1
+        si += 1
     }
     return scores
 }
@@ -148,7 +148,7 @@ fn bm25_corpus(docs, k1, b) {
         h dl = arr_len(tokens)
         arr_push(tokenized, freq)
         arr_push(lengths, dl)
-        total_len = total_len + dl
+        total_len += dl
         h seen = {}
         h keys = dict_keys(freq)
         h j = 0
@@ -162,9 +162,9 @@ fn bm25_corpus(docs, k1, b) {
                     doc_freqs[k] = 1
                 }
             }
-            j = j + 1
+            j += 1
         }
-        i = i + 1
+        i += 1
     }
     h avgdl = total_len / n
     return {n: n, doc_freqs: doc_freqs, tokenized: tokenized, lengths: lengths, avgdl: avgdl, k1: K1, b: B, docs: docs}
@@ -190,11 +190,11 @@ fn bm25_score(corpus, query) {
             }
             h idf = math_log((corpus["n"] - df + 0.5) / (df + 0.5) + 1)
             h norm = corpus["k1"] * (1 - corpus["b"] + corpus["b"] * dl / corpus["avgdl"])
-            score = score + idf * (tf * (corpus["k1"] + 1)) / (tf + norm)
-            qi = qi + 1
+            score += idf * (tf * (corpus["k1"] + 1)) / (tf + norm)
+            qi += 1
         }
         arr_push(scores, {doc_idx: i, score: score})
-        i = i + 1
+        i += 1
     }
     # sort desc
     h n = arr_len(scores)
@@ -207,9 +207,9 @@ fn bm25_score(corpus, query) {
                 scores[si] = scores[sj]
                 scores[sj] = tmp
             }
-            sj = sj + 1
+            sj += 1
         }
-        si = si + 1
+        si += 1
     }
     return scores
 }
@@ -227,7 +227,7 @@ fn levenshtein(a, b) {
     h i = 0
     while i <= lb {
         arr_push(prev, i)
-        i = i + 1
+        i += 1
     }
     h row = 0
     while row < la {
@@ -245,10 +245,10 @@ fn levenshtein(a, b) {
             if ins < min_val { min_val = ins }
             if sub < min_val { min_val = sub }
             arr_push(curr, min_val)
-            col = col + 1
+            col += 1
         }
         prev = curr
-        row = row + 1
+        row += 1
     }
     return prev[lb]
 }
@@ -275,7 +275,7 @@ fn closest(query, candidates) {
             best = candidates[i]
             best_idx = i
         }
-        i = i + 1
+        i += 1
     }
     return {text_match: best, score: best_score, idx: best_idx}
 }
@@ -298,12 +298,12 @@ fn chunk_fixed(text, size, overlap) {
         while j < arr_len(chunk_tokens) {
             if j > 0 { chunk_str = str_concat(chunk_str, " ") }
             chunk_str = str_concat(chunk_str, chunk_tokens[j])
-            j = j + 1
+            j += 1
         }
         arr_push(chunks, chunk_str)
         h step = size - ov
         if step <= 0 { step = 1 }
-        i = i + step
+        i += step
     }
     return chunks
 }
@@ -323,10 +323,10 @@ fn chunk_sentences(text, max_per_chunk) {
         while j < end {
             if j > i { chunk = str_concat(chunk, ". ") }
             chunk = str_concat(chunk, sentences[j])
-            j = j + 1
+            j += 1
         }
         arr_push(chunks, str_trim(chunk))
-        i = i + max_s
+        i += max_s
     }
     return chunks
 }
@@ -340,7 +340,7 @@ fn ngrams(tokens, n) {
     while i <= arr_len(tokens) - n {
         h gram = arr_slice(tokens, i, i + n)
         arr_push(result, gram)
-        i = i + 1
+        i += 1
     }
     return result
 }

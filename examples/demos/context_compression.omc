@@ -14,7 +14,7 @@ fn make_msgs(n) {
     while i < n {
         arr_push(msgs, concat_many("msg-", to_string(i),
             ": some content about topic-", to_string(i % 8)));
-        i = i + 1;
+        i += 1;
     }
     return msgs;
 }

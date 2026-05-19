@@ -60,7 +60,7 @@ fn bfs(g, start) {
                 visited[nb] = true
                 arr_push(queue, nb)
             }
-            i = i + 1
+            i += 1
         }
     }
     return order
@@ -96,7 +96,7 @@ fn bfs_path(g, start, goal) {
                 parent[nb] = current
                 arr_push(queue, nb)
             }
-            i = i + 1
+            i += 1
         }
     }
     return null
@@ -114,7 +114,7 @@ fn _dfs_visit(g, node, visited, order) {
         if !dict_has(visited, nb) {
             _dfs_visit(g, nb, visited, order)
         }
-        i = i + 1
+        i += 1
     }
 }
 
@@ -137,7 +137,7 @@ fn _topo_visit(g, node, visited, stack, in_progress) {
     while i < arr_len(neighbors) {
         h nb = neighbors[i]["to"]
         _topo_visit(g, nb, visited, stack, in_progress)
-        i = i + 1
+        i += 1
     }
     dict_delete(in_progress, node)
     visited[node] = true
@@ -156,7 +156,7 @@ fn toposort(g) {
         if !dict_has(visited, n) {
             _topo_visit(g, n, visited, stack, in_progress)
         }
-        i = i + 1
+        i += 1
     }
     return arr_reverse(stack)
 }
@@ -176,7 +176,7 @@ fn dijkstra(g, start) {
         dist[n] = 999999999
         prev[n] = null
         arr_push(unvisited, n)
-        i = i + 1
+        i += 1
     }
     dist[s] = 0
     while arr_len(unvisited) > 0 {
@@ -189,14 +189,14 @@ fn dijkstra(g, start) {
                 min_d = dist[n]
                 u = n
             }
-            j = j + 1
+            j += 1
         }
         if u == null { break }
         h new_unvisited = []
         h k = 0
         while k < arr_len(unvisited) {
             if unvisited[k] != u { arr_push(new_unvisited, unvisited[k]) }
-            k = k + 1
+            k += 1
         }
         unvisited = new_unvisited
         h neighbors = graph_neighbors(g, u)
@@ -211,7 +211,7 @@ fn dijkstra(g, start) {
                     prev[v] = u
                 }
             }
-            n2 = n2 + 1
+            n2 += 1
         }
     }
     return {dist: dist, prev: prev}
@@ -246,7 +246,7 @@ fn pagerank(g, damping, iterations) {
     h i = 0
     while i < n {
         rank[nodes[i]] = 1.0 / n
-        i = i + 1
+        i += 1
     }
     h iter = 0
     while iter < iters {
@@ -254,7 +254,7 @@ fn pagerank(g, damping, iterations) {
         h j = 0
         while j < n {
             new_rank[nodes[j]] = (1.0 - d) / n
-            j = j + 1
+            j += 1
         }
         h k = 0
         while k < n {
@@ -269,13 +269,13 @@ fn pagerank(g, damping, iterations) {
                     if dict_has(new_rank, nb) {
                         new_rank[nb] = new_rank[nb] + d * share
                     }
-                    m = m + 1
+                    m += 1
                 }
             }
-            k = k + 1
+            k += 1
         }
         rank = new_rank
-        iter = iter + 1
+        iter += 1
     }
     return rank
 }
@@ -295,7 +295,7 @@ fn connected_components(g) {
             _dfs_visit(g, n, visited, order)
             arr_push(components, order)
         }
-        i = i + 1
+        i += 1
     }
     return components
 }
@@ -314,7 +314,7 @@ fn _cycle_check(g, node, visited, rec_stack) {
         } elif dict_has(rec_stack, nb) {
             return true
         }
-        i = i + 1
+        i += 1
     }
     dict_delete(rec_stack, node)
     return false
@@ -331,7 +331,7 @@ fn has_cycle(g) {
         if !dict_has(visited, n) {
             if _cycle_check(g, n, visited, rec_stack) { return true }
         }
-        i = i + 1
+        i += 1
     }
     return false
 }
