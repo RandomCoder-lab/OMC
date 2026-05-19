@@ -2416,7 +2416,7 @@ impl Interpreter {
             | "to_string" | "to_str" | "string" | "len" | "type_of" | "error"
             | "defined_functions" | "call"
             // Introspection builtins
-            | "list_defined_fns" | "fn_arity" | "fn_source" | "get_scope_vars"
+            | "list_defined_fns" | "list_fns" | "fn_arity" | "fn_source" | "get_scope_vars"
             // Python-idiom builtins (forgiving aliases for users new to OMC)
             | "range" | "getenv" | "to_hex" | "from_hex"
             | "parse_int" | "parse_float"
@@ -5126,8 +5126,8 @@ impl Interpreter {
                     names.into_iter().map(Value::String).collect(),
                 )))
             }
-            // list_defined_fns() — alias for defined_functions; returns sorted array of user fn names
-            "list_defined_fns" => {
+            // list_defined_fns() / list_fns() — returns sorted array of user fn names
+            "list_defined_fns" | "list_fns" => {
                 let mut names: Vec<String> = self.functions.keys()
                     .filter(|n| !n.starts_with("__lambda_") && !n.starts_with("__rt_lambda_"))
                     .cloned()
@@ -5153,7 +5153,7 @@ impl Interpreter {
                     Ok(Value::Null)
                 }
             }
-            // fn_source(name) → string — reconstructed signature of a user-defined function
+            // fn_source(name) → string — full formatted source of a user-defined function
             "fn_source" => {
                 if args.is_empty() {
                     return Err("fn_source requires (fn_name)".to_string());
@@ -5163,9 +5163,17 @@ impl Interpreter {
                     Value::String(s) => s.clone(),
                     _ => return Err("fn_source: argument must be a string".to_string()),
                 };
-                if let Some((params, _body)) = self.functions.get(&fn_name) {
-                    let param_str = params.join(", ");
-                    Ok(Value::String(format!("fn {}({}) {{ ... }}", fn_name, param_str)))
+                if let Some((params, body)) = self.functions.get(&fn_name) {
+                    let stmt = Statement::FunctionDef {
+                        name: fn_name.clone(),
+                        params: params.clone(),
+                        param_types: params.iter().map(|_| None).collect(),
+                        body: body.clone(),
+                        return_type: None,
+                        pragmas: vec![],
+                    };
+                    let src = crate::formatter::format_program(&[stmt]);
+                    Ok(Value::String(src.trim_end_matches('\n').to_string()))
                 } else {
                     Ok(Value::Null)
                 }
@@ -14843,7 +14851,7 @@ pub(crate) const HEAL_BUILTIN_NAMES: &[&str] = &[
     "to_int", "int", "to_float", "float",
     "to_string", "string", "len", "type_of", "error",
     "defined_functions", "call",
-    "list_defined_fns", "fn_arity", "fn_source", "get_scope_vars",
+    "list_defined_fns", "list_fns", "fn_arity", "fn_source", "get_scope_vars",
     "test_record_failure", "test_failure_count",
     "test_get_failures", "test_clear_failures",
     "test_set_current", "test_get_current",
