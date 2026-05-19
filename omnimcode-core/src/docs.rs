@@ -1353,6 +1353,20 @@ print(answer)"#,
         unique_to_omc: true,
     },
     BuiltinDoc {
+        name: "llm_stream_print", category: "llm_workflow",
+        signature: "(prompt: string, system?: string, model?: string) -> string",
+        description: concat!(
+            "Stream the LLM response token-by-token to stdout as it arrives, then return the full accumulated text. ",
+            "Uses SSE streaming (stream:true in the API body). ",
+            "Works with both Anthropic and OpenAI providers (auto-detected via LLM_PROVIDER). ",
+            "Ideal for interactive CLI tools and demos where you want visible token-by-token output. ",
+            "Returns the complete response string when finished."
+        ),
+        example: r#"h full = llm_stream_print("Write a haiku about recursion", "You are a poet.")
+print(str_concat("Total chars: ", to_str(str_len(full))))"#,
+        unique_to_omc: true,
+    },
+    BuiltinDoc {
         name: "llm_tools", category: "llm_workflow",
         signature: "(messages: dict[], tools: dict[], model?: string) -> dict",
         description: concat!(

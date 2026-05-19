@@ -92,6 +92,119 @@ pub fn llm_system(
     llm_call_sys(prompt, model_override, Some(system))
 }
 
+/// `llm_stream_print(prompt, system?, model?) -> string`
+///
+/// Streams the LLM response token-by-token to stdout, then returns the full
+/// accumulated text. Uses SSE streaming (stream:true). Supports both Anthropic
+/// and OpenAI providers (auto-detected via LLM_PROVIDER env var).
+#[cfg(feature = "native-llm")]
+pub fn llm_stream_print(
+    prompt: &str,
+    system: Option<&str>,
+    model_override: Option<&str>,
+) -> Result<Value, String> {
+    use std::io::{BufRead, BufReader, Write};
+
+    let cfg = Config::from_env()?;
+    let model = model_override.unwrap_or(&cfg.model).to_string();
+
+    // Build messages list
+    let mut messages: Vec<ChatMessage> = Vec::new();
+    if let Some(sys) = system {
+        if !sys.is_empty() {
+            messages.push(ChatMessage { role: "system".to_string(), content: sys.to_string() });
+        }
+    }
+    messages.push(ChatMessage { role: "user".to_string(), content: prompt.to_string() });
+
+    match cfg.provider {
+        Provider::Anthropic => {
+            let mut system_parts: Vec<String> = Vec::new();
+            let mut msgs_json: Vec<serde_json::Value> = Vec::new();
+            for m in &messages {
+                if m.role == "system" {
+                    system_parts.push(m.content.clone());
+                } else {
+                    msgs_json.push(serde_json::json!({ "role": m.role, "content": m.content }));
+                }
+            }
+            let mut body = serde_json::json!({
+                "model": model, "max_tokens": 4096,
+                "messages": msgs_json, "stream": true
+            });
+            if !system_parts.is_empty() {
+                body["system"] = serde_json::Value::String(system_parts.join("\n\n"));
+            }
+            let resp = ureq::post(&cfg.base_url)
+                .set("Content-Type", "application/json")
+                .set("Authorization", &format!("Bearer {}", cfg.api_key))
+                .set("anthropic-version", "2023-06-01")
+                .set("x-api-key", &cfg.api_key)
+                .send_json(body)
+                .map_err(|e| format!("llm_stream HTTP error: {}", e))?;
+            let reader = BufReader::new(resp.into_reader());
+            let mut full_text = String::new();
+            for line in reader.lines() {
+                let line = line.map_err(|e| format!("llm_stream read error: {}", e))?;
+                if let Some(data) = line.strip_prefix("data: ") {
+                    if data == "[DONE]" { break; }
+                    if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
+                        if event["type"] == "content_block_delta" {
+                            if let Some(text) = event["delta"]["text"].as_str() {
+                                print!("{}", text);
+                                let _ = std::io::stdout().flush();
+                                full_text.push_str(text);
+                            }
+                        }
+                    }
+                }
+            }
+            println!();
+            Ok(Value::String(full_text))
+        }
+        Provider::OpenAI => {
+            let msgs_json: Vec<serde_json::Value> = messages
+                .iter()
+                .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
+                .collect();
+            let body = serde_json::json!({
+                "model": model, "messages": msgs_json, "stream": true
+            });
+            let resp = ureq::post(&cfg.base_url)
+                .set("Content-Type", "application/json")
+                .set("Authorization", &format!("Bearer {}", cfg.api_key))
+                .send_json(body)
+                .map_err(|e| format!("llm_stream HTTP error: {}", e))?;
+            let reader = BufReader::new(resp.into_reader());
+            let mut full_text = String::new();
+            for line in reader.lines() {
+                let line = line.map_err(|e| format!("llm_stream read error: {}", e))?;
+                if let Some(data) = line.strip_prefix("data: ") {
+                    if data == "[DONE]" { break; }
+                    if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
+                        if let Some(text) = event["choices"][0]["delta"]["content"].as_str() {
+                            print!("{}", text);
+                            let _ = std::io::stdout().flush();
+                            full_text.push_str(text);
+                        }
+                    }
+                }
+            }
+            println!();
+            Ok(Value::String(full_text))
+        }
+    }
+}
+
+#[cfg(not(feature = "native-llm"))]
+pub fn llm_stream_print(
+    _prompt: &str,
+    _system: Option<&str>,
+    _model_override: Option<&str>,
+) -> Result<Value, String> {
+    Err("llm_stream_print: recompile with --features native-llm".to_string())
+}
+
 /// `batch_llm_call(prompts, model?, concurrency?) -> string[]`
 ///
 /// Send multiple prompts to the LLM sequentially and return all responses in

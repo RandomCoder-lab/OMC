@@ -2229,6 +2229,7 @@ impl Interpreter {
             | "sha256" | "sha512" | "base64_encode" | "base64_decode"
             // LLM builtins
             | "llm_call" | "llm_chat" | "llm_embed" | "llm_models" | "llm_system"
+            | "llm_stream_print"
             | "llm_tools" | "substrate_embed"
             | "batch_llm_call" | "batch_llm_chat"
             // HTTP builtins
@@ -9573,6 +9574,32 @@ impl Interpreter {
                     None
                 };
                 crate::llm_builtins::llm_system(&prompt, &system, model.as_deref())
+            }
+            // llm_stream_print(prompt, system?, model?) -> string
+            //   Streams LLM response to stdout token-by-token, returns full text.
+            //   Uses SSE streaming API. system defaults to null (no system prompt).
+            "llm_stream_print" => {
+                if args.is_empty() {
+                    return Err("llm_stream_print requires (prompt, system?, model?)".to_string());
+                }
+                let prompt = self.eval_expr(&args[0])?.to_display_string();
+                let system = if args.len() > 1 {
+                    match self.eval_expr(&args[1])? {
+                        Value::Null => None,
+                        v => Some(v.to_display_string()),
+                    }
+                } else {
+                    None
+                };
+                let model = if args.len() > 2 {
+                    match self.eval_expr(&args[2])? {
+                        Value::Null => None,
+                        v => Some(v.to_display_string()),
+                    }
+                } else {
+                    None
+                };
+                crate::llm_builtins::llm_stream_print(&prompt, system.as_deref(), model.as_deref())
             }
             // llm_models() -> dict[]
             //   Returns the list of models available from the active provider.
