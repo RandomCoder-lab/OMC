@@ -2314,7 +2314,8 @@ impl Interpreter {
             // I/O
             | "read_file" | "write_file" | "file_exists" | "print"
             | "println" | "print_raw"
-            // Time, conversion, introspection
+            // Time, sleep, conversion, introspection
+            | "sleep" | "str_similarity" | "omc_eval_file"
             | "now_ms" | "to_int" | "int" | "to_float" | "float"
             | "to_string" | "string" | "len" | "type_of" | "error"
             | "defined_functions" | "call"
@@ -4884,6 +4885,57 @@ impl Interpreter {
                 }
                 names.sort_by(|a, b| a.to_display_string().cmp(&b.to_display_string()));
                 Ok(Value::Array(HArray::from_vec(names)))
+            }
+            "sleep" => {
+                let ms = if args.is_empty() { 0i64 } else {
+                    match self.eval_expr(&args[0])? {
+                        Value::HInt(n) => n.value,
+                        Value::HFloat(f) => f as i64,
+                        _ => 0,
+                    }
+                };
+                if ms > 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(ms as u64));
+                }
+                Ok(Value::Null)
+            }
+            "omc_eval_file" => {
+                if args.is_empty() {
+                    return Err("omc_eval_file requires (path)".to_string());
+                }
+                let path = self.eval_expr(&args[0])?.to_display_string();
+                let src = std::fs::read_to_string(&path)
+                    .map_err(|e| format!("omc_eval_file: {}", e))?;
+                let mut parser = crate::parser::Parser::new(&src);
+                let stmts = parser.parse().map_err(|e| format!("omc_eval_file parse error: {}", e))?;
+                self.register_user_functions(&stmts);
+                let pre_last = self.last_expression_value.take();
+                self.execute(stmts)?;
+                let result = self.last_expression_value.take().unwrap_or(Value::Null);
+                self.last_expression_value = pre_last;
+                Ok(result)
+            }
+            "str_similarity" => {
+                if args.len() < 2 {
+                    return Err("str_similarity requires (a, b)".to_string());
+                }
+                let a = self.eval_expr(&args[0])?.to_display_string();
+                let b = self.eval_expr(&args[1])?.to_display_string();
+                let va = crate::llm_builtins::substrate_embed(&a, 32);
+                let vb = crate::llm_builtins::substrate_embed(&b, 32);
+                if let (Value::Array(av), Value::Array(bv)) = (va, vb) {
+                    let mut dot = 0.0f64;
+                    let ai = av.items.borrow();
+                    let bi = bv.items.borrow();
+                    for (x, y) in ai.iter().zip(bi.iter()) {
+                        if let (Value::HFloat(xf), Value::HFloat(yf)) = (x, y) {
+                            dot += xf * yf;
+                        }
+                    }
+                    Ok(Value::HFloat(dot.clamp(-1.0, 1.0)))
+                } else {
+                    Ok(Value::HFloat(0.0))
+                }
             }
             // Introspection and utility.
             "type_of" => {
@@ -14688,6 +14740,8 @@ pub(crate) const HEAL_BUILTIN_NAMES: &[&str] = &[
     // I/O
     "read_file", "write_file", "file_exists", "file_ls", "print",
     "println", "print_raw",
+    // Time / sleep / similarity / eval
+    "sleep", "str_similarity", "omc_eval_file",
     // Time / random / conversion / introspection
     "now_ms", "random_int", "random_float", "random_seed",
     "to_int", "int", "to_float", "float",

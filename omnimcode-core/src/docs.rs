@@ -1397,6 +1397,77 @@ h v2 = substrate_embed("hello there", 16)
 # compute cosine similarity in OMC..."#,
         unique_to_omc: true,
     },
+    BuiltinDoc {
+        name: "llm_judge", category: "llm_workflow",
+        signature: "(responses: string[], criteria: string, model?: string) -> dict[]",
+        description: concat!(
+            "Score an array of LLM response strings against a criteria string. ",
+            "Sends a structured prompt to the LLM asking it to rate each response 0-10. ",
+            "Returns an array of dicts, each with keys `idx` (int), `score` (float), `reason` (string). ",
+            "Useful as the evaluation step in best-of-N improvement loops."
+        ),
+        example: r#"h responses = ["Paris", "London", "Berlin"]
+h scores = llm_judge(responses, "Which is the capital of France?")
+print(scores[0]["score"])"#,
+        unique_to_omc: true,
+    },
+    BuiltinDoc {
+        name: "llm_compare", category: "llm_workflow",
+        signature: "(a: string, b: string, criteria: string, model?: string) -> dict",
+        description: concat!(
+            "Compare two LLM responses head-to-head against a criteria string. ",
+            "Returns a dict `{winner: \"A\"|\"B\", reason: string}`. ",
+            "Useful for tournament-style selection in multi-agent systems."
+        ),
+        example: r#"h r = llm_compare("short answer", "detailed answer", "clarity and correctness")
+print(r["winner"])  # "A" or "B"
+print(r["reason"])"#,
+        unique_to_omc: true,
+    },
+    // ── Utility builtins ─────────────────────────────────────────────────────
+    BuiltinDoc {
+        name: "sleep", category: "io",
+        signature: "(ms: int) -> null",
+        description: "Sleep for the specified number of milliseconds. Useful for rate-limiting LLM calls or polling loops.",
+        example: r#"sleep(500)  # pause 0.5 seconds"#,
+        unique_to_omc: false,
+    },
+    BuiltinDoc {
+        name: "str_similarity", category: "string",
+        signature: "(a: string, b: string) -> float",
+        description: concat!(
+            "Compute cosine similarity between two strings using phi-pi-fibonacci harmonic embeddings (32 dims). ",
+            "Returns a float in [-1, 1]. Values near 1.0 indicate high similarity. ",
+            "No API call required — uses the same offline substrate_embed algorithm."
+        ),
+        example: r#"h sim = str_similarity("hello world", "hello there")
+print(sim)  # ~0.95"#,
+        unique_to_omc: true,
+    },
+    BuiltinDoc {
+        name: "omc_eval_file", category: "meta",
+        signature: "(path: string) -> any",
+        description: concat!(
+            "Read and evaluate an OMC source file at `path` within the current interpreter context. ",
+            "Functions defined in the file are registered into the caller's scope. ",
+            "Returns the last expression value of the evaluated file. ",
+            "Like `eval_omc(read_file(path))` but atomic."
+        ),
+        example: r#"omc_eval_file("examples/lib/llm.omc")
+h reply = llm_call("hello")  # function defined in lib file"#,
+        unique_to_omc: true,
+    },
+    BuiltinDoc {
+        name: "file_ls", category: "io",
+        signature: "(path?: string) -> string[]",
+        description: concat!(
+            "List entries in a directory. `path` defaults to \".\" (current directory). ",
+            "Returns a sorted array of filename strings (not full paths)."
+        ),
+        example: r#"h files = file_ls("examples/demos")
+print(files)  # ["best_of_n_improve.omc", "multi_agent_debate.omc", ...]"#,
+        unique_to_omc: true,
+    },
     // ── HTTP builtins ─────────────────────────────────────────────────────────
     BuiltinDoc {
         name: "http_get", category: "http",
