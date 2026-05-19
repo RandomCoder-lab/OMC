@@ -1,0 +1,261 @@
+# llm_agent.omc — High-level LLM agent primitives for OMC
+#
+# Builds on: llm_call, llm_chat, llm_tools, batch_llm_call, eval_omc,
+#            json_extract, str_format, substrate_embed
+#
+# Usage:
+#   from "examples/lib/llm_agent.omc" import ask_json, react_agent, code_agent, ...
+
+# ── ask_json ─────────────────────────────────────────────────────────────────
+# Ask the LLM for JSON, extract and parse it from any surrounding prose.
+
+fn ask_json(prompt, example, model) {
+    h sys = str_concat("Respond ONLY with valid JSON matching this structure: ", json_stringify(example))
+    h messages = [
+        {role: "system", content: sys},
+        {role: "user", content: prompt}
+    ]
+    h raw = llm_chat(messages, model)
+    h parsed = json_extract(raw)
+    if parsed == null { return example }
+    return parsed
+}
+
+# ── chain_of_thought ──────────────────────────────────────────────────────────
+
+fn chain_of_thought(question, model) {
+    h prompt = str_concat("Think through this step by step:\n\n", question, "\n\nReasoning:")
+    return llm_call(prompt, model)
+}
+
+# ── self_critique + revise ────────────────────────────────────────────────────
+
+fn self_critique(text, criteria, model) {
+    h prompt = str_format(
+        "Critique the following against: {criteria}\n\nText:\n{text}\n\nCritique:",
+        {text: text, criteria: criteria}
+    )
+    return llm_call(prompt, model)
+}
+
+fn critique_and_revise(text, criteria, model) {
+    h critique = self_critique(text, criteria, model)
+    h prompt = str_format(
+        "Rewrite addressing this critique.\n\nOriginal:\n{text}\n\nCritique:\n{critique}\n\nRevised:",
+        {text: text, critique: critique}
+    )
+    return llm_call(prompt, model)
+}
+
+# ── parallel_research ─────────────────────────────────────────────────────────
+
+fn parallel_research(questions, model) {
+    h prompts = par_map(questions, fn(q) {
+        return str_concat("Research question: ", q, "\n\nAnswer concisely and factually.")
+    })
+    return batch_llm_call(prompts, model)
+}
+
+fn research_and_synthesize(topic, sub_questions, model) {
+    h answers = parallel_research(sub_questions, model)
+    h parts = []
+    h i = 0
+    while i < arr_len(sub_questions) {
+        arr_push(parts, str_format("Q: {q}\nA: {a}", {q: sub_questions[i], a: answers[i]}))
+        i = i + 1
+    }
+    h research = arr_join(parts, "\n\n")
+    h prompt = str_format(
+        "Topic: {topic}\n\nResearch:\n{research}\n\nWrite a comprehensive synthesis:",
+        {topic: topic, research: research}
+    )
+    return llm_call(prompt, model)
+}
+
+# ── react_agent ───────────────────────────────────────────────────────────────
+# tools: array of {name, description, parameters, fn}
+# where fn(input_dict) -> string
+
+fn react_agent(goal, tools, model, max_turns) {
+    h tool_defs = par_map(tools, fn(t) {
+        return {name: t["name"], description: t["description"], parameters: t["parameters"]}
+    })
+    h tool_map = dict_new()
+    h i = 0
+    while i < arr_len(tools) {
+        dict_set(tool_map, tools[i]["name"], tools[i]["fn"])
+        i = i + 1
+    }
+
+    h messages = [{role: "user", content: goal}]
+    h trace = []
+    h turn = 0
+
+    while turn < max_turns {
+        h result = llm_tools(messages, tool_defs, model)
+
+        if result["type"] == "text" {
+            return {answer: result["content"], trace: trace, turns: turn}
+        }
+
+        h tool_name = result["name"]
+        h tool_input = result["input"]
+        arr_push(trace, str_format("[{n}] {i}", {n: tool_name, i: json_stringify(tool_input)}))
+
+        h tool_fn = dict_get(tool_map, tool_name)
+        h tool_result = "Error: unknown tool"
+        if tool_fn != null {
+            tool_result = tool_fn(tool_input)
+        }
+
+        arr_push(trace, str_format("  -> {r}", {r: str_slice(to_str(tool_result), 0, 100)}))
+        arr_push(messages, {role: "assistant", content: str_format("Used: {n}", {n: tool_name})})
+        arr_push(messages, {role: "user", content: str_format("Tool result: {r}. Continue.", {r: to_str(tool_result)})})
+        turn = turn + 1
+    }
+
+    return {answer: "Max turns reached", trace: trace, turns: turn}
+}
+
+# ── code_agent ────────────────────────────────────────────────────────────────
+# Generate + test OMC code; repair until all tests pass.
+# tests: array of {check: "OMC code that throws on failure"}
+
+fn code_agent(task, tests, model, max_attempts) {
+    h attempt = 0
+    h last_code = ""
+    h last_error = ""
+
+    while attempt < max_attempts {
+        h prompt = if attempt == 0 {
+            str_format(
+                "Write an OMC function for:\n{task}\n\nOutput ONLY OMC code, no explanation.",
+                {task: task}
+            )
+        } else {
+            str_format(
+                "Fix this OMC code.\n\nCode:\n{code}\n\nError:\n{error}\n\nTask:\n{task}\n\nOutput ONLY fixed code.",
+                {code: last_code, error: last_error, task: task}
+            )
+        }
+
+        h code = llm_call(prompt, model)
+        last_code = code
+
+        h all_pass = true
+        h failures = []
+        h i = 0
+        while i < arr_len(tests) {
+            h test = tests[i]
+            h check_code = str_concat(code, "\n", test["check"])
+            h res = eval_omc(check_code)
+            if res["error"] != null {
+                all_pass = false
+                arr_push(failures, str_format("Test {i}: {e}", {i: to_str(i), e: res["error"]}))
+            }
+            i = i + 1
+        }
+
+        if all_pass {
+            return {ok: true, code: code, attempts: attempt + 1}
+        }
+        last_error = arr_join(failures, "\n")
+        attempt = attempt + 1
+    }
+    return {ok: false, code: last_code, error: last_error, attempts: max_attempts}
+}
+
+# ── best_of_n ─────────────────────────────────────────────────────────────────
+
+fn best_of_n(task, n, model) {
+    h blank = arr_fill(task, n)
+    h prompts = par_map(blank, fn(t) {
+        return str_concat("Solve this task concisely:\n", t)
+    })
+    h solutions = batch_llm_call(prompts, model)
+
+    h score_prompts = par_map(solutions, fn(sol) {
+        return str_concat(
+            "Rate this solution 0-10. Respond with JSON {\"score\": N, \"reason\": \"...\"}.\n\nSolution:\n", sol
+        )
+    })
+    h scores_raw = batch_llm_call(score_prompts, model)
+    h scores = par_map(scores_raw, fn(raw) {
+        h j = json_extract(raw)
+        if j != null { return j }
+        return {score: 0, reason: raw}
+    })
+
+    h best_idx = 0
+    h best_score = -1.0
+    h i = 0
+    while i < arr_len(scores) {
+        h sv = to_float(to_str(scores[i]["score"]))
+        if sv > best_score {
+            best_score = sv
+            best_idx = i
+        }
+        i = i + 1
+    }
+    return {solution: solutions[best_idx], score: best_score, all_solutions: solutions}
+}
+
+# ── memory_agent ──────────────────────────────────────────────────────────────
+# Agent with short-term semantic memory via substrate_embed
+
+fn mem_agent_new() {
+    return {memories: [], embeddings: []}
+}
+
+fn mem_store(agent, text) {
+    arr_push(agent["memories"], text)
+    arr_push(agent["embeddings"], substrate_embed(text, 16))
+    return agent
+}
+
+fn mem_recall(agent, query, top_k) {
+    h qv = substrate_embed(query, 16)
+    h n = arr_len(agent["memories"])
+    if n == 0 { return [] }
+
+    h scored = []
+    h i = 0
+    while i < n {
+        h ev = agent["embeddings"][i]
+        h dot = 0.0
+        h j = 0
+        while j < arr_len(ev) {
+            dot = dot + ev[j] * qv[j]
+            j = j + 1
+        }
+        arr_push(scored, {score: dot, text: agent["memories"][i]})
+        i = i + 1
+    }
+
+    h sorted = arr_sort(scored, fn(a, b) {
+        if a["score"] > b["score"] { return -1 }
+        if a["score"] < b["score"] { return 1 }
+        return 0
+    })
+
+    h result = []
+    h k = 0
+    while k < min(top_k, arr_len(sorted)) {
+        arr_push(result, sorted[k]["text"])
+        k = k + 1
+    }
+    return result
+}
+
+fn mem_agent_call(agent, question, model) {
+    h context = mem_recall(agent, question, 3)
+    h ctx_text = arr_join(context, "\n")
+    h prompt = if str_len(ctx_text) > 0 {
+        str_format("Context:\n{ctx}\n\nQuestion: {q}", {ctx: ctx_text, q: question})
+    } else {
+        question
+    }
+    h answer = llm_call(prompt, model)
+    mem_store(agent, str_concat("Q: ", question, "\nA: ", answer))
+    return answer
+}
