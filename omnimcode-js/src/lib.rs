@@ -624,6 +624,7 @@ impl Transpiler {
             Expression::Mul(l, r) => format!("({} * {})",  self.emit_expr(l), self.emit_expr(r)),
             Expression::Div(l, r) => format!("({} / {})",  self.emit_expr(l), self.emit_expr(r)),
             Expression::Mod(l, r) => format!("({} % {})",  self.emit_expr(l), self.emit_expr(r)),
+            Expression::Power(l, r) => format!("Math.pow({}, {})", self.emit_expr(l), self.emit_expr(r)),
 
             // comparisons
             Expression::Eq(l, r)  => format!("({} === {})", self.emit_expr(l), self.emit_expr(r)),

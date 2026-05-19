@@ -114,6 +114,7 @@ impl Compiler {
                 }
             }
             Expression::Mod(_, _) => Some("int"),
+            Expression::Power(_, _) => None, // may be int or float depending on exponent sign
             Expression::Eq(_, _)
             | Expression::Ne(_, _)
             | Expression::Lt(_, _)
@@ -455,6 +456,9 @@ impl Compiler {
                 self.compile_expr(l)?;
                 self.compile_expr(r)?;
                 self.emit(Op::Mod);
+            }
+            Expression::Power(_, _) => {
+                return Err("Power (**) not supported in bytecode VM — use tree-walk interpreter".to_string());
             }
             Expression::Eq(l, r) => {
                 let lt = self.infer_type(l);

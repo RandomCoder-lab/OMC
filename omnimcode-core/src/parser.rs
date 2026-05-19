@@ -76,6 +76,9 @@ pub enum Token {
     StarEq,
     SlashEq,
     PercentEq,
+    StarStarEq,
+    // Exponentiation operator
+    StarStar,
     Ne,
     Lt,
     Le,
@@ -515,6 +518,14 @@ impl Lexer {
                 }
                 Some('*') => {
                     self.advance();
+                    if self.current() == Some('*') {
+                        self.advance();
+                        if self.current() == Some('=') {
+                            self.advance();
+                            return Token::StarStarEq;
+                        }
+                        return Token::StarStar;
+                    }
                     if self.current() == Some('=') {
                         self.advance();
                         return Token::StarEq;
@@ -1045,9 +1056,9 @@ impl Parser {
                         })
                     }
                     Token::PlusEq | Token::MinusEq | Token::StarEq
-                    | Token::SlashEq | Token::PercentEq => {
+                    | Token::SlashEq | Token::PercentEq | Token::StarStarEq => {
                         // Desugar `x += expr` → `x = x + expr`. Same
-                        // for -=, *=, /=, %=. We don't introduce a new
+                        // for -=, *=, /=, %=, **=. We don't introduce a new
                         // AST node — the rewrite stays inside the parser
                         // and the rest of the pipeline sees a normal
                         // Assignment with a binop on the RHS.
@@ -1062,6 +1073,7 @@ impl Parser {
                             Token::StarEq => Expression::Mul(Box::new(lhs), Box::new(rhs)),
                             Token::SlashEq => Expression::Div(Box::new(lhs), Box::new(rhs)),
                             Token::PercentEq => Expression::Mod(Box::new(lhs), Box::new(rhs)),
+                            Token::StarStarEq => Expression::Power(Box::new(lhs), Box::new(rhs)),
                             _ => unreachable!(),
                         };
                         Ok(Statement::Assignment { name: ident, value })
@@ -1745,23 +1757,23 @@ impl Parser {
     }
 
     fn parse_multiplicative(&mut self) -> Result<Expression, String> {
-        let mut left = self.parse_primary()?;
+        let mut left = self.parse_power()?;
 
         while matches!(self.current(), Token::Star | Token::Slash | Token::Percent) {
             let expr = match self.current() {
                 Token::Star => {
                     self.advance();
-                    let right = self.parse_primary()?;
+                    let right = self.parse_power()?;
                     Expression::mul(left, right)
                 }
                 Token::Slash => {
                     self.advance();
-                    let right = self.parse_primary()?;
+                    let right = self.parse_power()?;
                     Expression::div(left, right)
                 }
                 Token::Percent => {
                     self.advance();
-                    let right = self.parse_primary()?;
+                    let right = self.parse_power()?;
                     Expression::Mod(Box::new(left), Box::new(right))
                 }
                 _ => break,
@@ -1770,6 +1782,18 @@ impl Parser {
         }
 
         Ok(left)
+    }
+
+    // Right-associative: `a ** b ** c` = `a ** (b ** c)`
+    fn parse_power(&mut self) -> Result<Expression, String> {
+        let base = self.parse_primary()?;
+        if self.current() == Token::StarStar {
+            self.advance();
+            let exp = self.parse_power()?; // right-assoc: recurse
+            Ok(Expression::Power(Box::new(base), Box::new(exp)))
+        } else {
+            Ok(base)
+        }
     }
 
     fn parse_primary(&mut self) -> Result<Expression, String> {

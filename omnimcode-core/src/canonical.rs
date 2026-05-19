@@ -357,6 +357,10 @@ fn rename_expr(expr: &Expression, scope: &Scope) -> Expression {
             Box::new(rename_expr(a, scope)),
             Box::new(rename_expr(b, scope)),
         ),
+        Expression::Power(a, b) => Expression::Power(
+            Box::new(rename_expr(a, scope)),
+            Box::new(rename_expr(b, scope)),
+        ),
         Expression::Eq(a, b) => Expression::Eq(Box::new(rename_expr(a, scope)), Box::new(rename_expr(b, scope))),
         Expression::Ne(a, b) => Expression::Ne(Box::new(rename_expr(a, scope)), Box::new(rename_expr(b, scope))),
         Expression::Lt(a, b) => Expression::Lt(Box::new(rename_expr(a, scope)), Box::new(rename_expr(b, scope))),

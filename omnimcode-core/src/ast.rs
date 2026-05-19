@@ -235,6 +235,7 @@ pub enum Expression {
     Mul(Box<Expression>, Box<Expression>),
     Div(Box<Expression>, Box<Expression>),
     Mod(Box<Expression>, Box<Expression>),
+    Power(Box<Expression>, Box<Expression>),
     
     // Comparisons
     Eq(Box<Expression>, Box<Expression>),

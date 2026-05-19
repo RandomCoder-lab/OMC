@@ -807,6 +807,10 @@ impl Interpreter {
                 Box::new(Self::rewrite_call_expr(*l, module_names, alias)),
                 Box::new(Self::rewrite_call_expr(*r, module_names, alias)),
             ),
+            Expression::Power(l, r) => Expression::Power(
+                Box::new(Self::rewrite_call_expr(*l, module_names, alias)),
+                Box::new(Self::rewrite_call_expr(*r, module_names, alias)),
+            ),
             Expression::Eq(l, r) => Expression::Eq(
                 Box::new(Self::rewrite_call_expr(*l, module_names, alias)),
                 Box::new(Self::rewrite_call_expr(*r, module_names, alias)),
@@ -1244,6 +1248,11 @@ impl Interpreter {
                     }
                 }
                 Expression::Mod(Box::new(l), Box::new(r))
+            }
+            Expression::Power(l, r) => {
+                let l = Self::heal_expr(*l, defined, arities, diags);
+                let r = Self::heal_expr(*r, defined, arities, diags);
+                Expression::Power(Box::new(l), Box::new(r))
             }
             Expression::Call { name, args, pos } => {
                 // Typo check at call site. Substrate-routed lookup:
@@ -2099,6 +2108,20 @@ impl Interpreter {
                         Ok(Value::HInt(HInt::new(0)))
                     } else {
                         Ok(Value::HInt(HInt::new(lv.to_int() % divisor)))
+                    }
+                }
+            }
+            Expression::Power(base, exp) => {
+                let bv = self.eval_expr(base)?;
+                let ev = self.eval_expr(exp)?;
+                if bv.is_float() || ev.is_float() {
+                    Ok(Value::HFloat(bv.to_float().powf(ev.to_float())))
+                } else {
+                    let e = ev.to_int();
+                    if e < 0 {
+                        Ok(Value::HFloat((bv.to_int() as f64).powi(e as i32)))
+                    } else {
+                        Ok(Value::HInt(HInt::new(bv.to_int().pow(e as u32))))
                     }
                 }
             }

@@ -339,6 +339,7 @@ fn format_expr(expr: &Expression, out: &mut String) {
         Expression::Mul(l, r) => format_binop(l, "*", r, out),
         Expression::Div(l, r) => format_binop(l, "/", r, out),
         Expression::Mod(l, r) => format_binop(l, "%", r, out),
+        Expression::Power(l, r) => format_binop(l, "**", r, out),
         Expression::Eq(l, r) => format_binop(l, "==", r, out),
         Expression::Ne(l, r) => format_binop(l, "!=", r, out),
         Expression::Lt(l, r) => format_binop(l, "<", r, out),
