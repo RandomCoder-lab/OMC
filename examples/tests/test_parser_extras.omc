@@ -1,0 +1,74 @@
+# Regression tests for parser correctness.
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(msg + ": expected " + to_string(expected) + " got " + to_string(actual));
+    }
+}
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+
+# ---- chained index on call result ----
+
+fn test_chained_index_on_call_result() {
+    fn pair(a, b) { return {"a": a, "b": b}; }
+    h p = pair(10, 20);
+    assert_eq(p["a"], 10, "dict index via var");
+    assert_eq(p["b"], 20, "dict index via var b");
+}
+
+fn test_chained_index_in_return() {
+    # Regression: `return call(args)["key"]` correctly returns the field,
+    # not the whole dict.
+    fn make_val(v) { return {"val": v * 2}; }
+    fn doubled(x) { return make_val(x)["val"]; }
+    assert_eq(doubled(5), 10, "return call()[key]");
+    assert_eq(doubled(0), 0, "return call()[key] zero");
+    assert_eq(doubled(7), 14, "return call()[key] seven");
+}
+
+fn test_double_chained_index_on_call() {
+    fn nested() { return {"a": {"b": 99}}; }
+    h n = nested();
+    assert_eq(n["a"]["b"], 99, "double index via var");
+}
+
+fn test_chained_index_in_assign() {
+    fn get_dict() { return {"x": 5}; }
+    h val = get_dict()["x"];
+    assert_eq(val, 5, "assign from call()[key]");
+}
+
+fn test_chained_index_in_condition() {
+    fn flags() { return {"ok": 1}; }
+    h hit = 0;
+    if flags()["ok"] == 1 { hit = 1; }
+    assert_eq(hit, 1, "if call()[key]");
+}
+
+# ---- throw as return terminator ----
+
+fn test_throw_only_fn() {
+    fn always_throws(msg) { throw msg; }
+    h caught = "";
+    try {
+        always_throws("test-error");
+    } catch e {
+        caught = e;
+    }
+    assert_eq(caught, "test-error", "throw-only fn caught");
+}
+
+# ---- augmented assign /= ----
+
+fn test_augmented_assign_divide() {
+    h x = 100;
+    x /= 4;
+    assert_eq(x, 25, "x /= 4");
+    h y = 10;
+    y /= 2;
+    assert_eq(y, 5, "y /= 2");
+    h z = 7;
+    z /= 1;
+    assert_eq(z, 7, "z /= 1");
+}
