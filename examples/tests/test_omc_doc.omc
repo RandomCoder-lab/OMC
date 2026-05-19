@@ -1,0 +1,93 @@
+# Tests for `omc --doc` Markdown documentation generator.
+# Runs the binary with --doc on inline fixture files written via printf,
+# checks that output contains expected Markdown sections.
+
+fn assert_true(cond, msg)  { if !cond { test_record_failure(msg) } }
+fn assert_false(cond, msg) { if cond  { test_record_failure(msg) } }
+fn assert_contains(s, sub, msg) {
+    if !str_contains(s, sub) { test_record_failure(str_concat(msg, " (missing: ", sub, ")")) }
+}
+
+fn omc_bin() {
+    h candidates = [
+        "./target/debug/omnimcode-standalone",
+        "omc"
+    ]
+    h i = 0
+    while i < arr_len(candidates) {
+        h r = omc_spawn("test", ["-f", candidates[i]])
+        if r["ok"] { return candidates[i] }
+        i = i + 1
+    }
+    return "./target/debug/omnimcode-standalone"
+}
+
+fn doc_file(path) {
+    h bin = omc_bin()
+    return omc_spawn(bin, ["--doc", path])
+}
+
+# ── basic fn extraction ────────────────────────────────────────────────────────
+
+fn test_single_fn_appears() {
+    h r = omc_spawn("sh", ["-c",
+        "printf 'fn greet(name) { return name }\\n' > /tmp/_doc_single.omc"])
+    h result = doc_file("/tmp/_doc_single.omc")
+    assert_true(result["ok"], "exit 0 for valid file")
+    assert_contains(result["stdout"], "### `greet`", "fn heading present")
+    assert_contains(result["stdout"], "fn greet(name)", "signature in code block")
+    assert_contains(result["stdout"], "- `name`", "parameter listed")
+}
+
+fn test_no_fn_emits_no_public_message() {
+    h r = omc_spawn("sh", ["-c",
+        "printf '# just a comment\\nh x = 1\\n' > /tmp/_doc_empty.omc"])
+    h result = doc_file("/tmp/_doc_empty.omc")
+    assert_true(result["ok"], "exit 0 for file with no fns")
+    assert_contains(result["stdout"], "No public functions", "empty-fn message present")
+}
+
+fn test_doc_comment_extracted() {
+    h r = omc_spawn("sh", ["-c",
+        "printf '# Adds two numbers\\nfn add(a, b) { return a + b }\\n' > /tmp/_doc_comment.omc"])
+    h result = doc_file("/tmp/_doc_comment.omc")
+    assert_contains(result["stdout"], "Adds two numbers", "doc comment in output")
+}
+
+fn test_multiple_fns_all_appear() {
+    h code = "fn alpha(x) { return x }\nfn beta(y) { return y }\nfn gamma(z) { return z }\n"
+    h r = omc_spawn("sh", ["-c", str_concat("printf '", code, "' > /tmp/_doc_multi.omc")])
+    h result = doc_file("/tmp/_doc_multi.omc")
+    assert_contains(result["stdout"], "### `alpha`", "alpha present")
+    assert_contains(result["stdout"], "### `beta`", "beta present")
+    assert_contains(result["stdout"], "### `gamma`", "gamma present")
+}
+
+fn test_private_fn_excluded() {
+    h r = omc_spawn("sh", ["-c",
+        "printf 'fn pub(x) { return x }\\nfn _priv(x) { return x }\\n' > /tmp/_doc_priv.omc"])
+    h result = doc_file("/tmp/_doc_priv.omc")
+    assert_contains(result["stdout"], "### `pub`", "public fn present")
+    assert_false(str_contains(result["stdout"], "### `_priv`"), "private fn absent")
+}
+
+fn test_module_name_is_file_stem() {
+    h r = omc_spawn("sh", ["-c",
+        "printf 'fn f() {}\\n' > /tmp/_doc_stem.omc"])
+    h result = doc_file("/tmp/_doc_stem.omc")
+    assert_contains(result["stdout"], "# _doc_stem", "module name heading present")
+}
+
+fn test_no_params_no_params_section() {
+    h r = omc_spawn("sh", ["-c",
+        "printf 'fn zero() { return 0 }\\n' > /tmp/_doc_zero.omc"])
+    h result = doc_file("/tmp/_doc_zero.omc")
+    assert_contains(result["stdout"], "fn zero()", "zero-param signature present")
+    assert_false(str_contains(result["stdout"], "**Parameters:**"), "no params section for zero-arg fn")
+}
+
+fn test_invalid_file_exits_nonzero() {
+    h bin = omc_bin()
+    h result = omc_spawn(bin, ["--doc", "/tmp/_nonexistent_omc_doc_fixture.omc"])
+    assert_false(result["ok"], "nonexistent file → non-zero exit")
+}
