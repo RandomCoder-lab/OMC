@@ -1402,12 +1402,28 @@ impl Parser {
             self.advance();
             self.expect(Token::LParen)?;
             let first = self.parse_expression()?;
-            // Canonical OMC supports both range(end) and range(start, end).
+            // Canonical OMC supports range(end), range(start, end), and
+            // range(start, end, step). The fast ForIterable::Range path is used
+            // for the first two forms; a 3-arg range desugars to a builtin call
+            // (ForIterable::Expr) which the interpreter evaluates via range().
             if self.current() == Token::Comma {
                 self.advance();
-                let end = self.parse_expression()?;
-                self.expect(Token::RParen)?;
-                ForIterable::Range { start: first, end }
+                let second = self.parse_expression()?;
+                if self.current() == Token::Comma {
+                    // range(start, end, step) — desugar to Expr(Call("range", ...))
+                    self.advance();
+                    let step = self.parse_expression()?;
+                    self.expect(Token::RParen)?;
+                    let pos = crate::ast::Pos { line: 0, col: 0 };
+                    ForIterable::Expr(Expression::Call {
+                        name: "range".to_string(),
+                        args: vec![first, second, step],
+                        pos,
+                    })
+                } else {
+                    self.expect(Token::RParen)?;
+                    ForIterable::Range { start: first, end: second }
+                }
             } else {
                 self.expect(Token::RParen)?;
                 ForIterable::Range {

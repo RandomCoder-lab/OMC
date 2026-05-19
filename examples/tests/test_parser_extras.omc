@@ -148,3 +148,29 @@ fn test_power_aug_assign() {
     y **= 8;
     assert_eq(y, 256, "y **= 8");
 }
+
+# ---- range(start, end, step) ----
+
+fn test_range_step_forward() {
+    h total = 0;
+    for i in range(0, 10, 2) {
+        total += i;
+    }
+    assert_eq(total, 20, "range(0,10,2) sum=20");
+}
+
+fn test_range_step_countdown() {
+    h total = 0;
+    for i in range(5, 0, -1) {
+        total += i;
+    }
+    assert_eq(total, 15, "range(5,0,-1) sum=15");
+}
+
+fn test_range_step_skip() {
+    h count = 0;
+    for i in range(1, 10, 3) {
+        count += 1;
+    }
+    assert_eq(count, 3, "range(1,10,3) has 3 elements: 1,4,7");
+}
