@@ -329,6 +329,7 @@ impl Compiler {
             // inference can't see across the call boundary statically,
             // so we don't claim a return-type tag here.
             Expression::Lambda { .. } => None,
+            Expression::IfExpr { .. } => None,
         }
     }
 
@@ -795,6 +796,9 @@ impl Compiler {
                 // captured = current scope. Sibling closures in the same
                 // scope share the captured Rc.
                 self.emit(Op::Lambda(fn_name));
+            }
+            Expression::IfExpr { .. } => {
+                return Err("IfExpr: not supported in bytecode VM — use tree-walk interpreter".to_string());
             }
         }
         Ok(())

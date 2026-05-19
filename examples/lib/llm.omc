@@ -43,8 +43,8 @@ fn cot_verify(prompt, n, model) {
     h votes = {}
     h i = 0
     while i < n {
-        h res = cot(prompt, model)
-        h ans = str_trim(res["answer"])
+        h cot_result = cot(prompt, model)
+        h ans = str_trim(cot_result["answer"])
         if dict_has(votes, ans) {
             votes[ans] = votes[ans] + 1
         } else {
@@ -398,7 +398,7 @@ fn debate(topic, rounds, model) {
         ], m)
         arr_push(for_args, both[0])
         arr_push(against_args, both[1])
-        arr_push(transcript, {round: r + 1, for: both[0], against: both[1]})
+        arr_push(transcript, {round: r + 1, "for": both[0], against: both[1]})
         r = r + 1
     }
     h judge_sys = "You are an impartial debate judge. Output JSON: {\"winner\": \"for\" or \"against\", \"reasoning\": \"...\"}"

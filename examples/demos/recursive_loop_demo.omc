@@ -179,7 +179,7 @@ h passed = arr_filter(fn(r) r["success"], results)
 print(str_concat("  ", json_stringify(arr_len(passed)), "/3 demos fully solved"))
 
 for demo in results {
-    h status = if demo["success"] "✅" else "⚠️"
+    h status = if demo["success"] { "✅" } else { "⚠️" }
     print(str_concat("  ", status, " solved in ", json_stringify(demo["iterations"]), " iteration(s)"))
 }
 

@@ -197,6 +197,18 @@ impl Transpiler {
                 )
             }
 
+            // chained index assignment  x[a][b] = value
+            Statement::ChainedIndexAssignment { name, first_index, second_index, value } => {
+                format!(
+                    "{}{}[{}][{}] = {};\n",
+                    pad,
+                    name,
+                    self.emit_expr(first_index),
+                    self.emit_expr(second_index),
+                    self.emit_expr(value)
+                )
+            }
+
             // if / else if / else
             Statement::If {
                 condition,
@@ -648,6 +660,24 @@ impl Transpiler {
             // lambda / closure
             Expression::Lambda { params, body } => {
                 self.emit_lambda(params, body)
+            }
+
+            // if-expression: `if cond { stmts } else { stmts }` used as a value.
+            // Emitted as IIFE so it can appear in expression position.
+            Expression::IfExpr { condition, then_body, else_body } => {
+                let cond_js = self.emit_expr(condition);
+                let mut sub = Transpiler { indent: self.indent + 1, user_defs: self.user_defs.clone() };
+                let then_js = sub.emit_stmts(then_body);
+                let else_js = else_body.as_ref()
+                    .map(|b| {
+                        let mut s = Transpiler { indent: self.indent + 1, user_defs: self.user_defs.clone() };
+                        s.emit_stmts(b)
+                    })
+                    .unwrap_or_default();
+                format!(
+                    "(() => {{ if ({}) {{ {}return null; }} else {{ {}return null; }} }})()",
+                    cond_js, then_js, else_js
+                )
             }
         }
     }

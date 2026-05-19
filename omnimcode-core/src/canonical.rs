@@ -399,6 +399,11 @@ fn rename_expr(expr: &Expression, scope: &Scope) -> Expression {
                 .collect();
             Expression::Lambda { params: new_params, body: new_body }
         }
+        Expression::IfExpr { condition, then_body, else_body } => Expression::IfExpr {
+            condition: Box::new(rename_expr(condition, scope)),
+            then_body: then_body.iter().map(|s| rename_stmt(s, &mut scope.child())).collect(),
+            else_body: else_body.as_ref().map(|b| b.iter().map(|s| rename_stmt(s, &mut scope.child())).collect()),
+        },
     }
 }
 

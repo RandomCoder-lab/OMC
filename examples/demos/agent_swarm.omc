@@ -38,13 +38,12 @@ fn decompose_goal(goal, n, model) {
 # ── Worker: execute a single task ─────────────────────────────────────────────
 
 fn worker_execute(task, context, model) {
-    h prompt = if str_len(context) > 0 {
-        str_format(
+    h prompt = str_concat("Your task: ", task, "\n\nProvide a detailed, concrete response.")
+    if str_len(context) > 0 {
+        prompt = str_format(
             "Context:\n{ctx}\n\nYour task: {task}\n\nProvide a detailed, concrete response.",
             {ctx: context, task: task}
         )
-    } else {
-        str_concat("Your task: ", task, "\n\nProvide a detailed, concrete response.")
     }
     return prompt
 }

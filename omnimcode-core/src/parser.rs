@@ -1577,12 +1577,19 @@ impl Parser {
                 self.tokens = saved;
             }
         }
-        self.expect(Token::LBrace)?;
-        let mut body: Vec<Statement> = Vec::new();
-        while self.current() != Token::RBrace {
-            body.push(self.parse_statement()?);
-        }
-        self.expect(Token::RBrace)?;
+        // Braced body `fn(p) { stmts }` or single-expr body `fn(p) expr`.
+        let body = if self.current() == Token::LBrace {
+            self.advance();
+            let mut stmts: Vec<Statement> = Vec::new();
+            while self.current() != Token::RBrace {
+                stmts.push(self.parse_statement()?);
+            }
+            self.expect(Token::RBrace)?;
+            stmts
+        } else {
+            let e = self.parse_expression()?;
+            vec![Statement::Return(Some(e))]
+        };
         Ok(Expression::Lambda { params, body })
     }
 
@@ -1885,6 +1892,35 @@ impl Parser {
                 }
                 self.expect(Token::RParen)?;
                 Ok(Expression::Call { name: "range".to_string(), args, pos })
+            }
+            // `if cond { stmts } else { stmts }` as an expression.
+            // Value is the last expr-statement in the taken branch.
+            Token::If => {
+                self.advance();
+                let condition = self.parse_expression()?;
+                self.expect(Token::LBrace)?;
+                let then_body = self.parse_block()?;
+                self.expect(Token::RBrace)?;
+                let else_body = if self.current() == Token::Else {
+                    self.advance();
+                    // else if → wrap in a nested IfExpr as the else branch
+                    if self.current() == Token::If {
+                        let nested = self.parse_primary()?; // recurse → IfExpr
+                        Some(vec![Statement::Expression(nested)])
+                    } else {
+                        self.expect(Token::LBrace)?;
+                        let body = self.parse_block()?;
+                        self.expect(Token::RBrace)?;
+                        Some(body)
+                    }
+                } else {
+                    None
+                };
+                Ok(Expression::IfExpr {
+                    condition: Box::new(condition),
+                    then_body,
+                    else_body,
+                })
             }
             other => Err(format!(
                 "at {}: Unexpected token in expression: {}",

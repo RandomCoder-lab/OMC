@@ -387,6 +387,18 @@ fn format_expr(expr: &Expression, out: &mut String) {
             }
             out.push('}');
         }
+        Expression::IfExpr { condition, then_body, else_body } => {
+            out.push_str("if ");
+            format_expr(condition, out);
+            out.push_str(" {\n");
+            for s in then_body { format_stmt(s, 1, out); }
+            out.push('}');
+            if let Some(eb) = else_body {
+                out.push_str(" else {\n");
+                for s in eb { format_stmt(s, 1, out); }
+                out.push('}');
+            }
+        }
     }
 }
 

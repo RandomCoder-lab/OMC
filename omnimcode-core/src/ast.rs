@@ -291,6 +291,17 @@ pub enum Expression {
         params: Vec<String>,
         body: Vec<Statement>,
     },
+
+    // `if cond { stmts } else { stmts }` used as an expression.
+    // Value is the last Statement::Expression in whichever branch runs,
+    // or Null if the last statement is not an expression-statement.
+    // Enables `h x = if cond { a } else { b }` and call args like
+    // `fn(if cond { "on" } else { "off" })`.
+    IfExpr {
+        condition: Box<Expression>,
+        then_body: Vec<Statement>,
+        else_body: Option<Vec<Statement>>,
+    },
 }
 
 impl Expression {

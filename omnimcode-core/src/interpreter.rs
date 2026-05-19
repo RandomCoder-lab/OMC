@@ -2267,6 +2267,28 @@ impl Interpreter {
                     captured: Some(env),
                 })
             }
+            Expression::IfExpr { condition, then_body, else_body } => {
+                let cond = self.eval_expr(condition)?;
+                let branch: &[Statement] = if cond.to_bool() {
+                    then_body
+                } else {
+                    match else_body {
+                        Some(b) => b,
+                        None => return Ok(Value::Null),
+                    }
+                };
+                // Run all statements; last expression-statement is the value.
+                let mut last = Value::Null;
+                for stmt in branch {
+                    match stmt {
+                        Statement::Expression(e) => {
+                            last = self.eval_expr(e)?;
+                        }
+                        other => { self.execute_stmt(other)?; }
+                    }
+                }
+                Ok(last)
+            }
         }
     }
 
@@ -3423,16 +3445,16 @@ impl Interpreter {
             }
             "str_concat" => {
                 if args.len() < 2 {
-                    return Err("str_concat requires 2 arguments".to_string());
+                    return Err("str_concat requires at least 2 arguments".to_string());
                 }
-                // to_display_string (bare numbers) matches Phase 1's
-                // string-+-concat semantics and Phase 4's vm_fast_dispatch.
-                // Previously used to_string which produced ugly
-                // "HInt(42, φ=..., HIM=...)" output for numeric args —
-                // never what callers wanted.
-                let s1 = self.eval_expr(&args[0])?.to_display_string();
-                let s2 = self.eval_expr(&args[1])?.to_display_string();
-                Ok(Value::String(format!("{}{}", s1, s2)))
+                // Variadic: str_concat(a, b, c...) concatenates all args.
+                // to_display_string produces "42" not "HInt(42, φ=..., ...)"
+                // for numeric args — matches Phase 1 string-+-concat semantics.
+                let mut out = String::new();
+                for a in args {
+                    out.push_str(&self.eval_expr(a)?.to_display_string());
+                }
+                Ok(Value::String(out))
             }
             "str_uppercase" => {
                 if args.is_empty() {

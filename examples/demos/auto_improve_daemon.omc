@@ -206,11 +206,13 @@ h rounds_env = env_var("OMC_CONTINUOUS")
 if rounds_env == "1" or rounds_env == "true" { CONTINUOUS_MODE = true }
 
 print("=== Auto-Improve Daemon ===")
-print(str_concat("Mode: ", if CONTINUOUS_MODE { "continuous" } else { "single-cycle" }))
+h mode_str = "single-cycle"
+if CONTINUOUS_MODE { mode_str = "continuous" }
+print(str_concat("Mode: ", mode_str))
 print(str_concat("Files: ", to_str(arr_len(FILES_TO_IMPROVE))))
 print(str_concat("Log: ", LOG_FILE))
 print("")
 
 h result = daemon_cycle(FILES_TO_IMPROVE, 2, CONTINUOUS_MODE)
 print(str_concat("\nDaemon ran ", to_str(result["iterations"]), " iteration(s)."))
-print("Check log file for details: ", LOG_FILE)
+print(str_concat("Check log file for details: ", LOG_FILE))
