@@ -1,0 +1,124 @@
+# codebase_archaeologist.omc
+#
+# Thin demo wrapper for the universal archaeology module.
+# Works on .omc, .py, .rs, .ts, .js, .go, or any mix.
+#
+# Usage: omc examples/demos/codebase_archaeologist.omc
+#        LLM_PROVIDER=anthropic ANTHROPIC_API_KEY=... omc examples/demos/codebase_archaeologist.omc
+
+import "examples/lib/archaeology.omc"
+
+h SCAN_PATH  = "examples"
+h MODEL      = "claude-haiku-4-5-20251001"
+h opts = {
+    "extensions":   [".omc"],
+    "top_n":        8,
+    "threshold":    0.78,
+    "check_limit":  40,
+    "ref_weight":   5.0,
+    "fn_weight":    0.5
+}
+
+# ── Run ────────────────────────────────────────────────────────────────────────
+
+print("╔══════════════════════════════════════════════════╗")
+print("║     Codebase Archaeologist  (Universal Edition)  ║")
+print("╚══════════════════════════════════════════════════╝")
+print("")
+print("[ 1/3 ] Scanning " + SCAN_PATH + " ...")
+print("")
+
+h results  = archaeology_scan(SCAN_PATH, opts)
+h top      = results["attractors"]
+h clusters = results["clusters"]
+h stats    = results["stats"]
+
+# ── Top attractors ─────────────────────────────────────────────────────────────
+
+print("╔══════════════════════════════════════════════════╗")
+print("║          Top Attractor Modules                   ║")
+print("╚══════════════════════════════════════════════════╝")
+print("")
+print("  Files:     " + to_string(stats["file_count"]))
+print("  Functions: " + to_string(stats["total_fns"]))
+print("  Language:  " + stats["primary_lang"])
+print("")
+
+h ti = 0
+while ti < arr_len(top) {
+    h m = top[ti]
+    h slash = str_rfind(m["path"], "/")
+    h short = if slash >= 0 { str_slice(m["path"], slash + 1, str_len(m["path"])) } else { m["path"] }
+    print("  " + to_string(ti + 1) + ". " + short)
+    print("     attractor:  " + to_string(m["attractor_score"]))
+    print("     density:    " + to_string(m["density"]))
+    print("     functions:  " + to_string(m["fn_count"]))
+    print("     imported-by:" + to_string(m["refs"]) + " other modules")
+    print("     lang:       " + m["lang"])
+    print("")
+    ti += 1
+}
+
+# ── Duplicate clusters ─────────────────────────────────────────────────────────
+
+if arr_len(clusters) > 0 {
+    print("╔══════════════════════════════════════════════════╗")
+    print("║        Semantic Duplicate Clusters               ║")
+    print("╚══════════════════════════════════════════════════╝")
+    print("")
+    h ci = 0
+    while ci < arr_len(clusters) {
+        h grp = clusters[ci]
+        print("  Cluster " + to_string(ci + 1) + " (" + to_string(arr_len(grp)) + " members):")
+        h mi = 0
+        while mi < arr_len(grp) {
+            h slash2 = str_rfind(grp[mi], "/")
+            h short2 = if slash2 >= 0 { str_slice(grp[mi], slash2 + 1, str_len(grp[mi])) } else { grp[mi] }
+            print("    • " + short2)
+            mi += 1
+        }
+        print("")
+        ci += 1
+    }
+} else {
+    print("[ No semantic duplicate clusters found. ]")
+    print("")
+}
+
+# ── Claude narration ───────────────────────────────────────────────────────────
+
+print("[ 2/3 ] Asking Claude to narrate the architecture...")
+print("")
+h narration = archaeology_narrate(results, MODEL)
+
+print("╔══════════════════════════════════════════════════╗")
+print("║        Architectural Analysis (Claude)           ║")
+print("╚══════════════════════════════════════════════════╝")
+print("")
+print(narration)
+print("")
+
+# ── Summary ────────────────────────────────────────────────────────────────────
+
+print("[ 3/3 ] Done.")
+print("")
+print("╔══════════════════════════════════════════════════╗")
+print("║                  Summary                         ║")
+print("╚══════════════════════════════════════════════════╝")
+print("  Files scanned:    " + to_string(stats["file_count"]))
+print("  Functions mapped: " + to_string(stats["total_fns"]))
+print("  Dup clusters:     " + to_string(arr_len(clusters)))
+if arr_len(top) > 0 {
+    h slash3 = str_rfind(top[0]["path"], "/")
+    h top_name = if slash3 >= 0 { str_slice(top[0]["path"], slash3 + 1, str_len(top[0]["path"])) } else { top[0]["path"] }
+    print("  Top attractor:    " + top_name + "  (score=" + to_string(top[0]["attractor_score"]) + ")")
+}
+print("")
+print("  Signals used:")
+print("    omc_attractor_density  — phi-pi-fib token density (ANY language)")
+print("    omc_code_similarity    — structural distance (OMC files)")
+print("    str_similarity         — text distance (non-OMC files)")
+print("    omc_code_extract_fns   — surface area mapping (OMC files)")
+print("    omc_code_hash          — content-addressed dedup")
+print("    llm_call               — architectural narration")
+print("")

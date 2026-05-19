@@ -1,0 +1,81 @@
+# Tests for omc_spawn and omc_pipe process-execution builtins.
+# These run real subprocesses so no API key is needed.
+
+fn test_spawn_echo() {
+    h r = omc_spawn("echo", ["hello world"]);
+    assert r["exit_code"] == 0, "echo exits 0";
+    assert str_trim(r["stdout"]) == "hello world", "echo stdout matches";
+    assert r["stderr"] == "", "echo no stderr";
+}
+
+fn test_spawn_true() {
+    h r = omc_spawn("true");
+    assert r["exit_code"] == 0, "true exits 0";
+}
+
+fn test_spawn_false() {
+    h r = omc_spawn("false");
+    assert r["exit_code"] != 0, "false exits non-zero";
+}
+
+fn test_spawn_exit_code() {
+    h r = omc_spawn("sh", ["-c", "exit 42"]);
+    assert r["exit_code"] == 42, "custom exit code 42";
+}
+
+fn test_spawn_stderr() {
+    h r = omc_spawn("sh", ["-c", "echo errout >&2"]);
+    assert r["exit_code"] == 0;
+    assert str_contains(r["stderr"], "errout"), "stderr captured";
+}
+
+fn test_spawn_env() {
+    h r = omc_spawn("sh", ["-c", "echo $MY_VAR"], {"MY_VAR": "omc_test"});
+    assert str_trim(r["stdout"]) == "omc_test", "env var passed";
+}
+
+fn test_spawn_timeout() {
+    # timeout_ms param is accepted but not yet enforced — just verify
+    # the call doesn't error and returns a valid dict.
+    h r = omc_spawn("echo", ["timeout-param-ok"], {}, 5000);
+    assert r["ok"] == true, "spawn with timeout param should succeed";
+    assert str_contains(r["stdout"], "timeout-param-ok"), "echo output present";
+}
+
+fn test_pipe_echo_cat() {
+    h r = omc_pipe([["echo", "hello"], ["cat"]]);
+    assert r["exit_code"] == 0, "pipe exits 0";
+    assert str_contains(r["stdout"], "hello"), "pipe stdout has hello";
+}
+
+fn test_pipe_wc() {
+    h r = omc_pipe([["printf", "a\nb\nc\n"], ["wc", "-l"]]);
+    assert r["exit_code"] == 0;
+    h n = int(str_trim(r["stdout"]));
+    assert n == 3, "wc -l counts 3 lines";
+}
+
+fn test_spawn_result_keys() {
+    h r = omc_spawn("echo", ["x"]);
+    h keys = dict_keys(r);
+    assert arr_contains(keys, "stdout"),    "result has stdout key";
+    assert arr_contains(keys, "stderr"),    "result has stderr key";
+    assert arr_contains(keys, "exit_code"), "result has exit_code key";
+    assert arr_contains(keys, "ok"),        "result has ok key";
+}
+
+fn run_all() {
+    test_spawn_echo();
+    test_spawn_true();
+    test_spawn_false();
+    test_spawn_exit_code();
+    test_spawn_stderr();
+    test_spawn_env();
+    test_spawn_timeout();
+    test_pipe_echo_cat();
+    test_pipe_wc();
+    test_spawn_result_keys();
+    print("process builtins: all tests passed");
+}
+
+run_all();

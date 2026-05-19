@@ -1,0 +1,405 @@
+# archaeology.omc — Universal Codebase Archaeologist library
+#
+# Scans any source directory and surfaces:
+#   • Attractor modules  — highest phi-pi-fib density × import gravity
+#   • Semantic duplicate clusters  — grouped, not raw pairs
+#   • Per-language function surface area
+#
+# Universality: omc_attractor_density works on ANY text (Python, Rust, JS, …)
+# because it tokenizes raw bytes — no OMC parsing required.
+# omc_code_similarity and omc_code_valid are used only for .omc files.
+#
+# Public API:
+#   archaeology_scan(base, opts) -> results
+#   archaeology_narrate(results, model) -> string (Claude explanation)
+#
+# opts keys (all optional):
+#   "extensions"  -> [".omc"]               which extensions to scan
+#   "top_n"       -> 8                       attractor count
+#   "threshold"   -> 0.78                    duplicate similarity cutoff
+#                    (raise to 0.90+ for Python/Rust — boilerplate inflates similarity)
+#   "check_limit" -> 40                      max modules for pairwise dup check
+#   "ref_weight"  -> 5.0                     multiplier: import references
+#   "fn_weight"   -> 0.5                     multiplier: function count
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+
+fn _opt(opts, key, default) {
+    if dict_has(opts, key) { return dict_get(opts, key) }
+    return default
+}
+
+fn _short_path(p) {
+    h idx = str_rfind(p, "/")
+    if idx < 0 { return p }
+    h dir_end = str_rfind(str_slice(p, 0, idx), "/")
+    if dir_end < 0 { return str_slice(p, idx + 1, str_len(p)) }
+    return str_slice(p, dir_end + 1, str_len(p))
+}
+
+# ── Language detection ─────────────────────────────────────────────────────────
+
+fn detect_language(path) {
+    if str_ends_with(path, ".omc")  { return "omc" }
+    if str_ends_with(path, ".py")   { return "python" }
+    if str_ends_with(path, ".rs")   { return "rust" }
+    if str_ends_with(path, ".ts")   { return "typescript" }
+    if str_ends_with(path, ".js")   { return "javascript" }
+    if str_ends_with(path, ".go")   { return "go" }
+    if str_ends_with(path, ".c")    { return "c" }
+    if str_ends_with(path, ".cpp")  { return "cpp" }
+    if str_ends_with(path, ".java") { return "java" }
+    if str_ends_with(path, ".rb")   { return "ruby" }
+    return "other"
+}
+
+# ── File discovery ─────────────────────────────────────────────────────────────
+
+fn _find_files(base, extensions) {
+    h all = []
+    h ei = 0
+    while ei < arr_len(extensions) {
+        h ext = extensions[ei]
+        h found = omc_spawn("find", [base, "-name", "*" + ext,
+                                      "-not", "-path", "*node_modules*",
+                                      "-not", "-path", "*/.git/*",
+                                      "-not", "-path", "*/target/*"])
+        if found["ok"] {
+            h raw = str_trim(found["stdout"])
+            if str_len(raw) > 0 {
+                h paths = str_split(raw, "\n")
+                h fi = 0
+                while fi < arr_len(paths) {
+                    h pth = str_trim(paths[fi])
+                    if str_len(pth) > 0 {
+                        arr_push(all, pth)
+                    }
+                    fi += 1
+                }
+            }
+        }
+        ei += 1
+    }
+    return all
+}
+
+# ── Function counting (language-aware) ────────────────────────────────────────
+
+fn _fn_pattern_for_lang(lang) {
+    if lang == "omc"        { return null }            # use native builtin
+    if lang == "python"     { return "^def \\|^    def \\|^        def " }
+    if lang == "rust"       { return " fn " }
+    if lang == "typescript" { return "function \\|=> {\\|): " }
+    if lang == "javascript" { return "function \\|=> {" }
+    if lang == "go"         { return "^func " }
+    if lang == "c"          { return "^[a-zA-Z].*(\\(.*\\).*{" }
+    if lang == "cpp"        { return "^[a-zA-Z].*(\\(.*\\).*{\\|^[a-zA-Z].*::" }
+    if lang == "java"       { return "(public\\|private\\|protected\\|static).*(\\(.*\\).*{" }
+    if lang == "ruby"       { return "^def \\|^  def " }
+    return "function\\|def \\|fn \\|func " # generic fallback
+}
+
+fn _count_fns(path, content, lang) {
+    if lang == "omc" {
+        if omc_code_valid(content) {
+            return arr_len(omc_code_extract_fns(content))
+        }
+        return 0
+    }
+    h pat = _fn_pattern_for_lang(lang)
+    if pat == null { return 0 }
+    h grep_result = omc_spawn("grep", ["-c", pat, path])
+    if !grep_result["ok"] { return 0 }
+    h n = str_trim(grep_result["stdout"])
+    if str_len(n) == 0 { return 0 }
+    return str_to_int(n)
+}
+
+# ── Scoring ────────────────────────────────────────────────────────────────────
+# omc_attractor_density(text) works on ANY language — no parsing required.
+# It tokenizes raw bytes via the OMC tokenizer and returns the fraction of
+# token IDs that land on Fibonacci attractors.
+
+fn _score(content) {
+    if str_len(content) == 0 { return 0.0 }
+    return omc_attractor_density(content)
+}
+
+# ── Import/reference counting ─────────────────────────────────────────────────
+
+fn _count_refs(target_path, all_contents) {
+    h slash = str_rfind(target_path, "/")
+    h basename = if slash >= 0 { str_slice(target_path, slash + 1, str_len(target_path)) } else { target_path }
+    h count = 0
+    h i = 0
+    while i < arr_len(all_contents) {
+        if str_contains(all_contents[i], basename) {
+            count += 1
+        }
+        i += 1
+    }
+    # Subtract 1 for self-reference in the file's own content
+    if count > 0 { count -= 1 }
+    return count
+}
+
+# ── Top-k selection ────────────────────────────────────────────────────────────
+
+fn _top_k(arr, score_key, k) {
+    h result = []
+    h used   = {}
+    h r = 0
+    while r < k and r < arr_len(arr) {
+        h best_idx = -1
+        h best_val = -1.0
+        h i = 0
+        while i < arr_len(arr) {
+            if !dict_has(used, to_string(i)) {
+                if arr[i][score_key] > best_val {
+                    best_val = arr[i][score_key]
+                    best_idx = i
+                }
+            }
+            i += 1
+        }
+        if best_idx >= 0 {
+            dict_set(used, to_string(best_idx), true)
+            arr_push(result, arr[best_idx])
+        }
+        r += 1
+    }
+    return result
+}
+
+# ── Similarity (language-aware) ────────────────────────────────────────────────
+# For OMC: structural canonical similarity.
+# For everything else: raw text similarity via str_similarity.
+
+fn _module_sim(content_a, lang_a, content_b, lang_b) {
+    if lang_a == "omc" and lang_b == "omc" {
+        if omc_code_valid(content_a) and omc_code_valid(content_b) {
+            return omc_code_similarity(content_a, content_b)
+        }
+    }
+    return str_similarity(content_a, content_b)
+}
+
+# ── Duplicate pair detection ───────────────────────────────────────────────────
+
+fn _find_pairs(modules, threshold) {
+    h pairs = []
+    h i = 0
+    while i < arr_len(modules) {
+        h j = i + 1
+        while j < arr_len(modules) {
+            h a = modules[i]
+            h b = modules[j]
+            if a["hash"] != b["hash"] {
+                h sim = _module_sim(a["content"], a["lang"], b["content"], b["lang"])
+                if sim >= threshold {
+                    arr_push(pairs, {
+                        "a":     a["path"],
+                        "b":     b["path"],
+                        "a_fns": a["fn_count"],
+                        "b_fns": b["fn_count"],
+                        "sim":   sim
+                    })
+                }
+            }
+            j += 1
+        }
+        i += 1
+    }
+    return pairs
+}
+
+# ── Duplicate clustering (union-find style) ───────────────────────────────────
+# Groups individual pairs into connected clusters so version chains like
+# v7→v8→v9 appear as ONE group instead of N*(N-1)/2 pairs.
+
+fn cluster_pairs(pairs) {
+    h leaders = {}   # path -> leader path
+    h groups  = {}   # leader path -> [paths] (Rc-shared, mutated in place)
+
+    h pi = 0
+    while pi < arr_len(pairs) {
+        h pair  = pairs[pi]
+        h a     = pair["a"]
+        h b     = pair["b"]
+
+        h la = if dict_has(leaders, a) { dict_get(leaders, a) } else { a }
+        h lb = if dict_has(leaders, b) { dict_get(leaders, b) } else { b }
+
+        if la == lb {
+            pi += 1
+            continue
+        }
+
+        # Ensure la has a group array
+        if !dict_has(groups, la) {
+            dict_set(groups, la, [la])
+            dict_set(leaders, la, la)
+        }
+        h ga = dict_get(groups, la)   # shared reference — push mutates it
+
+        # Collect lb's members (or just [b] if lb has no group yet)
+        h lb_members = if dict_has(groups, lb) { dict_get(groups, lb) } else { [lb] }
+
+        # Merge lb's members into la's group, update their leader pointers
+        h mi = 0
+        while mi < arr_len(lb_members) {
+            h member = lb_members[mi]
+            arr_push(ga, member)
+            dict_set(leaders, member, la)
+            mi += 1
+        }
+        # Invalidate lb's old group entry so collection skips it
+        if dict_has(groups, lb) { dict_set(groups, lb, []) }
+
+        pi += 1
+    }
+
+    # Collect all non-trivial (≥2 members) groups
+    h result = []
+    h leader_list = dict_keys(groups)
+    h li = 0
+    while li < arr_len(leader_list) {
+        h grp = dict_get(groups, leader_list[li])
+        if arr_len(grp) >= 2 { arr_push(result, grp) }
+        li += 1
+    }
+    return result
+}
+
+# ── Claude narration ───────────────────────────────────────────────────────────
+
+fn archaeology_narrate(results, model) {
+    h top    = results["attractors"]
+    h stats  = results["stats"]
+    h listing = ""
+    h i = 0
+    while i < arr_len(top) {
+        h m = top[i]
+        h preview = str_slice(m["content"], 0, 150)
+        listing = listing +
+            to_string(i + 1) + ". " + _short_path(m["path"]) +
+            "  [attractor=" + to_string(m["attractor_score"]) +
+            "  density=" + to_string(m["density"]) +
+            "  fns=" + to_string(m["fn_count"]) +
+            "  refs=" + to_string(m["refs"]) + "]\n" +
+            "   " + preview + "\n\n"
+        i += 1
+    }
+    h lang_note = "language: " + stats["primary_lang"]
+    h prompt =
+        "You are doing codebase archaeology on a " + lang_note + " project.\n\n" +
+        "Stats: " + to_string(stats["file_count"]) + " files, " +
+        to_string(stats["total_fns"]) + " functions, " +
+        to_string(stats["cluster_count"]) + " duplicate clusters.\n\n" +
+        "Attractor score = phi-pi-fib token density × (1 + import references).\n" +
+        "Higher density = more idiomatic use of recognized vocabulary.\n\n" +
+        "Top attractor modules:\n\n" + listing +
+        "In 4-5 sentences: What architectural shape do these attractors reveal? " +
+        "Which is the foundational layer, which is orchestration? " +
+        "What should a new contributor understand first? " +
+        "Any concerns about the duplicate clusters?"
+    return llm_call(prompt, model)
+}
+
+# ── Main scan entry point ──────────────────────────────────────────────────────
+
+fn archaeology_scan(base, opts) {
+    h extensions   = _opt(opts, "extensions",  [".omc"])
+    h top_n        = _opt(opts, "top_n",       8)
+    h threshold    = _opt(opts, "threshold",   0.78)
+    h check_limit  = _opt(opts, "check_limit", 40)
+    h ref_weight   = _opt(opts, "ref_weight",  5.0)
+    h fn_weight    = _opt(opts, "fn_weight",   0.5)
+
+    # ── 1. Discover files ──────────────────────────────────────────────────────
+    h files = _find_files(base, extensions)
+
+    # ── 2. Read all content (needed for ref counting) ─────────────────────────
+    h all_contents = []
+    h fi = 0
+    while fi < arr_len(files) {
+        h content = ""
+        if file_exists(files[fi]) { content = read_file(files[fi]) }
+        arr_push(all_contents, content)
+        fi += 1
+    }
+
+    # ── 3. Score each module ──────────────────────────────────────────────────
+    h modules  = []
+    h total_fns = 0
+    h lang_counts = {}
+
+    fi = 0
+    while fi < arr_len(files) {
+        h path    = files[fi]
+        h content = all_contents[fi]
+        h lang    = detect_language(path)
+        h density = _score(content)
+        h fn_cnt  = _count_fns(path, content, lang)
+        h refs    = _count_refs(path, all_contents)
+        h chash   = omc_code_hash(content)
+        h asc     = density * 40.0 + refs * ref_weight + fn_cnt * fn_weight
+
+        total_fns += fn_cnt
+        h lcount = if dict_has(lang_counts, lang) { dict_get(lang_counts, lang) } else { 0 }
+        dict_set(lang_counts, lang, lcount + 1)
+
+        arr_push(modules, {
+            "path":           path,
+            "content":        content,
+            "lang":           lang,
+            "density":        density,
+            "fn_count":       fn_cnt,
+            "refs":           refs,
+            "hash":           chash,
+            "attractor_score": asc
+        })
+        fi += 1
+    }
+
+    # ── 4. Find top attractors ─────────────────────────────────────────────────
+    h attractors = _top_k(modules, "attractor_score", top_n)
+
+    # ── 5. Detect semantic duplicates among top modules ────────────────────────
+    h check_pool  = _top_k(modules, "attractor_score", check_limit)
+    h non_empty   = []
+    h ci = 0
+    while ci < arr_len(check_pool) {
+        if str_len(check_pool[ci]["content"]) > 20 { arr_push(non_empty, check_pool[ci]) }
+        ci += 1
+    }
+    h pairs    = _find_pairs(non_empty, threshold)
+    h clusters = cluster_pairs(pairs)
+
+    # ── 6. Determine primary language ─────────────────────────────────────────
+    h primary_lang = "unknown"
+    h max_lang_count = 0
+    h lang_keys = dict_keys(lang_counts)
+    h lki = 0
+    while lki < arr_len(lang_keys) {
+        h lk = lang_keys[lki]
+        if dict_get(lang_counts, lk) > max_lang_count {
+            max_lang_count = dict_get(lang_counts, lk)
+            primary_lang = lk
+        }
+        lki += 1
+    }
+
+    return {
+        "attractors": attractors,
+        "modules":    modules,
+        "clusters":   clusters,
+        "stats": {
+            "file_count":    arr_len(files),
+            "total_fns":     total_fns,
+            "cluster_count": arr_len(clusters),
+            "primary_lang":  primary_lang,
+            "lang_counts":   lang_counts
+        }
+    }
+}

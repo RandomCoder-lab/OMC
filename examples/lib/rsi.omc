@@ -1,0 +1,537 @@
+# =============================================================================
+# rsi.omc — Recursive Self-Improvement library for OMC
+# =============================================================================
+#
+# Core concepts
+# ─────────────
+# Candidate  — dict {code: string, score: float, gen: int, note: string}
+# Population — Candidate[]
+# Fitness fn — fn(code: string) → float   (0.0 = worst, ∞ = best)
+#
+# Typical loop
+# ────────────
+#   import "examples/lib/rsi.omc" as rsi
+#   h pop  = rsi.rsi_seed(seed_code, 4, fitness_fn)
+#   h best = rsi.rsi_run(seed_code, fitness_fn, {})
+#   print(best["history"][0]["code"])
+#
+# ── Candidate primitives ──────────────────────────────────────────────────────
+
+# rsi_make_candidate(code, score, gen, note) → Candidate
+fn rsi_make_candidate(code, score, gen, note) {
+    return {
+        "code":  code,
+        "score": score,
+        "gen":   gen,
+        "note":  note
+    }
+}
+
+# ── Seeding ───────────────────────────────────────────────────────────────────
+
+# rsi_seed(seed_code, n_variants, fitness_fn) → Candidate[]
+# Build an initial population of n_variants from seed_code.
+# The first candidate is the seed itself; extras are stub variants tagged by
+# their Fibonacci-hash position (no LLM call; deterministic).
+fn rsi_seed(seed_code, n_variants, fitness_fn) {
+    h pop = []
+    h i = 0
+    while i < n_variants {
+        h code  = seed_code
+        h score = fitness_fn(code)
+        arr_push(pop, rsi_make_candidate(code, score, 0, "seed"))
+        i = i + 1
+    }
+    return pop
+}
+
+# ── Fitness helpers ───────────────────────────────────────────────────────────
+
+# rsi_weighted_fitness(fns, weights) → fitness_fn
+# Returns a single fitness function that is a weighted sum of `fns`.
+# `weights` need not sum to 1; raw weighted sum is returned.
+fn rsi_weighted_fitness(fns, weights) {
+    return fn(code) {
+        h score = 0.0
+        h i = 0
+        while i < len(fns) {
+            h w = weights[i]
+            h f = fns[i]
+            score = score + w * f(code)
+            i = i + 1
+        }
+        return score
+    }
+}
+
+# rsi_substrate_fitness(seed_code) → fn(code) → float
+# Returns a fitness function that scores code by structural similarity
+# (cosine sim of substrate embeddings) to the seed code.  Score ∈ [0, 1].
+fn rsi_substrate_fitness(seed_code) {
+    h seed_emb = substrate_embed(seed_code, 16)
+    return fn(code) {
+        h emb = substrate_embed(code, 16)
+        h dot = 0.0
+        h i   = 0
+        while i < arr_len(seed_emb) {
+            dot = dot + seed_emb[i] * emb[i]
+            i   = i + 1
+        }
+        if dot < 0.0 { dot = 0.0 }
+        if dot > 1.0 { dot = 1.0 }
+        return dot
+    }
+}
+
+# rsi_composite_fitness(fns, weights) → fn(code) → float
+# Normalised weighted average of multiple fitness functions.
+# Identical to rsi_weighted_fitness but divides by sum(weights) so the
+# result always lies in the same [0,1] range as each component (assuming
+# each component also returns [0,1]).
+fn rsi_composite_fitness(fns, weights) {
+    h total = 0.0
+    h wi    = 0
+    while wi < len(weights) {
+        total = total + weights[wi]
+        wi    = wi + 1
+    }
+    if total == 0.0 { total = 1.0 }
+    return fn(code) {
+        h score = 0.0
+        h i = 0
+        while i < len(fns) {
+            h w = weights[i]
+            h f = fns[i]
+            score = score + w * f(code)
+            i = i + 1
+        }
+        return score / total
+    }
+}
+
+# ── Evaluation ────────────────────────────────────────────────────────────────
+
+# rsi_evaluate(pop, fitness_fn) → Candidate[]
+# Re-score every candidate in `pop` using `fitness_fn`.
+# Returns a new list with updated scores (originals untouched).
+fn rsi_evaluate(pop, fitness_fn) {
+    h result = []
+    h i = 0
+    while i < len(pop) {
+        h c         = pop[i]
+        h new_score = fitness_fn(c["code"])
+        arr_push(result, rsi_make_candidate(c["code"], new_score, c["gen"], c["note"]))
+        i = i + 1
+    }
+    return result
+}
+
+# ── Sorting & selection ───────────────────────────────────────────────────────
+
+# rsi_sort_pop(pop) → Candidate[]
+# Descending insertion sort by score (best first).
+fn rsi_sort_pop(pop) {
+    h sorted = []
+    h i = 0
+    while i < len(pop) {
+        arr_push(sorted, pop[i])
+        i = i + 1
+    }
+    h n = arr_len(sorted)
+    h ii = 1
+    while ii < n {
+        h key = sorted[ii]
+        h j   = ii - 1
+        while j >= 0 {
+            if sorted[j]["score"] >= key["score"] {
+                j = -1
+            } else {
+                sorted[j + 1] = sorted[j]
+                sorted[j]     = key
+                j = j - 1
+            }
+        }
+        ii = ii + 1
+    }
+    return sorted
+}
+
+# rsi_best(pop) → Candidate
+# Return the highest-scoring candidate.
+fn rsi_best(pop) {
+    h sorted = rsi_sort_pop(pop)
+    return sorted[0]
+}
+
+# rsi_top_k(pop, k) → Candidate[]
+# Return up to the top-k candidates by score.
+fn rsi_top_k(pop, k) {
+    h sorted = rsi_sort_pop(pop)
+    h result = []
+    h i = 0
+    while i < k {
+        if i < len(sorted) {
+            arr_push(result, sorted[i])
+        }
+        i = i + 1
+    }
+    return result
+}
+
+# rsi_tournament(pop, k) → Candidate
+# Tournament selection: pick k candidates (via harmonic hash spread) and
+# return the best among them.
+fn rsi_tournament(pop, k) {
+    h n    = len(pop)
+    h best = pop[0]
+    h i    = 0
+    while i < k {
+        h idx       = harmonic_hash(to_string(i) + best["code"]) % n
+        h contender = pop[idx]
+        if contender["score"] > best["score"] {
+            best = contender
+        }
+        i = i + 1
+    }
+    return best
+}
+
+# ── Mutation (LLM-backed) ─────────────────────────────────────────────────────
+
+# rsi_mutate(candidate, model, system_prompt) → Candidate
+# Ask the LLM to produce one improved variant of candidate["code"].
+# Returns a new Candidate with gen incremented and score=-1 (unevaluated).
+fn rsi_mutate(candidate, model, system_prompt) {
+    h sys   = system_prompt
+    if sys == null { sys = "You are an OMC code optimizer. Return ONLY the improved OMC code, no explanation." }
+    h prompt = "Improve this OMC function for correctness and performance:\n\n" + candidate["code"]
+    h new_code = llm_call(prompt, model, {"system": sys})
+    return rsi_make_candidate(new_code, -1.0, candidate["gen"] + 1, "mutated")
+}
+
+# rsi_mutate_batch(candidates, model, system_prompt) → Candidate[]
+# Mutate a list of candidates in one batch (sequential, respects rate limits).
+fn rsi_mutate_batch(candidates, model, system_prompt) {
+    h sys = system_prompt
+    if sys == null { sys = "You are an OMC code optimizer. Return ONLY the improved OMC code, no explanation." }
+    h prompts = []
+    h i = 0
+    while i < len(candidates) {
+        h c = candidates[i]
+        arr_push(prompts, {"prompt": "Improve this OMC function:\n\n" + c["code"], "system": sys})
+        i = i + 1
+    }
+    h replies  = batch_llm_call(prompts, model)
+    h result   = []
+    h j = 0
+    while j < len(candidates) {
+        h orig = candidates[j]
+        arr_push(result, rsi_make_candidate(replies[j], -1.0, orig["gen"] + 1, "mutated"))
+        j = j + 1
+    }
+    return result
+}
+
+# ── Structural analysis ───────────────────────────────────────────────────────
+
+# rsi_fingerprints(pop) → dict[]
+# Return [{idx, code, score, gen, fingerprint, attractor}] for each candidate.
+fn rsi_fingerprints(pop) {
+    h result = []
+    h i = 0
+    while i < len(pop) {
+        h c    = pop[i]
+        h info = omc_canonical_hash(c["code"])
+        h fp   = to_string(omc_code_fingerprint(c["code"]))
+        arr_push(result, {
+            "idx":         i,
+            "code":        c["code"],
+            "score":       c["score"],
+            "gen":         c["gen"],
+            "fingerprint": fp,
+            "attractor":   info["attractor"]
+        })
+        i = i + 1
+    }
+    return result
+}
+
+# rsi_fingerprint(pop) → dict[]
+# Alias for rsi_fingerprints (singular/plural both accepted).
+fn rsi_fingerprint(pop) {
+    return rsi_fingerprints(pop)
+}
+
+# rsi_dedupe(pop) → Candidate[]
+# Remove structurally duplicate candidates (same canonical fingerprint).
+# Keeps the first (highest-scoring if pre-sorted) occurrence.
+fn rsi_dedupe(pop) {
+    h seen   = {}
+    h result = []
+    h i = 0
+    while i < len(pop) {
+        h c  = pop[i]
+        h key = c["code"]
+        if seen[key] == null {
+            seen[key] = 1
+            arr_push(result, c)
+        }
+        i = i + 1
+    }
+    return result
+}
+
+# rsi_diff_report(a, b) → dict
+# Structural diff between two candidates (or raw code strings).
+# Returns {added, removed, modified, unchanged, similarity}.
+fn rsi_diff_report(a, b) {
+    h ca = a
+    h cb = b
+    if type_of(a) == "dict" { ca = a["code"] }
+    if type_of(b) == "dict" { cb = b["code"] }
+    h diff = omc_code_diff(ca, cb)
+    h sim  = omc_code_similarity(ca, cb)
+    return {
+        "added":     diff["added"],
+        "removed":   diff["removed"],
+        "modified":  diff["modified"],
+        "unchanged": diff["unchanged"],
+        "similarity": sim
+    }
+}
+
+# rsi_summary(pop) → dict
+# Population statistics: {size, best_score, worst_score, mean_score, generations}.
+fn rsi_summary(pop) {
+    h n    = len(pop)
+    if n == 0 {
+        return {"size": 0, "best_score": 0.0, "worst_score": 0.0, "mean_score": 0.0, "generations_seen": 0}
+    }
+    h best  = pop[0]["score"]
+    h worst = pop[0]["score"]
+    h total = 0.0
+    h max_g = pop[0]["gen"]
+    h i = 0
+    while i < n {
+        h s = pop[i]["score"]
+        h g = pop[i]["gen"]
+        if s > best  { best  = s }
+        if s < worst { worst = s }
+        total = total + s
+        if g > max_g { max_g = g }
+        i = i + 1
+    }
+    return {
+        "size":        n,
+        "best_score":  best,
+        "worst_score": worst,
+        "mean_score":  total / n,
+        "generations_seen": max_g
+    }
+}
+
+# ── Best-of-N ─────────────────────────────────────────────────────────────────
+
+# rsi_best_of_n(candidate, n, fitness_fn, model, system_prompt) → Candidate
+# Generate n LLM mutations, evaluate each, return the best.
+fn rsi_best_of_n(candidate, n, fitness_fn, model, system_prompt) {
+    h best   = candidate
+    h i      = 0
+    while i < n {
+        h mut   = rsi_mutate(candidate, model, system_prompt)
+        h score = fitness_fn(mut["code"])
+        h evaled = rsi_make_candidate(mut["code"], score, mut["gen"], mut["note"])
+        if score > best["score"] {
+            best = evaled
+        }
+        i = i + 1
+    }
+    return best
+}
+
+# ── Hill-climbing loop ────────────────────────────────────────────────────────
+
+# rsi_hill_climb(pop, fitness_fn, model, opts) → dict
+# opts keys (all optional):
+#   generations  int    default 5
+#   keep         int    default 4   (elites carried per generation)
+#   n_mutants    int    default 4   (new mutations per elite)
+#   model        str    default "claude-3-5-haiku-20241022"
+#   system       str    system prompt for mutations
+#
+# Returns {best: Candidate, history: Candidate[], gens: int}
+fn rsi_hill_climb(pop, fitness_fn, model, opts) {
+    h generations = opts["generations"]
+    h keep        = opts["keep"]
+    h n_mutants   = opts["n_mutants"]
+    h sys_prompt  = opts["system"]
+    if generations == null { generations = 5 }
+    if keep        == null { keep        = 4 }
+    if n_mutants   == null { n_mutants   = 4 }
+    if model       == null { model       = "claude-3-5-haiku-20241022" }
+
+    h current  = rsi_evaluate(pop, fitness_fn)
+    h history  = []
+    h g        = 0
+
+    while g < generations {
+        h survivors = rsi_top_k(current, keep)
+        h next_gen  = []
+        h ei        = 0
+        while ei < arr_len(survivors) {
+            arr_push(next_gen, survivors[ei])
+            ei = ei + 1
+        }
+
+        # Mutate each survivor n_mutants times
+        h mi = 0
+        while mi < arr_len(survivors) {
+            h elite   = survivors[mi]
+            h mutants = []
+            h mj      = 0
+            while mj < n_mutants {
+                arr_push(mutants, rsi_mutate(elite, model, sys_prompt))
+                mj = mj + 1
+            }
+            h evaled = rsi_evaluate(mutants, fitness_fn)
+            h ek = 0
+            while ek < arr_len(evaled) {
+                arr_push(next_gen, evaled[ek])
+                ek = ek + 1
+            }
+            mi = mi + 1
+        }
+
+        h gen_best = rsi_best(next_gen)
+        arr_push(history, gen_best)
+        current = next_gen
+        g = g + 1
+    }
+
+    return {
+        "best":    rsi_best(current),
+        "history": history,
+        "gens":    g
+    }
+}
+
+# ── LLM-judge scoring ─────────────────────────────────────────────────────────
+
+# rsi_judge_score(pop, criteria, model) → Candidate[]
+# Re-score population using llm_judge (score normalised to [0,1]).
+fn rsi_judge_score(pop, criteria, model) {
+    h codes = arr_map(pop, fn(c) { return c["code"] })
+    h raw   = llm_judge(codes, criteria, model)
+    h result = []
+    h i = 0
+    while i < len(pop) {
+        h c     = pop[i]
+        h score = raw[i]["score"] / 10.0
+        arr_push(result, rsi_make_candidate(c["code"], score, c["gen"], c["note"]))
+        i = i + 1
+    }
+    return result
+}
+
+# ── Pruning ───────────────────────────────────────────────────────────────────
+
+# rsi_prune_similar(pop, threshold) → Candidate[]
+# Remove candidates that are too similar (omc_code_similarity > threshold)
+# to any already-kept candidate.  Keeps the first (best-scoring if sorted).
+fn rsi_prune_similar(pop, threshold) {
+    h kept   = []
+    h i = 0
+    while i < len(pop) {
+        h c       = pop[i]
+        h too_sim = 0
+        h j = 0
+        while j < arr_len(kept) {
+            h sim = omc_code_similarity(c["code"], kept[j]["code"])
+            if sim > threshold {
+                too_sim = 1
+                j = arr_len(kept)   # break
+            }
+            j = j + 1
+        }
+        if too_sim == 0 {
+            arr_push(kept, c)
+        }
+        i = i + 1
+    }
+    return kept
+}
+
+# ── Lineage & provenance ──────────────────────────────────────────────────────
+
+# rsi_lineage(pop) → dict[]
+# Return [{gen, code, score, note}] as a generation-sorted lineage log.
+fn rsi_lineage(pop) {
+    h sorted  = rsi_sort_pop(pop)
+    h lineage = []
+    h i = 0
+    while i < arr_len(sorted) {
+        h c = sorted[i]
+        arr_push(lineage, {
+            "gen":   c["gen"],
+            "code":  c["code"],
+            "score": c["score"],
+            "note":  c["note"]
+        })
+        i = i + 1
+    }
+    return lineage
+}
+
+# rsi_most_similar(candidate, pop) → Candidate
+# Find the candidate in `pop` most similar to `candidate` (by substrate embed).
+fn rsi_most_similar(candidate, pop) {
+    h ref_emb = substrate_embed(candidate["code"], 16)
+    h best_c  = pop[0]
+    h best_s  = -1.0
+    h i       = 0
+    while i < len(pop) {
+        h c   = pop[i]
+        h emb = substrate_embed(c["code"], 16)
+        h dot = 0.0
+        h di  = 0
+        while di < arr_len(ref_emb) {
+            dot = dot + ref_emb[di] * emb[di]
+            di  = di + 1
+        }
+        if dot > best_s {
+            best_s = dot
+            best_c = c
+        }
+        i = i + 1
+    }
+    return best_c
+}
+
+# ── Top-level run helpers ─────────────────────────────────────────────────────
+
+# rsi_run(seed_code, fitness_fn, opts) → dict
+# Complete RSI loop: seed → hill-climb → return best.
+# opts: same as rsi_hill_climb plus {n_seed: int} for initial pop size.
+fn rsi_run(seed_code, fitness_fn, opts) {
+    h n_seed = opts["n_seed"]
+    h model  = opts["model"]
+    if n_seed == null { n_seed = 4 }
+    if model  == null { model  = "claude-3-5-haiku-20241022" }
+
+    h pop = rsi_seed(seed_code, n_seed, fitness_fn)
+    return rsi_hill_climb(pop, fitness_fn, model, opts)
+}
+
+# rsi_run_with_judge(seed_code, criteria, opts) → dict
+# Like rsi_run but uses llm_judge for scoring instead of a fitness function.
+fn rsi_run_with_judge(seed_code, criteria, opts) {
+    h model     = opts["model"]
+    h judge_mod = opts["judge_model"]
+    if model     == null { model     = "claude-3-5-haiku-20241022" }
+    if judge_mod == null { judge_mod = model }
+
+    return rsi_run(seed_code, fn(code) {
+        h scores = llm_judge([code], criteria, judge_mod)
+        return scores[0]["score"] / 10.0
+    }, opts)
+}

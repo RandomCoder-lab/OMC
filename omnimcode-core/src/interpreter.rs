@@ -15,6 +15,11 @@ pub type JitDispatch =
 pub struct Interpreter {
     globals: HashMap<String, Value>,
     functions: HashMap<String, (Vec<String>, Vec<Statement>)>,
+    /// Snapshot stacks for `fn_snapshot` / `fn_rollback`.
+    /// Each entry is a per-function LIFO stack of (params, body) pairs.
+    /// `fn_snapshot_all` captures the entire functions table as one entry
+    /// in the special key `__ALL__`.
+    fn_snapshots: HashMap<String, Vec<(Vec<String>, Vec<Statement>)>>,
     /// Class-parent table for `class Child extends Parent` inheritance.
     /// Maps child class name → parent class name. The instance-method
     /// dispatch path walks this chain when `<Child>__<method>` isn't
@@ -143,6 +148,7 @@ impl Interpreter {
         Interpreter {
             globals: HashMap::new(),
             functions: HashMap::new(),
+            fn_snapshots: HashMap::new(),
             jit_dispatch: None,
             locals: vec![std::rc::Rc::new(std::cell::RefCell::new(HashMap::new()))],
             return_value: None,
@@ -2489,6 +2495,10 @@ impl Interpreter {
             | "arr_enumerate" | "arr_window"
             // Meta-evaluation
             | "eval_omc" | "eval_omc_fresh" | "eval_omc_ctx" | "omc_source"
+            // RSI / benchmarking
+            | "code_parse_check" | "fn_bench" | "time_ms"
+            // RSI snapshot / rollback
+            | "fn_snapshot" | "fn_rollback" | "fn_snapshot_all" | "fn_rollback_all"
             // Process execution builtins
             | "omc_spawn" | "omc_pipe"
             // Prometheus autograd tape
@@ -9315,6 +9325,15 @@ impl Interpreter {
                     .collect();
                 Ok(Value::Array(HArray::from_vec(out)))
             }
+            "omc_code_valid" => {
+                // Returns true if `code` parses as valid OMC, false otherwise.
+                // Never throws — safe to call on LLM-generated code before metrics.
+                if args.is_empty() {
+                    return Err("omc_code_valid requires (code: string)".to_string());
+                }
+                let code = self.eval_expr(&args[0])?.to_display_string();
+                Ok(Value::Bool(crate::code_intel::is_valid(&code)))
+            }
             "omc_code_complexity" => {
                 // Cyclomatic complexity. Returns a dict with
                 // {complexity, ast_size, ast_depth} so the LLM can
@@ -12480,6 +12499,92 @@ impl Interpreter {
                 fresh.execute(stmts)?;
                 Ok(fresh.last_expression_value.take().unwrap_or(Value::Null))
             }
+            // ---- RSI / bench primitives -----------------------------------------
+
+            // code_parse_check(source_string) -> dict {ok, error}
+            // Parse-validates OMC source without executing it.
+            // Returns {ok: true} on success, {ok: false, error: "msg"} on failure.
+            "code_parse_check" => {
+                let src = if args.is_empty() {
+                    return Err("code_parse_check requires (source_string)".to_string());
+                } else {
+                    self.eval_expr(&args[0])?.to_string()
+                };
+                let mut parser = crate::parser::Parser::new(&src);
+                match parser.parse() {
+                    Ok(_) => {
+                        let mut m = std::collections::BTreeMap::new();
+                        m.insert("ok".to_string(), Value::Bool(true));
+                        m.insert("error".to_string(), Value::Null);
+                        Ok(Value::Dict(std::rc::Rc::new(std::cell::RefCell::new(m))))
+                    }
+                    Err(e) => {
+                        let mut m = std::collections::BTreeMap::new();
+                        m.insert("ok".to_string(), Value::Bool(false));
+                        m.insert("error".to_string(), Value::String(e));
+                        Ok(Value::Dict(std::rc::Rc::new(std::cell::RefCell::new(m))))
+                    }
+                }
+            }
+
+            // time_ms() -> float — wall-clock milliseconds since Unix epoch.
+            // Useful for manual before/after timing in RSI loops.
+            "time_ms" => {
+                use std::time::{SystemTime, UNIX_EPOCH};
+                let ms = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs_f64() * 1000.0;
+                Ok(Value::HFloat(ms))
+            }
+
+            // fn_bench(fn_name, args_list, n_reps?) -> dict {mean_ms, min_ms, max_ms, total_ms}
+            // Benchmarks fn_name by calling it with args_list repeated n_reps times.
+            // Returns timing statistics in milliseconds.
+            "fn_bench" => {
+                if args.len() < 2 {
+                    return Err("fn_bench requires (fn_name, args_list, n_reps?)".to_string());
+                }
+                let fn_name = match self.eval_expr(&args[0])? {
+                    Value::String(s) => s,
+                    v => return Err(format!("fn_bench: fn_name must be a string, got {:?}", v)),
+                };
+                let call_args_val = self.eval_expr(&args[1])?;
+                let call_args: Vec<Value> = match call_args_val {
+                    Value::Array(ref a) => a.items.borrow().clone(),
+                    other => vec![other],
+                };
+                let n_reps: usize = if args.len() >= 3 {
+                    match self.eval_expr(&args[2])? {
+                        Value::HInt(h) => h.value.max(1) as usize,
+                        Value::HFloat(f) => f.max(1.0) as usize,
+                        _ => 10,
+                    }
+                } else {
+                    10
+                };
+
+                use std::time::Instant;
+                let mut timings: Vec<f64> = Vec::with_capacity(n_reps);
+                for _ in 0..n_reps {
+                    let t0 = Instant::now();
+                    self.call_function_with_values(&fn_name, &call_args)?;
+                    timings.push(t0.elapsed().as_secs_f64() * 1000.0);
+                }
+                let total: f64 = timings.iter().sum();
+                let mean = total / timings.len() as f64;
+                let min = timings.iter().cloned().fold(f64::INFINITY, f64::min);
+                let max = timings.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+
+                let mut m = std::collections::BTreeMap::new();
+                m.insert("mean_ms".to_string(), Value::HFloat(mean));
+                m.insert("min_ms".to_string(), Value::HFloat(min));
+                m.insert("max_ms".to_string(), Value::HFloat(max));
+                m.insert("total_ms".to_string(), Value::HFloat(total));
+                m.insert("n_reps".to_string(), Value::HInt(crate::value::HInt::new(n_reps as i64)));
+                Ok(Value::Dict(std::rc::Rc::new(std::cell::RefCell::new(m))))
+            }
+
             // ---- omc_source() ---------------------------------------------------
             // Returns the source text of the currently running program (set by
             // the CLI or MCP before execution via `set_source_code`).
@@ -12490,7 +12595,211 @@ impl Interpreter {
                     None    => Value::Null,
                 })
             }
-            // Unknown name — check whether it's a local variable holding
+
+            // ---- code_parse_check(src) ----------------------------------------
+            // Returns {ok: bool, error: str|null} without running the code.
+            // ---- code_parse_check(src) -> {ok, error} ------------------------
+            // Parses OMC source WITHOUT running it.  Returns a dict:
+            //   {ok: bool, error: string|null}
+            // Useful for validating LLM-generated code before hot-swapping it.
+            "code_parse_check" => {
+                let eval_args: Vec<Value> = args.iter()
+                    .map(|e| self.eval_expr(e))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let src = match eval_args.first() {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => return Err("code_parse_check requires (src: string)".to_string()),
+                };
+                let mut parser = crate::parser::Parser::new(&src);
+                let mut m = std::collections::BTreeMap::new();
+                match parser.parse() {
+                    Ok(_) => {
+                        m.insert("ok".to_string(),    Value::Bool(true));
+                        m.insert("error".to_string(), Value::Null);
+                    }
+                    Err(e) => {
+                        m.insert("ok".to_string(),    Value::Bool(false));
+                        m.insert("error".to_string(), Value::String(e));
+                    }
+                }
+                Ok(Value::Dict(std::rc::Rc::new(std::cell::RefCell::new(m))))
+            }
+
+            // ---- time_ms() ---------------------------------------------------
+            // Current monotonic wall-clock time in milliseconds (f64).
+            // Use: h t0 = time_ms(); ...; time_ms() - t0
+            "time_ms" => {
+                use std::time::{SystemTime, UNIX_EPOCH};
+                let ms = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_secs_f64() * 1000.0)
+                    .unwrap_or(0.0);
+                Ok(Value::HFloat(ms))
+            }
+
+            // ---- fn_bench(fn_name, args, n_reps?) -> dict --------------------
+            // Times fn_name(*args) n_reps times in-process.
+            // Returns {mean_ms, min_ms, max_ms, total_ms, n_reps}.
+            "fn_bench" => {
+                let eval_args: Vec<Value> = args.iter()
+                    .map(|e| self.eval_expr(e))
+                    .collect::<Result<Vec<_>, _>>()?;
+                if eval_args.len() < 2 {
+                    return Err(
+                        "fn_bench requires (fn_name: string, args: list, n_reps?: int)".to_string(),
+                    );
+                }
+                let fn_name = match &eval_args[0] {
+                    Value::String(s) => s.clone(),
+                    _ => return Err("fn_bench: first arg must be function name string".to_string()),
+                };
+                let call_args: Vec<Value> = match &eval_args[1] {
+                    Value::Array(a) => a.items.borrow().clone(),
+                    _ => return Err("fn_bench: second arg must be an array of arguments".to_string()),
+                };
+                let n_reps: usize = match eval_args.get(2) {
+                    Some(v) => {
+                        let n = v.to_int();
+                        if n < 1 { 1 } else { n as usize }
+                    }
+                    None => 10,
+                };
+                let mut times_ms: Vec<f64> = Vec::with_capacity(n_reps);
+                for _ in 0..n_reps {
+                    let t0 = std::time::Instant::now();
+                    self.call_function_with_values(&fn_name, &call_args)?;
+                    times_ms.push(t0.elapsed().as_secs_f64() * 1000.0);
+                }
+                let total: f64 = times_ms.iter().sum();
+                let mean = total / n_reps as f64;
+                let min  = times_ms.iter().cloned().fold(f64::INFINITY,     f64::min);
+                let max  = times_ms.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                let mut m = std::collections::BTreeMap::new();
+                m.insert("mean_ms".to_string(),  Value::HFloat(mean));
+                m.insert("min_ms".to_string(),   Value::HFloat(min));
+                m.insert("max_ms".to_string(),   Value::HFloat(max));
+                m.insert("total_ms".to_string(), Value::HFloat(total));
+                m.insert("n_reps".to_string(),   Value::HInt(crate::value::HInt::new(n_reps as i64)));
+                Ok(Value::Dict(std::rc::Rc::new(std::cell::RefCell::new(m))))
+            }
+
+            // ----------------------------------------------------------------
+            // fn_snapshot(name) — push current impl onto per-fn stack.
+            //   Returns null.
+            // fn_rollback(name) — pop and restore. Returns old src (string)
+            //   or null if nothing was saved.
+            // fn_snapshot_all() — snapshot every user fn atomically.
+            // fn_rollback_all() — restore the last full snapshot.
+            // ----------------------------------------------------------------
+            "fn_snapshot" => {
+                let nm = if args.is_empty() {
+                    return Err("fn_snapshot requires (fn_name: string)".to_string());
+                } else {
+                    match self.eval_expr(&args[0])? {
+                        Value::String(s) => s,
+                        v => v.to_display_string(),
+                    }
+                };
+                if let Some(body) = self.functions.get(&nm).cloned() {
+                    self.fn_snapshots.entry(nm).or_default().push(body);
+                }
+                Ok(Value::Null)
+            }
+
+            "fn_rollback" => {
+                let nm = if args.is_empty() {
+                    return Err("fn_rollback requires (fn_name: string)".to_string());
+                } else {
+                    match self.eval_expr(&args[0])? {
+                        Value::String(s) => s,
+                        v => v.to_display_string(),
+                    }
+                };
+                if let Some(stack) = self.fn_snapshots.get_mut(&nm) {
+                    if let Some((params, body)) = stack.pop() {
+                        let src = crate::formatter::format_program(
+                            &[crate::ast::Statement::FunctionDef {
+                                name: nm.clone(),
+                                params: params.clone(),
+                                param_types: vec![None; params.len()],
+                                body: body.clone(),
+                                return_type: None,
+                                pragmas: vec![],
+                            }]
+                        );
+                        self.functions.insert(nm, (params, body));
+                        return Ok(Value::String(src));
+                    }
+                }
+                Ok(Value::Null)
+            }
+
+            "fn_snapshot_all" => {
+                // Serialise the entire functions table as one flattened snapshot.
+                // We store it under the magic key "__ALL__" as a single-element
+                // Vec containing the current state encoded as a fake (names, bodies)
+                // pair — actually we use a simpler scheme: one snapshot per fn.
+                let snapshot: Vec<(String, Vec<String>, Vec<Statement>)> = self
+                    .functions
+                    .iter()
+                    .map(|(k, (p, b))| (k.clone(), p.clone(), b.clone()))
+                    .collect();
+                // Encode as JSON-like string so we can store in a uniform stack.
+                // We keep a Rust-native copy in fn_snapshots["__ALL__"] by
+                // serialising to a stable sentinel key per function.
+                for (name, params, body) in &snapshot {
+                    self.fn_snapshots
+                        .entry(format!("__ALL__{}", name))
+                        .or_default()
+                        .push((params.clone(), body.clone()));
+                }
+                // Also track which fns were in this snapshot so rollback_all
+                // can restore deletions.
+                let names_json = snapshot
+                    .iter()
+                    .map(|(n, _, _)| format!("\"{}\"", n.replace('"', "\\\"")))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                self.fn_snapshots
+                    .entry("__ALL_NAMES__".to_string())
+                    .or_default()
+                    .push((vec![names_json], vec![]));
+                Ok(Value::Null)
+            }
+
+            "fn_rollback_all" => {
+                // Restore from the most recent fn_snapshot_all checkpoint.
+                let names_entry = self
+                    .fn_snapshots
+                    .get_mut("__ALL_NAMES__")
+                    .and_then(|s| s.pop());
+                if let Some((names_vec, _)) = names_entry {
+                    // Parse the stored names back
+                    let names_json = names_vec.into_iter().next().unwrap_or_default();
+                    let names: Vec<String> = names_json
+                        .split(',')
+                        .filter_map(|s| {
+                            let t = s.trim().trim_matches('"');
+                            if t.is_empty() { None } else { Some(t.replace("\\\"", "\"")) }
+                        })
+                        .collect();
+                    // Remove fns that were added after the snapshot
+                    self.functions.retain(|k, _| names.contains(k));
+                    // Restore each saved fn
+                    for name in &names {
+                        let key = format!("__ALL__{}", name);
+                        if let Some(stack) = self.fn_snapshots.get_mut(&key) {
+                            if let Some((params, body)) = stack.pop() {
+                                self.functions.insert(name.clone(), (params, body));
+                            }
+                        }
+                    }
+                    Ok(Value::Bool(true))
+                } else {
+                    Ok(Value::Bool(false))
+                }
+            }
+
             // a Value::Function before declaring it undefined. This is
             // what makes `h f = fn(x) {...}; f(3);` work: f resolves as
             // a closure value, and we dispatch through call_first_class_function.
@@ -14859,6 +15168,8 @@ pub(crate) const HEAL_BUILTIN_NAMES: &[&str] = &[
     "arr_enumerate", "arr_window",
     // Meta-evaluation
     "eval_omc", "eval_omc_fresh", "eval_omc_ctx", "omc_source",
+    "code_parse_check", "fn_bench", "time_ms",
+    "fn_snapshot", "fn_rollback", "fn_snapshot_all", "fn_rollback_all",
     // Dicts
     "dict_new", "dict_get", "dict_set", "dict_has", "dict_del",
     "dict_keys", "dict_values", "dict_len", "dict_merge",

@@ -3,13 +3,13 @@
 # Demonstrates the full recursive improvement loop.
 
 import "examples/lib/llm.omc"
-import "examples/lib/cache.omc" as cache
+import "examples/lib/cache.omc"
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
 h MODEL = "claude-opus-4-5"
 h MAX_REPAIR_ATTEMPTS = 5
-h SOLUTION_CACHE = cache.lru_new(100)
+h SOLUTION_CACHE = lru_new(100)
 
 # ── Code extraction ──────────────────────────────────────────────────────────
 
@@ -75,7 +75,7 @@ fn run_all_tests(code, tests) {
 # ── Generation + repair loop ─────────────────────────────────────────────────
 
 fn generate_solution(problem, tests) {
-    h cached = cache.lru_get(SOLUTION_CACHE, problem)
+    h cached = lru_get(SOLUTION_CACHE, problem)
     if cached != null {
         print(str_concat("[cache hit] ", problem))
         return cached
@@ -102,7 +102,7 @@ fn generate_solution(problem, tests) {
     while attempt < MAX_REPAIR_ATTEMPTS {
         h failures = run_all_tests(code, tests)
         if arr_len(failures) == 0 {
-            cache.lru_put(SOLUTION_CACHE, problem, code)
+            lru_put(SOLUTION_CACHE, problem, code)
             return {code: code, attempts: attempt + 1, solved: true}
         }
 

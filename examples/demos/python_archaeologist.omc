@@ -1,0 +1,100 @@
+# python_archaeologist.omc
+#
+# Cross-language demo: run the universal archaeology module on a Python codebase.
+# Proves that omc_attractor_density works on ANY language's source code —
+# Python files get phi-pi-fib density scored exactly like OMC files.
+#
+# Usage: omc examples/demos/python_archaeologist.omc
+
+import "examples/lib/archaeology.omc"
+
+h SCAN_PATH  = "experiments"
+h MODEL      = "claude-haiku-4-5-20251001"
+h opts = {
+    "extensions":  [".py"],
+    "top_n":       8,
+    "threshold":   0.92,
+    "check_limit": 30,
+    "ref_weight":  5.0,
+    "fn_weight":   0.3
+}
+
+print("╔══════════════════════════════════════════════════╗")
+print("║  Codebase Archaeologist — Python Edition         ║")
+print("║  substrate math applied to non-OMC source       ║")
+print("╚══════════════════════════════════════════════════╝")
+print("")
+print("Scanning: " + SCAN_PATH + " (*.py)")
+print("")
+
+h results  = archaeology_scan(SCAN_PATH, opts)
+h top      = results["attractors"]
+h clusters = results["clusters"]
+h stats    = results["stats"]
+
+# ── Stats ──────────────────────────────────────────────────────────────────────
+
+print("Files:     " + to_string(stats["file_count"]))
+print("Functions: " + to_string(stats["total_fns"]) + " (grep-counted)")
+print("Language:  " + stats["primary_lang"])
+print("")
+
+# ── Attractors ─────────────────────────────────────────────────────────────────
+
+print("╔══════════════════════════════════════════════════╗")
+print("║     Top Attractor Python Modules                 ║")
+print("╚══════════════════════════════════════════════════╝")
+print("")
+
+h ti = 0
+while ti < arr_len(top) {
+    h m = top[ti]
+    h slash = str_rfind(m["path"], "/")
+    h fname = if slash >= 0 { str_slice(m["path"], slash + 1, str_len(m["path"])) } else { m["path"] }
+    print(to_string(ti + 1) + ". " + fname)
+    print("   attractor: " + to_string(m["attractor_score"]))
+    print("   density:   " + to_string(m["density"]) + "  (phi-pi-fib token fraction)")
+    print("   fns:       " + to_string(m["fn_count"]))
+    print("   refs:      " + to_string(m["refs"]))
+    # Show first 120 chars of file as context
+    h preview = str_slice(m["content"], 0, 120)
+    print("   preview:   " + preview)
+    print("")
+    ti += 1
+}
+
+# ── Clusters ───────────────────────────────────────────────────────────────────
+
+if arr_len(clusters) > 0 {
+    print("╔══════════════════════════════════════════════════╗")
+    print("║     Semantic Duplicate Clusters (.py)            ║")
+    print("╚══════════════════════════════════════════════════╝")
+    print("")
+    h ci = 0
+    while ci < arr_len(clusters) {
+        h grp = clusters[ci]
+        print("Cluster " + to_string(ci + 1) + ":")
+        h mi = 0
+        while mi < arr_len(grp) {
+            h slash2 = str_rfind(grp[mi], "/")
+            h sname = if slash2 >= 0 { str_slice(grp[mi], slash2 + 1, str_len(grp[mi])) } else { grp[mi] }
+            print("  • " + sname)
+            mi += 1
+        }
+        print("")
+        ci += 1
+    }
+}
+
+# ── Narration ──────────────────────────────────────────────────────────────────
+
+print("Asking Claude to narrate the Python architecture...")
+print("")
+h narration = archaeology_narrate(results, MODEL)
+
+print("╔══════════════════════════════════════════════════╗")
+print("║     Architectural Analysis (Claude)              ║")
+print("╚══════════════════════════════════════════════════╝")
+print("")
+print(narration)
+print("")

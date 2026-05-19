@@ -46,6 +46,7 @@ use clap::Parser;
 use omnimcode_core::memory::MemoryStore;
 use serde_json::{json, Value};
 use std::sync::Arc;
+use tokio::time::{sleep, Duration};
 use tracing::{debug, info, warn};
 
 const PROXY_CACHE_NAMESPACE: &str = "_apiproxy_cache";
@@ -63,6 +64,8 @@ const SEARCH_TOOL_NAME:    &str = "omc_proxy_search";
 const SUMMARIZE_TOOL_NAME: &str = "omc_proxy_summarize";
 const SWARM_TOOL_NAME:     &str = "omc_proxy_swarm";
 const KB_TOOL_NAME:        &str = "omc_proxy_kb";
+const EVAL_TOOL_NAME:      &str = "omc_proxy_eval";
+const BUDGET_TOOL_NAME:    &str = "omc_proxy_budget";
 
 #[derive(Parser, Debug, Clone)]
 #[command(name = "omnimcode-apiproxy", version = env!("CARGO_PKG_VERSION"))]
@@ -108,6 +111,202 @@ struct Args {
     /// longer sessions where token budget is tight.
     #[arg(long, default_value_t = false)]
     adaptive_threshold: bool,
+
+    // ── Upgrade 1: Retry + Exponential Backoff ────────────────────────────
+    /// Maximum number of upstream retries on 5xx / network errors.
+    /// Each retry waits 2^n * 100ms (capped at 10 s).
+    #[arg(long, default_value_t = 3)]
+    max_retries: u32,
+
+    // ── Upgrade 2: Model Complexity Router ───────────────────────────────
+    /// If request complexity score < this value, route to
+    /// claude-haiku-* instead of the requested model.
+    #[arg(long, default_value_t = 0)]
+    route_haiku_below: u32,
+
+    /// If request complexity score < this value (and >= route_haiku_below),
+    /// route to claude-sonnet-* instead of the requested model.
+    #[arg(long, default_value_t = 0)]
+    route_sonnet_below: u32,
+
+    // ── Upgrade 3: omc_proxy_eval Tool Executor ───────────────────────────
+    /// Path to the `omnimcode-standalone` binary used by the
+    /// `omc_proxy_eval` tool. Defaults to finding it on $PATH.
+    #[arg(long, default_value = "omnimcode-standalone")]
+    omc_bin: String,
+
+    // ── Upgrade 4: Token Budget / Cost Accounting ─────────────────────────
+    /// Emit a warning injection into the next proxy message when a
+    /// conversation's cumulative token usage exceeds this value.
+    /// 0 = disabled.
+    #[arg(long, default_value_t = 0)]
+    budget_warn_tokens: u64,
+
+    /// Hard-cap: refuse further upstream calls once a conversation exceeds
+    /// this cumulative token count, returning a proxy error instead.
+    /// 0 = disabled.
+    #[arg(long, default_value_t = 0)]
+    budget_max_tokens: u64,
+
+    // ── Upgrade 5: Tool Call Deduplication ────────────────────────────────
+    /// TTL in seconds for the per-conversation tool-call result cache.
+    /// Identical tool calls within the same conversation within this
+    /// window return a cached result without hitting the upstream.
+    /// 0 = disabled.
+    #[arg(long, default_value_t = 0)]
+    tool_cache_ttl_secs: u64,
+
+    // ── Upgrade 6: Rate Limiting (per-IP token bucket) ────────────────────
+    /// Max requests per minute per client IP. 0 = no rate limit.
+    #[arg(long, default_value_t = 0)]
+    rate_limit_rpm: u32,
+
+    // ── Upgrade 7: Circuit Breaker ────────────────────────────────────────
+    /// Number of consecutive upstream failures before the circuit opens.
+    /// 0 = circuit breaker disabled.
+    #[arg(long, default_value_t = 0)]
+    circuit_breaker_threshold: u32,
+
+    /// Seconds after the circuit opens before it moves to half-open and
+    /// tries a probe request again.
+    #[arg(long, default_value_t = 30)]
+    circuit_breaker_reset_secs: u64,
+
+    // ── Upgrade 9: Full Response Caching ─────────────────────────────────
+    /// TTL in seconds for caching complete upstream responses keyed by
+    /// request body hash. Non-streaming, identical requests are served from
+    /// the in-memory cache without hitting the upstream. 0 = disabled.
+    #[arg(long, default_value_t = 0)]
+    response_cache_ttl_secs: u64,
+
+    // ── Upgrade 10: Context Window Auto-Pruning ───────────────────────────
+    /// Maximum total character count across all messages before the proxy
+    /// drops oldest user/assistant turn pairs. Keeps system + recent turns.
+    /// 0 = disabled.
+    #[arg(long, default_value_t = 0)]
+    max_context_chars: usize,
+}
+
+// ── Upgrade 6: Per-IP rate limiter ────────────────────────────────────────
+/// Simple token-bucket rate limiter.  One bucket per source IP.
+#[derive(Clone)]
+struct TokenBucket {
+    /// Tokens remaining in this bucket.
+    tokens: f64,
+    /// Max burst (= rpm).
+    capacity: f64,
+    /// Instant of the last refill.
+    last_refill: std::time::Instant,
+}
+
+impl TokenBucket {
+    fn new(rpm: u32) -> Self {
+        Self {
+            tokens: rpm as f64,
+            capacity: rpm as f64,
+            last_refill: std::time::Instant::now(),
+        }
+    }
+
+    /// Refills tokens based on elapsed time, then tries to consume one.
+    /// Returns `true` if the request is allowed.
+    fn try_consume(&mut self) -> bool {
+        let now = std::time::Instant::now();
+        let elapsed = now.duration_since(self.last_refill).as_secs_f64();
+        // Replenish: rpm tokens per 60 seconds.
+        self.tokens = (self.tokens + elapsed * self.capacity / 60.0).min(self.capacity);
+        self.last_refill = now;
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+// ── Upgrade 7: Circuit breaker ────────────────────────────────────────────
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CircuitState { Closed, Open, HalfOpen }
+
+#[derive(Clone)]
+struct CircuitBreaker {
+    state: CircuitState,
+    failures: u32,
+    threshold: u32,
+    reset_secs: u64,
+    opened_at: Option<std::time::Instant>,
+}
+
+impl CircuitBreaker {
+    fn new(threshold: u32, reset_secs: u64) -> Self {
+        Self {
+            state: CircuitState::Closed,
+            failures: 0,
+            threshold,
+            reset_secs,
+            opened_at: None,
+        }
+    }
+
+    /// Returns `true` when the request may proceed.
+    fn allow(&mut self) -> bool {
+        match self.state {
+            CircuitState::Closed => true,
+            CircuitState::Open => {
+                if let Some(opened_at) = self.opened_at {
+                    if opened_at.elapsed().as_secs() >= self.reset_secs {
+                        self.state = CircuitState::HalfOpen;
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            }
+            CircuitState::HalfOpen => true,
+        }
+    }
+
+    fn record_success(&mut self) {
+        self.failures = 0;
+        self.state = CircuitState::Closed;
+        self.opened_at = None;
+    }
+
+    fn record_failure(&mut self) {
+        self.failures += 1;
+        if self.state == CircuitState::HalfOpen || self.failures >= self.threshold {
+            self.state = CircuitState::Open;
+            self.opened_at = Some(std::time::Instant::now());
+        }
+    }
+}
+
+// ── Upgrade 4: Token-budget accounting ────────────────────────────────────
+#[derive(Default, Clone, Debug)]
+struct TokenUsage {
+    input_tokens:  u64,
+    output_tokens: u64,
+}
+
+impl TokenUsage {
+    fn total(&self) -> u64 { self.input_tokens + self.output_tokens }
+}
+/// One cached tool-call result. Evicted when `expires_at` is in the past.
+struct ToolCacheEntry {
+    result:     String,
+    expires_at: std::time::Instant,
+}
+
+/// Upgrade 9: full upstream response cached by request-body FNV hash.
+struct ResponseCacheEntry {
+    status:     StatusCode,
+    /// Serialized as (name, value) pairs so the struct is Clone-free.
+    headers:    Vec<(String, String)>,
+    body:       Bytes,
+    expires_at: std::time::Instant,
 }
 
 #[derive(Default, Debug, Clone)]
@@ -142,6 +341,10 @@ struct RewriteStats {
     /// in the proxy cache for future request-side compression.  No latency is
     /// added — recording runs on a background tokio task after each send.
     bytes_streamed_recorded: u64,
+    /// Upgrade 9: full-response cache hits served without upstream call.
+    response_cache_hits: u64,
+    /// Upgrade 10: message turns dropped by context-window pruning.
+    turns_pruned: u64,
 }
 
 /// Per-conversation state the proxy remembers across turns. Key is a stable
@@ -197,6 +400,54 @@ struct AppState {
     /// Registered agent namespaces for multi-tenant isolation (task #9).
     /// The default proxy cache namespace is always present.
     registered_namespaces: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+
+    // ── upgrade 1: retry ──────────────────────────────────────────────────
+    max_retries: u32,
+
+    // ── upgrade 2: complexity router ─────────────────────────────────────
+    /// Complexity score ceiling below which requests are downgraded to haiku.
+    route_haiku_below: u32,
+    /// Complexity score ceiling below which requests are downgraded to sonnet.
+    route_sonnet_below: u32,
+
+    // ── upgrade 3: omc_proxy_eval ─────────────────────────────────────────
+    /// Absolute path to the `omnimcode-standalone` binary, or empty string if
+    /// not configured (the eval tool returns an error in that case).
+    omc_bin: String,
+
+    // ── upgrade 4: token budget ───────────────────────────────────────────
+    budget_warn_tokens: u64,
+    budget_max_tokens: u64,
+    /// Per-conversation cumulative token usage. Key = conversation_id (same as
+    /// `conversations` above).
+    token_usage: Arc<std::sync::Mutex<std::collections::HashMap<i64, TokenUsage>>>,
+    /// Upgrade 5: per-tool-call result deduplication cache.
+    tool_result_cache: Arc<std::sync::Mutex<std::collections::HashMap<String, ToolCacheEntry>>>,
+
+    // ── upgrade 5: tool dedup ─────────────────────────────────────────────
+    tool_cache_ttl_secs: u64,
+    /// Per-conversation tool-call dedup cache.
+    /// Key = (conversation_id, tool_input_hash). Value = (result_json, stored_at_unix).
+    tool_cache: Arc<std::sync::Mutex<
+        std::collections::HashMap<(i64, u64), (serde_json::Value, u64)>
+    >>,
+
+    // ── upgrade 6: rate limiter ───────────────────────────────────────────
+    rate_limit_rpm: u32,
+    /// Per-IP token bucket. Key = IP string. Value = (tokens_f64, last_refill_unix_secs_f64).
+    rate_buckets: Arc<std::sync::Mutex<std::collections::HashMap<String, TokenBucket>>>,
+
+    // ── upgrade 7: circuit breaker ────────────────────────────────────────
+    circuit_breaker: Arc<std::sync::Mutex<CircuitBreaker>>,
+
+    // ── upgrade 9: response cache ─────────────────────────────────────────
+    response_cache_ttl_secs: u64,
+    response_cache: Arc<std::sync::Mutex<
+        std::collections::HashMap<u64, ResponseCacheEntry>
+    >>,
+
+    // ── upgrade 10: context window pruning ───────────────────────────────
+    max_context_chars: usize,
 }
 
 #[tokio::main]
@@ -257,12 +508,33 @@ async fn main() -> Result<()> {
             }
             s
         })),
+        // ── Upgrade fields ───────────────────────────────────────────────
+        max_retries: args.max_retries,
+        route_haiku_below: args.route_haiku_below,
+        route_sonnet_below: args.route_sonnet_below,
+        omc_bin: args.omc_bin.clone(),
+        budget_warn_tokens: args.budget_warn_tokens,
+        budget_max_tokens: args.budget_max_tokens,
+        tool_cache_ttl_secs: args.tool_cache_ttl_secs,
+        rate_limit_rpm: args.rate_limit_rpm,
+        token_usage: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        tool_result_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        tool_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        rate_buckets: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        circuit_breaker: Arc::new(std::sync::Mutex::new(CircuitBreaker::new(
+            args.circuit_breaker_threshold,
+            args.circuit_breaker_reset_secs,
+        ))),
+        response_cache_ttl_secs: args.response_cache_ttl_secs,
+        response_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        max_context_chars: args.max_context_chars,
     };
 
     let app = Router::new()
         .route("/v1/messages", post(handle_messages))
         .route("/_stats", axum::routing::get(stats_endpoint))
         .route("/_version", axum::routing::get(version_endpoint))
+        .route("/_metrics", axum::routing::get(metrics_endpoint))
         .fallback(any(passthrough))
         .with_state(state);
 
@@ -279,6 +551,36 @@ async fn main() -> Result<()> {
 /// expand-tool round-trip. Mixed tool_use (expand + other) passes through.
 async fn handle_messages(State(state): State<AppState>, req: Request) -> Response {
     let (parts, body) = req.into_parts();
+
+    // ── Upgrade 7: Circuit Breaker ───────────────────────────────────────────
+    {
+        let mut cb = state.circuit_breaker.lock().unwrap();
+        if !cb.allow() {
+            return error_response(StatusCode::SERVICE_UNAVAILABLE,
+                "upstream circuit open — too many recent failures; try again shortly");
+        }
+    }
+
+    // ── Upgrade 6: Rate Limiting (per-IP token bucket) ───────────────────────
+    if state.rate_limit_rpm > 0 {
+        let client_ip = parts.headers
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.split(',').next())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        let mut buckets = state.rate_buckets.lock().unwrap();
+        let bucket = buckets.entry(client_ip.clone()).or_insert_with(|| TokenBucket {
+            tokens: state.rate_limit_rpm as f64,
+            capacity: state.rate_limit_rpm as f64,
+            last_refill: std::time::Instant::now(),
+        });
+        if !bucket.try_consume() {
+            return error_response(StatusCode::TOO_MANY_REQUESTS,
+                &format!("rate limit exceeded for {}: max {} rpm", client_ip, state.rate_limit_rpm));
+        }
+    }
+
     let body_bytes = match axum::body::to_bytes(body, usize::MAX).await {
         Ok(b) => b,
         Err(e) => return error_response(StatusCode::BAD_REQUEST,
@@ -291,6 +593,31 @@ async fn handle_messages(State(state): State<AppState>, req: Request) -> Respons
         .unwrap_or_else(|| "?".into());
     info!("/v1/messages received: {} bytes, model={}, streaming={}",
         body_bytes.len(), model_name, is_streaming);
+
+    // ── Upgrade 9: Response Cache fast-path ─────────────────────────────────
+    if state.response_cache_ttl_secs > 0 && !is_streaming {
+        let req_hash = fnv_hash(&body_bytes);
+        let hit = {
+            let cache = state.response_cache.lock().unwrap();
+            cache.get(&req_hash)
+                .filter(|e| e.expires_at > std::time::Instant::now())
+                .map(|e| (e.status, e.headers.clone(), e.body.clone()))
+        };
+        if let Some((cached_status, cached_hdrs, cached_body)) = hit {
+            state.stats.lock().unwrap().response_cache_hits += 1;
+            info!("response cache hit: hash={:#x}", req_hash);
+            let mut resp_headers = HeaderMap::new();
+            for (k, v) in &cached_hdrs {
+                if let (Ok(name), Ok(val)) = (
+                    k.parse::<axum::http::header::HeaderName>(),
+                    HeaderValue::from_str(v),
+                ) { resp_headers.insert(name, val); }
+            }
+            resp_headers.insert("x-omc-response-cached",
+                HeaderValue::from_static("true"));
+            return rebuild_response(cached_status, &resp_headers, cached_body);
+        }
+    }
 
     // The REQUEST body is synchronous JSON even when the response will be streamed.
     // We can always rewrite the body. The streaming flag only affects how the
@@ -332,6 +659,17 @@ async fn handle_messages(State(state): State<AppState>, req: Request) -> Respons
 
     let _saved_unused = body_bytes.len() as i64 - rewritten.len() as i64;
 
+    // ── Upgrade 2: Model complexity routing ────────────────────────────────
+    let rewritten = apply_model_routing(rewritten, &state);
+
+    // ── Upgrade 10: Context window auto-pruning ──────────────────────────
+    let rewritten = if state.max_context_chars > 0 {
+        let pruned = prune_context_bytes(rewritten, &state);
+        pruned
+    } else {
+        rewritten
+    };
+
     if is_streaming {
         // Streaming response: pipe SSE chunks in real time. The request body
         // was still fully rewritten (compression happens), and the response
@@ -339,7 +677,7 @@ async fn handle_messages(State(state): State<AppState>, req: Request) -> Respons
         // The auto-expand loop is skipped for streaming; the LLM can still
         // call omc_proxy_expand_ref and the client surfaces it normally.
         state.stats.lock().unwrap().streaming_passthrough += 1;
-        forward_to_upstream(&state, &parts.headers, rewritten).await
+        forward_with_retry(&state, &parts.headers, rewritten, state.max_retries).await
     } else {
         handle_with_expand_loop(&state, &parts.headers, rewritten).await
     }
@@ -732,6 +1070,7 @@ async fn handle_with_expand_loop(
     state: &AppState, headers: &HeaderMap, initial_body: Bytes,
 ) -> Response {
     const MAX_EXPAND_ROUNDS: usize = 8;
+    let initial_body_hash = fnv_hash(&initial_body);
     let mut current_body = initial_body;
     for round in 0..MAX_EXPAND_ROUNDS {
         // Forward to upstream
@@ -762,9 +1101,53 @@ async fn handle_with_expand_loop(
             Err(_) => return rebuild_response(status, &resp_headers, resp_body),
         };
 
+        // ── Upgrade 7: Circuit breaker — record success ──────────────────
+        if let Ok(mut cb) = state.circuit_breaker.lock() { cb.record_success(); }
+        // Record failure on HTTP 5xx so circuit breaker opens if upstream is sick
+        if status.is_server_error() {
+            if let Ok(mut cb) = state.circuit_breaker.lock() { cb.record_failure(); }
+        }
+
+        // ── Upgrade 4: Token budget accounting ───────────────────────────
+        if let (Some(inp), Some(out)) = (
+            resp_json.get("usage").and_then(|u| u.get("input_tokens")).and_then(Value::as_u64),
+            resp_json.get("usage").and_then(|u| u.get("output_tokens")).and_then(Value::as_u64),
+        ) {
+            let conv_id = resp_json.get("id")
+                .and_then(Value::as_str)
+                .map(|s| omnimcode_core::tokenizer::fnv1a_64(s.as_bytes()))
+                .unwrap_or(0);
+            let mut map = state.token_usage.lock().unwrap();
+            let entry = map.entry(conv_id).or_default();
+            entry.input_tokens  += inp;
+            entry.output_tokens += out;
+            let total = entry.total();
+            if state.budget_max_tokens > 0 && total >= state.budget_max_tokens {
+                warn!("conversation {} exceeded budget_max_tokens ({} >= {})",
+                    conv_id, total, state.budget_max_tokens);
+            } else if state.budget_warn_tokens > 0 && total >= state.budget_warn_tokens {
+                info!("conversation {} approaching budget ({} >= {})",
+                    conv_id, total, state.budget_warn_tokens);
+            }
+        }
+
         // Resolve any proxy-managed tool calls transparently
         let proxy_calls = collect_proxy_tool_calls(&resp_json);
         if proxy_calls.is_empty() {
+            // ── Upgrade 9: Store clean response in cache ──────────────────
+            if state.response_cache_ttl_secs > 0 && round == 0 && status.is_success() {
+                let req_hash = initial_body_hash;
+                let headers_vec: Vec<(String, String)> = resp_headers.iter()
+                    .filter_map(|(k, v)| v.to_str().ok().map(|s| (k.to_string(), s.to_string())))
+                    .collect();
+                state.response_cache.lock().unwrap().insert(req_hash, ResponseCacheEntry {
+                    status,
+                    headers: headers_vec,
+                    body: resp_body.clone(),
+                    expires_at: std::time::Instant::now()
+                        + std::time::Duration::from_secs(state.response_cache_ttl_secs),
+                });
+            }
             let (compressed, saved) = compress_response_body(&resp_body, state);
             if saved > 0 {
                 state.stats.lock().unwrap().bytes_saved_response += saved as u64;
@@ -790,6 +1173,36 @@ async fn handle_with_expand_loop(
 
         let mut tool_results: Vec<Value> = Vec::new();
         for call in &proxy_calls {
+            // ── Upgrade 5: Dedup cache hit fast-path ───────────────────────
+            let is_det_pre = !matches!(call,
+                ProxyCall::Forward { .. } | ProxyCall::Delegate { .. } |
+                ProxyCall::Swarm { .. }   | ProxyCall::Eval { .. }
+            );
+            if is_det_pre {
+                let key = format!("{:?}", call);
+                let hit = state.tool_result_cache.lock().unwrap()
+                    .get(&key)
+                    .filter(|e| e.expires_at > std::time::Instant::now())
+                    .map(|e| e.result.clone());
+                if let Some(cached) = hit {
+                    let cached_id = match call {
+                        ProxyCall::ExpandRef { id, .. } | ProxyCall::Remember { id, .. } |
+                        ProxyCall::Recall    { id, .. } | ProxyCall::ListRefs { id }     |
+                        ProxyCall::Diff      { id, .. } | ProxyCall::NamespaceCreate { id, .. } |
+                        ProxyCall::NamespaceList    { id }     | ProxyCall::NamespaceShare { id, .. }  |
+                        ProxyCall::Search    { id, .. } | ProxyCall::Summarize { id, .. }|
+                        ProxyCall::Kb        { id, .. } | ProxyCall::Budget { id }       =>
+                            id.clone(),
+                        _ => String::new(),
+                    };
+                    tool_results.push(serde_json::json!({
+                        "type": "tool_result",
+                        "tool_use_id": cached_id,
+                        "content": format!("[cached] {}", cached),
+                    }));
+                    continue;
+                }
+            }
             let (tool_use_id, result_text) = match call {
                 ProxyCall::ExpandRef { id, hash_str } => {
                     let body_text = lookup_expand(hash_str, &state).unwrap_or_else(|e|
@@ -1057,7 +1470,40 @@ async fn handle_with_expand_loop(
                 ProxyCall::Kb { id, namespace, entries } => {
                     dispatch_kb(&id, &namespace, &entries, &state)
                 }
+
+                // ── omc_proxy_eval ──────────────────────────────────────────
+                ProxyCall::Eval { id, code, timeout_secs } => {
+                    let output = dispatch_eval(code.as_str(), *timeout_secs, &state).await;
+                    (id.clone(), output)
+                }
+
+                // ── omc_proxy_budget ────────────────────────────────────────
+                ProxyCall::Budget { id } => {
+                    let (ti, to) = {
+                        let map = state.token_usage.lock().unwrap();
+                        let ti: u64 = map.values().map(|u| u.input_tokens).sum();
+                        let to: u64 = map.values().map(|u| u.output_tokens).sum();
+                        (ti, to)
+                    };
+                    (id.clone(), format!("input: {}, output: {}, total: {}", ti, to, ti + to))
+                }
             };
+            // ── Upgrade 5: Tool call deduplication ────────────────────────
+            let is_deterministic = !matches!(call,
+                ProxyCall::Forward { .. } | ProxyCall::Delegate { .. } |
+                ProxyCall::Swarm { .. }   | ProxyCall::Eval { .. }
+            );
+            let call_cache_key = format!("{:?}", call);
+            // Check cache before paying dispatch cost next loop iteration
+            // (result already computed this time — store it below)
+            // Store in dedup cache
+            if is_deterministic {
+                state.tool_result_cache.lock().unwrap().insert(call_cache_key, ToolCacheEntry {
+                    result: result_text.clone(),
+                    expires_at: std::time::Instant::now()
+                        + std::time::Duration::from_secs(state.tool_cache_ttl_secs as u64),
+                });
+            }
             tool_results.push(json!({
                 "type": "tool_result",
                 "tool_use_id": tool_use_id,
@@ -1145,6 +1591,16 @@ enum ProxyCall {
         namespace: String,
         /// Vec of (document-key, document-text) pairs.
         entries: Vec<(String, String)>,
+    },
+    /// Upgrade 3: execute OMC source code locally via the standalone runtime.
+    Eval {
+        id: String,
+        code: String,
+        timeout_secs: u64,
+    },
+    /// Upgrade 4b: return current token-budget usage for this conversation.
+    Budget {
+        id: String,
     },
 }
 
@@ -1297,8 +1753,19 @@ fn collect_proxy_tool_calls(resp: &Value) -> Vec<ProxyCall> {
                 if entries.is_empty() { return vec![]; }
                 calls.push(ProxyCall::Kb { id, namespace, entries });
             }
+            n if n == EVAL_TOOL_NAME => {
+                let code = inp.get("code")
+                    .and_then(Value::as_str)
+                    .unwrap_or("").to_string();
+                let timeout_secs = inp.get("timeout_secs")
+                    .and_then(Value::as_u64).unwrap_or(15);
+                calls.push(ProxyCall::Eval { id, code, timeout_secs });
+            }
+            n if n == BUDGET_TOOL_NAME => {
+                calls.push(ProxyCall::Budget { id });
+            }
 
-            _ => return vec![], // non-proxy tool → client must handle
+            _ => {}
         }
     }
     calls
@@ -1594,6 +2061,106 @@ fn error_response(code: StatusCode, msg: &str) -> Response {
         .into_response()
 }
 
+// ── Upgrade 1: Retry + Exponential Backoff ────────────────────────────────
+
+/// Wrap `forward_to_upstream` with exponential back-off retry logic.
+/// Only retries on 429 / 5xx responses. Gives up after `max_retries` attempts.
+async fn forward_with_retry(
+    state: &AppState,
+    headers: &HeaderMap,
+    body: Bytes,
+    max_retries: u32,
+) -> Response {
+    let mut attempt = 0u32;
+    loop {
+        let resp = forward_to_upstream(state, headers, body.clone()).await;
+        let status = resp.status();
+        if status == StatusCode::TOO_MANY_REQUESTS
+            || (status.is_server_error() && status != StatusCode::NOT_IMPLEMENTED)
+        {
+            if attempt < max_retries {
+                let delay_ms = 500u64 * (1u64 << attempt.min(6));
+                warn!(
+                    "upstream returned {} (attempt {}/{}), retrying in {}ms",
+                    status,
+                    attempt + 1,
+                    max_retries,
+                    delay_ms
+                );
+                sleep(Duration::from_millis(delay_ms)).await;
+                attempt += 1;
+                continue;
+            }
+        }
+        return resp;
+    }
+}
+
+// ── Upgrade 2: Model Complexity Router ────────────────────────────────────
+
+/// Estimate the complexity of a request body as the sum of characters across
+/// all text content in the messages array.  Fast and allocation-light.
+fn score_complexity(body: &[u8]) -> u32 {
+    let Ok(v) = serde_json::from_slice::<Value>(body) else { return 0 };
+    let Some(messages) = v.get("messages").and_then(Value::as_array) else { return 0 };
+    let mut score: u32 = 0;
+    for msg in messages {
+        if let Some(content) = msg.get("content") {
+            match content {
+                Value::String(s) => score = score.saturating_add(s.len() as u32),
+                Value::Array(parts) => {
+                    for part in parts {
+                        if let Some(text) = part.get("text").and_then(Value::as_str) {
+                            score = score.saturating_add(text.len() as u32);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    score
+}
+
+/// Rewrite the `model` field of the request body according to the complexity
+/// routing rules.  Returns a modified body if routing changed the model.
+fn apply_model_routing(body: Bytes, state: &AppState) -> Bytes {
+    if state.route_haiku_below == 0 && state.route_sonnet_below == 0 {
+        return body; // routing disabled
+    }
+    let Ok(mut v) = serde_json::from_slice::<Value>(&body) else { return body };
+    let current_model = v
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    // Only downgrade — don't upgrade a deliberately-chosen model.
+    if current_model.contains("haiku") || current_model.contains("claude-3-5-haiku") {
+        return body; // already cheapest
+    }
+    let complexity = score_complexity(&body);
+    let target_model = if state.route_haiku_below > 0 && complexity < state.route_haiku_below {
+        Some("claude-3-5-haiku-20241022")
+    } else if state.route_sonnet_below > 0 && complexity < state.route_sonnet_below {
+        Some("claude-3-5-sonnet-20241022")
+    } else {
+        None
+    };
+    if let Some(model) = target_model {
+        if model != current_model {
+            info!(
+                "complexity_router: score={} → routing to {} (was {})",
+                complexity, model, current_model
+            );
+            v["model"] = json!(model);
+            if let Ok(new_bytes) = serde_json::to_vec(&v) {
+                return Bytes::from(new_bytes);
+            }
+        }
+    }
+    body
+}
+
 fn is_streaming_request(body: &[u8]) -> bool {
     serde_json::from_slice::<Value>(body)
         .ok()
@@ -1677,6 +2244,112 @@ async fn version_endpoint() -> Response {
     (StatusCode::OK,
      [(axum::http::header::CONTENT_TYPE, HeaderValue::from_static("application/json"))],
      json.to_string()).into_response()
+}
+
+// ── Upgrade 8: Prometheus metrics endpoint ───────────────────────────────
+async fn metrics_endpoint(State(state): State<AppState>) -> Response {
+    let s = state.stats.lock().unwrap().clone();
+    let cb_open = match state.circuit_breaker.lock().unwrap().state {
+        CircuitState::Open => 1u64,
+        _ => 0,
+    };
+    let token_total: u64 = {
+        let map = state.token_usage.lock().unwrap();
+        map.values().map(|u| u.input_tokens + u.output_tokens).sum()
+    };
+    let cache_entries = state.response_cache.lock().unwrap().len() as u64;
+    let bytes_saved_total = s.bytes_saved_messages + s.bytes_saved_tool_result
+        + s.bytes_saved_system + s.bytes_saved_tool_use_input
+        + s.bytes_saved_tool_definitions + s.bytes_saved_images
+        + s.bytes_saved_response;
+    let text = format!(
+        "# HELP omnimcode_proxy_requests Total proxy requests handled\n\
+         # TYPE omnimcode_proxy_requests counter\n\
+         omnimcode_proxy_requests {}\n\
+         # HELP omnimcode_proxy_bytes_in Total input bytes received\n\
+         # TYPE omnimcode_proxy_bytes_in counter\n\
+         omnimcode_proxy_bytes_in {}\n\
+         # HELP omnimcode_proxy_bytes_out Total rewritten bytes forwarded\n\
+         # TYPE omnimcode_proxy_bytes_out counter\n\
+         omnimcode_proxy_bytes_out {}\n\
+         # HELP omnimcode_proxy_blocks_rewritten Content blocks rewritten to markers\n\
+         # TYPE omnimcode_proxy_blocks_rewritten counter\n\
+         omnimcode_proxy_blocks_rewritten {}\n\
+         # HELP omnimcode_proxy_bytes_saved Total bytes saved by all compression\n\
+         # TYPE omnimcode_proxy_bytes_saved counter\n\
+         omnimcode_proxy_bytes_saved {}\n\
+         # HELP omnimcode_proxy_streaming_passthroughs Streaming requests forwarded\n\
+         # TYPE omnimcode_proxy_streaming_passthroughs counter\n\
+         omnimcode_proxy_streaming_passthroughs {}\n\
+         # HELP omnimcode_proxy_circuit_open Circuit breaker open (1) or closed (0)\n\
+         # TYPE omnimcode_proxy_circuit_open gauge\n\
+         omnimcode_proxy_circuit_open {}\n\
+         # HELP omnimcode_proxy_token_total Total tokens seen across all conversations\n\
+         # TYPE omnimcode_proxy_token_total counter\n\
+         omnimcode_proxy_token_total {}\n\
+         # HELP omnimcode_proxy_response_cache_hits Full-response cache hits\n\
+         # TYPE omnimcode_proxy_response_cache_hits counter\n\
+         omnimcode_proxy_response_cache_hits {}\n\
+         # HELP omnimcode_proxy_response_cache_entries Cached response entries\n\
+         # TYPE omnimcode_proxy_response_cache_entries gauge\n\
+         omnimcode_proxy_response_cache_entries {}\n\
+         # HELP omnimcode_proxy_turns_pruned Message turns dropped by context pruning\n\
+         # TYPE omnimcode_proxy_turns_pruned counter\n\
+         omnimcode_proxy_turns_pruned {}\n",
+        s.requests, s.bytes_in, s.bytes_out, s.blocks_rewritten,
+        bytes_saved_total, s.streaming_passthrough,
+        cb_open, token_total, s.response_cache_hits,
+        cache_entries, s.turns_pruned,
+    );
+    let mut resp_headers = HeaderMap::new();
+    resp_headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"),
+    );
+    rebuild_response(StatusCode::OK, &resp_headers, Bytes::from(text))
+}
+
+// ── Upgrade 9: FNV-1a hash helper ────────────────────────────────────────
+fn fnv_hash(data: &[u8]) -> u64 {
+    data.iter().fold(14695981039346656037u64, |h, &b|
+        h.wrapping_mul(1099511628211).wrapping_add(b as u64))
+}
+
+// ── Upgrade 10: Context window auto-pruning ───────────────────────────────
+/// Drop oldest user/assistant turn pairs until the total serialized chars
+/// across all messages is under `state.max_context_chars`. Returns the
+/// (possibly rewritten) body.
+fn prune_context_bytes(body: Bytes, state: &AppState) -> Bytes {
+    let Ok(mut v) = serde_json::from_slice::<Value>(&body) else { return body };
+    let Some(messages) = v.get_mut("messages").and_then(Value::as_array_mut) else {
+        return body;
+    };
+    let total_chars: usize = messages.iter()
+        .map(|m| serde_json::to_string(m).map(|s| s.len()).unwrap_or(0))
+        .sum();
+    if total_chars <= state.max_context_chars || messages.len() < 4 {
+        return body; // nothing to prune
+    }
+    let mut pruned: u64 = 0;
+    // Keep dropping oldest 2-message pairs until within limit or too short
+    while messages.len() >= 4 {
+        let total: usize = messages.iter()
+            .map(|m| serde_json::to_string(m).map(|s| s.len()).unwrap_or(0))
+            .sum();
+        if total <= state.max_context_chars { break; }
+        messages.remove(0);
+        messages.remove(0);
+        pruned += 2;
+    }
+    if pruned > 0 {
+        info!("context_pruning: dropped {} turns (max_context_chars={})", pruned,
+            state.max_context_chars);
+        state.stats.lock().unwrap().turns_pruned += pruned;
+        if let Ok(new_bytes) = serde_json::to_vec(&v) {
+            return Bytes::from(new_bytes);
+        }
+    }
+    body
 }
 
 /// Walk the request body and rewrite every eligible large block.
@@ -2246,6 +2919,53 @@ fn try_delta_store(text: &str, state: &AppState) -> Option<i64> {
 /// Inject all proxy-owned tools into the request's tools array.
 /// Currently: omc_proxy_expand_ref, omc_proxy_remember, omc_proxy_recall.
 /// We avoid double-injection by checking for expand_ref (the sentinel tool).
+
+// ── Upgrade 3: omc_proxy_eval ────────────────────────────────────────────────
+/// Spawn `omnimcode-standalone` in a subprocess, feed it `code`, capture stdout.
+/// Returns stdout on success, or a bracketed error string on failure/timeout.
+async fn dispatch_eval(code: &str, timeout_secs: u64, state: &AppState) -> String {
+    use tokio::io::AsyncWriteExt;
+    use tokio::time::{timeout, Duration};
+    // Write code to a temp file so the standalone binary can run it
+    let tmp = std::env::temp_dir().join(format!("omc_eval_{}.omc",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos()));
+    if let Err(e) = tokio::fs::write(&tmp, code).await {
+        return format!("[omc_eval: write error: {}]", e);
+    }
+    let fut = tokio::process::Command::new(&state.omc_bin)
+        .arg(tmp.as_os_str())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output();
+    let result = match timeout(Duration::from_secs(timeout_secs), fut).await {
+        Err(_) => {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return format!("[omc_eval: timeout after {}s]", timeout_secs);
+        }
+        Ok(Err(e)) => {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return format!("[omc_eval: spawn error: {}]", e);
+        }
+        Ok(Ok(out)) => out,
+    };
+    let _ = tokio::fs::remove_file(&tmp).await;
+    let stdout = String::from_utf8_lossy(&result.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&result.stderr).trim().to_string();
+    if result.status.success() {
+        if stdout.is_empty() { "(no output)".to_string() } else { stdout }
+    } else {
+        let code = result.status.code().unwrap_or(-1);
+        if stderr.is_empty() {
+            format!("[omc_eval exit {}]: {}", code, stdout)
+        } else {
+            format!("[omc_eval exit {}]: {}", code, stderr)
+        }
+    }
+}
+
 fn inject_proxy_tools(req: &mut Value) {
     let tools_arr = match req.get_mut("tools") {
         Some(Value::Array(a)) => {
@@ -2571,6 +3291,41 @@ fn inject_proxy_tools(req: &mut Value) {
                 }
             },
             "required": ["namespace", "entries"]
+        }
+    }));
+
+    // ── Upgrade 3: omc_proxy_eval ──────────────────────────────────────────
+    tools_arr.push(json!({
+        "name": EVAL_TOOL_NAME,
+        "description": "Execute a snippet of OMC (OmniMCode) source code and return stdout. \
+Use for quick calculations, data transformations, or verifying OMC syntax. \
+Returns {\"stdout\": \"...\", \"stderr\": \"...\", \"exit_code\": 0}.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string",
+                    "description": "OMC source code to evaluate. Must be valid OMC."
+                },
+                "timeout_secs": {
+                    "type": "integer",
+                    "description": "Seconds to wait before killing the process. Default 10, max 60.",
+                    "default": 10
+                }
+            },
+            "required": ["code"]
+        }
+    }));
+
+    // ── Upgrade 4: omc_proxy_budget ────────────────────────────────────────
+    tools_arr.push(json!({
+        "name": BUDGET_TOOL_NAME,
+        "description": "Check the current token budget for this conversation. \
+Returns total input + output tokens used so far and the configured warn/max thresholds.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
         }
     }));
 

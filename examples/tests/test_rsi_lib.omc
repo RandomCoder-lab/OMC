@@ -1,0 +1,279 @@
+# Tests for examples/lib/rsi.omc
+# Uses module import to preserve internal helper functions.
+import "examples/lib/rsi.omc" as rsi
+
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        print("FAIL [" + msg + "] expected=" + to_string(expected) + " got=" + to_string(actual))
+    } else {
+        print("PASS [" + msg + "]")
+    }
+}
+
+fn assert_approx(actual, expected, tol, msg) {
+    h diff = actual - expected
+    if diff < 0.0 { diff = 0.0 - diff }
+    if diff > tol {
+        print("FAIL [" + msg + "] expected≈" + to_string(expected) + " got=" + to_string(actual))
+    } else {
+        print("PASS [" + msg + "]")
+    }
+}
+
+fn assert_true(val, msg) {
+    if val {
+        print("PASS [" + msg + "]")
+    } else {
+        print("FAIL [" + msg + "] expected true, got false")
+    }
+}
+
+fn assert_ge(actual, minimum, msg) {
+    if actual >= minimum {
+        print("PASS [" + msg + "]")
+    } else {
+        print("FAIL [" + msg + "] expected >= " + to_string(minimum) + " got=" + to_string(actual))
+    }
+}
+
+# ── 1. rsi_make_candidate ─────────────────────────────────────────────────────
+print("=== 1. rsi_make_candidate ===")
+
+h c = rsi.rsi_make_candidate("fn f(x){return x;}", 0.75, 2, "test")
+assert_eq(c["code"],  "fn f(x){return x;}",  "candidate.code")
+assert_eq(c["score"], 0.75,                   "candidate.score")
+assert_eq(c["gen"],   2,                      "candidate.gen")
+assert_eq(c["note"],  "test",                 "candidate.note")
+
+# ── 2. rsi_sort_pop ───────────────────────────────────────────────────────────
+print("=== 2. rsi_sort_pop ===")
+
+h unsorted = [
+    rsi.rsi_make_candidate("a", 0.3, 0, "c"),
+    rsi.rsi_make_candidate("b", 0.9, 0, "a"),
+    rsi.rsi_make_candidate("c", 0.6, 0, "b")
+]
+h sorted = rsi.rsi_sort_pop(unsorted)
+assert_eq(sorted[0]["score"], 0.9, "sort: best first")
+assert_eq(sorted[1]["score"], 0.6, "sort: middle second")
+assert_eq(sorted[2]["score"], 0.3, "sort: worst last")
+
+# ── 3. rsi_best ───────────────────────────────────────────────────────────────
+print("=== 3. rsi_best ===")
+
+h pop3 = [
+    rsi.rsi_make_candidate("x", 0.2, 0, ""),
+    rsi.rsi_make_candidate("y", 0.8, 0, ""),
+    rsi.rsi_make_candidate("z", 0.5, 0, "")
+]
+h best = rsi.rsi_best(pop3)
+assert_eq(best["score"], 0.8, "rsi_best: score")
+assert_eq(best["code"],  "y", "rsi_best: code")
+
+# ── 4. rsi_top_k ─────────────────────────────────────────────────────────────
+print("=== 4. rsi_top_k ===")
+
+h pop4 = [
+    rsi.rsi_make_candidate("a", 0.1, 0, ""),
+    rsi.rsi_make_candidate("b", 0.9, 0, ""),
+    rsi.rsi_make_candidate("c", 0.5, 0, ""),
+    rsi.rsi_make_candidate("d", 0.7, 0, "")
+]
+h top2 = rsi.rsi_top_k(pop4, 2)
+assert_eq(len(top2),      2,   "top_k: length")
+assert_eq(top2[0]["score"],  0.9, "top_k: first score")
+assert_eq(top2[1]["score"],  0.7, "top_k: second score")
+
+h top10 = rsi.rsi_top_k(pop4, 10)
+assert_eq(len(top10), 4, "top_k: clamps to pop size")
+
+# ── 5. rsi_tournament ────────────────────────────────────────────────────────
+print("=== 5. rsi_tournament ===")
+
+h pop5 = [
+    rsi.rsi_make_candidate("a", 0.1, 0, ""),
+    rsi.rsi_make_candidate("b", 0.95, 0, ""),
+    rsi.rsi_make_candidate("c", 0.5, 0, "")
+]
+h winner = rsi.rsi_tournament(pop5, 3)
+# With k=3 iterations visiting all, should pick highest-scoring element found
+assert_true(winner["score"] >= 0.1, "tournament: winner score is valid")
+
+# ── 6. rsi_evaluate (pure fitness function) ───────────────────────────────────
+print("=== 6. rsi_evaluate (constant fitness) ===")
+
+fn const_fitness(code) {
+    return 0.42
+}
+
+h pop6 = [
+    rsi.rsi_make_candidate("fn f(){return 1;}", 0.0, 0, ""),
+    rsi.rsi_make_candidate("fn g(){return 2;}", 0.0, 0, "")
+]
+h scored = rsi.rsi_evaluate(pop6, const_fitness)
+assert_eq(len(scored),      2,    "evaluate: length preserved")
+assert_eq(scored[0]["score"],  0.42, "evaluate: score applied [0]")
+assert_eq(scored[1]["score"],  0.42, "evaluate: score applied [1]")
+# originals untouched
+assert_eq(pop6[0]["score"],    0.0,  "evaluate: original unchanged")
+
+# ── 7. rsi_substrate_fitness ─────────────────────────────────────────────────
+print("=== 7. rsi_substrate_fitness ===")
+
+h seed_code = "fn square(x) { return x * x; }"
+h sf = rsi.rsi_substrate_fitness(seed_code)
+
+# Identical code should score 1.0 similarity → near-maximum fitness
+h score_identical = sf(seed_code)
+assert_true(score_identical > 0.5, "substrate_fitness: identical code > 0.5")
+assert_true(score_identical <= 1.0, "substrate_fitness: identical code <= 1.0")
+
+# Completely different code should score lower
+h score_diff = sf("fn hello() { print(\"world\"); }")
+assert_true(score_diff >= 0.0, "substrate_fitness: diff code >= 0.0")
+assert_true(score_diff <= 1.0, "substrate_fitness: diff code <= 1.0")
+
+# ── 8. rsi_composite_fitness ─────────────────────────────────────────────────
+print("=== 8. rsi_composite_fitness ===")
+
+fn always_0(code) { return 0.0 }
+fn always_1(code) { return 1.0 }
+
+# 50/50 blend → 0.5
+h cf50 = rsi.rsi_composite_fitness([always_0, always_1], [1.0, 1.0])
+assert_approx(cf50("any code"), 0.5, 0.001, "composite_fitness: 50/50 blend")
+
+# 25/75 blend → 0.75
+h cf75 = rsi.rsi_composite_fitness([always_0, always_1], [1.0, 3.0])
+assert_approx(cf75("any code"), 0.75, 0.001, "composite_fitness: 25/75 blend")
+
+# single fitness
+h cf_single = rsi.rsi_composite_fitness([always_1], [2.0])
+assert_approx(cf_single("x"), 1.0, 0.001, "composite_fitness: single fn")
+
+# ── 9. rsi_diff_report ────────────────────────────────────────────────────────
+print("=== 9. rsi_diff_report ===")
+
+h old = "fn f(x) { return x; }"
+h new = "fn f(x) { return x * 2; }"
+h report = rsi.rsi_diff_report(old, new)
+
+assert_true(report["similarity"] >= 0.0,  "diff_report: similarity >= 0")
+assert_true(report["similarity"] <= 1.0,  "diff_report: similarity <= 1")
+assert_true(report["added"]     != null,  "diff_report: added key exists")
+assert_true(report["removed"]   != null,  "diff_report: removed key exists")
+assert_true(report["modified"]  != null,  "diff_report: modified key exists")
+assert_true(report["unchanged"] != null,  "diff_report: unchanged key exists")
+
+# Identical code → similarity 1.0, nothing changed
+h report_same = rsi.rsi_diff_report(old, old)
+assert_approx(report_same["similarity"], 1.0, 0.001, "diff_report: identical similarity=1")
+
+# ── 10. rsi_fingerprint ───────────────────────────────────────────────────────
+print("=== 10. rsi_fingerprint ===")
+
+h pop10 = [
+    rsi.rsi_make_candidate("fn f(x){return x;}",     0.5, 0, ""),
+    rsi.rsi_make_candidate("fn g(y){return y + 1;}", 0.7, 1, "")
+]
+h fps = rsi.rsi_fingerprint(pop10)
+assert_eq(len(fps),     2,   "fingerprint: length matches pop")
+assert_eq(fps[0]["idx"],   0,   "fingerprint: idx[0]")
+assert_eq(fps[1]["idx"],   1,   "fingerprint: idx[1]")
+assert_eq(fps[0]["score"], 0.5, "fingerprint: score preserved [0]")
+assert_true(fps[0]["fingerprint"] != null, "fingerprint: fp[0] exists")
+assert_true(fps[1]["fingerprint"] != null, "fingerprint: fp[1] exists")
+assert_true(fps[0]["attractor"]   != null, "fingerprint: attractor[0] exists")
+
+# Alpha-equivalent code → same fingerprint
+h pop10b = [
+    rsi.rsi_make_candidate("fn f(x){return x;}",     0.5, 0, ""),
+    rsi.rsi_make_candidate("fn f(z){return z;}",     0.5, 0, "")  # alpha-equiv
+]
+h fps_b = rsi.rsi_fingerprint(pop10b)
+assert_eq(fps_b[0]["fingerprint"], fps_b[1]["fingerprint"], "fingerprint: alpha-equiv match")
+
+# ── 11. rsi_dedupe ────────────────────────────────────────────────────────────
+print("=== 11. rsi_dedupe ===")
+
+h pop11 = [
+    rsi.rsi_make_candidate("fn f(x){return x+1;}",  0.8, 0, "orig"),
+    rsi.rsi_make_candidate("fn g(y){return y*2;}", 0.6, 0, "other"),
+    rsi.rsi_make_candidate("fn f(x){return x+1;}",  0.9, 1, "dup")
+]
+h deduped = rsi.rsi_dedupe(pop11)
+assert_eq(len(deduped), 2, "dedupe: removes structural duplicate")
+assert_eq(deduped[0]["note"], "orig",  "dedupe: keeps first occurrence")
+assert_eq(deduped[1]["note"], "other", "dedupe: keeps unique entry")
+
+# ── 12. rsi_summary ───────────────────────────────────────────────────────────
+print("=== 12. rsi_summary ===")
+
+h pop12 = [
+    rsi.rsi_make_candidate("a", 0.2, 0, ""),
+    rsi.rsi_make_candidate("b", 0.8, 2, ""),
+    rsi.rsi_make_candidate("c", 0.5, 1, "")
+]
+h summ = rsi.rsi_summary(pop12)
+assert_eq(summ["size"],             3,   "summary: size")
+assert_approx(summ["best_score"],   0.8, 0.001, "summary: best_score")
+assert_approx(summ["worst_score"],  0.2, 0.001, "summary: worst_score")
+assert_approx(summ["mean_score"],   0.5, 0.001, "summary: mean_score")
+assert_eq(summ["generations_seen"], 2,   "summary: max gen")
+
+# Edge case: empty population
+h empty_summ = rsi.rsi_summary([])
+assert_eq(empty_summ["size"], 0, "summary: empty pop size=0")
+assert_approx(empty_summ["mean_score"], 0.0, 0.001, "summary: empty pop mean=0")
+
+# ── 13. rsi_summary single candidate ─────────────────────────────────────────
+print("=== 13. rsi_summary single candidate ===")
+
+h pop13 = [rsi.rsi_make_candidate("fn x(){}", 0.66, 3, "sole")]
+h summ13 = rsi.rsi_summary(pop13)
+assert_eq(summ13["size"], 1, "summary: single size")
+assert_approx(summ13["best_score"],  0.66, 0.001, "summary: single best")
+assert_approx(summ13["worst_score"], 0.66, 0.001, "summary: single worst")
+assert_approx(summ13["mean_score"],  0.66, 0.001, "summary: single mean")
+assert_eq(summ13["generations_seen"], 3, "summary: single gen")
+
+# ── 14. rsi_composite_fitness with three functions ────────────────────────────
+print("=== 14. rsi_composite_fitness (3 fns) ===")
+
+fn always_half(code) { return 0.5 }
+h cf3 = rsi.rsi_composite_fitness([always_0, always_half, always_1], [1.0, 2.0, 1.0])
+# weighted average: (0*1 + 0.5*2 + 1*1) / 4 = (0 + 1 + 1)/4 = 0.5
+assert_approx(cf3("code"), 0.5, 0.001, "composite_fitness: 3-fn weighted average")
+
+# ── 15. Population round-trip through evaluate + sort + top_k ────────────────
+print("=== 15. evaluate → sort → top_k pipeline ===")
+
+fn linear_fitness(code) {
+    # Fitness proportional to code length (a simple deterministic proxy)
+    return len(code) / 100.0
+}
+
+h pop15 = [
+    rsi.rsi_make_candidate("fn f(x){return x;}",                   0.0, 0, "short"),
+    rsi.rsi_make_candidate("fn f(x){return x * x;}",               0.0, 0, "medium"),
+    rsi.rsi_make_candidate("fn f(x){h y = x * x; return y + 1;}", 0.0, 0, "long")
+]
+h ev15  = rsi.rsi_evaluate(pop15, linear_fitness)
+h top15 = rsi.rsi_top_k(ev15, 2)
+# Longest code gets highest score
+assert_eq(len(top15), 2, "pipeline: top_k=2")
+assert_true(top15[0]["score"] >= top15[1]["score"], "pipeline: top_k ordered desc")
+assert_true(top15[0]["score"] > 0.0, "pipeline: scores applied")
+
+# ── 16. rsi_diff_report structural keys ──────────────────────────────────────
+print("=== 16. rsi_diff_report key shape ===")
+
+h r16 = rsi.rsi_diff_report(
+    "fn a(x){return x;} fn b(y){return y;}",
+    "fn a(x){return x+1;} fn c(z){return z;}"
+)
+# "a" modified, "b" removed, "c" added — exact diffs depend on canonicalizer
+assert_true(r16["similarity"] < 1.0, "diff_report: non-identical similarity < 1")
+assert_true(r16["similarity"] >= 0.0, "diff_report: similarity non-negative")
+
+print("=== All tests complete ===")

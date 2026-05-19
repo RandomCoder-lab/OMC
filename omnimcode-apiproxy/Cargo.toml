@@ -12,7 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 omnimcode-core = { path = "../omnimcode-core", default-features = false }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "process", "time"] }
 axum = "0.7"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }

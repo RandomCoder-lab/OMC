@@ -1,0 +1,169 @@
+# Tests for RSI native builtins:
+#   code_parse_check, fn_bench, time_ms,
+#   fn_snapshot, fn_rollback, fn_snapshot_all, fn_rollback_all
+
+# ---------------------------------------------------------------------------
+# code_parse_check
+# ---------------------------------------------------------------------------
+
+fn test_code_parse_check_valid() {
+    h r = code_parse_check("fn add(a, b) { return a + b; }");
+    assert r["ok"] == true,   "valid code should parse OK";
+    assert r["error"] == null, "no error on valid code";
+}
+
+fn test_code_parse_check_invalid() {
+    h r = code_parse_check("fn broken( { }}}}");
+    assert r["ok"] == false,               "broken code should fail";
+    assert r["error"] != null,             "error field should be set";
+    assert len(r["error"]) > 0,            "error message non-empty";
+}
+
+fn test_code_parse_check_empty() {
+    h r = code_parse_check("");
+    assert r["ok"] == true, "empty string is valid (no statements)";
+}
+
+# ---------------------------------------------------------------------------
+# time_ms
+# ---------------------------------------------------------------------------
+
+fn test_time_ms_positive() {
+    h t = time_ms();
+    assert t > 0, "time_ms returns positive epoch ms";
+}
+
+fn test_time_ms_monotonic() {
+    h t0 = time_ms();
+    h t1 = time_ms();
+    assert t1 >= t0, "time_ms is non-decreasing";
+}
+
+# ---------------------------------------------------------------------------
+# fn_bench
+# ---------------------------------------------------------------------------
+
+fn identity(x) { return x; }
+fn sum_to(n) {
+    h s = 0;
+    for i in range(0, n + 1) { s += i; }
+    return s;
+}
+
+fn test_fn_bench_keys() {
+    h b = fn_bench("identity", [42], 10);
+    h ks = dict_keys(b);
+    assert arr_contains(ks, "mean_ms"),  "result has mean_ms";
+    assert arr_contains(ks, "min_ms"),   "result has min_ms";
+    assert arr_contains(ks, "max_ms"),   "result has max_ms";
+    assert arr_contains(ks, "total_ms"), "result has total_ms";
+    assert arr_contains(ks, "n_reps"),   "result has n_reps";
+}
+
+fn test_fn_bench_n_reps() {
+    h b = fn_bench("identity", [1], 7);
+    assert b["n_reps"] == 7, "n_reps matches requested count";
+}
+
+fn test_fn_bench_ordering() {
+    h b = fn_bench("sum_to", [100], 20);
+    assert b["min_ms"] <= b["mean_ms"], "min <= mean";
+    assert b["mean_ms"] <= b["max_ms"], "mean <= max";
+    assert b["total_ms"] >= b["min_ms"], "total >= min";
+}
+
+fn test_fn_bench_default_reps() {
+    # Default is 10 reps when n_reps omitted
+    h b = fn_bench("identity", [0]);
+    assert b["n_reps"] == 10, "default n_reps is 10";
+}
+
+# ---------------------------------------------------------------------------
+# fn_snapshot / fn_rollback
+# ---------------------------------------------------------------------------
+
+fn counter(x) { return x + 1; }
+
+fn test_snapshot_rollback_basic() {
+    h v0 = counter(10);   # should be 11
+    fn_snapshot("counter");
+    eval_omc("fn counter(x) { return x + 100; }");
+    h v1 = counter(10);   # should be 110
+    h old_src = fn_rollback("counter");
+    h v2 = counter(10);   # should be 11 again
+
+    assert v0 == 11,  "original counter returns x+1";
+    assert v1 == 110, "hot-swapped counter returns x+100";
+    assert v2 == 11,  "rollback restored original";
+    assert len(old_src) > 0, "rollback returns old source string";
+}
+
+fn test_snapshot_stacked() {
+    fn_snapshot("counter");   # snapshot v1 (x+100 from above is reverted, this is x+1)
+    eval_omc("fn counter(x) { return x + 200; }");
+    fn_snapshot("counter");   # snapshot v2 (x+200)
+    eval_omc("fn counter(x) { return x + 300; }");
+
+    assert counter(0) == 300, "latest: x+300";
+    fn_rollback("counter");
+    assert counter(0) == 200, "after first rollback: x+200";
+    fn_rollback("counter");
+    assert counter(0) == 1,   "after second rollback: x+1";
+}
+
+fn test_rollback_no_snapshot_returns_null() {
+    # 'identity' was never snapshot-d in this context
+    fn_snapshot("identity");  # push one
+    fn_rollback("identity");  # pop that one
+    h r = fn_rollback("identity");  # stack is empty
+    assert r == null, "rollback on empty stack returns null";
+}
+
+# ---------------------------------------------------------------------------
+# fn_snapshot_all / fn_rollback_all
+# ---------------------------------------------------------------------------
+
+fn alpha(x) { return x * 2; }
+fn beta(x)  { return x + 5; }
+
+fn test_snapshot_all_restores_all() {
+    fn_snapshot_all();
+
+    eval_omc("fn alpha(x) { return x * 1000; }");
+    eval_omc("fn beta(x)  { return x - 999; }");
+
+    assert alpha(3) == 3000, "alpha mutated to x*1000";
+    assert beta(3)  == -996, "beta mutated to x-999";
+
+    fn_rollback_all();
+
+    assert alpha(3) == 6,  "alpha restored to x*2";
+    assert beta(3)  == 8,  "beta restored to x+5";
+}
+
+# ---------------------------------------------------------------------------
+# Run all
+# ---------------------------------------------------------------------------
+
+fn run_all() {
+    test_code_parse_check_valid();
+    test_code_parse_check_invalid();
+    test_code_parse_check_empty();
+
+    test_time_ms_positive();
+    test_time_ms_monotonic();
+
+    test_fn_bench_keys();
+    test_fn_bench_n_reps();
+    test_fn_bench_ordering();
+    test_fn_bench_default_reps();
+
+    test_snapshot_rollback_basic();
+    test_snapshot_stacked();
+    test_rollback_no_snapshot_returns_null();
+    test_snapshot_all_restores_all();
+
+    print("rsi_builtins: all tests passed");
+}
+
+run_all();

@@ -3,18 +3,18 @@
 # The native substrate_embed builtin (no API key, pure math) powers all retrieval.
 
 import "examples/lib/llm.omc"
-import "examples/lib/cache.omc" as cache
+import "examples/lib/cache.omc"
 
 h MODEL = "claude-opus-4-5"
-h EMBED_CACHE = cache.lru_new(500)
+h EMBED_CACHE = lru_new(500)
 
 # ── Embedding helpers ─────────────────────────────────────────────────────────
 
 fn embed_cached(text) {
-    h cached = cache.lru_get(EMBED_CACHE, text)
+    h cached = lru_get(EMBED_CACHE, text)
     if cached != null { return cached }
     h v = substrate_embed(text, 16)
-    cache.lru_put(EMBED_CACHE, text, v)
+    lru_put(EMBED_CACHE, text, v)
     return v
 }
 

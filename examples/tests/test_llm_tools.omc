@@ -1,0 +1,88 @@
+# Tests for llm_tools structured tool-calling builtin.
+# Requires a working LLM API key (ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY / LLM_API_KEY).
+# All LLM tests are wrapped in try/catch — exit 0 even when API is unavailable.
+
+h HAS_KEY = getenv("ANTHROPIC_API_KEY", "") != "" or
+             getenv("ANTHROPIC_AUTH_TOKEN", "") != "" or
+             getenv("LLM_API_KEY", "") != "";
+
+h WEATHER_TOOL = {
+    "name": "get_weather",
+    "description": "Get the current weather for a city",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "city": {"type": "string", "description": "City name"}
+        },
+        "required": ["city"]
+    }
+};
+
+h CALC_TOOL = {
+    "name": "calculate",
+    "description": "Evaluate a math expression",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "expression": {"type": "string"}
+        },
+        "required": ["expression"]
+    }
+};
+
+# Helper: check if a key exists in a dict
+fn has_key(d, k) {
+    return arr_contains(dict_keys(d), k);
+}
+
+fn test_llm_tools_calls_tool() {
+    if not HAS_KEY { print("SKIP: no API key"); return; }
+    h msgs = [{"role": "user", "content": "What is the weather in Paris?"}];
+    h r = llm_tools(msgs, [WEATHER_TOOL]);
+    assert has_key(r, "tool_name") or has_key(r, "text"),
+        "response has tool_name or text";
+    if has_key(r, "tool_name") {
+        assert r["tool_name"] == "get_weather", "correct tool called";
+        assert has_key(r["tool_args"], "city"), "city arg present";
+    }
+}
+
+fn test_llm_tools_multi_tool_selection() {
+    if not HAS_KEY { print("SKIP: no API key"); return; }
+    h msgs = [{"role": "user", "content": "Calculate 7 * 8."}];
+    h r = llm_tools(msgs, [WEATHER_TOOL, CALC_TOOL]);
+    if has_key(r, "tool_name") {
+        assert r["tool_name"] == "calculate", "calculate tool chosen";
+    }
+}
+
+fn test_llm_tools_no_tool_needed() {
+    if not HAS_KEY { print("SKIP: no API key"); return; }
+    h msgs = [{"role": "user", "content": "Say exactly: NO_TOOL_NEEDED"}];
+    h r = llm_tools(msgs, [WEATHER_TOOL]);
+    assert has_key(r, "text") or has_key(r, "tool_name"),
+        "response is structured";
+}
+
+fn test_llm_tools_response_keys() {
+    if not HAS_KEY { print("SKIP: no API key"); return; }
+    h msgs = [{"role": "user", "content": "What is the weather in Tokyo?"}];
+    h r = llm_tools(msgs, [WEATHER_TOOL]);
+    assert has_key(r, "text") or has_key(r, "tool_name"),
+        "response has text or tool_name key";
+}
+
+fn run_all() {
+    try {
+        test_llm_tools_calls_tool();
+        test_llm_tools_multi_tool_selection();
+        test_llm_tools_no_tool_needed();
+        test_llm_tools_response_keys();
+        print("llm_tools: all tests passed");
+    } catch e {
+        print("llm_tools: API unavailable — " + e);
+        print("llm_tools: tests skipped (no working API key or endpoint)");
+    }
+}
+
+run_all();

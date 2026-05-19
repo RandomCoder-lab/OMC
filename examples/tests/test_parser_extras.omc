@@ -174,3 +174,28 @@ fn test_range_step_skip() {
     }
     assert_eq(count, 3, "range(1,10,3) has 3 elements: 1,4,7");
 }
+
+fn test_assert_passes() {
+    assert 1 == 1;
+    assert 2 + 2 == 4, "basic math";
+}
+
+fn test_assert_fails() {
+    h caught = false;
+    try {
+        assert 1 == 2, "one is not two";
+    } catch e {
+        caught = true;
+    }
+    assert_eq(caught, true, "assert should throw on false");
+}
+
+fn test_assert_no_msg() {
+    h caught = false;
+    try {
+        assert false;
+    } catch e {
+        caught = true;
+    }
+    assert_eq(caught, true, "bare assert false should throw");
+}

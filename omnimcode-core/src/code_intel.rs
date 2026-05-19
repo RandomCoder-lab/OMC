@@ -203,6 +203,12 @@ fn collect_expr_calls(e: &Expression, out: &mut BTreeSet<String>) {
     }
 }
 
+/// Returns true if `source` parses as valid OMC, false otherwise.
+pub fn is_valid(source: &str) -> bool {
+    let mut p = Parser::new(source);
+    p.parse().is_ok()
+}
+
 /// Cyclomatic complexity — count branch points + 1 per function.
 /// Higher = more branchy = harder to test.
 pub fn complexity(source: &str) -> Result<i64, String> {

@@ -49,6 +49,7 @@ pub fn llm_call(prompt: &str, model_override: Option<&str>) -> Result<Value, Str
     llm_call_sys(prompt, model_override, None)
 }
 
+#[cfg(feature = "native-llm")]
 pub fn llm_call_sys(
     prompt: &str,
     model_override: Option<&str>,
@@ -209,6 +210,7 @@ pub fn llm_stream_print(
 ///
 /// Scores each response (array of strings) against `criteria` and returns
 /// an array of `{idx, score, reason}` dicts sorted best-first.
+#[cfg(feature = "native-llm")]
 pub fn llm_judge(
     responses: &Value,
     criteria: &str,
@@ -257,6 +259,7 @@ pub fn llm_judge(
 /// `llm_compare(a, b, criteria, model?) -> dict`
 ///
 /// Compares two responses and returns `{winner: "A"|"B", reason: "..."}`.
+#[cfg(feature = "native-llm")]
 pub fn llm_compare(
     a: &str,
     b: &str,
@@ -516,19 +519,26 @@ struct Config {
 #[cfg(feature = "native-llm")]
 impl Config {
     fn from_env() -> Result<Self, String> {
-        let provider = match std::env::var("LLM_PROVIDER")
+        // Provider: explicit LLM_PROVIDER wins; otherwise infer from key env vars.
+        let explicit_provider = std::env::var("LLM_PROVIDER")
             .unwrap_or_default()
-            .to_lowercase()
-            .as_str()
-        {
+            .to_lowercase();
+        let provider = match explicit_provider.as_str() {
             "anthropic" => Provider::Anthropic,
-            _ => Provider::OpenAI,
+            "openai"    => Provider::OpenAI,
+            _ => {
+                // Auto-detect: if any Anthropic-specific var is set, use Anthropic.
+                let has_anthropic_key =
+                    std::env::var("ANTHROPIC_API_KEY").map(|v| !v.is_empty()).unwrap_or(false)
+                    || std::env::var("ANTHROPIC_AUTH_TOKEN").map(|v| !v.is_empty()).unwrap_or(false);
+                if has_anthropic_key { Provider::Anthropic } else { Provider::OpenAI }
+            }
         };
 
         let (default_url, default_model) = match provider {
             Provider::Anthropic => (
                 "https://api.anthropic.com/v1/messages".to_string(),
-                "claude-3-5-haiku-20241022".to_string(),
+                "claude-haiku-4-5".to_string(),
             ),
             Provider::OpenAI => (
                 "https://api.openai.com/v1/chat/completions".to_string(),
@@ -536,7 +546,21 @@ impl Config {
             ),
         };
 
-        let base_url = std::env::var("LLM_BASE_URL").unwrap_or(default_url);
+        // Base URL: LLM_BASE_URL > ANTHROPIC_BASE_URL > default.
+        let base_url = std::env::var("LLM_BASE_URL")
+            .or_else(|_| std::env::var("ANTHROPIC_BASE_URL"))
+            .unwrap_or(default_url);
+
+        // Append /v1/messages for Anthropic when the base URL ends with the proxy host.
+        let base_url = if provider == Provider::Anthropic
+            && !base_url.contains("/messages")
+            && !base_url.ends_with("/v1/chat/completions")
+        {
+            format!("{}/v1/messages", base_url.trim_end_matches('/'))
+        } else {
+            base_url
+        };
+
         let model = std::env::var("LLM_MODEL").unwrap_or(default_model);
         let api_key = api_key()?;
 
@@ -697,7 +721,12 @@ fn post_json(
 
 #[cfg(feature = "native-llm")]
 fn api_key() -> Result<String, String> {
-    for var in &["LLM_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"] {
+    for var in &[
+        "LLM_API_KEY",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",  // Claude Code / apiproxy token
+    ] {
         if let Ok(k) = std::env::var(var) {
             if !k.is_empty() {
                 return Ok(k);
@@ -706,7 +735,7 @@ fn api_key() -> Result<String, String> {
     }
     Err(
         "llm_call/llm_chat/llm_embed: no API key found. \
-         Set LLM_API_KEY (or OPENAI_API_KEY / ANTHROPIC_API_KEY)."
+         Set LLM_API_KEY (or OPENAI_API_KEY / ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN)."
             .to_string(),
     )
 }
@@ -996,6 +1025,7 @@ fn complete_openai_tools(
 /// Creates a harmonic embedding of `text` using Fibonacci-indexed phi/pi
 /// frequencies. Returns an L2-normalised float array of length `dims`
 /// (default 16). Works offline — no API key required.
+#[cfg(feature = "native-llm")]
 pub fn substrate_embed(text: &str, dims: usize) -> Value {
     const PHI: f64 = 1.618_033_988_749_895;
     let pi = std::f64::consts::PI;

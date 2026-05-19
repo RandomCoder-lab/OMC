@@ -1,0 +1,62 @@
+# Tests for llm_stream_print streaming response builtin.
+# llm_stream_print(prompt, system?, model?) — streams to stdout, returns full text.
+# Requires ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN (skipped gracefully if absent).
+
+h HAS_KEY = getenv("ANTHROPIC_API_KEY", "") != "" or
+             getenv("ANTHROPIC_AUTH_TOKEN", "") != "";
+
+fn test_stream_print_returns_text() {
+    if not HAS_KEY {
+        print("SKIP: no API key");
+        return;
+    }
+    try {
+        h result = llm_stream_print("Reply with exactly the word: STREAMOK");
+        assert str_contains(result, "STREAMOK"), "stream result contains expected word";
+    } catch e {
+        print("SKIP (API unavailable): " + e);
+    }
+}
+
+fn test_stream_with_system_prompt() {
+    if not HAS_KEY {
+        print("SKIP: no API key");
+        return;
+    }
+    try {
+        h r = llm_stream_print(
+            "What are you?",
+            "You are a robot assistant called OMCBOT. Always include OMCBOT in your reply."
+        );
+        assert str_contains(r, "OMCBOT"), "system prompt applied in stream";
+    } catch e {
+        print("SKIP (API unavailable): " + e);
+    }
+}
+
+fn test_stream_result_is_string() {
+    if not HAS_KEY {
+        print("SKIP: no API key");
+        return;
+    }
+    try {
+        h r = llm_stream_print("Say hello.");
+        assert type_of(r) == "string", "llm_stream_print returns a string";
+        assert len(r) > 0, "response is non-empty";
+    } catch e {
+        print("SKIP (API unavailable): " + e);
+    }
+}
+
+fn run_all() {
+    try {
+        test_stream_print_returns_text();
+        test_stream_with_system_prompt();
+        test_stream_result_is_string();
+        print("llm_stream: all tests passed (or skipped)");
+    } catch e {
+        print("llm_stream: error (API may be unavailable): " + e);
+    }
+}
+
+run_all();

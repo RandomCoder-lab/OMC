@@ -44,6 +44,7 @@ pub enum Token {
     Class,
     Extends,
     Yield,
+    Assert,
     /// f-string template — alternating literal and expression segments.
     /// Parser turns this into `concat_many(parts...)` at expression
     /// position.
@@ -489,6 +490,7 @@ impl Lexer {
                         "class" => Token::Class,
                         "extends" => Token::Extends,
                         "yield" => Token::Yield,
+                        "assert" => Token::Assert,
                         "match" => Token::Match,
                         "and" => Token::And,
                         "or" => Token::Or,
@@ -951,6 +953,26 @@ impl Parser {
                 let expr = self.parse_expression()?;
                 self.eat_semi();
                 Ok(Statement::Yield(expr))
+            }
+            Token::Assert => {
+                // `assert cond;` → `if !cond { throw "Assertion failed"; }`
+                // `assert cond, "msg";` → `if !cond { throw "msg"; }`
+                // Desugared at parse time — no new AST node needed.
+                self.advance(); // consume `assert`
+                let cond = self.parse_expression()?;
+                let msg = if self.current() == Token::Comma {
+                    self.advance();
+                    self.parse_expression()?
+                } else {
+                    Expression::String("Assertion failed".to_string())
+                };
+                self.eat_semi();
+                Ok(Statement::If {
+                    condition: Expression::Not(Box::new(cond)),
+                    then_body: vec![Statement::Throw(msg)],
+                    elif_parts: vec![],
+                    else_body: None,
+                })
             }
             Token::Match => self.parse_match_stmt(),
             // `import core;` or `import core as c;` or `load "path";`

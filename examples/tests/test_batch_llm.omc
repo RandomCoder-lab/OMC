@@ -1,0 +1,77 @@
+# Tests for batch_llm_call and batch_llm_chat builtins.
+# Requires ANTHROPIC_API_KEY (skipped if absent).
+
+h HAS_KEY = getenv("ANTHROPIC_API_KEY", "") != "" or
+             getenv("ANTHROPIC_AUTH_TOKEN", "") != "";
+
+fn test_batch_llm_call_basic() {
+    if not HAS_KEY {
+        print("SKIP: no API key");
+        return;
+    }
+    h prompts = [
+        "Reply with exactly: ALPHA",
+        "Reply with exactly: BETA",
+        "Reply with exactly: GAMMA"
+    ];
+    h results = batch_llm_call(prompts);
+    assert len(results) == 3, "got 3 results";
+    assert str_contains(results[0], "ALPHA"), "result 0 = ALPHA";
+    assert str_contains(results[1], "BETA"),  "result 1 = BETA";
+    assert str_contains(results[2], "GAMMA"), "result 2 = GAMMA";
+}
+
+fn test_batch_llm_call_model_override() {
+    if not HAS_KEY {
+        print("SKIP: no API key");
+        return;
+    }
+    h prompts = ["Reply YES", "Reply NO"];
+    h results = batch_llm_call(prompts, "claude-haiku-4-5");
+    assert len(results) == 2, "model override: 2 results";
+}
+
+fn test_batch_llm_call_empty() {
+    if not HAS_KEY {
+        print("SKIP: no API key");
+        return;
+    }
+    h results = batch_llm_call([]);
+    assert len(results) == 0, "empty batch → empty results";
+}
+
+fn test_batch_llm_chat_basic() {
+    if not HAS_KEY {
+        print("SKIP: no API key");
+        return;
+    }
+    h conversations = [
+        [{"role": "user", "content": "Reply with CHAT_A"}],
+        [{"role": "user", "content": "Reply with CHAT_B"}]
+    ];
+    h results = batch_llm_chat(conversations);
+    assert len(results) == 2, "batch_llm_chat: 2 results";
+    assert str_contains(results[0], "CHAT_A"), "chat result 0 = CHAT_A";
+    assert str_contains(results[1], "CHAT_B"), "chat result 1 = CHAT_B";
+}
+
+fn test_batch_llm_call_single() {
+    if not HAS_KEY {
+        print("SKIP: no API key");
+        return;
+    }
+    h results = batch_llm_call(["Say SINGLE"]);
+    assert len(results) == 1, "single-item batch";
+    assert str_contains(results[0], "SINGLE"), "single result correct";
+}
+
+fn run_all() {
+    test_batch_llm_call_basic();
+    test_batch_llm_call_model_override();
+    test_batch_llm_call_empty();
+    test_batch_llm_chat_basic();
+    test_batch_llm_call_single();
+    print("batch_llm: all tests passed (or skipped)");
+}
+
+run_all();

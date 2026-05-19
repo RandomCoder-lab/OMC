@@ -18,6 +18,21 @@ fn main() {
 
     let args: Vec<String> = env::args().collect();
 
+    // Subcommand-style dispatch: `omc fmt ...`, `omc pkg ...`
+    // Must come before flag-style parsing so these positional names
+    // don't get mis-interpreted as a file path.
+    if args.len() >= 2 {
+        match args[1].as_str() {
+            "fmt" => {
+                std::process::exit(fmt_subcommand(&args[2..]));
+            }
+            "pkg" => {
+                std::process::exit(pkg_subcommand(&args[2..]));
+            }
+            _ => {}
+        }
+    }
+
     // Parse simple flag-style args. Anything else is the input file
     // (or the install spec when --install is set).
     let mut mode = "run";
@@ -2090,6 +2105,156 @@ fn install_gpu_matmul_accelerator() {
             None
         },
     ));
+}
+
+// ---------------------------------------------------------------------------
+// `omc fmt [--check] [--diff] [--stdout] [file ...]`
+// ---------------------------------------------------------------------------
+
+/// Entry point for `omc fmt` subcommand.
+fn fmt_subcommand(args: &[String]) -> i32 {
+    let mut check  = false;
+    let mut diff   = false;
+    let mut stdout = false;
+    let mut files: Vec<&str> = Vec::new();
+
+    for a in args {
+        match a.as_str() {
+            "--check"  => check  = true,
+            "--diff"   => diff   = true,
+            "--stdout" => stdout = true,
+            f if !f.starts_with('-') => files.push(f),
+            other => {
+                eprintln!("omc fmt: unknown flag `{}`", other);
+                return 2;
+            }
+        }
+    }
+
+    if files.is_empty() {
+        eprintln!("Usage: omc fmt [--check] [--diff] [--stdout] <file...>");
+        return 2;
+    }
+
+    let mut any_changed = false;
+    for path in &files {
+        let code = match fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) => { eprintln!("omc fmt: cannot read {}: {}", path, e); return 1; }
+        };
+        let formatted = {
+            let mut parser = omnimcode_core::parser::Parser::new(&code);
+            match parser.parse() {
+                Ok(stmts) => omnimcode_core::formatter::format_program(&stmts),
+                Err(e) => { eprintln!("omc fmt: {}: {}", path, e); return 1; }
+            }
+        };
+
+        if check {
+            if formatted != code {
+                eprintln!("omc fmt: {} would be reformatted", path);
+                any_changed = true;
+            }
+        } else if diff {
+            if formatted != code {
+                println!("{}", minimal_unified_diff(&code, &formatted, path));
+                any_changed = true;
+            }
+        } else if stdout {
+            print!("{}", formatted);
+        } else {
+            // In-place rewrite
+            if formatted != code {
+                if let Err(e) = fs::write(path, &formatted) {
+                    eprintln!("omc fmt: cannot write {}: {}", path, e);
+                    return 1;
+                }
+                any_changed = true;
+            }
+        }
+    }
+
+    if check && any_changed { 1 } else { 0 }
+}
+
+/// Produce a minimal unified-diff string between `old` and `new`.
+fn minimal_unified_diff(old: &str, new: &str, label: &str) -> String {
+    let old_lines: Vec<&str> = old.lines().collect();
+    let new_lines: Vec<&str> = new.lines().collect();
+    let mut out = format!("--- {}\n+++ {} (formatted)\n", label, label);
+
+    // Simple O(n) pass: group consecutive changed lines into hunks.
+    let mut i = 0;
+    let mut j = 0;
+    while i < old_lines.len() || j < new_lines.len() {
+        if i < old_lines.len() && j < new_lines.len() && old_lines[i] == new_lines[j] {
+            i += 1; j += 1;
+        } else {
+            // Collect hunk
+            let i0 = i; let j0 = j;
+            while (i < old_lines.len() || j < new_lines.len())
+                && !(i < old_lines.len() && j < new_lines.len() && old_lines[i] == new_lines[j])
+            {
+                if i < old_lines.len() { i += 1; }
+                if j < new_lines.len() { j += 1; }
+            }
+            out.push_str(&format!("@@ -{},{} +{},{} @@\n",
+                i0 + 1, i - i0, j0 + 1, j - j0));
+            for l in &old_lines[i0..i] { out.push_str(&format!("-{}\n", l)); }
+            for l in &new_lines[j0..j] { out.push_str(&format!("+{}\n", l)); }
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// `omc pkg list | install <name> | search <query> | publish <file>`
+// ---------------------------------------------------------------------------
+
+/// Entry point for `omc pkg` subcommand.
+fn pkg_subcommand(args: &[String]) -> i32 {
+    let sub = args.first().map(|s| s.as_str()).unwrap_or("help");
+    match sub {
+        "list" | "ls" => list_command(),
+        "install" | "add" => {
+            let spec = args.get(1).map(|s| s.as_str());
+            install_command(spec)
+        }
+        "search" => {
+            let query = args.get(1).map(|s| s.as_str());
+            search_command(query)
+        }
+        "publish" => {
+            let file = match args.get(1) {
+                Some(f) => f.as_str(),
+                None => { eprintln!("Usage: omc pkg publish <file.omc>"); return 2; }
+            };
+            pkg_publish(file)
+        }
+        "help" | "--help" | "-h" => {
+            println!("Usage: omc pkg <subcommand> [args]");
+            println!();
+            println!("Subcommands:");
+            println!("  list              List installed packages");
+            println!("  install <name>    Install a package by name or URL");
+            println!("  search  <query>   Search the package registry");
+            println!("  publish <file>    Publish an .omc file to the registry");
+            0
+        }
+        other => {
+            eprintln!("omc pkg: unknown subcommand `{}`. Try `omc pkg help`.", other);
+            2
+        }
+    }
+}
+
+/// Publish an .omc file to the OMC package registry.
+/// Currently a stub — full registry push requires the `python-embed` feature.
+fn pkg_publish(path: &str) -> i32 {
+    eprintln!("omc pkg publish: registry push not yet implemented.");
+    eprintln!("  (file: {})", path);
+    eprintln!("  Tip: place your .omc file in a public git repo and share the URL.");
+    1
 }
 
 #[cfg(test)]
