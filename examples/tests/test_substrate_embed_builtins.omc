@@ -1,4 +1,5 @@
 # Tests for substrate_embed, str_similarity, sleep, file_ls, omc_eval_file
+# omc:check=lint_only — lru_* are loaded via omc_eval_file (dynamic import)
 # Run with: omc --test examples/tests/test_substrate_embed_builtins.omc
 
 fn assert_eq(actual, expected, msg) {

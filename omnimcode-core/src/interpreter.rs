@@ -1038,10 +1038,11 @@ impl Interpreter {
         for name in HEAL_BUILTIN_NAMES {
             set.insert(name.to_string());
         }
-        // Plus user-defined fns and top-level decls.
+        // Plus user-defined fns, class constructors, and top-level decls.
         for stmt in stmts {
             match stmt {
                 Statement::FunctionDef { name, .. } => { set.insert(name.clone()); }
+                Statement::ClassDef { name, .. } => { set.insert(name.clone()); }
                 Statement::VarDecl { name, .. } => { set.insert(name.clone()); }
                 _ => {}
             }
@@ -2445,6 +2446,21 @@ impl Interpreter {
             | "eval_omc" | "eval_omc_fresh" | "eval_omc_ctx" | "omc_source"
             // Process execution builtins
             | "omc_spawn" | "omc_pipe"
+            // Prometheus autograd tape
+            | "tape_reset" | "tape_var" | "tape_const"
+            | "tape_value" | "tape_set_value" | "tape_grad" | "tape_backward"
+            | "tape_add" | "tape_sub" | "tape_mul" | "tape_div"
+            | "tape_neg" | "tape_pow_int"
+            | "tape_exp" | "tape_log" | "tape_abs"
+            | "tape_sin" | "tape_cos" | "tape_relu" | "tape_sigmoid" | "tape_tanh"
+            | "tape_softmax" | "tape_sum" | "tape_mean" | "tape_transpose"
+            | "tape_matmul" | "tape_add_scalar" | "tape_mul_scalar" | "tape_div_scalar"
+            | "tape_phi_log" | "tape_substrate_resample" | "tape_smod_softmax"
+            // Forward-mode dual-number autograd
+            | "dual" | "dual_v" | "dual_d"
+            | "dual_add" | "dual_sub" | "dual_mul" | "dual_div" | "dual_neg"
+            | "dual_pow_int" | "dual_exp" | "dual_sin" | "dual_cos"
+            | "dual_relu" | "dual_sigmoid" | "dual_tanh"
         )
     }
 
@@ -14874,6 +14890,23 @@ pub(crate) const HEAL_BUILTIN_NAMES: &[&str] = &[
     "omc_spawn", "omc_pipe",
     // Native HTTP builtins
     "http_get", "http_post", "http_post_json", "http_put", "http_delete",
+    // str_find / str_rfind / str_lower / str_upper aliases
+    "str_find", "str_rfind", "str_lower", "str_upper", "str_strip",
+    // Prometheus autograd tape
+    "tape_reset", "tape_var", "tape_const",
+    "tape_value", "tape_set_value", "tape_grad", "tape_backward",
+    "tape_add", "tape_sub", "tape_mul", "tape_div",
+    "tape_neg", "tape_pow_int",
+    "tape_exp", "tape_log", "tape_abs",
+    "tape_sin", "tape_cos", "tape_relu", "tape_sigmoid", "tape_tanh",
+    "tape_softmax", "tape_sum", "tape_mean", "tape_transpose",
+    "tape_matmul", "tape_add_scalar", "tape_mul_scalar", "tape_div_scalar",
+    "tape_phi_log", "tape_substrate_resample", "tape_smod_softmax",
+    // Forward-mode dual-number autograd
+    "dual", "dual_v", "dual_d",
+    "dual_add", "dual_sub", "dual_mul", "dual_div", "dual_neg",
+    "dual_pow_int", "dual_exp", "dual_sin", "dual_cos",
+    "dual_relu", "dual_sigmoid", "dual_tanh",
     // Language literals. These are parsed as Variable(...) but get
     // special-cased at runtime — they must never be typo-corrected
     // (a "var_typo" rewriting `null` to a close-spelled name would

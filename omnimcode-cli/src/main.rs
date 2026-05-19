@@ -1446,6 +1446,12 @@ fn check_program(path: &str) -> i32 {
         Ok(c) => c,
         Err(e) => { eprintln!("reading {}: {}", path, e); return 1; }
     };
+    // # omc:check=lint_only suppresses heal failures (treat all heals as hints).
+    // Used for files that intentionally trigger heal behaviors (e.g. test_heal_pass.omc)
+    // or use dynamically-loaded names the static analyzer can't resolve.
+    let lint_only = content.lines().take(20)
+        .any(|l| l.trim_start().starts_with("# omc:check=lint_only"));
+
     let mut parser = Parser::new(&content);
     let statements = match parser.parse() {
         Ok(s) => s,
@@ -1458,16 +1464,34 @@ fn check_program(path: &str) -> i32 {
     let mut lint = lint_source(&content);
     lint_ast_stmts(&healed, None, &mut lint);
 
-    let total = diagnostics.len() + lint.len();
-    if total == 0 {
+    // Split heal diagnostics: missing-return is a style warning (doesn't
+    // fail the check — implicit null returns are valid OMC). Everything
+    // else (unknown call/var, arity mismatch) is a real issue that fails,
+    // unless the file has # omc:check=lint_only which demotes all heals to hints.
+    let (warn_diags, fail_diags): (Vec<_>, Vec<_>) = diagnostics.iter()
+        .partition(|d| d.starts_with("missing-return:") || lint_only);
+
+    let total_fail = fail_diags.len() + lint.len();
+    let total_warn = warn_diags.len();
+
+    if total_fail == 0 && total_warn == 0 {
         println!("{}: clean ({} iteration{})", path, iters,
                  if iters == 1 { "" } else { "s" });
         return 0;
     }
-    println!("{}: {} issue(s) ({} heal, {} lint) — {} iteration(s) ({})",
-             path, total, diagnostics.len(), lint.len(), iters, outcome);
-    for d in &diagnostics {
+    if total_fail == 0 {
+        println!("{}: clean ({} iteration{}) — {} hint(s)", path, iters,
+                 if iters == 1 { "" } else { "s" }, total_warn);
+    } else {
+        println!("{}: {} issue(s) ({} heal, {} lint, {} hint) — {} iteration(s) ({})",
+                 path, total_fail, fail_diags.len(), lint.len(), total_warn,
+                 iters, outcome);
+    }
+    for d in &fail_diags {
         println!("  heal: {}", d);
+    }
+    for d in &warn_diags {
+        println!("  hint: {}", d);
     }
     for (line, kind, msg) in &lint {
         if let Some(ln) = line {
@@ -1476,7 +1500,7 @@ fn check_program(path: &str) -> i32 {
             println!("  {}: [{}] {}", path, kind, msg);
         }
     }
-    1
+    if total_fail > 0 { 1 } else { 0 }
 }
 
 /// `--fmt`: parse, pretty-print the AST back to canonical OMC source,
@@ -1634,27 +1658,49 @@ fn execute_program(source: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn repl_history_path() -> std::path::PathBuf {
+    std::env::var("HOME").ok()
+        .map(|h| std::path::PathBuf::from(h).join(".omc_history"))
+        .unwrap_or_else(|| std::path::PathBuf::from(".omc_history"))
+}
+
 fn repl() {
     println!("OMNIcode interactive shell");
     println!("Type :help for commands, :quit to exit. Statements end with ;");
     println!();
+
+    // ── Persistent history ────────────────────────────────────────────────────
+    const MAX_HIST: usize = 500;
+    let hist_path = repl_history_path();
+    let mut history: Vec<String> = std::fs::read_to_string(&hist_path)
+        .unwrap_or_default()
+        .lines()
+        .map(|l| l.to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
 
     let stdin = io::stdin();
     let mut interpreter = Interpreter::new();
     maybe_register_python(&mut interpreter);
     let mut buffer = String::new();
     let mut continuing = false;
+    let mut pending_input: Option<String> = None;
 
     loop {
-        print!("{}", if continuing { "...> " } else { "omc> " });
-        io::stdout().flush().unwrap();
-
-        let mut line = String::new();
-        match stdin.read_line(&mut line) {
-            Ok(0) => { println!(); break; }
-            Err(e) => { eprintln!("Error reading input: {}", e); break; }
-            Ok(_) => {}
-        }
+        // Use pending_input (from :!N re-run) or read from stdin.
+        let line = if let Some(p) = pending_input.take() {
+            p
+        } else {
+            print!("{}", if continuing { "...> " } else { "omc> " });
+            io::stdout().flush().unwrap();
+            let mut l = String::new();
+            match stdin.read_line(&mut l) {
+                Ok(0) => { println!(); break; }
+                Err(e) => { eprintln!("Error reading input: {}", e); break; }
+                Ok(_) => {}
+            }
+            l
+        };
 
         let trimmed = line.trim();
 
@@ -1670,6 +1716,36 @@ fn repl() {
                 ":reset" => {
                     interpreter = Interpreter::new();
                     println!("interpreter state reset");
+                    continue;
+                }
+                ":history" | ":hist" => {
+                    let start = history.len().saturating_sub(20);
+                    for (i, h) in history[start..].iter().enumerate() {
+                        println!("  {:3}  {}", start + i + 1, h);
+                    }
+                    continue;
+                }
+                _ if trimmed.starts_with(":!") => {
+                    let idx_str = &trimmed[2..];
+                    let entry = if let Ok(n) = idx_str.parse::<i64>() {
+                        if n < 0 {
+                            let pos = (history.len() as i64 + n) as usize;
+                            history.get(pos).cloned()
+                        } else if n > 0 && (n as usize) <= history.len() {
+                            history.get(n as usize - 1).cloned()
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    match entry {
+                        Some(cmd) => {
+                            println!("omc> {}", cmd);
+                            pending_input = Some(format!("{}\n", cmd));
+                        }
+                        None => eprintln!("history: no entry {}", idx_str),
+                    }
                     continue;
                 }
                 _ => {}
@@ -1694,6 +1770,11 @@ fn repl() {
                 continuing = false;
                 let to_run = buffer.clone();
                 buffer.clear();
+                let entry = to_run.trim().to_string();
+                if !entry.is_empty() && history.last().map(|l| l != &entry).unwrap_or(true) {
+                    history.push(entry);
+                    if history.len() > MAX_HIST { history.remove(0); }
+                }
                 repl_execute(&mut interpreter, &to_run, statements);
             }
             Err(msg) if msg.contains("Semicolon") && !trimmed_buffer.ends_with(';') => {
@@ -1709,6 +1790,11 @@ fn repl() {
                         continuing = false;
                         let to_run = buffer.clone();
                         buffer.clear();
+                        let entry = to_run.trim().to_string();
+                        if !entry.is_empty() && history.last().map(|l| l != &entry).unwrap_or(true) {
+                            history.push(entry);
+                            if history.len() > MAX_HIST { history.remove(0); }
+                        }
                         repl_execute(&mut interpreter, &to_run, statements);
                     }
                     Err(msg2) => {
@@ -1734,6 +1820,10 @@ fn repl() {
         }
     }
 
+    if !history.is_empty() {
+        let content = history.join("\n") + "\n";
+        let _ = std::fs::write(&hist_path, content);
+    }
     println!("bye");
 }
 
@@ -1742,6 +1832,8 @@ fn repl_print_help() {
     println!("  :help, :h, :?   show this message");
     println!("  :quit, :q       exit the REPL");
     println!("  :reset          discard all defined variables and functions");
+    println!("  :history, :hist show last 20 history entries (numbered)");
+    println!("  :!N             re-run history entry N (positive or negative index)");
     println!();
     println!("Tips:");
     println!("  Statements need a trailing `;`. Multi-line input continues");
