@@ -271,3 +271,151 @@ fn gen_and_test(description, test_fn, model, max_attempts) {
     }
     return {code: code, passed: false, attempts: max_att}
 }
+
+# ── Best-of-N with LLM judge ────────────────────────────────────────────────
+
+# best_of_n(prompt, n, criteria, system?, model?) → {answer, score, idx}
+# Generates N responses in parallel, judges all with llm_judge, returns best.
+fn best_of_n(prompt, n, criteria, system, model) {
+    h m = _default(model, null)
+    h sys = _default(system, null)
+    h prompts = arr_fill({prompt: prompt, system: sys}, n)
+    h responses = batch_llm_call(prompts, m)
+    h scores = llm_judge(responses, criteria, m)
+    h best_score = -1.0
+    h best_idx = 0
+    h i = 0
+    while i < arr_len(scores) {
+        if scores[i]["score"] > best_score {
+            best_score = scores[i]["score"]
+            best_idx = scores[i]["idx"]
+        }
+        i = i + 1
+    }
+    return {answer: responses[best_idx], score: best_score, idx: best_idx}
+}
+
+# ── Parallel Self-Consistency CoT ───────────────────────────────────────────
+
+# parallel_cot(prompt, n, model?) → {answer, confidence, all_answers}
+# Like cot_verify but fires all N calls in parallel using batch_llm_call.
+fn parallel_cot(prompt, n, model) {
+    h m = _default(model, null)
+    h sys = "Think step by step. After reasoning, write 'ANSWER:' followed by your final answer on its own line."
+    h full = str_concat("Question: ", prompt, "\n\nReason carefully, then write ANSWER: <your answer>")
+    h prompts = arr_fill({prompt: full, system: sys}, n)
+    h raw_responses = batch_llm_call(prompts, m)
+    h votes = {}
+    h all_answers = []
+    h i = 0
+    while i < arr_len(raw_responses) {
+        h parts = str_split(raw_responses[i], "ANSWER:")
+        h ans = ""
+        if arr_len(parts) >= 2 {
+            ans = str_trim(parts[arr_len(parts) - 1])
+        } else {
+            ans = str_trim(raw_responses[i])
+        }
+        h short_ans = str_slice(ans, 0, 100)
+        arr_push(all_answers, short_ans)
+        if dict_has(votes, short_ans) {
+            votes[short_ans] = votes[short_ans] + 1
+        } else {
+            votes[short_ans] = 1
+        }
+        i = i + 1
+    }
+    h best = ""
+    h best_count = 0
+    h keys = dict_keys(votes)
+    h k = 0
+    while k < arr_len(keys) {
+        if votes[keys[k]] > best_count {
+            best = keys[k]
+            best_count = votes[keys[k]]
+        }
+        k = k + 1
+    }
+    return {answer: best, confidence: best_count / n, all_answers: all_answers, votes: votes}
+}
+
+# ── Improve Until Convergence ───────────────────────────────────────────────
+
+# improve_until(text, criteria, threshold, max_rounds, model?) → {text, score, rounds}
+# Repeatedly generates an improved version and judges it; stops when score >= threshold.
+fn improve_until(text, criteria, threshold, max_rounds, model) {
+    h m = _default(model, null)
+    h current = text
+    h round = 0
+    h score = 0.0
+    h sys = "Improve the following text according to the given criteria. Return only the improved version."
+    while round < max_rounds {
+        h improve_prompt = str_concat(
+            "Improve this based on: ", criteria, "\n\n", current
+        )
+        h candidate = llm_call(improve_prompt, m, sys)
+        h judgment = llm_judge([current, candidate], criteria, m)
+        h candidate_score = 0.0
+        h original_score = 0.0
+        h ji = 0
+        while ji < arr_len(judgment) {
+            if judgment[ji]["idx"] == 0 { original_score = judgment[ji]["score"] }
+            if judgment[ji]["idx"] == 1 { candidate_score = judgment[ji]["score"] }
+            ji = ji + 1
+        }
+        if candidate_score > original_score {
+            current = candidate
+            score = candidate_score
+        } else {
+            score = original_score
+        }
+        if score >= threshold { break }
+        round = round + 1
+    }
+    return {text: current, score: score, rounds: round + 1}
+}
+
+# ── Debate: two agents argue, judge picks winner ────────────────────────────
+
+# debate(topic, rounds, model?) → {winner: "for"|"against", reasoning, transcript}
+fn debate(topic, rounds, model) {
+    h m = _default(model, null)
+    h for_sys = str_concat("You argue FOR: ", topic, ". Be concise and compelling.")
+    h against_sys = str_concat("You argue AGAINST: ", topic, ". Be concise and compelling.")
+    h for_args = []
+    h against_args = []
+    h transcript = []
+    h r = 0
+    while r < rounds {
+        h context = str_concat("Topic: ", topic)
+        if arr_len(for_args) > 0 {
+            context = str_concat(context, "\n\nPrevious FOR arguments: ", for_args[arr_len(for_args) - 1])
+            context = str_concat(context, "\nPrevious AGAINST arguments: ", against_args[arr_len(against_args) - 1])
+        }
+        h both = batch_llm_call([
+            {prompt: context, system: for_sys},
+            {prompt: context, system: against_sys}
+        ], m)
+        arr_push(for_args, both[0])
+        arr_push(against_args, both[1])
+        arr_push(transcript, {round: r + 1, for: both[0], against: both[1]})
+        r = r + 1
+    }
+    h judge_sys = "You are an impartial debate judge. Output JSON: {\"winner\": \"for\" or \"against\", \"reasoning\": \"...\"}"
+    h judge_prompt = str_concat(
+        "Topic: ", topic, "\n\n",
+        "FOR argument:\n", for_args[arr_len(for_args) - 1], "\n\n",
+        "AGAINST argument:\n", against_args[arr_len(against_args) - 1], "\n\n",
+        "Who made the stronger case?"
+    )
+    h verdict_raw = llm_call(judge_prompt, m, judge_sys)
+    h verdict = extract_json(verdict_raw)
+    if verdict == null {
+        verdict = {winner: "tie", reasoning: verdict_raw}
+    }
+    return {
+        winner: verdict["winner"],
+        reasoning: verdict["reasoning"],
+        transcript: transcript
+    }
+}
