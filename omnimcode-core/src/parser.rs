@@ -1899,8 +1899,8 @@ impl Parser {
                 self.advance();
                 let condition = self.parse_expression()?;
                 self.expect(Token::LBrace)?;
+                // parse_block() consumes the closing `}` itself.
                 let then_body = self.parse_block()?;
-                self.expect(Token::RBrace)?;
                 let else_body = if self.current() == Token::Else {
                     self.advance();
                     // else if → wrap in a nested IfExpr as the else branch
@@ -1909,9 +1909,7 @@ impl Parser {
                         Some(vec![Statement::Expression(nested)])
                     } else {
                         self.expect(Token::LBrace)?;
-                        let body = self.parse_block()?;
-                        self.expect(Token::RBrace)?;
-                        Some(body)
+                        Some(self.parse_block()?)
                     }
                 } else {
                     None

@@ -1,0 +1,54 @@
+fn assert_eq(actual, expected, msg) {
+    if actual != expected {
+        test_record_failure(str_concat(msg, ": expected ", to_string(expected), " got ", to_string(actual)));
+    }
+}
+
+fn assert_true(cond, msg) { if !cond { test_record_failure(msg); } }
+
+fn test_if_expr_basic() {
+    h x = if true { 1 } else { 2 }
+    assert_eq(x, 1, "true branch")
+    h y = if false { 1 } else { 2 }
+    assert_eq(y, 2, "false branch")
+}
+
+fn test_if_expr_in_call() {
+    h s = str_concat("mode=", if true { "on" } else { "off" })
+    assert_eq(s, "mode=on", "if-expr as fn arg")
+    h t = str_concat("x=", to_string(if false { 10 } else { 20 }))
+    assert_eq(t, "x=20", "if-expr nested in to_string")
+}
+
+fn test_if_expr_no_else() {
+    h z = if false { 42 }
+    assert_eq(z, null, "no-else false → null")
+    h w = if true { 99 }
+    assert_eq(w, 99, "no-else true → value")
+}
+
+fn test_if_expr_chained() {
+    h grade = 85
+    h letter = if grade >= 90 { "A" } else if grade >= 80 { "B" } else { "C" }
+    assert_eq(letter, "B", "chained if-expr")
+    h letter2 = if grade >= 90 { "A" } else if grade >= 95 { "S" } else { "C" }
+    assert_eq(letter2, "C", "chained if-expr fall-through")
+}
+
+fn test_single_expr_lambda() {
+    h doubled = arr_map([1, 2, 3], fn(x) (x * 2))
+    assert_eq(doubled[0], 2, "lambda result[0]")
+    assert_eq(doubled[1], 4, "lambda result[1]")
+    assert_eq(doubled[2], 6, "lambda result[2]")
+    h evens = arr_filter([1, 2, 3, 4, 5], fn(n) ((n % 2) == 0))
+    assert_eq(arr_len(evens), 2, "filter count")
+    assert_eq(evens[0], 2, "filter first")
+}
+
+fn test_dict_bare_ident_keys() {
+    h d = {name: "Alice", age: 30}
+    assert_eq(d["name"], "Alice", "bare-ident string key")
+    assert_eq(d["age"], 30, "bare-ident int key")
+    h e = {x: 1, y: 2, z: 3}
+    assert_eq((e["x"] + e["y"] + e["z"]), 6, "sum of bare-ident keys")
+}
