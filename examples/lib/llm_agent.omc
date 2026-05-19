@@ -108,9 +108,9 @@ fn react_agent(goal, tools, model, max_turns) {
             tool_result = tool_fn(tool_input)
         }
 
-        arr_push(trace, str_format("  -> {r}", {r: str_slice(to_str(tool_result), 0, 100)}))
+        arr_push(trace, str_format("  -> {r}", {r: str_slice(to_string(tool_result), 0, 100)}))
         arr_push(messages, {role: "assistant", content: str_format("Used: {n}", {n: tool_name})})
-        arr_push(messages, {role: "user", content: str_format("Tool result: {r}. Continue.", {r: to_str(tool_result)})})
+        arr_push(messages, {role: "user", content: str_format("Tool result: {r}. Continue.", {r: to_string(tool_result)})})
         turn += 1
     }
 
@@ -148,10 +148,10 @@ fn code_agent(task, tests, model, max_attempts) {
         while i < arr_len(tests) {
             h test = tests[i]
             h check_code = str_concat(code, "\n", test["check"])
-            h res = eval_omc(check_code)
-            if res["error"] != null {
+            h eval_res = eval_omc(check_code)
+            if eval_res["error"] != null {
                 all_pass = false
-                arr_push(failures, str_format("Test {i}: {e}", {i: to_str(i), e: res["error"]}))
+                arr_push(failures, str_format("Test {i}: {e}", {i: to_string(i), e: eval_res["error"]}))
             }
             i += 1
         }
@@ -190,7 +190,7 @@ fn best_of_n(task, n, model) {
     h best_score = -1.0
     h i = 0
     while i < arr_len(scores) {
-        h sv = to_float(to_str(scores[i]["score"]))
+        h sv = to_float(to_string(scores[i]["score"]))
         if sv > best_score {
             best_score = sv
             best_idx = i

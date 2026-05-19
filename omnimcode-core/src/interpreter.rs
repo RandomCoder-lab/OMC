@@ -2419,6 +2419,7 @@ impl Interpreter {
             // Introspection builtins
             | "list_defined_fns" | "list_fns" | "fn_arity" | "fn_source" | "get_scope_vars"
             // Python-idiom builtins (forgiving aliases for users new to OMC)
+            | "input"
             | "range" | "getenv" | "to_hex" | "from_hex"
             | "parse_int" | "parse_float"
             // stdlib-friendly aliases
@@ -14878,6 +14879,7 @@ pub(crate) const HEAL_BUILTIN_NAMES: &[&str] = &[
     "test_get_failures", "test_clear_failures",
     "test_set_current", "test_get_current",
     // Python-idiom builtins
+    "input",
     "range", "getenv", "to_hex", "from_hex",
     "parse_int", "parse_float",
     // v0.3 symbolic prediction
