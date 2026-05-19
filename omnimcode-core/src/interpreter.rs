@@ -14691,7 +14691,7 @@ pub(crate) fn stmts_contain_return(stmts: &[Statement]) -> bool {
 
 fn stmt_contains_return(s: &Statement) -> bool {
     match s {
-        Statement::Return(_) => true,
+        Statement::Return(_) | Statement::Throw(_) => true,
         Statement::If { then_body, elif_parts, else_body, .. } => {
             stmts_contain_return(then_body)
                 || elif_parts.iter().any(|(_, b)| stmts_contain_return(b))

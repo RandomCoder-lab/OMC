@@ -1402,6 +1402,25 @@ fn lint_source(content: &str) -> Vec<LintHint> {
 
 /// AST-level lint: walk the statement tree looking for structural issues.
 fn lint_ast_stmts(stmts: &[Statement], in_fn: Option<&str>, hints: &mut Vec<LintHint>) {
+    // Dead code: any statement(s) after an unconditional control-flow terminator.
+    let ctx = in_fn.unwrap_or("<top-level>");
+    for i in 0..stmts.len().saturating_sub(1) {
+        let is_terminal = matches!(&stmts[i],
+            Statement::Return(_) | Statement::Break | Statement::Continue | Statement::Throw(_));
+        if is_terminal {
+            let kw = match &stmts[i] {
+                Statement::Return(_)  => "return",
+                Statement::Break      => "break",
+                Statement::Continue   => "continue",
+                Statement::Throw(_)   => "throw",
+                _                     => unreachable!(),
+            };
+            hints.push((None, "dead-code",
+                format!("`{}` makes the following statement(s) unreachable in `{}`", kw, ctx)));
+            break;
+        }
+    }
+
     for stmt in stmts {
         match stmt {
             Statement::FunctionDef { name, body, .. } => {

@@ -1976,7 +1976,18 @@ impl Parser {
                     }
                 }
                 self.expect(Token::RParen)?;
-                Ok(Expression::Call { name, args, pos: callee_pos })
+                // Handle chained index on call result: f(x)["key"], f(x)["a"]["b"]
+                let mut expr = Expression::Call { name, args, pos: callee_pos };
+                while self.current() == Token::LBracket {
+                    self.advance();
+                    let idx = self.parse_expression()?;
+                    self.expect(Token::RBracket)?;
+                    expr = Expression::ChainedIndex {
+                        object: Box::new(expr),
+                        index: Box::new(idx),
+                    };
+                }
+                Ok(expr)
             }
             Token::LBracket => {
                 self.advance();
