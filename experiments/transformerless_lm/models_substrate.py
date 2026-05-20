@@ -52,71 +52,91 @@ FIBONACCI = [
 FIB_POS_UNIQUE = sorted(set(f for f in FIBONACCI if f > 0))
 
 
-def fibonacci_tier_values(n_tiers: int) -> list[float]:
-    """First n_tiers signed Fibonacci tier values, smallest magnitude first.
+def fibonacci_tier_values(n_tiers: int, reciprocals: bool = False) -> list[float]:
+    """Signed Fibonacci tier values.
 
-    Tier 0 = 0 (the "fold-to-zero" attractor).
-    Tier 1 = ±1
-    Tier 2 = ±2
-    Tier 3 = ±3
-    Tier k = ±F(k) for F(k) the k-th unique positive Fibonacci number.
+    Without reciprocals (the original v1):
+        {0, ±1, ±2, ±3, ±5, ±8, ±13, ±21, ...}
+    log spacing toward infinity, no resolution between 0 and 1.
 
-    Returns sorted list [-F_max, ..., -1, 0, +1, ..., +F_max] suitable
-    for nearest-tier-value snapping.
+    With reciprocals (v2 — fixes the "no resolution near zero" failure
+    from the v1 bench):
+        {0, ±1/F_max, ..., ±1/5, ±1/3, ±1/2, ±1, ±2, ±3, ±5, ±8, ..., ±F_max}
+    log spacing crossing zero — fine resolution near 0 where most
+    Gaussian-distributed weights actually live.
+
+    Adjacent ratios approach φ (since F(k+1)/F(k) → φ), so this is
+    the natural phi-Fibonacci tier system the substrate already uses
+    elsewhere in OMC.
     """
     fibs = FIB_POS_UNIQUE[: max(0, n_tiers - 1)]
-    return sorted([-f for f in fibs] + [0.0] + [float(f) for f in fibs])
+    pos = [float(f) for f in fibs]
+    if reciprocals:
+        pos = sorted(set(pos + [1.0 / f for f in fibs if f > 1]))
+    return sorted([-v for v in pos] + [0.0] + pos)
 
 
 def fibonacci_tier_snap(W: torch.Tensor, n_tiers: int = 8,
-                         scale: str = "per_tensor") -> tuple[torch.Tensor, int]:
+                         scale: str = "per_tensor",
+                         reciprocals: bool = False) -> tuple[torch.Tensor, int]:
     """Snap each weight in W to its nearest signed-Fibonacci tier value.
 
-    The user's Principle B: every weight folds to a Fibonacci tier;
-    high-frequency / large-magnitude weights occupy the small tiers
-    (1, 2, 3); rare ones drift to higher tiers (5, 8, 13, ...) and
-    very rare ones fold to 0 (pruned).
-
     Args:
-        W: tensor of arbitrary shape.
-        n_tiers: number of tier levels per sign (including 0).
-                  e.g. n_tiers=4 → values in {-3, -2, -1, 0, 1, 2, 3}
-                  = 7 levels = log2(7) ≈ 2.8 bits per weight.
-        scale: "per_tensor" → one scale factor over the full tensor.
+        W: tensor (1-D or 2-D).
+        n_tiers: resolution per sign (= number of distinct positive Fibonacci
+                  values, before any reciprocals).
+        scale: "per_tensor" → one global scale set by max(|W|).
+               "per_row"   → one scale per output row of a 2-D matrix
+                              (matches each row's own dynamic range; the
+                              standard per-channel quantization trick).
+        reciprocals: if True, include 1/F(k) values in the tier set —
+                      gives fine resolution near 0.
 
     Returns:
-        (W_quantized, n_unique_values_actually_used)
+        (W_quantized, n_unique_values_actually_used_avg)
     """
     tier_vals = torch.tensor(
-        fibonacci_tier_values(n_tiers), dtype=W.dtype, device=W.device
-    )                                                      # [n_levels]
-    abs_max = W.abs().max().item()
-    if abs_max == 0:
-        return W.clone(), 1
-    # Choose scale so the largest |w| maps to the largest tier value.
-    s = abs_max / max(tier_vals.abs().max().item(), 1.0)
-    # Nearest tier (in scaled units).
-    target_vals = tier_vals * s                            # [n_levels]
-    # For each element of W, find the closest target value.
-    diffs = (W.unsqueeze(-1) - target_vals).abs()           # [..., n_levels]
-    nearest = diffs.argmin(dim=-1)                          # [...]
-    W_q = target_vals[nearest]
-    n_unique = nearest.unique().numel()
-    return W_q, n_unique
+        fibonacci_tier_values(n_tiers, reciprocals=reciprocals),
+        dtype=W.dtype, device=W.device,
+    )                                                       # [n_levels]
+    max_tier = max(tier_vals.abs().max().item(), 1.0)
+
+    if scale == "per_tensor":
+        abs_max = W.abs().max().item()
+        if abs_max == 0:
+            return W.clone(), 1
+        s = abs_max / max_tier
+        target_vals = tier_vals * s
+        diffs = (W.unsqueeze(-1) - target_vals).abs()
+        nearest = diffs.argmin(dim=-1)
+        W_q = target_vals[nearest]
+        n_unique = nearest.unique().numel()
+        return W_q, n_unique
+
+    if scale == "per_row":
+        if W.dim() != 2:
+            # Fall back to per-tensor for 1-D / N-D parameters.
+            return fibonacci_tier_snap(W, n_tiers, "per_tensor", reciprocals)
+        abs_max_row = W.abs().max(dim=-1, keepdim=True).values.clamp(min=1e-12)  # [out, 1]
+        s_row = abs_max_row / max_tier                       # [out, 1]
+        # For each row, scaled tier set is tier_vals * s_row. We need
+        # per-row argmin over [out, in, n_levels].
+        targets = tier_vals.view(1, 1, -1) * s_row.unsqueeze(-1)  # [out, 1, n_levels]
+        diffs = (W.unsqueeze(-1) - targets).abs()             # [out, in, n_levels]
+        nearest = diffs.argmin(dim=-1)                        # [out, in]
+        W_q = torch.gather(targets.expand_as(diffs), -1,
+                            nearest.unsqueeze(-1)).squeeze(-1)
+        n_unique = nearest.unique().numel()
+        return W_q, n_unique
+
+    raise ValueError(scale)
 
 
 def fibonacci_quantize_model(model: torch.nn.Module, n_tiers: int = 8,
+                              scale: str = "per_tensor",
+                              reciprocals: bool = False,
                               targets: list[str] = None) -> dict:
-    """In-place Fibonacci-tier-snap of model parameters matching `targets`.
-
-    Args:
-        model: any nn.Module.
-        n_tiers: tier resolution per sign.
-        targets: substrings; a param is quantized iff any target is in
-                  its name. Default = quantize ALL params.
-
-    Returns: dict with summary stats (params_quantized, n_unique_per_tensor).
-    """
+    """In-place Fibonacci-tier-snap of model parameters matching `targets`."""
     if targets is None:
         targets = [""]
     stats = {"params_quantized": 0, "tensors_quantized": 0,
@@ -125,7 +145,9 @@ def fibonacci_quantize_model(model: torch.nn.Module, n_tiers: int = 8,
         if not any(t in name for t in targets):
             continue
         with torch.no_grad():
-            W_q, n_unique = fibonacci_tier_snap(p.data, n_tiers=n_tiers)
+            W_q, n_unique = fibonacci_tier_snap(
+                p.data, n_tiers=n_tiers, scale=scale, reciprocals=reciprocals,
+            )
             p.data.copy_(W_q)
             stats["params_quantized"] += p.numel()
             stats["tensors_quantized"] += 1

@@ -156,12 +156,18 @@ def main():
         print(f"\n  ✓ [arch={arch}] fp32 final_val = {final_val:.4f}")
 
         # ---- Principle B: post-hoc Fibonacci-tier quantization sweep ----
-        # Keep the trained weights in `state_dict_orig` so we can re-quantize
-        # at each n_tiers from a clean baseline.
         state_dict_orig = {k: v.clone() for k, v in model.state_dict().items()}
-        for n_tiers in tier_sweep:
+        configs = []
+        for reciprocals in [False, True]:
+            for scale in ["per_tensor", "per_row"]:
+                for n_tiers in tier_sweep:
+                    configs.append((n_tiers, reciprocals, scale))
+        for n_tiers, reciprocals, scale in configs:
             model.load_state_dict(state_dict_orig)
-            stats = fibonacci_quantize_model(model, n_tiers=n_tiers)
+            stats = fibonacci_quantize_model(
+                model, n_tiers=n_tiers,
+                reciprocals=reciprocals, scale=scale,
+            )
             eval_gen.manual_seed(args.seed + 1000)
             vq = evaluate(model, val_split, args.batch_size, args.seq_len,
                           n_batches=32, generator=eval_gen)
@@ -169,60 +175,75 @@ def main():
                                   for s in stats["per_tensor"].values())
             n_tensors = stats["tensors_quantized"]
             avg_unique = n_unique_total / max(n_tensors, 1)
-            print(f"    n_tiers={n_tiers:>3} → val={vq:.4f}  Δ={vq - final_val:+.4f}  "
-                  f"avg_unique_tier_vals={avg_unique:.1f}", flush=True)
-            arch_record["quantized"][n_tiers] = {
+            key = f"n{n_tiers}_{'rec' if reciprocals else 'nor'}_{scale}"
+            print(f"    {key:<22} → val={vq:.4f}  Δ={vq - final_val:+.4f}  "
+                  f"avg_unique={avg_unique:.1f}", flush=True)
+            arch_record["quantized"][key] = {
+                "n_tiers": n_tiers,
+                "reciprocals": reciprocals,
+                "scale": scale,
                 "val": vq,
                 "delta": vq - final_val,
                 "params_quantized": stats["params_quantized"],
                 "avg_unique_tier_values": avg_unique,
             }
-        # Restore fp32 weights at the end so subsequent code can use the model.
         model.load_state_dict(state_dict_orig)
         results["archs"][arch] = arch_record
 
-    # ---- Summary table ----
+    # ---- Summary tables ----
     print()
-    print("=" * 96)
-    schemes = ["fp32"] + [f"q{n}" for n in tier_sweep]
-    header = f"{'arch':<18} {'attn_params':>12} {'total':>10} "
-    header += " ".join(f"{s:>10}" for s in schemes)
-    print(header)
-    print("-" * 96)
+    print("=" * 110)
+    print("FP32 BASELINES")
+    print("-" * 110)
+    print(f"{'arch':<18} {'attn_params':>12} {'total':>10} {'fp32_val':>10}")
     for arch in ["dense_crt", "tied_substrate"]:
         r = results["archs"][arch]
-        vals = [r["val_fp32"]]
-        for n_tiers in tier_sweep:
-            vals.append(r["quantized"][n_tiers]["val"])
-        cells = " ".join(f"{v:>10.4f}" for v in vals)
-        print(f"{arch:<18} {r['n_attn_params']:>12,} {r['n_params']:>10,} {cells}")
+        print(f"{arch:<18} {r['n_attn_params']:>12,} {r['n_params']:>10,} "
+              f"{r['val_fp32']:>10.4f}")
+
+    print()
+    print("=" * 110)
+    print("QUANTIZATION SWEEP — Δ vs fp32 for each arch")
+    print("(rec=with reciprocal Fibonacci tiers; nor=Fibonacci only)")
+    print("-" * 110)
+    for arch in ["dense_crt", "tied_substrate"]:
+        r = results["archs"][arch]
+        print(f"\n  {arch}  (fp32 val = {r['val_fp32']:.4f}):")
+        print(f"    {'n_tiers':>8} {'tier_set':>10} {'scale':>12} "
+              f"{'val':>10} {'Δ':>10} {'unique':>10}")
+        for key, q in r["quantized"].items():
+            print(f"    {q['n_tiers']:>8} {('rec' if q['reciprocals'] else 'nor'):>10} "
+                  f"{q['scale']:>12} {q['val']:>10.4f} {q['delta']:>+10.4f} "
+                  f"{q['avg_unique_tier_values']:>10.1f}")
 
     # ---- Interpretation ----
     print()
-    print("INTERPRETATION:")
+    print("=" * 110)
+    print("INTERPRETATION")
+    print("-" * 110)
     a_fp32 = results["archs"]["dense_crt"]["val_fp32"]
     t_fp32 = results["archs"]["tied_substrate"]["val_fp32"]
     a_attn = results["archs"]["dense_crt"]["n_attn_params"]
     t_attn = results["archs"]["tied_substrate"]["n_attn_params"]
     rel = (t_fp32 - a_fp32) / a_fp32 * 100
-    print(f"  Principle A (tied substrate vs dense_crt):")
-    print(f"    val_fp32 delta: {t_fp32 - a_fp32:+.4f} ({rel:+.1f}%)")
-    print(f"    attn param reduction: {a_attn / t_attn:.2f}x")
-    if abs(rel) < 5:
-        print(f"    → PRINCIPLE A: tied QKV trains within 5% of dense — VALIDATED")
-    else:
-        print(f"    → PRINCIPLE A: tied QKV {('lost' if rel > 0 else 'gained')} {abs(rel):.1f}% "
-              f"— {'NOT VALIDATED (too tight)' if rel > 5 else 'BEAT BASELINE'}")
+    print(f"\nPRINCIPLE A (tied substrate vs dense_crt):")
+    print(f"  val_fp32 delta: {t_fp32 - a_fp32:+.4f} ({rel:+.1f}%)")
+    print(f"  attn param reduction: {a_attn / t_attn:.2f}x")
+    verdict_a = ("VALIDATED" if abs(rel) < 5 else
+                  ("BEAT BASELINE" if rel < 0 else "NOT VALIDATED"))
+    print(f"  → PRINCIPLE A: {verdict_a}")
 
-    print(f"\n  Principle B (Fibonacci-tier quantization on dense_crt):")
-    for n_tiers in tier_sweep:
-        delta = results["archs"]["dense_crt"]["quantized"][n_tiers]["delta"]
-        # log2(2*n_tiers - 1) bits per weight (n_tiers includes 0, then mirror)
-        # for n_tiers=8: levels = 2*8-1 = 15 → ~4 bits.
-        levels = 2 * n_tiers - 1
-        bits = (levels - 1).bit_length()
-        verdict = "VALIDATED" if delta < 0.1 else ("DEGRADED" if delta < 0.5 else "BROKEN")
-        print(f"    n_tiers={n_tiers:>3} (~{bits} bits): val delta {delta:+.4f}  → {verdict}")
+    print(f"\nPRINCIPLE B (best quantizer per arch, vs ≤0.10 nat threshold):")
+    for arch in ["dense_crt", "tied_substrate"]:
+        r = results["archs"][arch]
+        best_key = min(r["quantized"], key=lambda k: r["quantized"][k]["delta"])
+        best = r["quantized"][best_key]
+        verdict_b = "VALIDATED" if best["delta"] < 0.10 else (
+            "USABLE" if best["delta"] < 0.30 else "BROKEN")
+        print(f"  {arch}:")
+        print(f"    best = {best_key}  (Δ={best['delta']:+.4f}, "
+              f"n_tiers={best['n_tiers']}, rec={best['reciprocals']}, "
+              f"scale={best['scale']})  → {verdict_b}")
 
     out_path = Path(__file__).parent / args.out
     with open(out_path, "w") as f:
