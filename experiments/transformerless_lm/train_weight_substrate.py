@@ -158,15 +158,21 @@ def main():
         # ---- Principle B: post-hoc Fibonacci-tier quantization sweep ----
         state_dict_orig = {k: v.clone() for k, v in model.state_dict().items()}
         configs = []
+        # Fibonacci basis: full cross product (already studied in v2)
         for reciprocals in [False, True]:
             for scale in ["per_tensor", "per_row"]:
                 for n_tiers in tier_sweep:
-                    configs.append((n_tiers, reciprocals, scale))
-        for n_tiers, reciprocals, scale in configs:
+                    configs.append((n_tiers, reciprocals, scale, "fibonacci"))
+        # phi_power basis: only with per_row (the winning scale from v2);
+        # reciprocals flag has no meaning for phi_power so leave False.
+        for scale in ["per_tensor", "per_row"]:
+            for n_tiers in tier_sweep:
+                configs.append((n_tiers, False, scale, "phi_power"))
+        for n_tiers, reciprocals, scale, tier_basis in configs:
             model.load_state_dict(state_dict_orig)
             stats = fibonacci_quantize_model(
                 model, n_tiers=n_tiers,
-                reciprocals=reciprocals, scale=scale,
+                reciprocals=reciprocals, scale=scale, tier_basis=tier_basis,
             )
             eval_gen.manual_seed(args.seed + 1000)
             vq = evaluate(model, val_split, args.batch_size, args.seq_len,
@@ -175,13 +181,16 @@ def main():
                                   for s in stats["per_tensor"].values())
             n_tensors = stats["tensors_quantized"]
             avg_unique = n_unique_total / max(n_tensors, 1)
-            key = f"n{n_tiers}_{'rec' if reciprocals else 'nor'}_{scale}"
-            print(f"    {key:<22} → val={vq:.4f}  Δ={vq - final_val:+.4f}  "
+            basis_tag = "phi" if tier_basis == "phi_power" else (
+                "frec" if reciprocals else "fnor")
+            key = f"n{n_tiers}_{basis_tag}_{scale}"
+            print(f"    {key:<24} → val={vq:.4f}  Δ={vq - final_val:+.4f}  "
                   f"avg_unique={avg_unique:.1f}", flush=True)
             arch_record["quantized"][key] = {
                 "n_tiers": n_tiers,
                 "reciprocals": reciprocals,
                 "scale": scale,
+                "tier_basis": tier_basis,
                 "val": vq,
                 "delta": vq - final_val,
                 "params_quantized": stats["params_quantized"],
@@ -209,10 +218,13 @@ def main():
     for arch in ["dense_crt", "tied_substrate"]:
         r = results["archs"][arch]
         print(f"\n  {arch}  (fp32 val = {r['val_fp32']:.4f}):")
-        print(f"    {'n_tiers':>8} {'tier_set':>10} {'scale':>12} "
+        print(f"    {'n_tiers':>8} {'basis':>10} {'tier_set':>10} {'scale':>12} "
               f"{'val':>10} {'Δ':>10} {'unique':>10}")
         for key, q in r["quantized"].items():
-            print(f"    {q['n_tiers']:>8} {('rec' if q['reciprocals'] else 'nor'):>10} "
+            basis = q.get("tier_basis", "fibonacci")
+            tag = "—" if basis == "phi_power" else (
+                'rec' if q['reciprocals'] else 'nor')
+            print(f"    {q['n_tiers']:>8} {basis:>10} {tag:>10} "
                   f"{q['scale']:>12} {q['val']:>10.4f} {q['delta']:>+10.4f} "
                   f"{q['avg_unique_tier_values']:>10.1f}")
 

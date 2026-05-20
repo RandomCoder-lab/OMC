@@ -52,6 +52,30 @@ FIBONACCI = [
 FIB_POS_UNIQUE = sorted(set(f for f in FIBONACCI if f > 0))
 
 
+PHI = (1.0 + 5.0 ** 0.5) / 2.0   # golden ratio φ ≈ 1.61803
+
+
+def phi_power_tier_values(n_tiers: int) -> list[float]:
+    """Continuous Binet limit of Fibonacci tiers: {0, ±φ^k}.
+
+    Since F(k+1)/F(k) → φ, Fibonacci's "true" continuous ratio is φ.
+    Tier values {φ^k} have ADJACENT RATIO EXACTLY = φ (not approaching φ
+    asymptotically like discrete Fibonacci does at small k).
+
+    n_tiers = number of distinct positive φ^k values. Centered around
+    φ^0 = 1 so we get both reciprocals (small values) and powers (large
+    values) for free, in a single smooth geometric series.
+
+    For n_tiers=8: positive values = {φ^-4, ..., φ^3}
+                  ≈ {0.146, 0.236, 0.382, 0.618, 1.0, 1.618, 2.618, 4.236}
+    """
+    half = n_tiers // 2
+    k_lo = -half
+    k_hi = n_tiers - half
+    pos = [PHI ** k for k in range(k_lo, k_hi)]
+    return sorted([-v for v in pos] + [0.0] + pos)
+
+
 def fibonacci_tier_values(n_tiers: int, reciprocals: bool = False) -> list[float]:
     """Signed Fibonacci tier values.
 
@@ -78,7 +102,8 @@ def fibonacci_tier_values(n_tiers: int, reciprocals: bool = False) -> list[float
 
 def fibonacci_tier_snap(W: torch.Tensor, n_tiers: int = 8,
                          scale: str = "per_tensor",
-                         reciprocals: bool = False) -> tuple[torch.Tensor, int]:
+                         reciprocals: bool = False,
+                         tier_basis: str = "fibonacci") -> tuple[torch.Tensor, int]:
     """Snap each weight in W to its nearest signed-Fibonacci tier value.
 
     Args:
@@ -95,10 +120,13 @@ def fibonacci_tier_snap(W: torch.Tensor, n_tiers: int = 8,
     Returns:
         (W_quantized, n_unique_values_actually_used_avg)
     """
-    tier_vals = torch.tensor(
-        fibonacci_tier_values(n_tiers, reciprocals=reciprocals),
-        dtype=W.dtype, device=W.device,
-    )                                                       # [n_levels]
+    if tier_basis == "fibonacci":
+        tv_list = fibonacci_tier_values(n_tiers, reciprocals=reciprocals)
+    elif tier_basis == "phi_power":
+        tv_list = phi_power_tier_values(n_tiers)
+    else:
+        raise ValueError(f"unknown tier_basis: {tier_basis}")
+    tier_vals = torch.tensor(tv_list, dtype=W.dtype, device=W.device)   # [n_levels]
     max_tier = max(tier_vals.abs().max().item(), 1.0)
 
     if scale == "per_tensor":
@@ -116,7 +144,8 @@ def fibonacci_tier_snap(W: torch.Tensor, n_tiers: int = 8,
     if scale == "per_row":
         if W.dim() != 2:
             # Fall back to per-tensor for 1-D / N-D parameters.
-            return fibonacci_tier_snap(W, n_tiers, "per_tensor", reciprocals)
+            return fibonacci_tier_snap(W, n_tiers, "per_tensor",
+                                         reciprocals, tier_basis)
         abs_max_row = W.abs().max(dim=-1, keepdim=True).values.clamp(min=1e-12)  # [out, 1]
         s_row = abs_max_row / max_tier                       # [out, 1]
         # For each row, scaled tier set is tier_vals * s_row. We need
@@ -135,6 +164,7 @@ def fibonacci_tier_snap(W: torch.Tensor, n_tiers: int = 8,
 def fibonacci_quantize_model(model: torch.nn.Module, n_tiers: int = 8,
                               scale: str = "per_tensor",
                               reciprocals: bool = False,
+                              tier_basis: str = "fibonacci",
                               targets: list[str] = None) -> dict:
     """In-place Fibonacci-tier-snap of model parameters matching `targets`."""
     if targets is None:
@@ -146,7 +176,8 @@ def fibonacci_quantize_model(model: torch.nn.Module, n_tiers: int = 8,
             continue
         with torch.no_grad():
             W_q, n_unique = fibonacci_tier_snap(
-                p.data, n_tiers=n_tiers, scale=scale, reciprocals=reciprocals,
+                p.data, n_tiers=n_tiers, scale=scale,
+                reciprocals=reciprocals, tier_basis=tier_basis,
             )
             p.data.copy_(W_q)
             stats["params_quantized"] += p.numel()
