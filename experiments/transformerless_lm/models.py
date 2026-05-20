@@ -298,6 +298,7 @@ class TinyLM(nn.Module):
         pe_kind: str,             # "sinusoidal" or "crt"
         gate_mode: str,           # "none" | "key" | "score" | "learned" | "geodesic"
         token_substrate: bool = False,
+        token_beta_learnable: bool = False,
     ):
         super().__init__()
         self.seq_len = seq_len
@@ -310,10 +311,18 @@ class TinyLM(nn.Module):
             raise ValueError(f"unknown pe_kind: {pe_kind}")
         self.register_buffer("pe", pe)
         self.token_substrate = token_substrate
+        self.token_beta_learnable = token_beta_learnable
         if token_substrate:
             self.register_buffer(
                 "token_enc", crt_token_encoding(vocab_size, d_model)
             )
+            if token_beta_learnable:
+                # β is the attenuable counterpart to geodesic's α.
+                # Initialized to 1.0 = prior fully on; gradient signal
+                # can fade it to 0 if the learned embedding starts to
+                # fight the prior. Mirrors the architectural rule
+                # refined in TRANSFORMERLESS_RESULT.md.
+                self.token_beta = nn.Parameter(torch.tensor(1.0))
         self.blocks = nn.ModuleList([
             Block(d_model, gate_mode=gate_mode, seq_len=seq_len) for _ in range(n_blocks)
         ])
@@ -327,7 +336,10 @@ class TinyLM(nn.Module):
         B, T = x.shape
         h = self.embed(x)
         if self.token_substrate:
-            h = h + self.token_enc[x]
+            if self.token_beta_learnable:
+                h = h + self.token_beta * self.token_enc[x]
+            else:
+                h = h + self.token_enc[x]
         h = h + self.pe[:T]
         mask = self.mask[:T, :T]
         for block in self.blocks:
@@ -385,4 +397,19 @@ def make_model(
         # Per GEODESIC_RESULT.md "What's next" item 2 — the first
         # end-to-end transformerless candidate.
         return TinyLM(**common, pe_kind="crt", gate_mode="geodesic", token_substrate=True)
+    if arch == "token_crt_beta":
+        # Like token_crt but with a learnable β scaling the substrate
+        # prior. Tests the "attenuable" clause of the rule refined in
+        # TRANSFORMERLESS_RESULT.md: β=1 at init (prior fully on, fast
+        # warmup) but gradient can fade it as the learned embedding
+        # starts to fight. Should hold the early-phase advantage AND
+        # not pay the late-phase accuracy cost.
+        return TinyLM(**common, pe_kind="crt", gate_mode="none",
+                      token_substrate=True, token_beta_learnable=True)
+    if arch == "transformerless_v2":
+        # token_crt_beta + geodesic. Attenuable token-substrate +
+        # attenuable position-pair bias. Tests whether stacking ALL
+        # three primitives works when each has an off-switch.
+        return TinyLM(**common, pe_kind="crt", gate_mode="geodesic",
+                      token_substrate=True, token_beta_learnable=True)
     raise ValueError(f"unknown arch: {arch}")
