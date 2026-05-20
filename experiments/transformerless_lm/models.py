@@ -72,6 +72,36 @@ def crt_pe(seq_len: int, d_model: int) -> torch.Tensor:
 
 
 # ---------------------------------------------------------------------------
+# Token-ID substrate encoding
+# ---------------------------------------------------------------------------
+
+
+def crt_token_encoding(vocab_size: int, d_model: int) -> torch.Tensor:
+    """CRT-Fibonacci encoding of token IDs.
+
+    Same construction as crt_pe, but the integer quantity is the token
+    id instead of the sequence position. Returns a fixed [vocab, d_model]
+    table that gets ADDED to the learned embedding — the substrate
+    provides a structural prior, the learned embedding refines it.
+
+    Token IDs are integer-valued, so this respects the architectural
+    rule from GEODESIC_RESULT.md ("substrate metric applies to integer
+    quantities"). Char-level vocabs are typically <100 IDs, so even
+    the smallest modulus (5) gives meaningful structure.
+    """
+    enc = torch.zeros(vocab_size, d_model)
+    ids = torch.arange(0, vocab_size, dtype=torch.float)
+    n_pairs = d_model // 2
+    for i in range(n_pairs):
+        m = _FIB_MODULI[i % len(_FIB_MODULI)]
+        residue = ids % m
+        angle = 2 * math.pi * residue / m
+        enc[:, 2 * i] = torch.sin(angle)
+        enc[:, 2 * i + 1] = torch.cos(angle)
+    return enc
+
+
+# ---------------------------------------------------------------------------
 # HBit tension gate
 # ---------------------------------------------------------------------------
 
@@ -266,7 +296,8 @@ class TinyLM(nn.Module):
         n_blocks: int,
         seq_len: int,
         pe_kind: str,             # "sinusoidal" or "crt"
-        gate_mode: str,           # "none" | "key" | "score" | "learned"
+        gate_mode: str,           # "none" | "key" | "score" | "learned" | "geodesic"
+        token_substrate: bool = False,
     ):
         super().__init__()
         self.seq_len = seq_len
@@ -278,6 +309,11 @@ class TinyLM(nn.Module):
         else:
             raise ValueError(f"unknown pe_kind: {pe_kind}")
         self.register_buffer("pe", pe)
+        self.token_substrate = token_substrate
+        if token_substrate:
+            self.register_buffer(
+                "token_enc", crt_token_encoding(vocab_size, d_model)
+            )
         self.blocks = nn.ModuleList([
             Block(d_model, gate_mode=gate_mode, seq_len=seq_len) for _ in range(n_blocks)
         ])
@@ -289,7 +325,10 @@ class TinyLM(nn.Module):
 
     def forward(self, x):
         B, T = x.shape
-        h = self.embed(x) + self.pe[:T]
+        h = self.embed(x)
+        if self.token_substrate:
+            h = h + self.token_enc[x]
+        h = h + self.pe[:T]
         mask = self.mask[:T, :T]
         for block in self.blocks:
             h = block(h, mask)
@@ -333,4 +372,17 @@ def make_model(
         # (integer, native to the substrate's basis) instead of
         # activations (continuous, no substrate structure).
         return TinyLM(**common, pe_kind="crt", gate_mode="geodesic")
+    if arch == "token_crt":
+        # CRT-PE + CRT-Fibonacci encoding added to token embeddings.
+        # Substrate signal applied to TOKEN IDS (integer). No geodesic.
+        # Isolates the contribution of the token-id substrate primitive.
+        return TinyLM(**common, pe_kind="crt", gate_mode="none", token_substrate=True)
+    if arch == "transformerless":
+        # All three validated in-loop substrate primitives turned on:
+        #   - CRT-Fibonacci PE (positions)
+        #   - CRT-Fibonacci token encoding (token IDs)
+        #   - Geodesic attention bias (position pairs)
+        # Per GEODESIC_RESULT.md "What's next" item 2 — the first
+        # end-to-end transformerless candidate.
+        return TinyLM(**common, pe_kind="crt", gate_mode="geodesic", token_substrate=True)
     raise ValueError(f"unknown arch: {arch}")
