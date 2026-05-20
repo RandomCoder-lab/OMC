@@ -52,6 +52,90 @@ FIBONACCI = [
 FIB_POS_UNIQUE = sorted(set(f for f in FIBONACCI if f > 0))
 
 
+def fibonacci_tier_values(n_tiers: int) -> list[float]:
+    """First n_tiers signed Fibonacci tier values, smallest magnitude first.
+
+    Tier 0 = 0 (the "fold-to-zero" attractor).
+    Tier 1 = ±1
+    Tier 2 = ±2
+    Tier 3 = ±3
+    Tier k = ±F(k) for F(k) the k-th unique positive Fibonacci number.
+
+    Returns sorted list [-F_max, ..., -1, 0, +1, ..., +F_max] suitable
+    for nearest-tier-value snapping.
+    """
+    fibs = FIB_POS_UNIQUE[: max(0, n_tiers - 1)]
+    return sorted([-f for f in fibs] + [0.0] + [float(f) for f in fibs])
+
+
+def fibonacci_tier_snap(W: torch.Tensor, n_tiers: int = 8,
+                         scale: str = "per_tensor") -> tuple[torch.Tensor, int]:
+    """Snap each weight in W to its nearest signed-Fibonacci tier value.
+
+    The user's Principle B: every weight folds to a Fibonacci tier;
+    high-frequency / large-magnitude weights occupy the small tiers
+    (1, 2, 3); rare ones drift to higher tiers (5, 8, 13, ...) and
+    very rare ones fold to 0 (pruned).
+
+    Args:
+        W: tensor of arbitrary shape.
+        n_tiers: number of tier levels per sign (including 0).
+                  e.g. n_tiers=4 → values in {-3, -2, -1, 0, 1, 2, 3}
+                  = 7 levels = log2(7) ≈ 2.8 bits per weight.
+        scale: "per_tensor" → one scale factor over the full tensor.
+
+    Returns:
+        (W_quantized, n_unique_values_actually_used)
+    """
+    tier_vals = torch.tensor(
+        fibonacci_tier_values(n_tiers), dtype=W.dtype, device=W.device
+    )                                                      # [n_levels]
+    abs_max = W.abs().max().item()
+    if abs_max == 0:
+        return W.clone(), 1
+    # Choose scale so the largest |w| maps to the largest tier value.
+    s = abs_max / max(tier_vals.abs().max().item(), 1.0)
+    # Nearest tier (in scaled units).
+    target_vals = tier_vals * s                            # [n_levels]
+    # For each element of W, find the closest target value.
+    diffs = (W.unsqueeze(-1) - target_vals).abs()           # [..., n_levels]
+    nearest = diffs.argmin(dim=-1)                          # [...]
+    W_q = target_vals[nearest]
+    n_unique = nearest.unique().numel()
+    return W_q, n_unique
+
+
+def fibonacci_quantize_model(model: torch.nn.Module, n_tiers: int = 8,
+                              targets: list[str] = None) -> dict:
+    """In-place Fibonacci-tier-snap of model parameters matching `targets`.
+
+    Args:
+        model: any nn.Module.
+        n_tiers: tier resolution per sign.
+        targets: substrings; a param is quantized iff any target is in
+                  its name. Default = quantize ALL params.
+
+    Returns: dict with summary stats (params_quantized, n_unique_per_tensor).
+    """
+    if targets is None:
+        targets = [""]
+    stats = {"params_quantized": 0, "tensors_quantized": 0,
+             "per_tensor": {}}
+    for name, p in model.named_parameters():
+        if not any(t in name for t in targets):
+            continue
+        with torch.no_grad():
+            W_q, n_unique = fibonacci_tier_snap(p.data, n_tiers=n_tiers)
+            p.data.copy_(W_q)
+            stats["params_quantized"] += p.numel()
+            stats["tensors_quantized"] += 1
+            stats["per_tensor"][name] = {
+                "numel": p.numel(),
+                "n_unique_tier_values": n_unique,
+            }
+    return stats
+
+
 def fib_offsets_up_to(t: int) -> list[int]:
     """Fibonacci offsets ≤ t. For T=128 returns {1,2,3,5,8,13,21,34,55,89}
     — 10 offsets, i.e. log_phi_pi(128) ≈ 3.6 · 10 ≈ 36 in linear count
@@ -311,6 +395,66 @@ class ZeckendorfRoutedFFN(nn.Module):
 # ---------------------------------------------------------------------------
 
 
+class TiedSubstrateAttention(nn.Module):
+    """Tied Q/K/V attention via substrate channel permutation.
+
+    The user's Principle A: instead of independent W_Q, W_K, W_V, there is
+    ONE learned projection W. Q is W·x; K and V are obtained by FIXED
+    channel-rotation of Q by Fibonacci strides:
+
+        Q = W · x
+        K = roll(Q, F_K, dims=-1)   # channels shifted by F_K
+        V = roll(Q, F_V, dims=-1)   # channels shifted by F_V
+
+    The strides F_K, F_V are Fibonacci numbers selected so K and V
+    occupy meaningfully different parts of the channel space. The model
+    learns ONE representation whose Q, K, V views are interderivable
+    by substrate-native operations.
+
+    Param count vs standard:
+        standard: W_Q + W_K + W_V + W_out = 4·d²
+        tied:     W + W_out = 2·d²      (50% reduction in attention)
+
+    Inference economics:
+        - one matmul per forward (vs three)
+        - K and V are zero-cost channel rolls of Q
+        - per-token attention parameter fetch: 2·d² (vs 4·d²)
+    """
+
+    def __init__(self, d_model: int, F_K: int = 13, F_V: int = 55,
+                 dropout: float = 0.0, seq_len: int = 128):
+        super().__init__()
+        self.d_model = d_model
+        self.seq_len = seq_len
+        # ONE shared projection. No separate W_K or W_V.
+        self.W = nn.Linear(d_model, d_model, bias=False)
+        self.out = nn.Linear(d_model, d_model, bias=False)
+        self.F_K = F_K % d_model
+        self.F_V = F_V % d_model
+        self.dropout = dropout
+
+    def effective_flops(self) -> int:
+        # Per forward: one W·x matmul (T·d² FLOPs) + Q·K^T (T²·d) + attn·V (T²·d).
+        # Note: standard attention has 3·T·d² for Q,K,V projections; tied
+        # has T·d² (one matmul). The roll() is free.
+        T, D = self.seq_len, self.d_model
+        return 2 * T * D * D + 2 * 2 * T * T * D
+
+    def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        B, T, D = x.shape
+        Q = self.W(x)                                       # [B, T, D]
+        K = torch.roll(Q, shifts=self.F_K, dims=-1)          # channel-rotate
+        V = torch.roll(Q, shifts=self.F_V, dims=-1)
+        scale = 1.0 / math.sqrt(D)
+        scores = (Q @ K.transpose(-2, -1)) * scale
+        scores = scores.masked_fill(mask == 0, float('-inf'))
+        attn = F.softmax(scores, dim=-1)
+        if self.dropout > 0 and self.training:
+            attn = F.dropout(attn, p=self.dropout)
+        out = attn @ V
+        return self.out(out)
+
+
 class SubstrateBlock(nn.Module):
     """Block = norm → substrate-attention → norm → substrate-FFN, with
     residuals. Both inner ops are the substrate-native primitives.
@@ -318,12 +462,20 @@ class SubstrateBlock(nn.Module):
 
     def __init__(self, d_model: int, seq_len: int, attn_kind: str,
                  K_specialists: int, vocab_size: int,
-                 bucket_modulus: int = 13):
+                 bucket_modulus: int = 13,
+                 tied_F_K: int = 13, tied_F_V: int = 55):
         super().__init__()
+        self.attn_kind = attn_kind
         if attn_kind == "fib":
             self.attn = FibonacciOffsetAttention(d_model, seq_len)
         elif attn_kind == "bucket":
             self.attn = CRTBucketAttention(d_model, seq_len, modulus=bucket_modulus)
+        elif attn_kind == "tied":
+            self.attn = TiedSubstrateAttention(d_model, F_K=tied_F_K, F_V=tied_F_V,
+                                                seq_len=seq_len)
+            # tied attention uses a standard causal mask; we need it here.
+            mask = torch.tril(torch.ones(seq_len, seq_len))
+            self.register_buffer("causal_mask", mask)
         else:
             raise ValueError(f"unknown attn_kind: {attn_kind}")
         self.ff = ZeckendorfRoutedFFN(
@@ -333,7 +485,12 @@ class SubstrateBlock(nn.Module):
         self.ln2 = nn.LayerNorm(d_model)
 
     def forward(self, x, token_ids):
-        x = x + self.attn(self.ln1(x))
+        if self.attn_kind == "tied":
+            B, T, _ = x.shape
+            mask = self.causal_mask[:T, :T]
+            x = x + self.attn(self.ln1(x), mask)
+        else:
+            x = x + self.attn(self.ln1(x))
         x = x + self.ff(self.ln2(x), token_ids)
         return x
 
@@ -353,16 +510,20 @@ class SubstrateLM(nn.Module):
 
     def __init__(self, vocab_size: int, d_model: int, n_blocks: int,
                  seq_len: int, attn_kind: str, K_specialists: int,
-                 bucket_modulus: int = 13):
+                 bucket_modulus: int = 13,
+                 tied_F_K: int = 13, tied_F_V: int = 55):
         super().__init__()
         self.seq_len = seq_len
         self.attn_kind = attn_kind
+        self.tied_F_K = tied_F_K
+        self.tied_F_V = tied_F_V
         self.embed = nn.Embedding(vocab_size, d_model)
         pe = crt_pe(seq_len, d_model)
         self.register_buffer("pe", pe)
         self.blocks = nn.ModuleList([
             SubstrateBlock(d_model, seq_len, attn_kind, K_specialists, vocab_size,
-                           bucket_modulus=bucket_modulus)
+                           bucket_modulus=bucket_modulus,
+                           tied_F_K=tied_F_K, tied_F_V=tied_F_V)
             for _ in range(n_blocks)
         ])
         self.ln_f = nn.LayerNorm(d_model)
