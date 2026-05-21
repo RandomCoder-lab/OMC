@@ -88,7 +88,8 @@ class FibGenLinear(nn.Module):
     def __init__(self, in_features: int, out_features: int, K: int = 16,
                  mode: str = "separable",
                  bias: bool = True, init_scale: float = 0.1,
-                 lazy_tier_dropout: bool = False):
+                 lazy_tier_dropout: bool = False,
+                 lazy_K_active: int = 0):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
@@ -97,6 +98,10 @@ class FibGenLinear(nn.Module):
             raise ValueError(f"unknown mode: {mode}")
         self.mode = mode
         self.lazy_tier_dropout = lazy_tier_dropout
+        # lazy_K_active: if > 0 and < K, during training only K_active Fibonacci
+        # frequencies (sampled per step) are used, shrinking the inner matmul.
+        # Real compute savings, not just gradient masking.
+        self.lazy_K_active = lazy_K_active if 0 < lazy_K_active < K else 0
         n_components = self.K if mode == "separable" else self.K * self.K
         self.seed = nn.Parameter(
             torch.randn(n_components, 4) * (init_scale / max(1, math.sqrt(n_components)))
@@ -199,6 +204,21 @@ class FibGenLinear(nn.Module):
         # eval: deterministic, scaled by keep_prob to match training E[seed]
         return self.seed * self.tier_keep_probs.unsqueeze(-1)
 
+    def _sample_active_indices(self) -> torch.Tensor:
+        """Sample lazy_K_active indices uniformly from [0, K).
+
+        At each training step we keep a fresh random subset; over many
+        steps every Fibonacci frequency gets visited.
+        """
+        K_a = self.lazy_K_active
+        # Always keep frequency 0 (the lowest-Fibonacci component is most
+        # important; matches the "tier 1 always active" intent).
+        idx = torch.randperm(self.K, device=self.seed.device)[:K_a]
+        # ensure 0 is in the set (substrate-tier-1 anchor)
+        if 0 not in idx.tolist():
+            idx[0] = 0
+        return idx.sort().values
+
     def _forward_compressed(self, x: torch.Tensor) -> torch.Tensor:
         """Substrate-native forward: compute y = W·x WITHOUT materializing W.
 
@@ -235,6 +255,26 @@ class FibGenLinear(nn.Module):
         # cross mode: seed [K, K, 4] mixing matrix
         K = self.K
         seed_cross = seed.view(K, K, 4)
+        # Lazy K-subsampling path: at training, use only K_active frequencies
+        # per axis. The inner K×K mix shrinks to K_active × K_active; the
+        # outer projections to/from x shrink to K_active. Inference uses full K.
+        if self.training and self.lazy_K_active and self.lazy_K_active < K:
+            idx_i = self._sample_active_indices()                # [K_a]
+            idx_j = self._sample_active_indices()
+            seed_sub = seed_cross[idx_i][:, idx_j]               # [K_a, K_a, 4]
+            cos_j_sub = self.cos_j[:, idx_j]                     # [in, K_a]
+            sin_j_sub = self.sin_j[:, idx_j]
+            cos_i_sub = self.cos_i[:, idx_i]                     # [out, K_a]
+            sin_i_sub = self.sin_i[:, idx_i]
+            a, b, c, d = (seed_sub[..., k] for k in range(4))
+            x_cos = x @ cos_j_sub                                 # [B,T,K_a]
+            x_sin = x @ sin_j_sub
+            y_cos = x_cos @ a.t() + x_sin @ c.t()                 # [B,T,K_a]
+            y_sin = x_cos @ b.t() + x_sin @ d.t()
+            y = y_cos @ cos_i_sub.t() + y_sin @ sin_i_sub.t()
+            if self.bias is not None:
+                y = y + self.bias
+            return y
         a, b, c, d = seed_cross[..., 0], seed_cross[..., 1], seed_cross[..., 2], seed_cross[..., 3]
         x_cos = x @ self.cos_j                            # [B, T, K]
         x_sin = x @ self.sin_j
