@@ -97,18 +97,22 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--distractor-frac", type=float, default=0.20)
     parser.add_argument("--d-models", type=str, default="64,128,256,384")
+    parser.add_argument("--corpus", type=str, default="tinyshakespeare",
+                        choices=["embedded", "tinyshakespeare", "omc"])
     parser.add_argument("--out", type=str, default="results_d_scaling.json")
     args = parser.parse_args()
 
     chars, stoi, itos, encoded = make_dataset(seq_len=args.seq_len,
-                                                 source="tinyshakespeare")
+                                                 source=args.corpus)
     vocab_size = len(chars)
     train_split, val_split = build_distractor_stream(
         encoded, args.distractor_frac, args.seq_len, args.seed,
     )
     fib_positions = fib_positions_in_window(args.seq_len)
 
-    print(f"d-scale ablation: d_models = {args.d_models}")
+    print(f"d-scale ablation: corpus={args.corpus} ({encoded.numel():,} chars, "
+          f"vocab {vocab_size})")
+    print(f"d_models = {args.d_models}")
     print(f"Lazy data: P={len(fib_positions)} tokens/seq", flush=True)
 
     d_values = [int(x) for x in args.d_models.split(",")]

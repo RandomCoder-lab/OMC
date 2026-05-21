@@ -46,11 +46,17 @@ def make_dataset(seq_len: int = 64, source: str = "embedded"):
                     fast smoke tests and the original tiny-bench)
       - "tinyshakespeare": load tinyshakespeare.txt (1.1 MB) — used
                            by the scale experiment
+      - "omc": load omc_codebase.txt (~4 MB of OMC source: .py/.rs/.md/.toml).
+               More diverse than English prose; 210 unique chars.
     """
     import os
     import torch
     if source == "tinyshakespeare":
         path = os.path.join(os.path.dirname(__file__), "tinyshakespeare.txt")
+        with open(path, "r") as f:
+            text = f.read()
+    elif source == "omc":
+        path = os.path.join(os.path.dirname(__file__), "omc_codebase.txt")
         with open(path, "r") as f:
             text = f.read()
     else:
