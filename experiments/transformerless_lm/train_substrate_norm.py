@@ -1,16 +1,16 @@
-"""A/B bench for substrate LayerNorm and Softmax.
+"""A/B bench for refined substrate LayerNorm and Softmax.
 
-Stacks on top of SubstrateNegMultiAdvancedV2 (R4+R5 substrate-canonical
-reformulation, val=2.5889 on its own). Hypothesis: V2's extra capacity
-(per-tier asymmetry + frequency rescaling) loses signal through
-substrate-blind LN/softmax — pairing with SubstrateL1LN and
-substrate_softmax (base phi^pi) may unlock it.
+Stacks on top of SubstrateNegMultiAdvancedV2 (val=2.5889 on its own).
+Tests refined LN and softmax:
+  - SubstrateMedianLN: median center + MAD spread (full L1)
+  - substrate_tier_softmax: F(k)/phi^(pi*k) tier mixture of softmaxes
+    at temperatures pi*log(phi)*phi^k
 
 Four arms (all with V2 activation):
   baseline_v2               standard LN + standard softmax (= 2.5889 ref)
-  + l1_ln                   SubstrateL1LN  + standard softmax
-  + phi_pi_softmax          standard LN    + substrate_softmax
-  + both                    SubstrateL1LN  + substrate_softmax
+  + median_ln               SubstrateMedianLN + standard softmax
+  + tier_softmax            standard LN + substrate_tier_softmax
+  + both                    SubstrateMedianLN + substrate_tier_softmax
 """
 
 import argparse
@@ -33,7 +33,8 @@ from lazy_data import fib_positions_in_window, get_fib_strided_batch
 from train_K_shrink import K_schedule_tier_walk, set_K_active_recursive
 from losses_substrate import substrate_fft_loss
 from activations_substrate import SubstrateNegMultiAdvancedV2
-from layernorm_substrate import SubstrateL1LN, substrate_softmax
+from layernorm_substrate import (SubstrateL1LN, SubstrateMedianLN,
+                                   substrate_softmax, substrate_tier_softmax)
 
 
 class FibRecLMSubstrateNorm(FibRecLM):
@@ -58,6 +59,7 @@ class FibRecLMSubstrateNorm(FibRecLM):
         )
         self._softmax_fn = softmax_fn if softmax_fn is not None else \
             (lambda x, dim=-1: F.softmax(x, dim=dim))
+        self._softmax_label = getattr(softmax_fn, "__name__", "F.softmax")
 
     def _layer_forward(self, x, mask, n, seeds_n):
         qkv_s, out_s, w1_s, w2_s = seeds_n
@@ -113,7 +115,7 @@ def train_one(name, ln_cls, softmax_fn, train_split, val_split, vocab_size,
                                                  K_min=args.K_min)
     n_params = sum(p.numel() for p in model.parameters())
     ln_name = ln_cls.__name__
-    sm_name = "substrate_softmax" if softmax_fn is substrate_softmax else "F.softmax"
+    sm_name = getattr(softmax_fn, "__name__", "F.softmax")
     print(f"\n[train {name}]  ln={ln_name}  softmax={sm_name}  "
           f"params={n_params:,}", flush=True)
     t0 = time.time()
@@ -157,7 +159,7 @@ def main():
     parser.add_argument("--K-init", type=int, default=89)
     parser.add_argument("--K-min", type=int, default=13)
     parser.add_argument("--lambda-sub", type=float, default=0.01)
-    parser.add_argument("--out", type=str, default="results_substrate_norm.json")
+    parser.add_argument("--out", type=str, default="results_substrate_norm_v2.json")
     args = parser.parse_args()
 
     chars, stoi, itos, encoded = make_dataset(seq_len=args.seq_len,
@@ -169,10 +171,10 @@ def main():
     fib_positions = fib_positions_in_window(args.seq_len)
 
     arms = [
-        ("baseline_v2",       nn.LayerNorm,    None),
-        ("l1_ln",             SubstrateL1LN,   None),
-        ("phi_pi_softmax",    nn.LayerNorm,    substrate_softmax),
-        ("both",              SubstrateL1LN,   substrate_softmax),
+        ("baseline_v2",     nn.LayerNorm,        None),
+        ("median_ln",       SubstrateMedianLN,   None),
+        ("tier_softmax",    nn.LayerNorm,        substrate_tier_softmax),
+        ("both",            SubstrateMedianLN,   substrate_tier_softmax),
     ]
     results = {}
     for name, ln_cls, sm_fn in arms:
