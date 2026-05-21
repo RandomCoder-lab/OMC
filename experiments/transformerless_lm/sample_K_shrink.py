@@ -118,6 +118,8 @@ def main():
     parser.add_argument("--temperature", type=float, default=0.8)
     parser.add_argument("--top-k", type=int, default=10)
     parser.add_argument("--out", type=str, default="samples_K_shrink_ts.txt")
+    parser.add_argument("--skip-dense", action="store_true",
+                        help="Only train + sample the shrink arm.")
     args = parser.parse_args()
 
     chars, stoi, itos, encoded = make_dataset(seq_len=args.seq_len,
@@ -136,17 +138,18 @@ def main():
     samples = {}
     metas = {}
 
-    # 1. Dense baseline
-    print("=" * 60); print("DENSE_CRT (baseline)"); print("=" * 60)
-    m = make_model("crt_only", vocab_size=vocab_size, seq_len=args.seq_len,
-                    d_model=args.d_model, n_blocks=args.n_blocks)
-    opt = torch.optim.AdamW(m.parameters(), lr=args.lr)
-    best_val, best_step = train_with_best(
-        "dense_crt", m, opt, train_split, val_split, args, fib_positions)
-    metas["dense_crt"] = (best_val, best_step, sum(p.numel() for p in m.parameters()))
-    out_ids = generate_text(m, prompt_ids, args.n_new, args.seq_len,
-                              args.temperature, args.top_k)
-    samples["dense_crt"] = "".join(itos[int(i)] for i in out_ids[0].tolist())
+    # 1. Dense baseline (skip if --skip-dense)
+    if not args.skip_dense:
+        print("=" * 60); print("DENSE_CRT (baseline)"); print("=" * 60)
+        m = make_model("crt_only", vocab_size=vocab_size, seq_len=args.seq_len,
+                        d_model=args.d_model, n_blocks=args.n_blocks)
+        opt = torch.optim.AdamW(m.parameters(), lr=args.lr)
+        best_val, best_step = train_with_best(
+            "dense_crt", m, opt, train_split, val_split, args, fib_positions)
+        metas["dense_crt"] = (best_val, best_step, sum(p.numel() for p in m.parameters()))
+        out_ids = generate_text(m, prompt_ids, args.n_new, args.seq_len,
+                                  args.temperature, args.top_k)
+        samples["dense_crt"] = "".join(itos[int(i)] for i in out_ids[0].tolist())
 
     # 2. Shrink (substrate-hierarchical)
     print("\n" + "=" * 60); print("SHRINK K=89 → K=13 (substrate)"); print("=" * 60)
