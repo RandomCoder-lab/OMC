@@ -42,44 +42,66 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-FIBONACCI = [1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610, 987, 1597]
+# Extended unique-positive Fibonacci table — 32 entries.
+# Previous 16-entry version caused K>16 to silently clamp.
+FIBONACCI = [
+    1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610, 987,
+    1597, 2584, 4181, 6765, 10946, 17711, 28657, 46368, 75025,
+    121393, 196418, 317811, 514229, 832040, 1346269, 2178309, 3524578,
+]
 
 
 class FibGenLinear(nn.Module):
     """Drop-in replacement for nn.Linear where W is generated from a seed.
 
+    Two generator modes:
+
+    "separable" (the original): each component uses the SAME Fibonacci
+        frequency on both axes. Generates rank-K terms.
+            W[i,j] = Σ_k [a_k cos(F_k·i) cos(F_k·j) + ...]
+        Seed: 4·K params.
+
+    "cross" (new): each component uses INDEPENDENT Fibonacci frequencies
+        on the two axes. Generates a full K_i × K_j grid of frequency
+        pairs, so the matrix is a sum of K_i·K_j outer products of
+        single-frequency 1-D bases.
+            W[i,j] = Σ_{k_i, k_j} [a_{kk'} cos(F_{k_i}·i) cos(F_{k_j}·j) + ...]
+        Seed: 4·K² params. Equal expressivity as separable at K_separable = K²,
+        but with the substrate-canonical Fibonacci-coprime structure that
+        makes the basis non-degenerate (Fibonacci frequencies are pairwise
+        substrate-distinguishable).
+
     Args:
         in_features: input dim.
         out_features: output dim.
-        K: number of Fibonacci-frequency components in the generator.
-            Higher K = more capacity, more params. K=16 → 64 params
-            (vs in·out for a stored matrix).
+        K: number of Fibonacci frequencies per axis.
+        mode: "separable" or "cross".
         bias: whether to include a learnable bias vector.
-        init_scale: scales the seed initialization. The generated W has
-            magnitude ~ init_scale · sqrt(4K), so smaller init_scale
-            gives smaller initial weights.
+        init_scale: scales the seed initialization.
     """
 
     def __init__(self, in_features: int, out_features: int, K: int = 16,
+                 mode: str = "separable",
                  bias: bool = True, init_scale: float = 0.1):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
         self.K = min(K, len(FIBONACCI))
-        # Seed: 4 coefficients per Fibonacci component (cc, sc, cs, ss).
+        if mode not in ("separable", "cross"):
+            raise ValueError(f"unknown mode: {mode}")
+        self.mode = mode
+        n_components = self.K if mode == "separable" else self.K * self.K
         self.seed = nn.Parameter(
-            torch.randn(self.K, 4) * (init_scale / max(1, math.sqrt(self.K)))
+            torch.randn(n_components, 4) * (init_scale / max(1, math.sqrt(n_components)))
         )
         if bias:
             self.bias = nn.Parameter(torch.zeros(out_features))
         else:
             self.register_parameter("bias", None)
-        # Precompute the cos/sin of position·Fibonacci-frequency for both
-        # axes. These are FIXED — no gradient flows through positions.
+        # Precompute cos/sin position·Fibonacci-frequency tables.
         i_idx = torch.arange(out_features).float()
         j_idx = torch.arange(in_features).float()
         freqs = torch.tensor(FIBONACCI[:self.K], dtype=torch.float)
-        # angles: [out, K], [in, K]
         a_i = 2 * math.pi * i_idx.unsqueeze(1) * freqs.unsqueeze(0) / max(out_features, 1)
         a_j = 2 * math.pi * j_idx.unsqueeze(1) * freqs.unsqueeze(0) / max(in_features, 1)
         self.register_buffer("cos_i", torch.cos(a_i))   # [out, K]
@@ -88,21 +110,24 @@ class FibGenLinear(nn.Module):
         self.register_buffer("sin_j", torch.sin(a_j))
 
     def generate_W(self) -> torch.Tensor:
-        # seed: [K, 4] → split into 4 [K] tensors.
-        a, b, c, d = self.seed[:, 0], self.seed[:, 1], self.seed[:, 2], self.seed[:, 3]
-        # W = sum_k (
-        #   a_k · cos_i[:, k] · cos_j[:, k]^T +
-        #   b_k · sin_i[:, k] · cos_j[:, k]^T +
-        #   c_k · cos_i[:, k] · sin_j[:, k]^T +
-        #   d_k · sin_i[:, k] · sin_j[:, k]^T
-        # )
-        # Each term is an [out, in] outer product.
-        # Compose via einsum: [out, K] · [K] · [K, in] (with the diagonal)
-        # → [out, in].
-        W = torch.einsum("ok,k,jk->oj", self.cos_i, a, self.cos_j)
-        W = W + torch.einsum("ok,k,jk->oj", self.sin_i, b, self.cos_j)
-        W = W + torch.einsum("ok,k,jk->oj", self.cos_i, c, self.sin_j)
-        W = W + torch.einsum("ok,k,jk->oj", self.sin_i, d, self.sin_j)
+        if self.mode == "separable":
+            a, b, c, d = self.seed[:, 0], self.seed[:, 1], self.seed[:, 2], self.seed[:, 3]
+            W = torch.einsum("ok,k,jk->oj", self.cos_i, a, self.cos_j)
+            W = W + torch.einsum("ok,k,jk->oj", self.sin_i, b, self.cos_j)
+            W = W + torch.einsum("ok,k,jk->oj", self.cos_i, c, self.sin_j)
+            W = W + torch.einsum("ok,k,jk->oj", self.sin_i, d, self.sin_j)
+            return W
+        # mode == "cross": seed shape [K*K, 4], reshape to [K, K, 4]
+        K = self.K
+        seed = self.seed.view(K, K, 4)
+        a, b, c, d = seed[..., 0], seed[..., 1], seed[..., 2], seed[..., 3]
+        # W[i,j] = Σ_{k_i, k_j} [a · cos_i[i, k_i] cos_j[j, k_j] + ...]
+        # einsum: cos_i [out, k_i] @ a [k_i, k_j] -> [out, k_j], then
+        # · cos_j [in, k_j] -> [out, in].
+        W = torch.einsum("ol,lm,jm->oj", self.cos_i, a, self.cos_j)
+        W = W + torch.einsum("ol,lm,jm->oj", self.sin_i, b, self.cos_j)
+        W = W + torch.einsum("ol,lm,jm->oj", self.cos_i, c, self.sin_j)
+        W = W + torch.einsum("ol,lm,jm->oj", self.sin_i, d, self.sin_j)
         return W
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -127,11 +152,11 @@ class FibGenLinear(nn.Module):
 class FibGenAttention(nn.Module):
     """Single-head self-attention with all linear layers FibGen-generated."""
 
-    def __init__(self, d_model: int, K: int = 16):
+    def __init__(self, d_model: int, K: int = 16, mode: str = "separable"):
         super().__init__()
         self.d_model = d_model
-        self.qkv = FibGenLinear(d_model, 3 * d_model, K=K)
-        self.out = FibGenLinear(d_model, d_model, K=K)
+        self.qkv = FibGenLinear(d_model, 3 * d_model, K=K, mode=mode)
+        self.out = FibGenLinear(d_model, d_model, K=K, mode=mode)
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         B, T, D = x.shape
@@ -148,21 +173,22 @@ class FibGenAttention(nn.Module):
 class FibGenFeedForward(nn.Module):
     """FFN with FibGen-generated linear layers."""
 
-    def __init__(self, d_model: int, expansion: int = 4, K: int = 16):
+    def __init__(self, d_model: int, expansion: int = 4, K: int = 16,
+                 mode: str = "separable"):
         super().__init__()
         d_inner = d_model * expansion
-        self.w1 = FibGenLinear(d_model, d_inner, K=K)
-        self.w2 = FibGenLinear(d_inner, d_model, K=K)
+        self.w1 = FibGenLinear(d_model, d_inner, K=K, mode=mode)
+        self.w2 = FibGenLinear(d_inner, d_model, K=K, mode=mode)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.w2(F.gelu(self.w1(x)))
 
 
 class FibGenBlock(nn.Module):
-    def __init__(self, d_model: int, K: int = 16):
+    def __init__(self, d_model: int, K: int = 16, mode: str = "separable"):
         super().__init__()
-        self.attn = FibGenAttention(d_model, K=K)
-        self.ff = FibGenFeedForward(d_model, K=K)
+        self.attn = FibGenAttention(d_model, K=K, mode=mode)
+        self.ff = FibGenFeedForward(d_model, K=K, mode=mode)
         self.ln1 = nn.LayerNorm(d_model)
         self.ln2 = nn.LayerNorm(d_model)
 
@@ -184,25 +210,20 @@ class FibGenLM(nn.Module):
     """
 
     def __init__(self, vocab_size: int, d_model: int, n_blocks: int,
-                 seq_len: int, K: int = 16):
+                 seq_len: int, K: int = 16, mode: str = "separable"):
         super().__init__()
         self.seq_len = seq_len
         self.K = K
-        # Embedding implemented as FibGen + index → FibGen produces a
-        # [vocab, d_model] table that we index into.
-        self.embed_gen = FibGenLinear(vocab_size, d_model, K=K, bias=False)
-        # Positional encoding stays CRT-Fibonacci (already substrate-aligned,
-        # and it's a buffer, not a learned weight).
+        self.mode = mode
+        self.embed_gen = FibGenLinear(vocab_size, d_model, K=K, mode=mode,
+                                        bias=False)
         pe = self._crt_pe(seq_len, d_model)
         self.register_buffer("pe", pe)
         self.blocks = nn.ModuleList([
-            FibGenBlock(d_model, K=K) for _ in range(n_blocks)
+            FibGenBlock(d_model, K=K, mode=mode) for _ in range(n_blocks)
         ])
         self.ln_f = nn.LayerNorm(d_model)
-        # Head: FibGen too (or tied with embed — but tied with a generator
-        # means head and embed share the SAME generator seed which forces
-        # a constraint. Pick untied for now to test capacity.)
-        self.head = FibGenLinear(d_model, vocab_size, K=K, bias=False)
+        self.head = FibGenLinear(d_model, vocab_size, K=K, mode=mode, bias=False)
         mask = torch.tril(torch.ones(seq_len, seq_len))
         self.register_buffer("mask", mask)
 

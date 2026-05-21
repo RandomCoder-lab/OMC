@@ -106,6 +106,8 @@ def main():
     parser.add_argument("--distractor-frac", type=float, default=0.20)
     parser.add_argument("--K-sweep", type=str, default="8,16,32",
                         help="Comma-separated K values for FibGen.")
+    parser.add_argument("--modes", type=str, default="separable,cross",
+                        help="Comma-separated generator modes.")
     parser.add_argument("--out", type=str, default="results_fibgen.json")
     args = parser.parse_args()
 
@@ -135,16 +137,20 @@ def main():
     results["dense_crt"] = train_one("dense_crt", vocab_size, train_split,
                                        val_split, args, fib_positions, make_crt)
 
-    # 2. FibGen at each K
+    # 2. FibGen at each K x mode
     K_values = [int(k) for k in args.K_sweep.split(",")]
-    for K in K_values:
-        def make_fibgen(K=K):
-            return FibGenLM(vocab_size=vocab_size, d_model=args.d_model,
-                             n_blocks=args.n_blocks, seq_len=args.seq_len, K=K)
-        results[f"fibgen_K{K}"] = train_one(
-            f"fibgen_K{K}", vocab_size, train_split, val_split, args,
-            fib_positions, make_fibgen,
-        )
+    modes = [m.strip() for m in args.modes.split(",")]
+    for mode in modes:
+        for K in K_values:
+            def make_fibgen(K=K, mode=mode):
+                return FibGenLM(vocab_size=vocab_size, d_model=args.d_model,
+                                 n_blocks=args.n_blocks, seq_len=args.seq_len,
+                                 K=K, mode=mode)
+            name = f"fibgen_K{K}_{mode}"
+            results[name] = train_one(
+                name, vocab_size, train_split, val_split, args,
+                fib_positions, make_fibgen,
+            )
 
     # Summary
     print()
@@ -166,24 +172,25 @@ def main():
 
     # Verdict
     base_val = results["dense_crt"]["final_val"]
-    print(f"VERDICT (uniform-random floor: {uniform_floor:.4f}, dense_crt: {base_val:.4f}):")
-    for K in K_values:
-        r = results[f"fibgen_K{K}"]
-        if r["final_val"] < uniform_floor * 0.85:
-            tag = "LEARNED (≤85% of uniform floor)"
-        elif r["final_val"] < uniform_floor * 0.95:
-            tag = "WEAK LEARNING"
-        else:
-            tag = "FAILED (near uniform-random)"
-        # Compute compression
-        dense_eq = 0
-        stored = 0
-        m = FibGenLM(vocab_size=vocab_size, d_model=args.d_model,
-                      n_blocks=args.n_blocks, seq_len=args.seq_len, K=K)
-        ss = m.storage_summary()
-        compr = ss["compression"]
-        print(f"  K={K:>3}: val={r['final_val']:.4f}  "
-              f"compression={compr:.1f}x  → {tag}")
+    print(f"VERDICT (uniform-random floor: {uniform_floor:.4f}, "
+          f"dense_crt: {base_val:.4f}):")
+    for mode in modes:
+        for K in K_values:
+            r = results[f"fibgen_K{K}_{mode}"]
+            if r["final_val"] < uniform_floor * 0.85:
+                tag = "LEARNED"
+            elif r["final_val"] < uniform_floor * 0.95:
+                tag = "WEAK LEARNING"
+            else:
+                tag = "FAILED"
+            m = FibGenLM(vocab_size=vocab_size, d_model=args.d_model,
+                          n_blocks=args.n_blocks, seq_len=args.seq_len,
+                          K=K, mode=mode)
+            ss = m.storage_summary()
+            gap_pct = (r["final_val"] - base_val) / base_val * 100
+            print(f"  K={K:>3} mode={mode:<10}: val={r['final_val']:.4f}  "
+                  f"compr={ss['compression']:5.1f}x  vs_dense={gap_pct:+5.1f}%  "
+                  f"→ {tag}")
 
     out_path = Path(__file__).parent / args.out
     with open(out_path, "w") as f:
