@@ -119,9 +119,18 @@ class SubsimLM(nn.Module):
     def __init__(self, vocab_size: int, d_model: int, n_blocks: int,
                  seq_len: int, K: int = 32, fibgen_K: int = 32,
                  mode: str = "cross", lazy_tier_dropout: bool = False,
-                 lazy_K_active: int = 0):
+                 lazy_K_active: int = 0,
+                 stochastic_fib_depth: bool = False):
         super().__init__()
         self.seq_len = seq_len
+        self.stochastic_fib_depth = stochastic_fib_depth
+        self.n_blocks = n_blocks
+        # Per-block KEEP probability: block i active with prob 1/F(i+1).
+        # Block 0 always active; deeper blocks decreasingly active.
+        FIB = [1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144]
+        keep = [1.0 / FIB[min(i, len(FIB)-1)] for i in range(n_blocks)]
+        self.register_buffer("block_keep_probs",
+                              torch.tensor(keep, dtype=torch.float))
         self.K = K
         self.embed = nn.Embedding(vocab_size, d_model)
         pe = self._crt_pe(seq_len, d_model)
@@ -152,8 +161,18 @@ class SubsimLM(nn.Module):
     def forward(self, token_ids):
         B, T = token_ids.shape
         h = self.embed(token_ids) + self.pe[:T]
-        for block in self.blocks:
-            h = block(h)
+        if self.training and self.stochastic_fib_depth:
+            # Substrate-aligned stochastic depth: block i active with
+            # probability 1/F(i+1). Block 0 always; later blocks rarely.
+            # Each step samples a fresh mask; expected active blocks =
+            # sum(1/F(i+1)) which for 4 blocks is ~2 of 4 active.
+            for i, block in enumerate(self.blocks):
+                if torch.rand(1).item() < self.block_keep_probs[i].item():
+                    h = block(h)
+                # else: skip the block entirely (no forward, no backward)
+        else:
+            for block in self.blocks:
+                h = block(h)
         h = self.ln_f(h)
         return self.head(h)
 
