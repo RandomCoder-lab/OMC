@@ -1,0 +1,20 @@
+{
+  "ce": {
+    "name": "ce",
+    "best_val": 2.7601853013038635,
+    "best_step": 7462,
+    "wall": 248.67605233192444
+  },
+  "ce_attractor": {
+    "name": "ce_attractor",
+    "best_val": 2.7481073141098022,
+    "best_step": 7999,
+    "wall": 257.83108472824097
+  },
+  "ce_fft": {
+    "name": "ce_fft",
+    "best_val": 2.592044234275818,
+    "best_step": 7462,
+    "wall": 265.70565700531006
+  }
+}
