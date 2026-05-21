@@ -1,0 +1,498 @@
+{
+  "archs": {
+    "dense_crt": {
+      "n_params": 801664,
+      "n_attn_params": 264192,
+      "val_fp32": 2.439574755728245,
+      "quantized": {
+        "n4_fnor_per_tensor": {
+          "n_tiers": 4,
+          "reciprocals": false,
+          "scale": "per_tensor",
+          "tier_basis": "fibonacci",
+          "val": 7.848854899406433,
+          "delta": 5.409280143678188,
+          "params_quantized": 801664,
+          "avg_unique_tier_values": 5.784313725490196
+        },
+        "n8_fnor_per_tensor": {
+          "n_tiers": 8,
+          "reciprocals": false,
+          "scale": "per_tensor",
+          "tier_basis": "fibonacci",
+          "val": 3.4171799793839455,
+          "delta": 0.9776052236557007,
+          "params_quantized": 801664,
+          "avg_unique_tier_values": 12.254901960784315
+        },
+        "n16_fnor_per_tensor": {
+          "n_tiers": 16,
+          "reciprocals": false,
+          "scale": "per_tensor",
+          "tier_basis": "fibonacci",
+          "val": 3.404290087521076,
+          "delta": 0.9647153317928314,
+          "params_quantized": 801664,
+          "avg_unique_tier_values": 19.96078431372549
+        },
+        "n32_fnor_per_tensor": {
+          "n_tiers": 32,
+          "reciprocals": false,
+          "scale": "per_tensor",
+          "tier_basis": "fibonacci",
+          "val": 3.4040319994091988,
+          "delta": 0.964457243680954,
+          "params_quantized": 801664,
+          "avg_unique_tier_values": 24.235294117647058
+        },
+        "n4_fnor_per_row": {
+          "n_tiers": 4,
+          "reciprocals": false,
+          "scale": "per_row",
+          "tier_basis": "fibonacci",
+          "val": 4.788576230406761,
+          "delta": 2.3490014746785164,
+          "params_quantized": 801664,
+          "avg_unique_tier_values": 5.823529411764706
+        },
+        "n8_fnor_per_row": {
+          "n_tiers": 8,
+          "reciprocals": false,
+          "scale": "per_row",
+          "tier_basis": "fibonacci",
+          "val": 3.1771102994680405,
+          "delta": 0.7375355437397957,
+          "params_quantized": 801664,
+          "avg_unique_tier_values": 12.27450980392157
+        },
+        "n16_fnor_per_row": {
+          "n_tiers": 16,
+          "reciprocals": false,
+          "scale": "per_row",
+          "tier_basis": "fibonacci",
+          "val": 3.2084167823195457,
+          "delta": 0.768842026591301,
+          "params_quantized": 801664,
+          "avg_unique_tier_values": 19.980392156862745
+        },
+        "n32_fnor_per_row": {
+          "n_tiers": 32,
+          "reciprocals": false,
+          "scale": "per_row",
+          "tier_basis": "fibonacci",
+          "val": 3.2085734754800797,
+          "delta": 0.7689987197518349,
+          "params_quantized": 801664,
+          "avg_unique_tier_values": 23.84313725490196
+        },
+        "n4_frec_per_tensor": {
+          "n_tiers": 4,
+          "reciprocals": true,
+          "scale": "per_tensor",
+          "tier_basis": "fibonacci",
+          "val": 4.2178787142038345,
+          "delta": 1.7783039584755898,
+          "params_quantized": 801664,
+          "avg_unique_tier_values": 9.07843137254902
+        },
+        "n8_frec_per_tensor": {
+          "n_tiers": 8,
+          "reciprocals": true,
+          "scale": "per_tensor",
+          "tier_basis": "fibonacci",
+          "val": 3.3867647871375084,
+          "delta": 0.9471900314092636,
+          "params_quantized": 801664,
+          "avg_unique_tier_values": 18.07843137254902
+        },
+        "n16_frec_per_tensor": {
+          "n_tiers": 16,
+          "reciprocals": true,
+          "scale": "per_tensor",
+          "tier_basis": "fibonacci",
+          "val": 3.4041296541690826,
+          "delta": 0.9645548984408379,
+          "params_quantized": 801664,
+          "avg_unique_tier_values": 23.862745098039216
+        },
+        "n32_frec_per_tensor": {
+          "n_tiers": 32,
+          "reciprocals": true,
+          "scale": "per_tensor",
+          "tier_basis": "fibonacci",
+          "val": 3.4040321484208107,
+          "delta": 0.9644573926925659,
+          "params_quantized": 801664,
+          "avg_unique_tier_values": 24.372549019607842
+        },
+        "n4_frec_per_row": {
+          "n_tiers": 4,
+          "reciprocals": true,
+          "scale": "per_row",
+          "tier_basis": "fibonacci",
+          "val": 4.287693277001381,
+          "delta": 1.8481185212731361,
+          "params_quantized": 801664,
+          "avg_unique_tier_values": 9.117647058823529
+        },
+        "n8_frec_per_row": {
+          "n_tiers": 8,
+          "reciprocals": true,
+          "scale": "per_row",
+          "tier_basis": "fibonacci",
+          "val": 3.2172485813498497,
+          "delta": 0.7776738256216049,
+          "params_quantized": 801664,
+          "avg_unique_tier_values": 18.098039215686274
+        },
+        "n16_frec_per_row": {
+          "n_tiers": 16,
+          "reciprocals": true,
+          "scale": "per_row",
+          "tier_basis": "fibonacci",
+          "val": 3.208352394402027,
+          "delta": 0.7687776386737823,
+          "params_quantized": 801664,
+          "avg_unique_tier_values": 23.352941176470587
+        },
+        "n32_frec_per_row": {
+          "n_tiers": 32,
+          "reciprocals": true,
+          "scale": "per_row",
+          "tier_basis": "fibonacci",
+          "val": 3.208573505282402,
+          "delta": 0.7689987495541573,
+          "params_quantized": 801664,
+          "avg_unique_tier_values": 23.88235294117647
+        },
+        "n4_phi_per_tensor": {
+          "n_tiers": 4,
+          "reciprocals": false,
+          "scale": "per_tensor",
+          "tier_basis": "phi_power",
+          "val": 5.488777279853821,
+          "delta": 3.049202524125576,
+          "params_quantized": 801664,
+          "avg_unique_tier_values": 7.431372549019608
+        },
+        "n8_phi_per_tensor": {
+          "n_tiers": 8,
+          "reciprocals": false,
+          "scale": "per_tensor",
+          "tier_basis": "phi_power",
+          "val": 3.389074243605137,
+          "delta": 0.9494994878768921,
+          "params_quantized": 801664,
+          "avg_unique_tier_values": 13.745098039215685
+        },
+        "n16_phi_per_tensor": {
+          "n_tiers": 16,
+          "reciprocals": false,
+          "scale": "per_tensor",
+          "tier_basis": "phi_power",
+          "val": 3.403871789574623,
+          "delta": 0.9642970338463783,
+          "params_quantized": 801664,
+          "avg_unique_tier_values": 20.666666666666668
+        },
+        "n32_phi_per_tensor": {
+          "n_tiers": 32,
+          "reciprocals": false,
+          "scale": "per_tensor",
+          "tier_basis": "phi_power",
+          "val": 3.4040320068597794,
+          "delta": 0.9644572511315346,
+          "params_quantized": 801664,
+          "avg_unique_tier_values": 24.372549019607842
+        },
+        "n4_phi_per_row": {
+          "n_tiers": 4,
+          "reciprocals": false,
+          "scale": "per_row",
+          "tier_basis": "phi_power",
+          "val": 4.5734723508358,
+          "delta": 2.1338975951075554,
+          "params_quantized": 801664,
+          "avg_unique_tier_values": 7.450980392156863
+        },
+        "n8_phi_per_row": {
+          "n_tiers": 8,
+          "reciprocals": false,
+          "scale": "per_row",
+          "tier_basis": "phi_power",
+          "val": 3.2266528829932213,
+          "delta": 0.7870781272649765,
+          "params_quantized": 801664,
+          "avg_unique_tier_values": 13.764705882352942
+        },
+        "n16_phi_per_row": {
+          "n_tiers": 16,
+          "reciprocals": false,
+          "scale": "per_row",
+          "tier_basis": "phi_power",
+          "val": 3.2084721997380257,
+          "delta": 0.7688974440097809,
+          "params_quantized": 801664,
+          "avg_unique_tier_values": 20.686274509803923
+        },
+        "n32_phi_per_row": {
+          "n_tiers": 32,
+          "reciprocals": false,
+          "scale": "per_row",
+          "tier_basis": "phi_power",
+          "val": 3.208569012582302,
+          "delta": 0.7689942568540573,
+          "params_quantized": 801664,
+          "avg_unique_tier_values": 23.88235294117647
+        }
+      }
+    },
+    "tied_substrate": {
+      "n_params": 668536,
+      "n_attn_params": 131072,
+      "val_fp32": 2.592747889459133,
+      "quantized": {
+        "n4_fnor_per_tensor": {
+          "n_tiers": 4,
+          "reciprocals": false,
+          "scale": "per_tensor",
+          "tier_basis": "fibonacci",
+          "val": 6.7923648953437805,
+          "delta": 4.199617005884647,
+          "params_quantized": 668536,
+          "avg_unique_tier_values": 6.373831775700935
+        },
+        "n8_fnor_per_tensor": {
+          "n_tiers": 8,
+          "reciprocals": false,
+          "scale": "per_tensor",
+          "tier_basis": "fibonacci",
+          "val": 3.584361217916012,
+          "delta": 0.9916133284568787,
+          "params_quantized": 668536,
+          "avg_unique_tier_values": 13.598130841121495
+        },
+        "n16_fnor_per_tensor": {
+          "n_tiers": 16,
+          "reciprocals": false,
+          "scale": "per_tensor",
+          "tier_basis": "fibonacci",
+          "val": 3.6512366607785225,
+          "delta": 1.0584887713193893,
+          "params_quantized": 668536,
+          "avg_unique_tier_values": 22.289719626168225
+        },
+        "n32_fnor_per_tensor": {
+          "n_tiers": 32,
+          "reciprocals": false,
+          "scale": "per_tensor",
+          "tier_basis": "fibonacci",
+          "val": 3.6507833153009415,
+          "delta": 1.0580354258418083,
+          "params_quantized": 668536,
+          "avg_unique_tier_values": 26.14018691588785
+        },
+        "n4_fnor_per_row": {
+          "n_tiers": 4,
+          "reciprocals": false,
+          "scale": "per_row",
+          "tier_basis": "fibonacci",
+          "val": 6.571510136127472,
+          "delta": 3.9787622466683388,
+          "params_quantized": 668536,
+          "avg_unique_tier_values": 6.383177570093458
+        },
+        "n8_fnor_per_row": {
+          "n_tiers": 8,
+          "reciprocals": false,
+          "scale": "per_row",
+          "tier_basis": "fibonacci",
+          "val": 3.2470703125,
+          "delta": 0.6543224230408669,
+          "params_quantized": 668536,
+          "avg_unique_tier_values": 13.607476635514018
+        },
+        "n16_fnor_per_row": {
+          "n_tiers": 16,
+          "reciprocals": false,
+          "scale": "per_row",
+          "tier_basis": "fibonacci",
+          "val": 3.183598607778549,
+          "delta": 0.590850718319416,
+          "params_quantized": 668536,
+          "avg_unique_tier_values": 22.299065420560748
+        },
+        "n32_fnor_per_row": {
+          "n_tiers": 32,
+          "reciprocals": false,
+          "scale": "per_row",
+          "tier_basis": "fibonacci",
+          "val": 3.183070808649063,
+          "delta": 0.59032291918993,
+          "params_quantized": 668536,
+          "avg_unique_tier_values": 25.49532710280374
+        },
+        "n4_frec_per_tensor": {
+          "n_tiers": 4,
+          "reciprocals": true,
+          "scale": "per_tensor",
+          "tier_basis": "fibonacci",
+          "val": 3.734321117401123,
+          "delta": 1.14157322794199,
+          "params_quantized": 668536,
+          "avg_unique_tier_values": 10.037383177570094
+        },
+        "n8_frec_per_tensor": {
+          "n_tiers": 8,
+          "reciprocals": true,
+          "scale": "per_tensor",
+          "tier_basis": "fibonacci",
+          "val": 3.504885621368885,
+          "delta": 0.9121377319097519,
+          "params_quantized": 668536,
+          "avg_unique_tier_values": 20.233644859813083
+        },
+        "n16_frec_per_tensor": {
+          "n_tiers": 16,
+          "reciprocals": true,
+          "scale": "per_tensor",
+          "tier_basis": "fibonacci",
+          "val": 3.6509373784065247,
+          "delta": 1.0581894889473915,
+          "params_quantized": 668536,
+          "avg_unique_tier_values": 25.53271028037383
+        },
+        "n32_frec_per_tensor": {
+          "n_tiers": 32,
+          "reciprocals": true,
+          "scale": "per_tensor",
+          "tier_basis": "fibonacci",
+          "val": 3.650783285498619,
+          "delta": 1.058035396039486,
+          "params_quantized": 668536,
+          "avg_unique_tier_values": 26.1588785046729
+        },
+        "n4_frec_per_row": {
+          "n_tiers": 4,
+          "reciprocals": true,
+          "scale": "per_row",
+          "tier_basis": "fibonacci",
+          "val": 3.894965998828411,
+          "delta": 1.302218109369278,
+          "params_quantized": 668536,
+          "avg_unique_tier_values": 10.046728971962617
+        },
+        "n8_frec_per_row": {
+          "n_tiers": 8,
+          "reciprocals": true,
+          "scale": "per_row",
+          "tier_basis": "fibonacci",
+          "val": 3.2067508846521378,
+          "delta": 0.6140029951930046,
+          "params_quantized": 668536,
+          "avg_unique_tier_values": 20.242990654205606
+        },
+        "n16_frec_per_row": {
+          "n_tiers": 16,
+          "reciprocals": true,
+          "scale": "per_row",
+          "tier_basis": "fibonacci",
+          "val": 3.183425836265087,
+          "delta": 0.590677946805954,
+          "params_quantized": 668536,
+          "avg_unique_tier_values": 24.94392523364486
+        },
+        "n32_frec_per_row": {
+          "n_tiers": 32,
+          "reciprocals": true,
+          "scale": "per_row",
+          "tier_basis": "fibonacci",
+          "val": 3.183070831000805,
+          "delta": 0.5903229415416718,
+          "params_quantized": 668536,
+          "avg_unique_tier_values": 25.49532710280374
+        },
+        "n4_phi_per_tensor": {
+          "n_tiers": 4,
+          "reciprocals": false,
+          "scale": "per_tensor",
+          "tier_basis": "phi_power",
+          "val": 6.240207105875015,
+          "delta": 3.647459216415882,
+          "params_quantized": 668536,
+          "avg_unique_tier_values": 8.22429906542056
+        },
+        "n8_phi_per_tensor": {
+          "n_tiers": 8,
+          "reciprocals": false,
+          "scale": "per_tensor",
+          "tier_basis": "phi_power",
+          "val": 3.6822675615549088,
+          "delta": 1.0895196720957756,
+          "params_quantized": 668536,
+          "avg_unique_tier_values": 15.05607476635514
+        },
+        "n16_phi_per_tensor": {
+          "n_tiers": 16,
+          "reciprocals": false,
+          "scale": "per_tensor",
+          "tier_basis": "phi_power",
+          "val": 3.651181146502495,
+          "delta": 1.0584332570433617,
+          "params_quantized": 668536,
+          "avg_unique_tier_values": 23.19626168224299
+        },
+        "n32_phi_per_tensor": {
+          "n_tiers": 32,
+          "reciprocals": false,
+          "scale": "per_tensor",
+          "tier_basis": "phi_power",
+          "val": 3.6507839262485504,
+          "delta": 1.0580360367894173,
+          "params_quantized": 668536,
+          "avg_unique_tier_values": 26.1588785046729
+        },
+        "n4_phi_per_row": {
+          "n_tiers": 4,
+          "reciprocals": false,
+          "scale": "per_row",
+          "tier_basis": "phi_power",
+          "val": 5.210846841335297,
+          "delta": 2.6180989518761635,
+          "params_quantized": 668536,
+          "avg_unique_tier_values": 8.233644859813085
+        },
+        "n8_phi_per_row": {
+          "n_tiers": 8,
+          "reciprocals": false,
+          "scale": "per_row",
+          "tier_basis": "phi_power",
+          "val": 3.199477568268776,
+          "delta": 0.6067296788096428,
+          "params_quantized": 668536,
+          "avg_unique_tier_values": 15.065420560747663
+        },
+        "n16_phi_per_row": {
+          "n_tiers": 16,
+          "reciprocals": false,
+          "scale": "per_row",
+          "tier_basis": "phi_power",
+          "val": 3.1830404922366142,
+          "delta": 0.5902926027774811,
+          "params_quantized": 668536,
+          "avg_unique_tier_values": 23.205607476635514
+        },
+        "n32_phi_per_row": {
+          "n_tiers": 32,
+          "reciprocals": false,
+          "scale": "per_row",
+          "tier_basis": "phi_power",
+          "val": 3.183070570230484,
+          "delta": 0.5903226807713509,
+          "params_quantized": 668536,
+          "avg_unique_tier_values": 25.49532710280374
+        }
+      }
+    }
+  }
+}

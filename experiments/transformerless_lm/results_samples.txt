@@ -1,0 +1,46 @@
+# Samples (steps=2500, temperature=0.7, top_k=10)
+# Prompt: 'ROMEO:\nWhat light through'
+
+
+======================================================================
+dense_crt  best_val=2.5205 @ step 2400  params=801,664
+======================================================================
+ROMEO:
+What light throughen:
+
+
+
+S savetoayyy d dy h: r a ototoutoourooone wee ereaaaree  handird,
+
+re ota wethall w thel heeree t anou aneneasie  ad meneeeendat  an  hare thee wee and he  a he henathat he t,othothenee haannddassen oo ot  hino madoanomy he anoe wat ararent mee t a tt aala tt s
+
+
+esithesou may ale whe aall h wo t  ha wen achereneeee oe hande t moulllat o tistht thhoousseasse meriitthotheeaalllo we  ade  adi
+
+======================================================================
+fibgen_K32_cross  best_val=2.7026 @ step 2499  params=80,640
+======================================================================
+ROMEO:
+What light through hit t s sas tos hat berer wh as, otot t bend
+
+W t o t tar heso s ms t t tre tha we mall t t ml he hhe tito t an terese t t mene tono h he t h he this whou har t  t he hheathhis t t, thothenor his, be she hes she h ho t wousom bungll an at t arert she t s th ang wer seshes to sou mas he  wes thes b w sh t g t hase snd
+Tore t he his t t ge wat o tisert thho hiser s t trin torthigasondo w w the we h
+
+======================================================================
+subsim_K32  best_val=2.6643 @ step 800  params=95,104
+======================================================================
+ROMEO:
+What light through theloul shed ss hawh he he s anououounound m t the se tanou so l ms t codre cr be thand therel heeitutouroou au tereie t
+KI the theran lee luler the theou hareno t he he ath the fe,uthouhenir his,
+I thouhe s ith h houre ounour he lithowure
+Tarere me at f th anou theseshesithesou man he, our anou bre he tho the fas l ououerou hand fou the hathofuistht thowhesuer she
+Whinououthe thondouhe ofou thei
+
+======================================================================
+composed_transformerless  best_val=2.6630 @ step 1000  params=213,752
+======================================================================
+ROMEO:
+What light througheisthoulosh this nd f arer ar alotothat, y nd fe t y t tar hee thakstr ar
+:
+
+Wta t thall t thel henst, t toousen se sie the mine the at y, t fle tthis s ouanlleng t t s, yath t he t, thothunir har, oucase hes st th hus anoanoma he anoe than aresth s y t f th aal mer seshestthe ou may ale athteals h t st tha t fase fr se se o  sand ft fous mat oftistht thas s seasse marin thothe ator o he  far  st 

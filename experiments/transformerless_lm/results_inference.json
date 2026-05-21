@@ -1,0 +1,92 @@
+[
+  {
+    "name": "dense_crt_d128_naive",
+    "tokens_generated": 64,
+    "wall_seconds": 0.1352088451385498,
+    "tokens_per_sec": 473.3418138023336,
+    "ms_per_token": 2.1126382052898407,
+    "weight_mb": 3.05810546875,
+    "n_params": 801664
+  },
+  {
+    "name": "fibgen_K32_cross_d128_naive",
+    "tokens_generated": 64,
+    "wall_seconds": 0.5972557067871094,
+    "tokens_per_sec": 107.15678271921925,
+    "ms_per_token": 9.332120418548584,
+    "weight_mb": 0.3076171875,
+    "n_params": 80640
+  },
+  {
+    "name": "fibgen_K32_cross_d128_cached",
+    "tokens_generated": 64,
+    "wall_seconds": 0.14516830444335938,
+    "tokens_per_sec": 440.86758638812245,
+    "ms_per_token": 2.2682547569274902,
+    "weight_mb": 0.3076171875,
+    "n_params": 80640
+  },
+  {
+    "name": "composed_transformerless_d128_naive",
+    "tokens_generated": 64,
+    "wall_seconds": 1.4448821544647217,
+    "tokens_per_sec": 44.294269814488615,
+    "ms_per_token": 22.576283663511276,
+    "weight_mb": 0.815399169921875,
+    "n_params": 213752
+  },
+  {
+    "name": "composed_transformerless_d128_cached",
+    "tokens_generated": 64,
+    "wall_seconds": 0.29195213317871094,
+    "tokens_per_sec": 219.2140173910771,
+    "ms_per_token": 4.561752080917358,
+    "weight_mb": 0.815399169921875,
+    "n_params": 213752
+  },
+  {
+    "name": "dense_crt_d256_naive",
+    "tokens_generated": 64,
+    "wall_seconds": 0.2424333095550537,
+    "tokens_per_sec": 263.99012626384314,
+    "ms_per_token": 3.7880204617977142,
+    "weight_mb": 12.1162109375,
+    "n_params": 3176192
+  },
+  {
+    "name": "fibgen_K32_cross_d256_naive",
+    "tokens_generated": 64,
+    "wall_seconds": 0.8499040603637695,
+    "tokens_per_sec": 75.30261706551585,
+    "ms_per_token": 13.279750943183899,
+    "weight_mb": 0.333984375,
+    "n_params": 87552
+  },
+  {
+    "name": "fibgen_K32_cross_d256_cached",
+    "tokens_generated": 64,
+    "wall_seconds": 0.2694823741912842,
+    "tokens_per_sec": 237.49234135280207,
+    "ms_per_token": 4.210662096738815,
+    "weight_mb": 0.333984375,
+    "n_params": 87552
+  },
+  {
+    "name": "composed_transformerless_d256_naive",
+    "tokens_generated": 64,
+    "wall_seconds": 2.197666645050049,
+    "tokens_per_sec": 29.121796130523922,
+    "ms_per_token": 34.33854132890701,
+    "weight_mb": 0.84954833984375,
+    "n_params": 222704
+  },
+  {
+    "name": "composed_transformerless_d256_cached",
+    "tokens_generated": 64,
+    "wall_seconds": 0.4581449031829834,
+    "tokens_per_sec": 139.69379459502215,
+    "ms_per_token": 7.158514112234116,
+    "weight_mb": 0.84954833984375,
+    "n_params": 222704
+  }
+]
