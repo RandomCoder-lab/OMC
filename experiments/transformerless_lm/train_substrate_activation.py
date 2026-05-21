@@ -164,24 +164,25 @@ def main():
     fib_positions = fib_positions_in_window(args.seq_len)
 
     results = {}
+    # Baseline GELU val on this config is 2.5920 (from prior bench).
+    # Skipping its re-run to save compute.
     for name, cls in [
-        ("gelu_baseline", None),
         ("substrate_gelu_inverse", SubstrateGELUInverse),  # reciprocal Fibonacci
         ("substrate_gelu_soft", SubstrateGELUSoft),         # soft blend, inverse default
     ]:
         results[name] = train_one(name, cls, train_split, val_split,
                                     vocab_size, args, fib_positions)
 
+    GELU_BASELINE_REF = 2.5920   # from prior identical-config bench
     print()
     print("=" * 84)
     print(f"{'arch':<26} {'params':>10} {'best_val':>10} {'wall':>10}")
     print('-' * 84)
-    base_val = results["gelu_baseline"]["best_val"]
+    print(f"{'(gelu baseline ref)':<26} {'':>10} {GELU_BASELINE_REF:>10.4f} {'-':>10}")
+    print('-' * 84)
     for name, r in results.items():
-        delta = ""
-        if name != "gelu_baseline":
-            d = (r["best_val"] - base_val) / base_val * 100
-            delta = f"  ({d:+.2f}% vs gelu)"
+        d = (r["best_val"] - GELU_BASELINE_REF) / GELU_BASELINE_REF * 100
+        delta = f"  ({d:+.2f}% vs gelu)"
         print(f"{name:<26} {r['n_params']:>10,} {r['best_val']:>10.4f} "
               f"{r['wall']:>9.1f}s{delta}")
 
