@@ -1,12 +1,13 @@
 """A/B bench for substrate LayerNorm and Softmax.
 
-Stacks on top of the substrate activation winner (SubstrateNegMultiRefined,
-val=2.5871, -0.19% vs GELU). Swaps the per-block nn.LayerNorm with
-SubstrateL1LN and/or the attention F.softmax with substrate_softmax
-(base phi^pi).
+Stacks on top of SubstrateNegMultiAdvancedV2 (R4+R5 substrate-canonical
+reformulation, val=2.5889 on its own). Hypothesis: V2's extra capacity
+(per-tier asymmetry + frequency rescaling) loses signal through
+substrate-blind LN/softmax — pairing with SubstrateL1LN and
+substrate_softmax (base phi^pi) may unlock it.
 
-Four arms:
-  baseline_refined          standard LN + standard softmax (current best)
+Four arms (all with V2 activation):
+  baseline_v2               standard LN + standard softmax (= 2.5889 ref)
   + l1_ln                   SubstrateL1LN  + standard softmax
   + phi_pi_softmax          standard LN    + substrate_softmax
   + both                    SubstrateL1LN  + substrate_softmax
@@ -31,7 +32,7 @@ from train_distractor_mix import build_distractor_stream
 from lazy_data import fib_positions_in_window, get_fib_strided_batch
 from train_K_shrink import K_schedule_tier_walk, set_K_active_recursive
 from losses_substrate import substrate_fft_loss
-from activations_substrate import SubstrateNegMultiRefined
+from activations_substrate import SubstrateNegMultiAdvancedV2
 from layernorm_substrate import SubstrateL1LN, substrate_softmax
 
 
@@ -53,7 +54,7 @@ class FibRecLMSubstrateNorm(FibRecLM):
             )
             self.ln_f = ln_cls(self.d_model)
         self.activations = nn.ModuleList(
-            [SubstrateNegMultiRefined() for _ in range(self.n_blocks)]
+            [SubstrateNegMultiAdvancedV2() for _ in range(self.n_blocks)]
         )
         self._softmax_fn = softmax_fn if softmax_fn is not None else \
             (lambda x, dim=-1: F.softmax(x, dim=dim))
@@ -168,7 +169,7 @@ def main():
     fib_positions = fib_positions_in_window(args.seq_len)
 
     arms = [
-        ("baseline_refined",  nn.LayerNorm,    None),
+        ("baseline_v2",       nn.LayerNorm,    None),
         ("l1_ln",             SubstrateL1LN,   None),
         ("phi_pi_softmax",    nn.LayerNorm,    substrate_softmax),
         ("both",              SubstrateL1LN,   substrate_softmax),
@@ -178,7 +179,7 @@ def main():
         results[name] = train_one(name, ln_cls, sm_fn, train_split, val_split,
                                     vocab_size, args, fib_positions)
 
-    REFINED_REF = 2.5871   # previous winner (refined activation, standard LN+SM)
+    REFINED_REF = 2.5871   # refined activation, standard LN+SM
     GELU_REF = 2.5920
     print()
     print("=" * 92)
