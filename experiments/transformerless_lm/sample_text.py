@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from corpus import make_dataset
 from models import make_model
 from models_fibgen import FibGenLM, FibGenTransformerless
+from models_subsim import SubsimLM
 from train_distractor_mix import build_distractor_stream
 from lazy_data import fib_positions_in_window, get_fib_strided_batch
 
@@ -131,7 +132,7 @@ def main():
     )
     fib_positions = fib_positions_in_window(args.seq_len)
 
-    # Build the three archs
+    # Build the four archs (now includes SubsimLM — substrate-native operator)
     archs = {
         "dense_crt": lambda: make_model(
             "crt_only", vocab_size=vocab_size, seq_len=args.seq_len,
@@ -140,6 +141,11 @@ def main():
         "fibgen_K32_cross": lambda: FibGenLM(
             vocab_size=vocab_size, d_model=args.d_model,
             n_blocks=args.n_blocks, seq_len=args.seq_len, K=32, mode="cross",
+        ),
+        "subsim_K32": lambda: SubsimLM(
+            vocab_size=vocab_size, d_model=args.d_model,
+            n_blocks=args.n_blocks, seq_len=args.seq_len,
+            K=32, fibgen_K=32, mode="cross",
         ),
         "composed_transformerless": lambda: FibGenTransformerless(
             vocab_size=vocab_size, d_model=args.d_model, n_blocks=args.n_blocks,
