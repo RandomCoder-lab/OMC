@@ -87,7 +87,8 @@ class FibGenLinear(nn.Module):
 
     def __init__(self, in_features: int, out_features: int, K: int = 16,
                  mode: str = "separable",
-                 bias: bool = True, init_scale: float = 0.1):
+                 bias: bool = True, init_scale: float = 0.1,
+                 lazy_tier_dropout: bool = False):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
@@ -95,10 +96,34 @@ class FibGenLinear(nn.Module):
         if mode not in ("separable", "cross"):
             raise ValueError(f"unknown mode: {mode}")
         self.mode = mode
+        self.lazy_tier_dropout = lazy_tier_dropout
         n_components = self.K if mode == "separable" else self.K * self.K
         self.seed = nn.Parameter(
             torch.randn(n_components, 4) * (init_scale / max(1, math.sqrt(n_components)))
         )
+
+        # Fibonacci tier per seed component, used for lazy-tier dropout.
+        # Lower tier = more important = active more often.
+        if mode == "separable":
+            # Component k → tier (k+1). F(tier) = Fibonacci number.
+            tiers_int = [i + 1 for i in range(self.K)]
+        else:
+            # Cross-mode pair (k_i, k_j) → tier max(k_i, k_j) + 1.
+            # Pair (0, 0) is tier 1 (most important, always active).
+            # Pair (31, 31) is tier 32 (rarely active under 1/F(32) probability).
+            tiers_int = [max(k_i, k_j) + 1
+                         for k_i in range(self.K) for k_j in range(self.K)]
+        # Two substrate-aligned schemes available on this buffer:
+        # (1) lazy_tier_dropout=True   -> mask seed via Bernoulli(tier_keep_probs)
+        # (2) gradient-scale via tier_lr_scale (applied by training loop)
+        keep_probs = torch.tensor(
+            [1.0 / math.sqrt(t) for t in tiers_int], dtype=torch.float,
+        )
+        self.register_buffer("tier_keep_probs", keep_probs)
+        # tier-weighted learning rate: low-tier components get full LR, high-tier
+        # get reduced LR proportional to 1/sqrt(tier). Apply by multiplying
+        # seed.grad by this buffer BEFORE optimizer.step().
+        self.register_buffer("tier_lr_scale", keep_probs.unsqueeze(-1))
         if bias:
             self.bias = nn.Parameter(torch.zeros(out_features))
         else:
@@ -151,6 +176,29 @@ class FibGenLinear(nn.Module):
             return cached
         return self._compute_W()
 
+    def _maybe_lazy_seed(self) -> torch.Tensor:
+        """Returns the seed (optionally masked by Fibonacci-tier dropout).
+
+        Substrate-native lazy LOADING applied to the seed itself:
+          - Tier 1 components are always active (full participation)
+          - Tier-k components active with probability 1/sqrt(k)
+          - Only active components contribute to this step's forward;
+            only they receive gradient on backward.
+
+        Magnitude matching: at training the mask is Bernoulli; at eval
+        we scale the seed by the per-component keep_prob so the
+        EXPECTED forward output during training matches the deterministic
+        forward at eval. This avoids the magnitude crash that pure-mask
+        without scaling caused.
+        """
+        if not self.lazy_tier_dropout:
+            return self.seed
+        if self.training:
+            mask = torch.bernoulli(self.tier_keep_probs)        # [n_components]
+            return self.seed * mask.unsqueeze(-1)
+        # eval: deterministic, scaled by keep_prob to match training E[seed]
+        return self.seed * self.tier_keep_probs.unsqueeze(-1)
+
     def _forward_compressed(self, x: torch.Tensor) -> torch.Tensor:
         """Substrate-native forward: compute y = W·x WITHOUT materializing W.
 
@@ -166,8 +214,9 @@ class FibGenLinear(nn.Module):
         K-dim projected x, then projected back.
         """
         # x: [B, T, in_features]
+        seed = self._maybe_lazy_seed()
         if self.mode == "separable":
-            a, b, c, d = self.seed[:, 0], self.seed[:, 1], self.seed[:, 2], self.seed[:, 3]
+            a, b, c, d = seed[:, 0], seed[:, 1], seed[:, 2], seed[:, 3]
             # Project x into Fibonacci-basis along input axis: [B, T, K]
             x_cos = x @ self.cos_j                        # [B, T, K]
             x_sin = x @ self.sin_j                        # [B, T, K]
@@ -185,8 +234,8 @@ class FibGenLinear(nn.Module):
             return y
         # cross mode: seed [K, K, 4] mixing matrix
         K = self.K
-        seed = self.seed.view(K, K, 4)
-        a, b, c, d = seed[..., 0], seed[..., 1], seed[..., 2], seed[..., 3]
+        seed_cross = seed.view(K, K, 4)
+        a, b, c, d = seed_cross[..., 0], seed_cross[..., 1], seed_cross[..., 2], seed_cross[..., 3]
         x_cos = x @ self.cos_j                            # [B, T, K]
         x_sin = x @ self.sin_j
         # K×K mixing in seed space:

@@ -49,13 +49,16 @@ class SubstrateSimilarityAttention(nn.Module):
     """
 
     def __init__(self, d_model: int, K: int = 32, seq_len: int = 128,
-                 fibgen_K: int = 32, mode: str = "cross"):
+                 fibgen_K: int = 32, mode: str = "cross",
+                 lazy_tier_dropout: bool = False):
         super().__init__()
         self.d_model = d_model
         self.K = K
-        self.W_sig = FibGenLinear(d_model, K, K=fibgen_K, mode=mode, bias=False)
-        self.W_v = FibGenLinear(d_model, d_model, K=fibgen_K, mode=mode, bias=False)
-        self.W_out = FibGenLinear(d_model, d_model, K=fibgen_K, mode=mode, bias=False)
+        kw = dict(K=fibgen_K, mode=mode, bias=False,
+                   lazy_tier_dropout=lazy_tier_dropout)
+        self.W_sig = FibGenLinear(d_model, K, **kw)
+        self.W_v = FibGenLinear(d_model, d_model, **kw)
+        self.W_out = FibGenLinear(d_model, d_model, **kw)
         # Standard causal mask; substrate-distance attention is dense in
         # principle. Could also use Fibonacci-offset mask for sparsity.
         mask = torch.tril(torch.ones(seq_len, seq_len))
@@ -81,13 +84,16 @@ class SubsimBlock(nn.Module):
     """Substrate-similarity attention + FibGen FFN."""
 
     def __init__(self, d_model: int, seq_len: int, K: int = 32,
-                 fibgen_K: int = 32, mode: str = "cross"):
+                 fibgen_K: int = 32, mode: str = "cross",
+                 lazy_tier_dropout: bool = False):
         super().__init__()
         self.attn = SubstrateSimilarityAttention(d_model, K=K, seq_len=seq_len,
-                                                   fibgen_K=fibgen_K, mode=mode)
+                                                   fibgen_K=fibgen_K, mode=mode,
+                                                   lazy_tier_dropout=lazy_tier_dropout)
         # FFN with FibGen weights (separate K for FFN if desired)
-        self.w1 = FibGenLinear(d_model, 4 * d_model, K=fibgen_K, mode=mode)
-        self.w2 = FibGenLinear(4 * d_model, d_model, K=fibgen_K, mode=mode)
+        kw = dict(K=fibgen_K, mode=mode, lazy_tier_dropout=lazy_tier_dropout)
+        self.w1 = FibGenLinear(d_model, 4 * d_model, **kw)
+        self.w2 = FibGenLinear(4 * d_model, d_model, **kw)
         self.ln1 = nn.LayerNorm(d_model)
         self.ln2 = nn.LayerNorm(d_model)
 
@@ -108,7 +114,7 @@ class SubsimLM(nn.Module):
 
     def __init__(self, vocab_size: int, d_model: int, n_blocks: int,
                  seq_len: int, K: int = 32, fibgen_K: int = 32,
-                 mode: str = "cross"):
+                 mode: str = "cross", lazy_tier_dropout: bool = False):
         super().__init__()
         self.seq_len = seq_len
         self.K = K
@@ -116,7 +122,8 @@ class SubsimLM(nn.Module):
         pe = self._crt_pe(seq_len, d_model)
         self.register_buffer("pe", pe)
         self.blocks = nn.ModuleList([
-            SubsimBlock(d_model, seq_len, K=K, fibgen_K=fibgen_K, mode=mode)
+            SubsimBlock(d_model, seq_len, K=K, fibgen_K=fibgen_K, mode=mode,
+                          lazy_tier_dropout=lazy_tier_dropout)
             for _ in range(n_blocks)
         ])
         self.ln_f = nn.LayerNorm(d_model)
