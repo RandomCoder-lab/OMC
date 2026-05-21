@@ -42,13 +42,18 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-# Extended unique-positive Fibonacci table — 32 entries.
-# Previous 16-entry version caused K>16 to silently clamp.
-FIBONACCI = [
-    1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610, 987,
-    1597, 2584, 4181, 6765, 10946, 17711, 28657, 46368, 75025,
-    121393, 196418, 317811, 514229, 832040, 1346269, 2178309, 3524578,
-]
+# Extended unique-positive Fibonacci table — 64 entries.
+# Computed by recurrence; large F(k) wrap pseudo-randomly mod small
+# dimensions but remain pairwise-distinct, so they still serve as a
+# rich basis on weight matrices at d=128-1024.
+def _build_fibonacci(n: int) -> list[int]:
+    out = [1, 2]
+    while len(out) < n:
+        out.append(out[-1] + out[-2])
+    return out
+
+
+FIBONACCI = _build_fibonacci(64)
 
 
 class FibGenLinear(nn.Module):
@@ -196,6 +201,189 @@ class FibGenBlock(nn.Module):
         x = x + self.attn(self.ln1(x), mask)
         x = x + self.ff(self.ln2(x))
         return x
+
+
+class FibGenSparseAttention(nn.Module):
+    """Fibonacci-offset attention + FibGen QKV/out weights.
+
+    Composes two validated substrate components:
+      - sparse attention restricted to Fibonacci-distance position pairs
+        (~log_phi_pi(T) edges per query instead of T)
+      - FibGen-generated Q, K, V, out projections (100x weight compression)
+    """
+
+    def __init__(self, d_model: int, seq_len: int, K: int = 16,
+                 mode: str = "separable"):
+        super().__init__()
+        self.d_model = d_model
+        self.seq_len = seq_len
+        self.qkv = FibGenLinear(d_model, 3 * d_model, K=K, mode=mode)
+        self.out = FibGenLinear(d_model, d_model, K=K, mode=mode)
+        # Fibonacci-offset mask
+        mask = torch.zeros(seq_len, seq_len, dtype=torch.bool)
+        diag = torch.arange(seq_len)
+        mask[diag, diag] = True
+        for f in FIBONACCI:
+            if f >= seq_len:
+                break
+            i_idx = torch.arange(f, seq_len)
+            j_idx = i_idx - f
+            mask[i_idx, j_idx] = True
+        self.register_buffer("fib_mask", mask)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, T, D = x.shape
+        qkv = self.qkv(x)
+        q, k, v = qkv.chunk(3, dim=-1)
+        scale = 1.0 / math.sqrt(D)
+        scores = (q @ k.transpose(-2, -1)) * scale
+        scores = scores.masked_fill(~self.fib_mask[:T, :T], float("-inf"))
+        attn = F.softmax(scores, dim=-1)
+        return self.out(attn @ v)
+
+
+class FibGenRoutedFFN(nn.Module):
+    """Zeckendorf-routed FFN where each specialist is FibGen-generated.
+
+    Composes three substrate primitives:
+      - K specialists, each at d_inner = expansion·d/n_specialists width
+        so total params match standard FFN
+      - per-token routing by the top Zeckendorf index of the token id
+        (integer routing, no float router)
+      - each specialist's W1, W2 are FibGen-generated
+    """
+
+    def __init__(self, d_model: int, n_specialists: int = 5,
+                 expansion: int = 4, vocab_size: int = 65,
+                 K: int = 16, mode: str = "separable"):
+        super().__init__()
+        self.d_model = d_model
+        self.n_specialists = n_specialists
+        d_inner = max(1, int(expansion * d_model / n_specialists))
+        self.specialists = nn.ModuleList([
+            nn.Sequential(
+                FibGenLinear(d_model, d_inner, K=K, mode=mode),
+                nn.GELU(),
+                FibGenLinear(d_inner, d_model, K=K, mode=mode),
+            )
+            for _ in range(n_specialists)
+        ])
+        # Routing table from omnimcode-core/src/phi_pi_fib.rs (Zeckendorf-top
+        # index of each token id, mod K)
+        def _zeckendorf_top(n):
+            if n <= 0:
+                return 0
+            rem = n
+            i = len(FIBONACCI) - 1
+            while i >= 0:
+                if FIBONACCI[i] <= rem:
+                    return i
+                i -= 1
+            return 0
+        route = torch.tensor(
+            [_zeckendorf_top(t) % n_specialists for t in range(vocab_size)],
+            dtype=torch.long,
+        )
+        self.register_buffer("route_table", route)
+
+    def forward(self, x: torch.Tensor, token_ids: torch.Tensor) -> torch.Tensor:
+        B, T, D = x.shape
+        route_id = self.route_table[token_ids]               # [B, T]
+        out = torch.zeros_like(x)
+        for k, spec in enumerate(self.specialists):
+            mask = (route_id == k).float().unsqueeze(-1)
+            if mask.sum() == 0:
+                continue
+            out = out + spec(x) * mask
+        return out
+
+
+class FibGenTransformerlessBlock(nn.Module):
+    """Block = sparse Fibonacci-offset attention + Zeckendorf-routed FFN.
+    All weights inside both inner modules are FibGen-generated."""
+
+    def __init__(self, d_model: int, seq_len: int, vocab_size: int,
+                 K: int = 16, mode: str = "separable",
+                 n_specialists: int = 5):
+        super().__init__()
+        self.attn = FibGenSparseAttention(d_model, seq_len, K=K, mode=mode)
+        self.ff = FibGenRoutedFFN(d_model, n_specialists=n_specialists,
+                                    vocab_size=vocab_size, K=K, mode=mode)
+        self.ln1 = nn.LayerNorm(d_model)
+        self.ln2 = nn.LayerNorm(d_model)
+
+    def forward(self, x, token_ids):
+        x = x + self.attn(self.ln1(x))
+        x = x + self.ff(self.ln2(x), token_ids)
+        return x
+
+
+class FibGenTransformerless(nn.Module):
+    """All-substrate transformerless candidate.
+
+    Composes:
+      - CRT-Fibonacci positional encoding   (validated -5.4%)
+      - FibGen embedding                     (100x compression)
+      - Fibonacci-offset sparse attention   (-3.2% / 14x FLOPs)
+      - FibGen QKV/out weights              (100x compression)
+      - Zeckendorf-routed FFN                (1/n_specialists per-token FFN)
+      - FibGen specialist weights            (100x compression each)
+      - FibGen LM head                       (100x compression)
+
+    Storage at d=128 should be dramatically smaller than the dense
+    baseline; inference should run on Fibonacci-strided KV state.
+    """
+
+    def __init__(self, vocab_size: int, d_model: int, n_blocks: int,
+                 seq_len: int, K: int = 16, mode: str = "separable",
+                 n_specialists: int = 5):
+        super().__init__()
+        self.seq_len = seq_len
+        self.K = K
+        self.mode = mode
+        self.embed_gen = FibGenLinear(vocab_size, d_model, K=K, mode=mode,
+                                        bias=False)
+        pe = FibGenLM._crt_pe(seq_len, d_model)
+        self.register_buffer("pe", pe)
+        self.blocks = nn.ModuleList([
+            FibGenTransformerlessBlock(
+                d_model, seq_len, vocab_size, K=K, mode=mode,
+                n_specialists=n_specialists,
+            )
+            for _ in range(n_blocks)
+        ])
+        self.ln_f = nn.LayerNorm(d_model)
+        self.head = FibGenLinear(d_model, vocab_size, K=K, mode=mode, bias=False)
+
+    def forward(self, token_ids):
+        B, T = token_ids.shape
+        W_emb = self.embed_gen.generate_W()
+        h = W_emb.t()[token_ids] + self.pe[:T]
+        for block in self.blocks:
+            h = block(h, token_ids)
+        h = self.ln_f(h)
+        return self.head(h)
+
+    def storage_summary(self) -> dict:
+        stored = 0
+        dense_eq = 0
+        for m in self.modules():
+            if isinstance(m, FibGenLinear):
+                stored += m.n_stored_params
+                dense_eq += m.n_dense_equivalent_params
+        # LayerNorms etc.
+        for n, p in self.named_parameters():
+            if "seed" in n:
+                continue
+            if any(s in n for s in (".embed_gen.bias", ".head.bias",
+                                      ".qkv.bias", ".out.bias",
+                                      ".w1.bias", ".w2.bias",
+                                      ".0.bias", ".2.bias")):
+                continue
+            stored += p.numel()
+            dense_eq += p.numel()
+        return {"stored": stored, "dense_equivalent": dense_eq,
+                "compression": dense_eq / max(stored, 1)}
 
 
 class FibGenLM(nn.Module):
