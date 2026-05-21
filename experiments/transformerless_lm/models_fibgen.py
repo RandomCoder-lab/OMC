@@ -53,7 +53,7 @@ def _build_fibonacci(n: int) -> list[int]:
     return out
 
 
-FIBONACCI = _build_fibonacci(64)
+FIBONACCI = _build_fibonacci(128)
 
 
 class FibGenLinear(nn.Module):

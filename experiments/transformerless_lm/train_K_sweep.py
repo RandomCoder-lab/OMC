@@ -97,7 +97,9 @@ def main():
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--distractor-frac", type=float, default=0.20)
-    parser.add_argument("--K-values", type=str, default="32,48,64")
+    parser.add_argument("--K-values", type=str, default="13,21,34,55,89",
+                        help="Substrate-canonical: K should be Fibonacci. "
+                             "Defaults span F(7)..F(11).")
     parser.add_argument("--out", type=str, default="results_K_sweep.json")
     args = parser.parse_args()
 
