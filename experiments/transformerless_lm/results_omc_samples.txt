@@ -1,0 +1,30 @@
+# OMC corpus samples (steps=20000, temp=0.7, top_k=10)
+# Prompt: 'def fibonacci(n):\n    '
+
+
+======================================================================
+dense_crt  best_val=2.3586 @ step 14000  params=820,224
+======================================================================
+def fibonacci(n):
+        t c  rrrreerrngati  tor  e: sirateatrie re  eles  e ts itsintri iges tita e ine orrareellluesplirc  ath   iss e as  p iss fi  t f  in a     tese ctt tif op  ficont  corrr t   cl   s  tent on s    ta  oonti t   f ond our s tre ite it      in    o soins   ilsint       icont tee s calt pu in arct   of o  tetoral t   so s s  s s    ies  s tin   inpll arr   oee  exest  o aot  etu or    tashopalinth
+
+======================================================================
+fibrec_fibadamw  best_val=2.5799 @ step 14000  params=70,144
+======================================================================
+def fibonacci(n):
+        tece      ehre  ti   or  exataroatatri            e  stite         titetant         ateg        rhed                    s     texp    ar   ==  a   t            co
+                                  a            f         
+                           ar      
+             
+*        
+ t       arct 
+           ra  }    ----- 
+      
+        
+      
+     
+     e))
+   te     --  
+  
+ -------  
+     :
