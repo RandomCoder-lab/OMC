@@ -34,7 +34,8 @@ from losses_substrate import substrate_fft_loss
 from activations_substrate import (SubstrateGELU, SubstrateGELUSoft,
                                       SubstrateGELUInverse, PhiPiFibActivation,
                                       BinetFibActivation, SubstrateNegAsymmetric,
-                                      SubstrateNegAsymmetricMulti)
+                                      SubstrateNegAsymmetricMulti,
+                                      SubstrateNegMultiRefined)
 
 
 class FibRecLMWithActivation(FibRecLM):
@@ -170,7 +171,7 @@ def main():
     # Baseline GELU val on this config is 2.5920 (from prior bench).
     # Skipping its re-run to save compute.
     for name, cls in [
-        ("substrate_neg_multi", SubstrateNegAsymmetricMulti),  # multi-tier resonance
+        ("substrate_neg_multi_refined", SubstrateNegMultiRefined),  # R2+R6
     ]:
         results[name] = train_one(name, cls, train_split, val_split,
                                     vocab_size, args, fib_positions)

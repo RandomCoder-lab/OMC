@@ -179,6 +179,58 @@ class SubstrateNegAsymmetricMulti(nn.Module):
         return (branches * self.coeffs).sum(dim=-1)
 
 
+class SubstrateNegMultiRefined(nn.Module):
+    """Refined multi-tier substrate activation.
+
+    Improvements over SubstrateNegAsymmetricMulti:
+      (R2) per-layer LEARNABLE tier weights, initialized at the
+           substrate-canonical F(k)/phi^(pi·k) sequence. The model
+           discovers its own per-tier coupling strength via gradient.
+      (R6) tanh saturation by phi^pi (substrate's canonical contraction)
+           keeps activation magnitudes bounded — prevents runaway
+           from any single tier dominating.
+
+    Untouched (in this variant):
+      (R1) K depth — kept fixed at 5
+      (R3) coordination with K-shrink — separate concern
+      (R4) per-tier asymmetry — kept symmetric for simplicity
+      (R5) frequency scaling — kept at F(k), substrate-canonical
+    """
+
+    def __init__(self, K: int = 5):
+        super().__init__()
+        phi = (1.0 + 5.0 ** 0.5) / 2.0
+        phi_pi = phi ** math.pi
+        FIB = [1.0, 2.0, 3.0, 5.0, 8.0, 13.0, 21.0, 34.0, 55.0, 89.0]
+        K = min(K, len(FIB))
+        self.K = K
+        freqs = torch.tensor(FIB[:K], dtype=torch.float)
+        # Substrate-canonical init for tier weights — model can learn away.
+        init_coeffs = torch.tensor(
+            [FIB[k] / (phi_pi ** (k + 1)) for k in range(K)], dtype=torch.float,
+        )
+        init_coeffs = init_coeffs / init_coeffs.sum()
+        # LEARNABLE tier weights (R2)
+        self.tier_weights = nn.Parameter(init_coeffs.clone())
+        self.register_buffer("phi", torch.tensor(phi, dtype=torch.float))
+        self.register_buffer("phi_pi", torch.tensor(phi_pi, dtype=torch.float))
+        self.register_buffer("freqs", freqs)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        log_phi = torch.log(self.phi)
+        x_expanded = x.unsqueeze(-1) * self.freqs
+        x_pos = x_expanded.clamp(min=0.0)
+        x_neg = (-x_expanded).clamp(min=0.0)
+        branch_pos = x_pos * (1.0 - torch.exp(-x_pos * log_phi))
+        branch_neg = -x_neg * torch.exp(-x_neg * log_phi)
+        pos_mask = (x_expanded > 0).to(x.dtype)
+        branches = branch_pos * pos_mask + branch_neg * (1.0 - pos_mask)
+        # R2: weighted sum with learnable tier weights
+        f_sum = (branches * self.tier_weights).sum(dim=-1)
+        # R6: substrate-bounded magnitude via tanh saturation by phi^pi
+        return self.phi_pi * torch.tanh(f_sum / self.phi_pi)
+
+
 class BinetFibActivation(nn.Module):
     """Pure substrate activation — Binet's Fibonacci interpolation curve.
 
