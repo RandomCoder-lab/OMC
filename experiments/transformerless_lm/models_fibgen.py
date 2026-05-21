@@ -114,7 +114,15 @@ class FibGenLinear(nn.Module):
         self.register_buffer("cos_j", torch.cos(a_j))   # [in, K]
         self.register_buffer("sin_j", torch.sin(a_j))
 
-    def generate_W(self) -> torch.Tensor:
+    def cache_weight(self):
+        """Precompute the generated W and store as a buffer; subsequent
+        forwards will skip generation. Use for deployment.
+        After caching, `seed` is still stored but not used at runtime."""
+        with torch.no_grad():
+            W = self._compute_W()
+            self.register_buffer("_cached_W", W)
+
+    def _compute_W(self) -> torch.Tensor:
         if self.mode == "separable":
             a, b, c, d = self.seed[:, 0], self.seed[:, 1], self.seed[:, 2], self.seed[:, 3]
             W = torch.einsum("ok,k,jk->oj", self.cos_i, a, self.cos_j)
@@ -134,6 +142,14 @@ class FibGenLinear(nn.Module):
         W = W + torch.einsum("ol,lm,jm->oj", self.cos_i, c, self.sin_j)
         W = W + torch.einsum("ol,lm,jm->oj", self.sin_i, d, self.sin_j)
         return W
+
+    def generate_W(self) -> torch.Tensor:
+        """Returns the generated W. If `cache_weight()` was called, uses
+        the cached buffer (no compute); otherwise recomputes from seed."""
+        cached = getattr(self, "_cached_W", None)
+        if cached is not None:
+            return cached
+        return self._compute_W()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         W = self.generate_W()
