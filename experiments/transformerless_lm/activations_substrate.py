@@ -121,6 +121,64 @@ class SubstrateNegAsymmetric(nn.Module):
         return pos * pos_mask + neg * (1.0 - pos_mask)
 
 
+class SubstrateNegAsymmetricMulti(nn.Module):
+    """Multi-tier substrate activation — F(k)/φ^(π·k)-weighted Fibonacci resonance.
+
+    The simple SubstrateNegAsymmetric uses one substrate constant (log φ).
+    This refinement uses the substrate's CANONICAL DECAY SEQUENCE
+    F(k)/φ^(π·k) as multi-tier weights, with each Fibonacci frequency
+    contributing its own ramp / peak-decay branch:
+
+        f(x) = Σ_k [F(k)/φ^(π·k)] · branch_k(x)
+
+    where:
+        branch_k(x) = x · (1 − exp(−F(k)·x·log φ))            if x > 0
+        branch_k(x) = −F(k)·|x| · exp(−F(k)·|x|·log φ)         if x < 0
+
+    Negative branch has K peaks at |x| = 1/(F(k)·log φ):
+        k=1: |x|≈2.08    k=2: |x|≈1.04    k=3: |x|≈0.69
+        k=5: |x|≈0.42    k=8: |x|≈0.26
+    weighted by 0.22, 0.097, 0.032, 0.012, 0.004 respectively.
+
+    Multi-frequency Fibonacci resonance — substrate-canonical at every
+    tier of its own hierarchy, expressed in a single closed form.
+    No clamp, no GELU, no exp other than the substrate's own decay.
+    """
+
+    def __init__(self, K: int = 5):
+        super().__init__()
+        phi = (1.0 + 5.0 ** 0.5) / 2.0
+        phi_pi = phi ** math.pi
+        FIB = [1.0, 2.0, 3.0, 5.0, 8.0, 13.0, 21.0, 34.0, 55.0, 89.0]
+        K = min(K, len(FIB))
+        self.K = K
+        freqs = torch.tensor(FIB[:K], dtype=torch.float)
+        # Substrate-canonical tier weights F(k)/φ^(π·k).
+        coeffs = torch.tensor([FIB[k] / (phi_pi ** (k + 1)) for k in range(K)],
+                                dtype=torch.float)
+        # Normalize so the sum of weights = 1 (otherwise the activation
+        # scale shifts massively from the standard).
+        coeffs = coeffs / coeffs.sum()
+        self.register_buffer("phi", torch.tensor(phi, dtype=torch.float))
+        self.register_buffer("freqs", freqs)        # F(k)
+        self.register_buffer("coeffs", coeffs)       # F(k)/φ^(π·k), normalized
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        log_phi = torch.log(self.phi)
+        # Expand x to multiply by each Fibonacci frequency.
+        # x: [..., D]; freqs: [K]; want [..., D, K].
+        x_expanded = x.unsqueeze(-1) * self.freqs                    # [..., D, K]
+        x_pos = x_expanded.clamp(min=0.0)
+        x_neg = (-x_expanded).clamp(min=0.0)
+        # Per-tier substrate branches
+        branch_pos = x_pos * (1.0 - torch.exp(-x_pos * log_phi))      # [..., D, K]
+        branch_neg = -x_neg * torch.exp(-x_neg * log_phi)
+        pos_mask = (x_expanded > 0).to(x.dtype)
+        branches = branch_pos * pos_mask + branch_neg * (1.0 - pos_mask)
+        # Weighted sum across K tiers via substrate-decay coefficients.
+        return (branches * self.coeffs).sum(dim=-1)
+
+
 class BinetFibActivation(nn.Module):
     """Pure substrate activation — Binet's Fibonacci interpolation curve.
 

@@ -33,7 +33,8 @@ from train_K_shrink import K_schedule_tier_walk, set_K_active_recursive
 from losses_substrate import substrate_fft_loss
 from activations_substrate import (SubstrateGELU, SubstrateGELUSoft,
                                       SubstrateGELUInverse, PhiPiFibActivation,
-                                      BinetFibActivation, SubstrateNegAsymmetric)
+                                      BinetFibActivation, SubstrateNegAsymmetric,
+                                      SubstrateNegAsymmetricMulti)
 
 
 class FibRecLMWithActivation(FibRecLM):
@@ -169,7 +170,7 @@ def main():
     # Baseline GELU val on this config is 2.5920 (from prior bench).
     # Skipping its re-run to save compute.
     for name, cls in [
-        ("substrate_neg_asymmetric", SubstrateNegAsymmetric),  # peak-decay neg branch
+        ("substrate_neg_multi", SubstrateNegAsymmetricMulti),  # multi-tier resonance
     ]:
         results[name] = train_one(name, cls, train_split, val_split,
                                     vocab_size, args, fib_positions)
