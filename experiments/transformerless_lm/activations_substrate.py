@@ -77,6 +77,45 @@ class SubstrateGELUInverse(SubstrateGELU):
         super().__init__(init_scale=init_scale, inverse=True)
 
 
+class PhiPiFibActivation(nn.Module):
+    """Substrate-CANONICAL activation: GELU + sum of sin(F(k)·x) terms,
+    each weighted by the substrate's F(k)/φ^(π·k) probe-decay sequence
+    from phi_pi_fib.rs.
+
+        f(x) = GELU(x) + α · Σ_k [F(k)/φ^(π·k)] · sin(F(k)·x)
+
+    Substrate-canonical FORMULA via F(k)/φ^(π·k), smooth basis (sin),
+    gradient-friendly (no discretization), per-layer learnable substrate
+    strength α (init small so it starts as nearly-GELU and grows toward
+    full substrate coupling only if helpful).
+    """
+
+    def __init__(self, K: int = 5, init_alpha: float = 0.1):
+        super().__init__()
+        phi = (1.0 + 5.0 ** 0.5) / 2.0
+        phi_pi = phi ** math.pi      # ≈ 4.534
+        # Substrate-canonical sequence F(k)/φ^(π·k) from phi_pi_fib.rs
+        FIB = [1.0, 2.0, 3.0, 5.0, 8.0, 13.0, 21.0, 34.0, 55.0, 89.0]
+        K = min(K, len(FIB))
+        coeffs = torch.tensor([FIB[k] / (phi_pi ** (k + 1)) for k in range(K)],
+                                dtype=torch.float)
+        freqs = torch.tensor(FIB[:K], dtype=torch.float)
+        self.register_buffer("substrate_coeffs", coeffs)   # F(k)/φ^(πk)
+        self.register_buffer("substrate_freqs", freqs)     # F(k)
+        self.alpha = nn.Parameter(torch.tensor(float(init_alpha)))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        base = F.gelu(x)
+        # x: [..., D]. We add scalar wobble: sum_k coeffs[k] * sin(freqs[k] * x).
+        # Each term sin(F(k) * x) is element-wise, then weighted by F(k)/φ^(π·k).
+        # For numerical stability we evaluate all K terms in a vectorized way.
+        # Shape: [..., K] via x.unsqueeze(-1) * freqs (broadcast).
+        scaled = x.unsqueeze(-1) * self.substrate_freqs        # [..., K]
+        sin_terms = torch.sin(scaled)                            # [..., K]
+        correction = (sin_terms * self.substrate_coeffs).sum(dim=-1)  # [...]
+        return base + self.alpha * correction
+
+
 class SubstrateGELUSoft(nn.Module):
     """Softer variant: blend GELU with attractor-snap by a learnable mix.
     At mix=0 it's pure GELU; at mix=1 it's full snap. Uses reciprocal
