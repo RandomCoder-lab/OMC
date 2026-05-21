@@ -32,7 +32,8 @@ from lazy_data import fib_positions_in_window, get_fib_strided_batch
 from train_K_shrink import K_schedule_tier_walk, set_K_active_recursive
 from losses_substrate import substrate_fft_loss
 from activations_substrate import (SubstrateGELU, SubstrateGELUSoft,
-                                      SubstrateGELUInverse, PhiPiFibActivation)
+                                      SubstrateGELUInverse, PhiPiFibActivation,
+                                      BinetFibActivation)
 
 
 class FibRecLMWithActivation(FibRecLM):
@@ -168,7 +169,7 @@ def main():
     # Baseline GELU val on this config is 2.5920 (from prior bench).
     # Skipping its re-run to save compute.
     for name, cls in [
-        ("phi_pi_fib_activation", PhiPiFibActivation),  # smooth substrate via F(k)/φ^(πk)
+        ("binet_fib_activation", BinetFibActivation),   # PURE replacement of GELU
     ]:
         results[name] = train_one(name, cls, train_split, val_split,
                                     vocab_size, args, fib_positions)

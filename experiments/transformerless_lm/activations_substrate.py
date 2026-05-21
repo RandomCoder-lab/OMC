@@ -77,6 +77,52 @@ class SubstrateGELUInverse(SubstrateGELU):
         super().__init__(init_scale=init_scale, inverse=True)
 
 
+class BinetFibActivation(nn.Module):
+    """Pure substrate activation — Binet's Fibonacci interpolation curve.
+
+    Replaces GELU entirely with the smooth continuous extension of the
+    Fibonacci sequence:
+
+        F(x) = (φ^x − cos(π·x)·φ^(−x)) / √5
+
+    Passes through Fibonacci numbers at integer x (F(0)=0, F(1)=1,
+    F(2)=1, F(3)=2, F(4)=3, F(5)=5, ...). Uses ONLY φ and π — the
+    substrate's canonical constants. No GELU underneath.
+
+    Bounded via tanh to ±φ^π (substrate's canonical contraction):
+
+        f(x) = φ^π · tanh( F_binet(x) / (√5 · φ^π) )
+
+    The tanh keeps activations finite and the gradient nonzero
+    everywhere. Per-layer learnable scale lets the model position
+    its input range relative to the curve.
+    """
+
+    def __init__(self, init_scale: float = 1.0):
+        super().__init__()
+        self.scale = nn.Parameter(torch.tensor(float(init_scale)))
+        # Substrate constants — store as buffers for device safety
+        phi = (1.0 + 5.0 ** 0.5) / 2.0
+        phi_pi = phi ** math.pi
+        self.register_buffer("phi", torch.tensor(phi, dtype=torch.float))
+        self.register_buffer("phi_pi", torch.tensor(phi_pi, dtype=torch.float))
+        self.register_buffer("sqrt5", torch.tensor(5.0 ** 0.5, dtype=torch.float))
+        self.register_buffer("pi", torch.tensor(math.pi, dtype=torch.float))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Scale input — model learns where its activations sit relative to
+        # the Binet curve's interesting region (small integers).
+        z = x * self.scale
+        # Clip z to a safe range so φ^z and φ^(-z) don't overflow.
+        # For φ ≈ 1.618 and float32, φ^z is finite up to z ≈ 88.
+        z = z.clamp(-30.0, 30.0)
+        phi_z = self.phi ** z                      # φ^x
+        phi_neg_z = self.phi ** (-z)                # φ^(-x)
+        cos_pi_z = torch.cos(self.pi * z)            # cos(π·x)
+        f_binet = (phi_z - cos_pi_z * phi_neg_z) / self.sqrt5
+        return self.phi_pi * torch.tanh(f_binet / (self.sqrt5 * self.phi_pi))
+
+
 class PhiPiFibActivation(nn.Module):
     """Substrate-CANONICAL activation: GELU + sum of sin(F(k)·x) terms,
     each weighted by the substrate's F(k)/φ^(π·k) probe-decay sequence
