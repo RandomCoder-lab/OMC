@@ -26,15 +26,25 @@ import torch.nn.functional as F
 
 _FIB_ATTRACTORS = [0.0, 1.0, 2.0, 3.0, 5.0, 8.0, 13.0, 21.0, 34.0, 55.0, 89.0]
 
+# Reciprocal Fibonacci attractors — dense near 0, sparse far from 0.
+# Matches the actual distribution of post-GELU activations (small values).
+_INV_FIB_ATTRACTORS = sorted(set([0.0] + [
+    1.0 / f for f in [1.0, 2.0, 3.0, 5.0, 8.0, 13.0, 21.0, 34.0, 55.0, 89.0]
+] + [1.0, 2.0, 3.0]))    # keep a few positive integers for tail coverage
 
-def _signed_attractor_table(device, dtype):
-    pos = torch.tensor(_FIB_ATTRACTORS, dtype=dtype, device=device)
-    return torch.cat([-pos[1:].flip(0), pos])   # [-89, -55, ..., -1, 0, 1, ..., 89]
+
+def _signed_attractor_table(device, dtype, inverse: bool = False):
+    pos = torch.tensor(
+        _INV_FIB_ATTRACTORS if inverse else _FIB_ATTRACTORS,
+        dtype=dtype, device=device,
+    )
+    return torch.cat([-pos[1:].flip(0), pos])
 
 
-def attractor_snap(x: torch.Tensor) -> torch.Tensor:
-    """Snap each scalar to its nearest signed-Fibonacci attractor."""
-    table = _signed_attractor_table(x.device, x.dtype)
+def attractor_snap(x: torch.Tensor, inverse: bool = False) -> torch.Tensor:
+    """Snap each scalar to its nearest signed-Fibonacci attractor.
+    inverse=True uses reciprocal Fibonacci values (dense near 0)."""
+    table = _signed_attractor_table(x.device, x.dtype, inverse=inverse)
     diffs = (x.unsqueeze(-1) - table).abs()
     nearest_idx = diffs.argmin(dim=-1)
     return table[nearest_idx]
@@ -43,44 +53,46 @@ def attractor_snap(x: torch.Tensor) -> torch.Tensor:
 class SubstrateGELU(nn.Module):
     """GELU + attractor snap with straight-through gradient.
 
-    Forward: gelu(x) → snap to nearest Fibonacci attractor (after scaling).
-    Backward: gradient flows through GELU only (snap is an identity in
-    the backward pass). Standard STE trick for non-differentiable ops.
-
-    The per-layer `scale` parameter lets the model learn where its
-    activations should sit relative to the fixed attractor table.
-    Initialized to a value that maps typical post-GELU magnitudes
-    (~0.1-1.0) into the attractor-meaningful range.
+    inverse=True uses reciprocal Fibonacci attractors, which are dense
+    in [-1, 1] — much better matched to typical post-GELU magnitudes
+    than the forward Fibonacci attractors {1, 2, 3, 5, 8, ...} that
+    sit OUTSIDE the typical activation range.
     """
 
-    def __init__(self, init_scale: float = 3.0):
+    def __init__(self, init_scale: float = 3.0, inverse: bool = False):
         super().__init__()
         self.scale = nn.Parameter(torch.tensor(float(init_scale)))
+        self.inverse = inverse
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         h = F.gelu(x)
-        # Bring h into the attractor-meaningful range, snap, scale back.
         h_scaled = h * self.scale
-        snapped = attractor_snap(h_scaled) / self.scale
-        # Straight-through estimator: forward = snapped, backward = identity through h
+        snapped = attractor_snap(h_scaled, inverse=self.inverse) / self.scale
         return h + (snapped - h).detach()
+
+
+class SubstrateGELUInverse(SubstrateGELU):
+    """Convenience subclass: SubstrateGELU with inverse=True (reciprocal Fib)."""
+    def __init__(self, init_scale: float = 3.0):
+        super().__init__(init_scale=init_scale, inverse=True)
 
 
 class SubstrateGELUSoft(nn.Module):
     """Softer variant: blend GELU with attractor-snap by a learnable mix.
-    At mix=0 it's pure GELU; at mix=1 it's full snap. The model can
-    learn its own substrate-coupling strength."""
+    At mix=0 it's pure GELU; at mix=1 it's full snap. Uses reciprocal
+    Fibonacci attractors by default since they match post-GELU magnitudes."""
 
-    def __init__(self, init_scale: float = 3.0):
+    def __init__(self, init_scale: float = 3.0, inverse: bool = True):
         super().__init__()
         self.scale = nn.Parameter(torch.tensor(float(init_scale)))
-        self.mix_raw = nn.Parameter(torch.tensor(0.0))  # sigmoid(0)=0.5
+        # Initialize at low coupling — sigmoid(-2) ≈ 0.12 so 88% GELU, 12% snap
+        self.mix_raw = nn.Parameter(torch.tensor(-2.0))
+        self.inverse = inverse
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         h = F.gelu(x)
         h_scaled = h * self.scale
-        snapped = attractor_snap(h_scaled) / self.scale
+        snapped = attractor_snap(h_scaled, inverse=self.inverse) / self.scale
         mix = torch.sigmoid(self.mix_raw)
-        # Blend: gradient flows through h always; the snap component is STE
         snap_path = h + (snapped - h).detach()
         return (1 - mix) * h + mix * snap_path

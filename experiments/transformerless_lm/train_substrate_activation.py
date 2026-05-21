@@ -31,7 +31,7 @@ from train_distractor_mix import build_distractor_stream
 from lazy_data import fib_positions_in_window, get_fib_strided_batch
 from train_K_shrink import K_schedule_tier_walk, set_K_active_recursive
 from losses_substrate import substrate_fft_loss
-from activations_substrate import SubstrateGELU, SubstrateGELUSoft
+from activations_substrate import SubstrateGELU, SubstrateGELUSoft, SubstrateGELUInverse
 
 
 class FibRecLMWithActivation(FibRecLM):
@@ -166,8 +166,8 @@ def main():
     results = {}
     for name, cls in [
         ("gelu_baseline", None),
-        ("substrate_gelu", SubstrateGELU),
-        ("substrate_gelu_soft", SubstrateGELUSoft),
+        ("substrate_gelu_inverse", SubstrateGELUInverse),  # reciprocal Fibonacci
+        ("substrate_gelu_soft", SubstrateGELUSoft),         # soft blend, inverse default
     ]:
         results[name] = train_one(name, cls, train_split, val_split,
                                     vocab_size, args, fib_positions)
