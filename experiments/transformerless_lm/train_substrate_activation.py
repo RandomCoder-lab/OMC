@@ -36,7 +36,8 @@ from activations_substrate import (SubstrateGELU, SubstrateGELUSoft,
                                       BinetFibActivation, SubstrateNegAsymmetric,
                                       SubstrateNegAsymmetricMulti,
                                       SubstrateNegMultiRefined,
-                                      SubstrateNegMultiAdvanced)
+                                      SubstrateNegMultiAdvanced,
+                                      SubstrateNegMultiAdvancedV2)
 
 
 class FibRecLMWithActivation(FibRecLM):
@@ -172,7 +173,7 @@ def main():
     # Baseline GELU val on this config is 2.5920 (from prior bench).
     # Skipping its re-run to save compute.
     for name, cls in [
-        ("substrate_neg_multi_advanced", SubstrateNegMultiAdvanced),  # R2+R4+R5+R6
+        ("substrate_neg_multi_adv_v2", SubstrateNegMultiAdvancedV2),  # R4+R5 refined
     ]:
         results[name] = train_one(name, cls, train_split, val_split,
                                     vocab_size, args, fib_positions)

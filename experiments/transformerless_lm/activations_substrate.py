@@ -286,6 +286,67 @@ class SubstrateNegMultiAdvanced(nn.Module):
         return self.phi_pi * torch.tanh(f_sum / self.phi_pi)
 
 
+class SubstrateNegMultiAdvancedV2(nn.Module):
+    """Refined R4 + R5 — substrate-canonical reformulations.
+
+    Replaces the failing R4/R5 init choices with substrate-canonical
+    alternatives discovered from the V1 failure analysis:
+
+    R4 (per-tier asymmetry, reformulated):
+      Positive tier weights init: F(k)/phi^(pi*k)   (decay — substrate canonical)
+      Negative tier weights init: F(k)*phi^(pi*k)   (EXPANSION — pushes peak
+                                                       to higher k, captures
+                                                       finer negative structure)
+      Both learnable.
+
+    R5 (frequency rescaling, reformulated):
+      freqs = F(k)/phi   (substrate-decayed via golden ratio — gentler
+                          than F(k), more spread than sqrt(F(k)))
+      Values: 0.618, 1.236, 1.854, 3.090, 4.944
+
+    R2 + R6 kept unchanged.
+    """
+
+    def __init__(self, K: int = 5):
+        super().__init__()
+        phi = (1.0 + 5.0 ** 0.5) / 2.0
+        phi_pi = phi ** math.pi
+        FIB = [1.0, 2.0, 3.0, 5.0, 8.0, 13.0, 21.0, 34.0, 55.0, 89.0]
+        K = min(K, len(FIB))
+        self.K = K
+        # R5 reformulated: frequencies F(k)/phi
+        freqs = torch.tensor([FIB[k] / phi for k in range(K)], dtype=torch.float)
+        # R4 reformulated: asymmetric init.
+        # Positive: substrate-canonical decay F(k)/phi^(pi*k)
+        pos_init = torch.tensor(
+            [FIB[k] / (phi_pi ** (k + 1)) for k in range(K)], dtype=torch.float)
+        pos_init = pos_init / pos_init.sum()
+        # Negative: substrate-canonical EXPANSION F(k)*phi^(pi*k)
+        # (large k dominates -> peak at small |x| -> captures fine
+        # near-zero negative structure)
+        neg_init = torch.tensor(
+            [FIB[k] * (phi_pi ** (k + 1)) for k in range(K)], dtype=torch.float)
+        neg_init = neg_init / neg_init.sum()
+        self.tier_weights_pos = nn.Parameter(pos_init.clone())
+        self.tier_weights_neg = nn.Parameter(neg_init.clone())
+        self.register_buffer("phi", torch.tensor(phi, dtype=torch.float))
+        self.register_buffer("phi_pi", torch.tensor(phi_pi, dtype=torch.float))
+        self.register_buffer("freqs", freqs)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        log_phi = torch.log(self.phi)
+        x_expanded = x.unsqueeze(-1) * self.freqs
+        x_pos = x_expanded.clamp(min=0.0)
+        x_neg = (-x_expanded).clamp(min=0.0)
+        branch_pos = x_pos * (1.0 - torch.exp(-x_pos * log_phi))
+        branch_neg = -x_neg * torch.exp(-x_neg * log_phi)
+        pos_mask = (x_expanded > 0).to(x.dtype)
+        pos_sum = (branch_pos * pos_mask * self.tier_weights_pos).sum(dim=-1)
+        neg_sum = (branch_neg * (1.0 - pos_mask) * self.tier_weights_neg).sum(dim=-1)
+        f_sum = pos_sum + neg_sum
+        return self.phi_pi * torch.tanh(f_sum / self.phi_pi)
+
+
 class BinetFibActivation(nn.Module):
     """Pure substrate activation — Binet's Fibonacci interpolation curve.
 
