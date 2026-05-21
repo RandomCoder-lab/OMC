@@ -151,9 +151,62 @@ class FibGenLinear(nn.Module):
             return cached
         return self._compute_W()
 
+    def _forward_compressed(self, x: torch.Tensor) -> torch.Tensor:
+        """Substrate-native forward: compute y = W·x WITHOUT materializing W.
+
+        For the SEPARABLE basis,
+            W = Σ_k a_k cos_i[:,k] cos_j[:,k]^T + ... (4 sign combos)
+        and y = W @ x decomposes as
+            y_i = Σ_k cos_i[i,k] · ( a_k · (cos_j[:,k]^T · x) )
+                + ... three more terms
+        — a K-step "Fourier-in-the-Fibonacci-basis" pass with no [out,in]
+        tensor materialized. Cost: O(B·T·K·(in+out)) instead of O(B·T·in·out).
+
+        For the CROSS basis the inner term is a K×K matmul on the
+        K-dim projected x, then projected back.
+        """
+        # x: [B, T, in_features]
+        if self.mode == "separable":
+            a, b, c, d = self.seed[:, 0], self.seed[:, 1], self.seed[:, 2], self.seed[:, 3]
+            # Project x into Fibonacci-basis along input axis: [B, T, K]
+            x_cos = x @ self.cos_j                        # [B, T, K]
+            x_sin = x @ self.sin_j                        # [B, T, K]
+            # Inner separable mixing (Hadamard product with coefficients)
+            #   cc term contributes cos_i[i,k] · a_k · x_cos[k]
+            #   sc term contributes sin_i[i,k] · b_k · x_cos[k]
+            #   cs term contributes cos_i[i,k] · c_k · x_sin[k]
+            #   ss term contributes sin_i[i,k] · d_k · x_sin[k]
+            y_cos = (a * x_cos) + (c * x_sin)              # [B, T, K]
+            y_sin = (b * x_cos) + (d * x_sin)
+            # Project K-dim mixed signal back to output axis
+            y = y_cos @ self.cos_i.t() + y_sin @ self.sin_i.t()   # [B, T, out]
+            if self.bias is not None:
+                y = y + self.bias
+            return y
+        # cross mode: seed [K, K, 4] mixing matrix
+        K = self.K
+        seed = self.seed.view(K, K, 4)
+        a, b, c, d = seed[..., 0], seed[..., 1], seed[..., 2], seed[..., 3]
+        x_cos = x @ self.cos_j                            # [B, T, K]
+        x_sin = x @ self.sin_j
+        # K×K mixing in seed space:
+        #   y_cos = a · x_cos + c · x_sin   (cos-side mixing)
+        #   y_sin = b · x_cos + d · x_sin   (sin-side mixing)
+        y_cos = x_cos @ a.t() + x_sin @ c.t()             # [B, T, K]
+        y_sin = x_cos @ b.t() + x_sin @ d.t()
+        y = y_cos @ self.cos_i.t() + y_sin @ self.sin_i.t()
+        if self.bias is not None:
+            y = y + self.bias
+        return y
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        W = self.generate_W()
-        return F.linear(x, W, self.bias)
+        # If we cached the dense W (deployment mode), use the materialized
+        # matmul. Otherwise compute in the Fibonacci basis directly — no
+        # W materialization — which is the substrate-native compute path.
+        cached = getattr(self, "_cached_W", None)
+        if cached is not None:
+            return F.linear(x, cached, self.bias)
+        return self._forward_compressed(x)
 
     @property
     def n_stored_params(self) -> int:
