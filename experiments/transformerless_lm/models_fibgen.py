@@ -204,20 +204,24 @@ class FibGenLinear(nn.Module):
         # eval: deterministic, scaled by keep_prob to match training E[seed]
         return self.seed * self.tier_keep_probs.unsqueeze(-1)
 
-    def _sample_active_indices(self) -> torch.Tensor:
-        """Sample lazy_K_active indices uniformly from [0, K).
+    def set_K_active(self, K_a: int):
+        """Set the number of active Fibonacci frequencies per axis.
+        Used by progressive Fibonacci-K growth schedules — start with
+        K_a small, grow toward K over training.
+        """
+        self.lazy_K_active = max(1, min(K_a, self.K))
 
-        At each training step we keep a fresh random subset; over many
-        steps every Fibonacci frequency gets visited.
+    def _sample_active_indices(self) -> torch.Tensor:
+        """Return the first lazy_K_active indices [0, 1, ..., K_a-1].
+
+        Deterministic, not random: the SMALLEST Fibonacci indices (the
+        substrate's "tier 1" — lowest-frequency components) are always
+        kept first. Growing K_active extends the active set toward
+        higher Fibonacci frequencies. This is the user's "fold to most
+        respected tier" applied as a training schedule.
         """
         K_a = self.lazy_K_active
-        # Always keep frequency 0 (the lowest-Fibonacci component is most
-        # important; matches the "tier 1 always active" intent).
-        idx = torch.randperm(self.K, device=self.seed.device)[:K_a]
-        # ensure 0 is in the set (substrate-tier-1 anchor)
-        if 0 not in idx.tolist():
-            idx[0] = 0
-        return idx.sort().values
+        return torch.arange(K_a, device=self.seed.device)
 
     def _forward_compressed(self, x: torch.Tensor) -> torch.Tensor:
         """Substrate-native forward: compute y = W·x WITHOUT materializing W.
