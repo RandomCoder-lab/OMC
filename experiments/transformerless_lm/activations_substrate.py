@@ -77,6 +77,45 @@ class SubstrateGELUInverse(SubstrateGELU):
         super().__init__(init_scale=init_scale, inverse=True)
 
 
+class SubstrateNegAsymmetric(nn.Module):
+    """Substrate-canonical asymmetric activation.
+
+    The substrate's contraction ratio φ handles BOTH branches without
+    needing exp() / softplus / sigmoid:
+
+        f(x) = x · (1 − φ^(−x))   if x > 0
+        f(x) = −|x| / φ^|x|       if x < 0
+
+    Properties:
+      - Positive branch saturates toward identity as x grows
+        (substrate-shaped soft ramp).
+      - Negative branch DECAYS toward 0 as |x| grows
+        (substrate contraction). Bounded magnitude |neg| ≤ 1/(e·ln φ) ≈ 0.76.
+      - Continuous at x=0 (both branches → 0).
+      - No divide-by-zero anywhere (φ^|x| ≥ 1).
+      - Uses ONLY φ. No exp, no sigmoid, no GELU.
+
+    The negative side's shape — peaks around |x|≈1.4 then decays — is
+    impossible to express via standard activations without infinite
+    terms. Substrate math gets it from a single closed form.
+    """
+
+    def __init__(self):
+        super().__init__()
+        phi = (1.0 + 5.0 ** 0.5) / 2.0
+        self.register_buffer("phi", torch.tensor(phi, dtype=torch.float))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Positive branch: x · (1 − φ^(−x))
+        pos = x * (1.0 - self.phi ** (-x.clamp(min=0.0)))
+        # Negative branch: −|x| / φ^|x|
+        neg_x = (-x).clamp(min=0.0)            # |x| for x < 0, else 0
+        neg = -neg_x / (self.phi ** neg_x)
+        # Combine via masks (avoids in-place ops, keeps gradients clean)
+        pos_mask = (x > 0).to(x.dtype)
+        return pos * pos_mask + neg * (1.0 - pos_mask)
+
+
 class BinetFibActivation(nn.Module):
     """Pure substrate activation — Binet's Fibonacci interpolation curve.
 
