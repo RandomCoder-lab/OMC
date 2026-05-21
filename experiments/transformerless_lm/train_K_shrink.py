@@ -76,6 +76,25 @@ def K_schedule_substrate(step: int, max_steps: int,
     return K_min
 
 
+def K_schedule_tier_walk(step: int, max_steps: int,
+                          K_init: int = 144, K_min: int = 3) -> int:
+    """Step-function K schedule that GUARANTEES walking every Fibonacci tier.
+
+    Builds the ordered list of Fibonacci values in [K_min, K_init], then
+    spends equal step count at each tier. Avoids the issue where the
+    φ^π formula doesn't reach K_min in a finite step budget.
+
+    Example: K_init=144, K_min=3 →
+      tiers = [144, 89, 55, 34, 21, 13, 8, 5, 3] (9 tiers)
+      steps per tier = max_steps / 9
+    """
+    tiers = sorted(set(f for f in FIBONACCI if K_min <= f <= K_init),
+                   reverse=True)
+    steps_per_tier = max_steps // len(tiers)
+    tier_idx = min(step // max(steps_per_tier, 1), len(tiers) - 1)
+    return tiers[tier_idx]
+
+
 def evaluate(model, val_split, batch_size, window, fib_positions, generator,
               n_batches=16):
     model.eval()

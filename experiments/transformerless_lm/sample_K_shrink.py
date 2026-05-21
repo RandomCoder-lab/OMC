@@ -26,7 +26,8 @@ from models_fibgen import FibGenLinear, FIBONACCI
 from optimizers_fib import FibonacciAdamW
 from train_distractor_mix import build_distractor_stream
 from lazy_data import fib_positions_in_window, get_fib_strided_batch
-from train_K_shrink import K_schedule_substrate, set_K_active_recursive
+from train_K_shrink import (K_schedule_substrate, K_schedule_tier_walk,
+                              set_K_active_recursive)
 
 
 def evaluate(model, val_split, batch_size, window, fib_positions, generator,
@@ -110,8 +111,13 @@ def main():
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--distractor-frac", type=float, default=0.20)
-    parser.add_argument("--K-init", type=int, default=89)
-    parser.add_argument("--K-min", type=int, default=5)
+    parser.add_argument("--K-init", type=int, default=144)
+    parser.add_argument("--K-min", type=int, default=3)
+    parser.add_argument("--schedule", type=str, default="tier_walk",
+                        choices=["phi_pi", "tier_walk"],
+                        help="phi_pi = continuous decay; tier_walk = "
+                             "equal steps per Fibonacci tier (guarantees "
+                             "K_min reached).")
     parser.add_argument("--prompt", type=str,
                         default="ROMEO:\nWhat light through")
     parser.add_argument("--n-new", type=int, default=400)
@@ -157,8 +163,12 @@ def main():
                   n_blocks=args.n_blocks, seq_len=args.seq_len,
                   K=args.K_init, mode="cross")
     opt = FibonacciAdamW(m.parameters(), lr=args.lr)
-    sched = lambda s, T: K_schedule_substrate(s, T, K_init=args.K_init,
-                                                 K_min=args.K_min)
+    if args.schedule == "tier_walk":
+        sched = lambda s, T: K_schedule_tier_walk(s, T, K_init=args.K_init,
+                                                     K_min=args.K_min)
+    else:
+        sched = lambda s, T: K_schedule_substrate(s, T, K_init=args.K_init,
+                                                     K_min=args.K_min)
     best_val, best_step = train_with_best(
         "shrink", m, opt, train_split, val_split, args, fib_positions,
         K_schedule_fn=sched)
