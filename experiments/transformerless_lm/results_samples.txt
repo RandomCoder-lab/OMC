@@ -1,0 +1,30 @@
+# Samples (steps=2500, temperature=0.7, top_k=10)
+# Prompt: 'ROMEO:\nWhat light through'
+
+
+======================================================================
+dense_crt  best_val=2.5324 @ step 2400  params=801,664
+======================================================================
+ROMEO:
+What light througheiitha llllldedddyowe my he s alllldounndyond ne o o iinou heed hamhitha dre ore deengou theend heeiee thennnndnnneeeie hee meneeeennde nde nn he thin wwou hereng nnde dennnnnee hiccchanthenne hisssod ssennoodied hinne anounoff he onden and aarent snn ink thouul wends
+ouesithesou man hee weedenns h wied tho wen se andoeeeenne iccchetof dd wandoftisththeess hiseesse merindoooouskeelllllllld d o s
+i
+
+======================================================================
+fibgen_K32_cross  best_val=2.7128 @ step 2499  params=80,640
+======================================================================
+ROMEO:
+What light through ththoul s
+Tofos ndau s th w the, thoutndas m t  t w t tas heso landire,ededore  wetonor t thnl heere, t to t t tnerese  s mende tond h nde  t he the the  g s gos n t s, wath t hest, thethenge s s, th s th ss st  h he t wo some he llolg lldararert snd t s tt mas wendseshes to sou man he, whe thes h w st t g t hase s
+
+
+Tore te s he gt t gs wat n tistht thas s sersse merindtores ganondo wled s   s n
+
+======================================================================
+composed_transformerless  best_val=2.6764 @ step 2499  params=213,752
+======================================================================
+ROMEO:
+What light through hithous sh theay t m arer we an, thath, anom ne t o t tar heso hand th,
+
+Md tha w thand thegrd heere, t torithencerese the mene d that hee haler theathe t hareng t he henath t hest, thethengo harsnd, ssen ss se th he measand t herandereat ararert snd t h th ang wersseshesito sou may I t whe angs b w st tha t hases nd
+Toreron hand go t ge wat oftistht thas hises se merindtorthegatondo hes thes s n
