@@ -106,12 +106,19 @@ class SubstrateNegAsymmetric(nn.Module):
         self.register_buffer("phi", torch.tensor(phi, dtype=torch.float))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Positive branch: x · (1 − φ^(−x))
-        pos = x * (1.0 - self.phi ** (-x.clamp(min=0.0)))
-        # Negative branch: −|x| / φ^|x|
-        neg_x = (-x).clamp(min=0.0)            # |x| for x < 0, else 0
-        neg = -neg_x / (self.phi ** neg_x)
-        # Combine via masks (avoids in-place ops, keeps gradients clean)
+        # Clamp to a safe range — φ^|x| overflows float32 around |x|≈180.
+        # During training (especially early) activations can briefly spike;
+        # clamping at ±30 gives plenty of dynamic range while staying safe
+        # (φ^30 ≈ 1.86 million, plenty of float32 headroom).
+        x = x.clamp(-30.0, 30.0)
+        # Positive branch: x · (1 − φ^(−x)). Use exp(−x·log(φ)) for stable
+        # decay even at the clamp boundary.
+        log_phi = torch.log(self.phi)
+        x_pos = x.clamp(min=0.0)
+        pos = x_pos * (1.0 - torch.exp(-x_pos * log_phi))
+        # Negative branch: −|x| · exp(−|x|·log(φ)). Stable for all |x|.
+        x_neg = (-x).clamp(min=0.0)
+        neg = -x_neg * torch.exp(-x_neg * log_phi)
         pos_mask = (x > 0).to(x.dtype)
         return pos * pos_mask + neg * (1.0 - pos_mask)
 
