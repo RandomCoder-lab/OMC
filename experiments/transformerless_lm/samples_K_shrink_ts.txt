@@ -1,0 +1,9 @@
+# K-shrink samples on TinyShakespeare (steps=10000, temp=0.8, top_k=10)
+# Prompt: 'ROMEO:\nWhat light through'
+
+
+======================================================================
+shrink  best_val=2.6583 @ step 7992  params=327,464
+======================================================================
+ROMEO:
+What light through hitlO lfer dusathawe isert s nestonoat, b nd ne t y breaathee  l mato todrdoory wetonou the my heerdut toutithuneerefe  aameneefe to h nye  tlerdibth memy her ns n t mnenyen t hefe sthothunir his,nod s en ss it th no me hanofo mefanol thadaaaefit mny t s th ano wersseseesitobsou mah hy, nte enes h t th t b t hase an oeseerot bcor nt m me maten tistht thhothisewase meriwetowthigwalh,n wew the  s i
