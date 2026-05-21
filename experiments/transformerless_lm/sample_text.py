@@ -30,14 +30,35 @@ from train_distractor_mix import build_distractor_stream
 from lazy_data import fib_positions_in_window, get_fib_strided_batch
 
 
+def evaluate(model, val_split, batch_size, window, fib_positions, generator,
+              n_batches=16):
+    model.eval()
+    losses = []
+    with torch.no_grad():
+        for _ in range(n_batches):
+            x, y = get_fib_strided_batch(val_split, batch_size, window,
+                                           fib_positions, generator)
+            logits = model(x)
+            losses.append(F.cross_entropy(
+                logits.reshape(-1, logits.size(-1)), y.reshape(-1)).item())
+    model.train()
+    return sum(losses) / len(losses)
+
+
 def train(name, model, train_split, val_split, args, fib_positions):
+    """Train and return BEST-VAL checkpoint. Substrate models jump between
+    Fibonacci-attractor configurations during training, so the best val
+    is rarely at the final step — sample from the best attractor."""
     torch.manual_seed(args.seed)
     gen = torch.Generator(); gen.manual_seed(args.seed + 1)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     t0 = time.time()
-    eval_every = 300
+    eval_every = 200
     print(f"\n[train {name}] params={sum(p.numel() for p in model.parameters()):,}",
           flush=True)
+    best_val = float("inf")
+    best_state = None
+    best_step = -1
     for step in range(args.steps):
         x, y = get_fib_strided_batch(train_split, args.batch_size, args.seq_len,
                                        fib_positions, gen)
@@ -45,9 +66,22 @@ def train(name, model, train_split, val_split, args, fib_positions):
         loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), y.reshape(-1))
         optimizer.zero_grad(); loss.backward(); optimizer.step()
         if step % eval_every == 0 or step == args.steps - 1:
-            print(f"  step {step:5d}  train={loss.item():.4f}  "
-                  f"({time.time()-t0:.1f}s)", flush=True)
-    return model
+            vl = evaluate(model, val_split, args.batch_size, args.seq_len,
+                          fib_positions, gen)
+            marker = ""
+            if vl < best_val:
+                best_val = vl
+                best_state = {k: v.clone() for k, v in model.state_dict().items()}
+                best_step = step
+                marker = " ← BEST"
+            print(f"  step {step:5d}  train={loss.item():.4f}  val={vl:.4f}"
+                  f"  ({time.time()-t0:.1f}s){marker}", flush=True)
+    # Load best
+    if best_state is not None:
+        model.load_state_dict(best_state)
+    print(f"  → using best checkpoint from step {best_step}  val={best_val:.4f}",
+          flush=True)
+    return model, best_val, best_step
 
 
 @torch.no_grad()
@@ -120,16 +154,20 @@ def main():
     )
 
     samples = {}
+    meta = {}
     for name, make_fn in archs.items():
         model = make_fn()
-        train(name, model, train_split, val_split, args, fib_positions)
+        model, best_val, best_step = train(name, model, train_split, val_split,
+                                              args, fib_positions)
+        meta[name] = {"best_val": best_val, "best_step": best_step,
+                      "n_params": sum(p.numel() for p in model.parameters())}
         out_ids = generate_text(model, prompt_ids, args.n_new, args.seq_len,
                                   itos, temperature=args.temperature,
                                   top_k=args.top_k)
         text = "".join(itos[int(i)] for i in out_ids[0].tolist())
         samples[name] = text
         print(f"\n{'=' * 70}")
-        print(f"SAMPLE from {name}:")
+        print(f"SAMPLE from {name}  (best_val={best_val:.4f} @ step {best_step})")
         print('=' * 70)
         print(text)
         print('=' * 70, flush=True)
@@ -141,7 +179,10 @@ def main():
                 f"top_k={args.top_k})\n")
         f.write(f"# Prompt: {args.prompt!r}\n\n")
         for name, text in samples.items():
-            f.write(f"\n{'=' * 70}\n{name}\n{'=' * 70}\n{text}\n")
+            m = meta[name]
+            f.write(f"\n{'=' * 70}\n{name}  best_val={m['best_val']:.4f} @ step "
+                    f"{m['best_step']}  params={m['n_params']:,}\n"
+                    f"{'=' * 70}\n{text}\n")
     print(f"\nWrote {out_path}")
 
 
