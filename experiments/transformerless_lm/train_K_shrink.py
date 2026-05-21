@@ -157,10 +157,13 @@ def main():
     parser.add_argument("--distractor-frac", type=float, default=0.20)
     parser.add_argument("--K-init", type=int, default=89)
     parser.add_argument("--K-min", type=int, default=5)
+    parser.add_argument("--corpus", type=str, default="omc",
+                        choices=["omc", "tinyshakespeare"])
     parser.add_argument("--out", type=str, default="results_K_shrink.json")
     args = parser.parse_args()
 
-    chars, stoi, itos, encoded = make_dataset(seq_len=args.seq_len, source="omc")
+    chars, stoi, itos, encoded = make_dataset(seq_len=args.seq_len,
+                                                 source=args.corpus)
     vocab_size = len(chars)
     train_split, val_split = build_distractor_stream(
         encoded, args.distractor_frac, args.seq_len, args.seed,
@@ -219,11 +222,12 @@ def main():
         f"shrink_K{args.K_init}_to_K{args.K_min}", m, opt, train_split,
         val_split, args, fib_positions, K_schedule_fn=sched)
 
-    # Summary
-    DENSE_VAL = 2.3586
+    # Summary — reference dense baselines depend on corpus
+    DENSE_REF = {"omc": 2.3586, "tinyshakespeare": 2.4396}
+    DENSE_VAL = DENSE_REF.get(args.corpus, 2.4)
     print()
     print("=" * 84)
-    print(f"Reference: dense_crt at d={args.d_model} OMC = val {DENSE_VAL}")
+    print(f"Reference: dense_crt at d={args.d_model} {args.corpus} = val {DENSE_VAL}")
     print('-' * 84)
     print(f"{'config':<26} {'params':>10} {'best_val':>10} {'final_val':>10} "
           f"{'gap %':>10}")
