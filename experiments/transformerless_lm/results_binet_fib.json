@@ -1,0 +1,9 @@
+{
+  "binet_fib_activation": {
+    "name": "binet_fib_activation",
+    "n_params": 327468,
+    "best_val": 2.9976043105125427,
+    "best_step": 7462,
+    "wall": 304.54568457603455
+  }
+}
