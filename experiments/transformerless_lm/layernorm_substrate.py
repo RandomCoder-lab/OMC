@@ -21,6 +21,7 @@ import torch.nn.functional as F
 
 PHI = (1.0 + 5.0 ** 0.5) / 2.0
 PI_LOG_PHI = math.pi * math.log(PHI)   # log(phi^pi) = pi * log(phi) ≈ 1.5145
+PHI_PI = PHI ** math.pi                # substrate's canonical contraction ≈ 4.534
 FIB = [1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89]
 
 
@@ -56,18 +57,13 @@ class SubstrateL1LN(nn.Module):
 
 
 class SubstrateMedianLN(nn.Module):
-    """LayerNorm with median center + MAD spread (full L1 alignment).
+    """LayerNorm with median center + MAD spread (DEPRECATED — sparse grads).
 
-    SubstrateL1LN uses the mean (L2-optimal center, minimizes sum (x-c)^2)
-    with the MAD (L1 spread). That mixes metrics. The L1-optimal center
-    is the median (minimizes sum |x-c|), which pairs naturally with MAD.
+    Tried median for full L1 alignment; lost to baseline by ~8% (val 2.91
+    vs 2.69 at K=55) because torch.median back-props only through one
+    element per row, starving every other dimension of gradient signal.
 
-    Standard LN:    (x - mean)   / std   -- L2 center + L2 spread
-    SubstrateL1LN:  (x - mean)   / MAD   -- L2 center + L1 spread (mixed)
-    MedianLN:       (x - median) / MAD   -- L1 center + L1 spread (canonical)
-
-    Gradient note: torch.median back-props only through the median
-    element per row (sparse, like maxpool). That's fine here.
+    Kept for reference. Use SubstrateWeiszfeldLN for the smooth L1 center.
     """
 
     def __init__(self, normalized_shape, eps: float = 1e-5):
@@ -82,6 +78,46 @@ class SubstrateMedianLN(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         median = x.median(dim=-1, keepdim=True).values
         diff = x - median
+        mad = diff.abs().mean(dim=-1, keepdim=True)
+        return self.gamma * diff / (mad + self.eps) + self.beta
+
+
+class SubstrateWeiszfeldLN(nn.Module):
+    """LayerNorm with one-step Weiszfeld iteration for smooth L1 center.
+
+    The geometric median (= L1-optimal center, minimizes sum |x-c|) is
+    the canonical L1 center, but exact median has sparse gradients. The
+    Weiszfeld iteration converges to the geometric median by iterative
+    reweighted means:
+
+        c_{n+1} = sum(w_i * x_i) / sum(w_i)
+        w_i = 1 / (|x_i - c_n| + eps)
+
+    Bootstrap c_0 = mean. One step gives a smooth, dense-gradient
+    approximation of the L1 center. Gradient flows through every
+    element via the weights — fixes the median sparse-grad failure.
+
+    Standard LN:        (x - mean)        / std   -- L2 center + L2 spread
+    SubstrateL1LN v1:   (x - mean)        / MAD   -- L2 center + L1 spread
+    SubstrateMedianLN:  (x - median)      / MAD   -- L1 (sparse grad)
+    Weiszfeld v2:       (x - L1_center) / MAD     -- L1 (dense grad)
+    """
+
+    def __init__(self, normalized_shape, eps: float = 1e-5):
+        super().__init__()
+        if isinstance(normalized_shape, int):
+            normalized_shape = (normalized_shape,)
+        self.normalized_shape = tuple(normalized_shape)
+        self.gamma = nn.Parameter(torch.ones(*self.normalized_shape))
+        self.beta = nn.Parameter(torch.zeros(*self.normalized_shape))
+        self.eps = eps
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # One Weiszfeld step: bootstrap from mean, reweight by 1/|x-c|.
+        c0 = x.mean(dim=-1, keepdim=True)
+        w = 1.0 / (torch.abs(x - c0) + self.eps)
+        c1 = (w * x).sum(dim=-1, keepdim=True) / w.sum(dim=-1, keepdim=True)
+        diff = x - c1
         mad = diff.abs().mean(dim=-1, keepdim=True)
         return self.gamma * diff / (mad + self.eps) + self.beta
 
@@ -102,24 +138,17 @@ def substrate_softmax(x: torch.Tensor, dim: int = -1) -> torch.Tensor:
 
 def substrate_tier_softmax(x: torch.Tensor, dim: int = -1,
                             K: int = 5) -> torch.Tensor:
-    """F(k)/phi^(pi*k) weighted mixture of tier-scaled softmaxes.
+    """F(k)/phi^(pi*k) tier mixture of softmaxes (DEPRECATED — exp-based).
 
-    substrate_softmax uses a single phi^pi base (one temperature). The
-    substrate's actual mass distribution is tier-decayed: F(k)/phi^(pi*k)
-    per tier. Apply that decay to a mixture of softmaxes at tier-scaled
-    temperatures:
+    Tried mixing K=5 softmaxes at tier-scaled temperatures. Weights
+    {1, 0.225, 0.097, 0.032, 0.012} are so dominated by tier 0 that the
+    mixture mostly collapses to single-temp substrate_softmax — at 5x
+    the compute. Deeper problem: still uses exp, but the substrate is
+    L1-attractor based.
 
-        out = sum_k w_k * softmax(x * pi*log(phi) * phi^k)  /  sum_k w_k
-        where w_k = F(k) / phi^(pi*k)
-
-    Tier 0 has the highest weight (matches single-temp substrate_softmax);
-    higher tiers contribute progressively sharper signal blended by
-    substrate decay. K=5 default; weights {1, 0.225, 0.097, 0.032, 0.012}.
-
-    Output is a valid probability distribution (convex combination of
-    softmaxes), so it drops in wherever F.softmax is used.
+    Kept for reference. Use substrate_attractor_softmax for the
+    exp-free substrate-canonical normalization.
     """
-    # precompute weights
     weights = [FIB[k] / (PHI ** (math.pi * k)) for k in range(K)]
     w_total = sum(weights)
     out = None
@@ -129,3 +158,37 @@ def substrate_tier_softmax(x: torch.Tensor, dim: int = -1,
         contrib = (weights[k] / w_total) * sm_k
         out = contrib if out is None else out + contrib
     return out
+
+
+def substrate_attractor_softmax(x: torch.Tensor,
+                                  dim: int = -1) -> torch.Tensor:
+    """Exp-free substrate-canonical normalization via L1 attractor distance.
+
+    The standard softmax uses exp: attn_i = exp(x_i) / sum_j exp(x_j).
+    The substrate's "softmax" doesn't need exp — it has its own canonical
+    nearness formula: attractor weight = 1 / (1 + L1_distance * phi^pi).
+
+    Apply that directly: distance is (x_max - x_i) >= 0; the attractor
+    weight decays smoothly from 1 (at the max) toward 0 (far below max),
+    with sharpness controlled by phi^pi ≈ 4.534.
+
+        d_i = x_max - x_i                    (>= 0, L1 attractor distance)
+        score_i = 1 / (1 + d_i * phi^pi)
+        attn_i = score_i / sum_j score_j
+
+    Properties:
+      - Sums to 1 by normalization.
+      - Smooth gradient through every element (via score and sum).
+      - No exp anywhere — matches activation's L1-attractor design.
+      - Masked positions (x_i = -inf) cleanly get attn_i = 0.
+      - Cheaper than F.softmax: one max + reciprocal + sum, no exp.
+
+    Compared to substrate_softmax (which uses phi^pi as exp base):
+    attractor variant has sub-exponential tail decay (algebraic vs
+    exponential). The substrate's actual decay is algebraic
+    (F(k)/phi^(pi*k)) — closer match to the underlying math.
+    """
+    x_max = x.max(dim=dim, keepdim=True).values
+    d = x_max - x   # >= 0; +inf where x is -inf (masked)
+    score = 1.0 / (1.0 + d * PHI_PI)
+    return score / score.sum(dim=dim, keepdim=True)

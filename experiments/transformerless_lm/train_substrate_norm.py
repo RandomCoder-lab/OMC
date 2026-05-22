@@ -1,16 +1,17 @@
-"""A/B bench for refined substrate LayerNorm and Softmax.
+"""A/B bench for refined substrate LayerNorm and Softmax v2.
 
 Stacks on top of SubstrateNegMultiAdvancedV2 (val=2.5889 on its own).
-Tests refined LN and softmax:
-  - SubstrateMedianLN: median center + MAD spread (full L1)
-  - substrate_tier_softmax: F(k)/phi^(pi*k) tier mixture of softmaxes
-    at temperatures pi*log(phi)*phi^k
+After v1 attempts (median_ln, tier_softmax) underperformed, refined:
+  - SubstrateWeiszfeldLN: one-step Weiszfeld for smooth L1 center
+    (fixes median's sparse-gradient failure; full L1 alignment kept)
+  - substrate_attractor_softmax: exp-free, 1/(1 + d*phi^pi) on L1
+    attractor distance (matches activation's L1 attractor design)
 
 Four arms (all with V2 activation):
   baseline_v2               standard LN + standard softmax (= 2.5889 ref)
-  + median_ln               SubstrateMedianLN + standard softmax
-  + tier_softmax            standard LN + substrate_tier_softmax
-  + both                    SubstrateMedianLN + substrate_tier_softmax
+  + weiszfeld_ln            SubstrateWeiszfeldLN + standard softmax
+  + attractor_softmax       standard LN + substrate_attractor_softmax
+  + both                    SubstrateWeiszfeldLN + substrate_attractor_softmax
 """
 
 import argparse
@@ -34,7 +35,9 @@ from train_K_shrink import K_schedule_tier_walk, set_K_active_recursive
 from losses_substrate import substrate_fft_loss
 from activations_substrate import SubstrateNegMultiAdvancedV2
 from layernorm_substrate import (SubstrateL1LN, SubstrateMedianLN,
-                                   substrate_softmax, substrate_tier_softmax)
+                                   SubstrateWeiszfeldLN,
+                                   substrate_softmax, substrate_tier_softmax,
+                                   substrate_attractor_softmax)
 
 
 class FibRecLMSubstrateNorm(FibRecLM):
@@ -159,7 +162,7 @@ def main():
     parser.add_argument("--K-init", type=int, default=89)
     parser.add_argument("--K-min", type=int, default=13)
     parser.add_argument("--lambda-sub", type=float, default=0.01)
-    parser.add_argument("--out", type=str, default="results_substrate_norm_v2.json")
+    parser.add_argument("--out", type=str, default="results_substrate_norm_v3.json")
     args = parser.parse_args()
 
     chars, stoi, itos, encoded = make_dataset(seq_len=args.seq_len,
@@ -171,10 +174,10 @@ def main():
     fib_positions = fib_positions_in_window(args.seq_len)
 
     arms = [
-        ("baseline_v2",     nn.LayerNorm,        None),
-        ("median_ln",       SubstrateMedianLN,   None),
-        ("tier_softmax",    nn.LayerNorm,        substrate_tier_softmax),
-        ("both",            SubstrateMedianLN,   substrate_tier_softmax),
+        ("baseline_v2",         nn.LayerNorm,           None),
+        ("weiszfeld_ln",        SubstrateWeiszfeldLN,   None),
+        ("attractor_softmax",   nn.LayerNorm,           substrate_attractor_softmax),
+        ("both",                SubstrateWeiszfeldLN,   substrate_attractor_softmax),
     ]
     results = {}
     for name, ln_cls, sm_fn in arms:
