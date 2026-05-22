@@ -1268,7 +1268,9 @@ def _single_stage_refine(model, draft, vocab_size, scorer, mode: str,
                             n_classes: int = 0,
                             pronoun_mask: torch.Tensor = None,
                             vowel_start_mask: torch.Tensor = None,
-                            end_vowels: list = None):
+                            end_vowels: list = None,
+                            punct_mask: torch.Tensor = None,
+                            newline_mask: torch.Tensor = None):
     """One refinement stage: optimize a single score until plateau.
 
     mode: 'min' (harmony, quality) or 'max' (creativity).
@@ -1434,7 +1436,9 @@ def staged_refine(model, prompt, n_new, vocab_size,
                     n_classes: int = 0,
                     pronoun_mask: torch.Tensor = None,
                     vowel_start_mask: torch.Tensor = None,
-                    end_vowels: list = None):
+                    end_vowels: list = None,
+                    punct_mask: torch.Tensor = None,
+                    newline_mask: torch.Tensor = None):
     """Staircase refinement: hit one score, then the next, then the next.
 
     Stage 1: substrate alignment (minimize harmony) -- match the shape.
