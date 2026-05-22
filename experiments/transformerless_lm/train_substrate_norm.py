@@ -178,8 +178,9 @@ def main():
     )
     fib_positions = fib_positions_in_window(args.seq_len)
 
+    # Skip baseline_v2 (known reference val=2.5889) and failed v1
+    # primitives (median_ln, weiszfeld_ln, tier_softmax, attractor_softmax).
     arms = [
-        ("baseline_v2",   nn.LayerNorm,    None),
         ("l1_ln_cal",     SubstrateL1LN,   None),
         ("phi_pi_sm",     nn.LayerNorm,    substrate_softmax),
         ("both",          SubstrateL1LN,   substrate_softmax),
