@@ -87,56 +87,231 @@ PHI = (1.0 + 5.0 ** 0.5) / 2.0
 PI_LOG_PHI = math.pi * math.log(PHI)
 
 
+_FIB_FREQS = [1, 2, 3, 5, 8, 13, 21]
+_FIB_NUMS = [1, 1, 2, 3, 5, 8, 13]   # F(k) for tier k = 0..K-1
+_FIB_LAGS = [1, 2, 3, 5, 8, 13, 21]  # Fibonacci sequence lags for multi-scale
+
+
+def corpus_char_signature(corpus_tokens: torch.Tensor,
+                            vocab_size: int) -> torch.Tensor:
+    """Char-level substrate signature of a corpus.
+
+    Returns the normalized Fibonacci-frequency energy profile of the
+    one-hot distribution implied by the actual tokens. This is the
+    corpus's char-level substrate fingerprint -- target for the model
+    to match instead of the abstract F(k)/phi^(pi*k) canonical.
+    """
+    fib_freqs = torch.tensor(_FIB_FREQS, dtype=torch.float,
+                              device=corpus_tokens.device)
+    K = fib_freqs.numel()
+    v_idx = torch.arange(vocab_size, dtype=torch.float,
+                          device=corpus_tokens.device)
+    angles = 2 * math.pi * v_idx.unsqueeze(1) * fib_freqs.unsqueeze(0) / vocab_size
+    basis_cos = torch.cos(angles)                                  # [V, K]
+    basis_sin = torch.sin(angles)
+    one_hot = F.one_hot(corpus_tokens, vocab_size).float()         # [N, V]
+    proj_cos = one_hot @ basis_cos                                 # [N, K]
+    proj_sin = one_hot @ basis_sin
+    energy = (proj_cos ** 2 + proj_sin ** 2).mean(dim=0)            # [K]
+    return energy / (energy.sum() + 1e-8)
+
+
+def corpus_multiscale_signature(corpus_tokens: torch.Tensor,
+                                  vocab_size: int,
+                                  seq_len: int = 64) -> torch.Tensor:
+    """Multi-scale substrate signature: self-similarity decay at Fib lags
+    measured over windows of the actual corpus."""
+    one_hot = F.one_hot(corpus_tokens, vocab_size).float()         # [N, V]
+    N = one_hot.shape[0]
+    K = len(_FIB_LAGS)
+    sims = []
+    for lag in _FIB_LAGS:
+        if N <= lag:
+            sims.append(torch.tensor(0.0, device=one_hot.device))
+            continue
+        # Dot product between token t and token t+lag, averaged
+        p1 = one_hot[:-lag]
+        p2 = one_hot[lag:]
+        sim = (p1 * p2).sum(dim=-1).mean()
+        sims.append(sim)
+    sims = torch.stack(sims)
+    return sims / (sims.sum() + 1e-8)
+
+
+def substrate_harmony_loss_grounded(logits: torch.Tensor,
+                                     vocab_size: int,
+                                     target_signature: torch.Tensor,
+                                     K_harmony: int = None,
+                                     ) -> torch.Tensor:
+    """Char-level harmony loss grounded against a TARGET signature.
+
+    K_harmony: number of Fibonacci frequencies to USE in this loss. As
+    the model's K-shrinks (basis collapses), the harmony's active
+    frequency count should shrink with it -- the substrate's measuring
+    stick must match the model's representational capacity. None = use
+    all 7.
+    """
+    fib_freqs_all = _FIB_FREQS
+    K_full = len(fib_freqs_all)
+    K_use = K_full if K_harmony is None else min(K_harmony, K_full)
+    fib_freqs = torch.tensor(fib_freqs_all[:K_use], dtype=logits.dtype,
+                              device=logits.device)
+    target = target_signature[:K_use]
+    target = target / (target.sum() + 1e-8)        # renormalize at K_use
+    v_idx = torch.arange(vocab_size, dtype=logits.dtype, device=logits.device)
+    angles = 2 * math.pi * v_idx.unsqueeze(1) * fib_freqs.unsqueeze(0) / vocab_size
+    basis_cos = torch.cos(angles)
+    basis_sin = torch.sin(angles)
+    pred = F.softmax(logits, dim=-1)
+    pred_cos = pred @ basis_cos
+    pred_sin = pred @ basis_sin
+    energy = (pred_cos ** 2 + pred_sin ** 2).mean(dim=(0, 1))
+    energy = energy / (energy.sum() + 1e-8)
+    return (energy - target).abs().sum()
+
+
+def substrate_multiscale_harmony_loss_grounded(logits: torch.Tensor,
+                                                  vocab_size: int,
+                                                  target_signature: torch.Tensor,
+                                                  K_harmony: int = None,
+                                                  ) -> torch.Tensor:
+    """Multi-scale harmony loss grounded against a TARGET signature.
+
+    K_harmony: shrinks lag set as model's K shrinks. None = all 7 lags.
+    """
+    fib_lags_all = _FIB_LAGS
+    K_full = len(fib_lags_all)
+    K_use = K_full if K_harmony is None else min(K_harmony, K_full)
+    lags = fib_lags_all[:K_use]
+    target = target_signature[:K_use]
+    target = target / (target.sum() + 1e-8)
+    probs = F.softmax(logits, dim=-1)
+    T = probs.shape[1]
+    sims = []
+    for lag in lags:
+        if T <= lag:
+            sims.append(torch.tensor(0.0, dtype=logits.dtype,
+                                      device=logits.device))
+            continue
+        p1 = probs[:, :-lag]
+        p2 = probs[:,  lag:]
+        sim = (p1 * p2).sum(dim=-1).mean()
+        sims.append(sim)
+    sims = torch.stack(sims)
+    sims = sims / (sims.sum() + 1e-8)
+    return (sims - target).abs().sum()
+
+
 def substrate_harmony_loss(logits: torch.Tensor, vocab_size: int) -> torch.Tensor:
     """L1 distance from canonical F(k)/phi^(pi*k) decay at Fibonacci freqs.
 
     NO TARGET REQUIRED. Measures how well the predicted distribution's
     Fibonacci-frequency energy profile matches the substrate's canonical
-    tier-decay pattern. This is the model's *self-harmony* score:
-    higher harmony = output is in tune with the substrate prior.
+    TIER-DECAY pattern F(k)/phi^(pi*k). This is the model's self-harmony
+    score: lower = more in tune with the substrate prior.
+
+    v1 used pure 1/phi^(pi*k) (geometric decay). v2 uses the full
+    substrate-canonical F(k)/phi^(pi*k) — F(k) numerator preserves the
+    Fibonacci tier structure, giving the higher tiers a bit more weight
+    than pure geometric decay. Same formula the winning V2 activation
+    used internally.
 
     Mechanism:
-      1. Project the predicted distribution onto K Fibonacci frequencies
-         (same basis substrate_fft_loss uses).
+      1. Project the predicted distribution onto K Fibonacci frequencies.
       2. Compute energy per frequency: pred_cos^2 + pred_sin^2.
       3. Normalize energies to a distribution (sum=1).
       4. Compare to canonical F(k)/phi^(pi*k) tier decay (also normalized).
-      5. L1 distance between the two = harmony score (lower = more in tune).
-
-    Use cases:
-      - Self-recursive training (phase 2): model generates, scores its own
-        output by harmony, gradient steps to improve substrate alignment.
-        No external label needed -- the substrate IS the label.
-      - Regularizer on supervised training: pull predictions toward the
-        substrate's natural decay pattern, encourage tier structure.
+      5. L1 distance between the two.
     """
-    fib_freqs = torch.tensor([1, 2, 3, 5, 8, 13, 21], dtype=logits.dtype,
+    fib_freqs = torch.tensor(_FIB_FREQS, dtype=logits.dtype,
                               device=logits.device)
     K = fib_freqs.numel()
-    # Canonical substrate decay: 1/phi^(pi*k) for k in [0, K).
-    # (F(k) prefactor washes out under normalization; pure decay term.)
+    # Canonical substrate tier decay: F(k)/phi^(pi*k) -- the same formula
+    # the winning V2 activation uses for its tier weights.
     canonical = torch.tensor(
-        [1.0 / (PHI ** (math.pi * k)) for k in range(K)],
+        [_FIB_NUMS[k] / (PHI ** (math.pi * k)) for k in range(K)],
         dtype=logits.dtype, device=logits.device,
     )
-    canonical = canonical / canonical.sum()  # normalize
+    canonical = canonical / canonical.sum()
 
-    # Project predicted distribution onto Fibonacci frequencies.
     v_idx = torch.arange(vocab_size, dtype=logits.dtype, device=logits.device)
     angles = 2 * math.pi * v_idx.unsqueeze(1) * fib_freqs.unsqueeze(0) / vocab_size
     basis_cos = torch.cos(angles)
     basis_sin = torch.sin(angles)
 
-    pred = F.softmax(logits, dim=-1)                  # [B, T, V]
-    pred_cos = pred @ basis_cos                        # [B, T, K]
+    pred = F.softmax(logits, dim=-1)                   # [B, T, V]
+    pred_cos = pred @ basis_cos                         # [B, T, K]
     pred_sin = pred @ basis_sin
 
-    # Energy per Fibonacci frequency, averaged over batch and time.
     energy = (pred_cos ** 2 + pred_sin ** 2).mean(dim=(0, 1))  # [K]
-    energy = energy / (energy.sum() + 1e-8)            # normalize to dist
+    energy = energy / (energy.sum() + 1e-8)
 
-    # L1 distance from canonical (substrate's natural decay pattern).
     return (energy - canonical).abs().sum()
+
+
+def substrate_multiscale_harmony_loss(logits: torch.Tensor,
+                                        vocab_size: int) -> torch.Tensor:
+    """Multi-scale substrate harmony via self-similarity decay at Fib lags.
+
+    The single-scale substrate_harmony_loss measures only char-level
+    spectrum -- catches frequency patterns but NOT meter, rhyme, theme,
+    or any structure that lives above the char tier. A model that
+    optimizes only char-level harmony produces statistically-correct
+    gibberish, not poetry.
+
+    Multi-scale harmony measures the model's *self-similarity* at
+    Fibonacci lags L ∈ {1, 2, 3, 5, 8, 13, 21}. Each lag is a
+    different POETIC SCALE:
+        lag 1   chars within a word (high similarity expected)
+        lag 5   words within a line (~iambic pentameter range)
+        lag 8   lines within a quatrain
+        lag 13  across quatrains / stanzas
+        lag 21  across sonnets / acts (low similarity expected)
+
+    Substrate prior: this similarity should decay as F(k)/phi^(pi*k)
+    across lags -- same canonical formula as char-level harmony, but
+    applied to SCALES not frequencies. If the model produces output
+    with the right decay across these lags, it's exhibiting hierarchical
+    poetic structure: short-range cohesion (words) + long-range theme
+    (stanzas).
+
+    Formula:
+        sim_L = mean over t of (probs[t] · probs[t+L])
+              = expected next-token-agreement at lag L
+        canonical_k = F(k) / phi^(pi*k), normalized to sum=1
+        sim_k normalized to sum=1
+        loss = L1 distance(sim, canonical)
+
+    Note: this measures self-correlation patterns, not absolute output
+    distributions. Combine with single-scale substrate_harmony_loss
+    for both char-frequency AND multi-scale structure.
+    """
+    probs = F.softmax(logits, dim=-1)                  # [B, T, V]
+    T = probs.shape[1]
+    K = len(_FIB_LAGS)
+
+    # Compute self-similarity at each Fibonacci lag.
+    sims = []
+    for lag in _FIB_LAGS:
+        if T <= lag:
+            # Sequence too short for this lag; substitute small similarity.
+            sims.append(torch.tensor(0.0, dtype=logits.dtype,
+                                      device=logits.device))
+            continue
+        p1 = probs[:, :-lag]                           # [B, T-lag, V]
+        p2 = probs[:,  lag:]                           # [B, T-lag, V]
+        sim = (p1 * p2).sum(dim=-1).mean()             # scalar
+        sims.append(sim)
+    sims = torch.stack(sims)
+    sims = sims / (sims.sum() + 1e-8)
+
+    canonical = torch.tensor(
+        [_FIB_NUMS[k] / (PHI ** (math.pi * k)) for k in range(K)],
+        dtype=logits.dtype, device=logits.device,
+    )
+    canonical = canonical / canonical.sum()
+
+    return (sims - canonical).abs().sum()
 
 
 def substrate_fft_loss(logits: torch.Tensor, targets: torch.Tensor,
