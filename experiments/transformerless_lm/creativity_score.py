@@ -104,6 +104,24 @@ def line_length_match(generated: str, corpus_text: str) -> float:
     return sum(abs(g - c) for g, c in zip(gen_h, corp_h))
 
 
+def real_word_fraction(generated: str, corpus_text: str,
+                          min_word_len: int = 3) -> float:
+    """Fraction of generated 'words' that are real (length >= min_word_len
+    AND appear in the corpus vocabulary). The strict gate against
+    gibberish: 'fan' is real even if Shakespeare uses it, 'xqrt' is not.
+    Short tokens (1-2 chars) excluded because they're noise-prone.
+    """
+    def clean(s):
+        return s.lower().strip(string.punctuation)
+    corpus_vocab = set(clean(w) for w in corpus_text.split() if clean(w))
+    gen_words = [clean(w) for w in generated.split() if clean(w)]
+    long_words = [w for w in gen_words if len(w) >= min_word_len]
+    if not long_words:
+        return 0.0
+    real = sum(1 for w in long_words if w in corpus_vocab)
+    return real / len(long_words)
+
+
 def common_word_presence(generated: str, corpus_text: str,
                             top_k: int = 50) -> float:
     """How many of the corpus's top-K most-common words appear in the
@@ -194,8 +212,9 @@ def creativity_score(generated: str, corpus_text: str) -> dict:
     vc = vc_alternation_rate(generated)
     line_dist = line_length_match(generated, corpus_text)
     line_stats = line_structure_stats(generated)
-    # Strong anti-gibberish: common-word presence and word-length match.
+    # Strong anti-gibberish: common-word, real-word, and word-length.
     cw = common_word_presence(generated, corpus_text, top_k=50)
+    rw = real_word_fraction(generated, corpus_text, min_word_len=3)
     awl = avg_word_length_match(generated, corpus_text)
     # Repetition penalty: only severe excess counts now (threshold scales
     # with text length so real text's natural repetition doesn't penalize).
@@ -203,10 +222,11 @@ def creativity_score(generated: str, corpus_text: str) -> dict:
     rep_pen = repetition_penalty(generated, n=4, max_freq_threshold=threshold)
 
     composite = (
-        0.20 * cw +              # common-word presence (anti-gibberish)
-        0.25 * vocab +           # any vocab overlap (length-weighted via cw)
-        0.15 * awl +             # word-length sanity
-        0.20 * n3 +              # 3-gram match (corpus patterns)
+        0.25 * rw +              # real-word fraction (HARDEST anti-gibberish)
+        0.15 * cw +              # common-word presence
+        0.15 * vocab +           # any vocab overlap (short tokens count)
+        0.10 * awl +             # word-length sanity
+        0.15 * n3 +              # 3-gram match (corpus patterns)
         0.10 * n4 +              # 4-gram match (longer patterns)
         0.10 * max(0.0, 1.0 - line_dist)   # line structure
     ) - 0.3 * rep_pen
@@ -217,6 +237,7 @@ def creativity_score(generated: str, corpus_text: str) -> dict:
         "ngram_4": n4,
         "vocab_overlap": vocab,
         "common_word_presence": cw,
+        "real_word_fraction": rw,
         "avg_word_len_match": awl,
         "vc_alternation": vc,
         "line_dist": line_dist,

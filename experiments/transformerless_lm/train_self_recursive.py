@@ -49,7 +49,8 @@ from losses_substrate import (substrate_fft_loss, substrate_harmony_loss,
                                 substrate_multiscale_harmony_loss_grounded)
 from activations_substrate import SubstrateNegMultiAdvancedV2
 from train_substrate_attention import FibRecLMSubsim
-from creativity_score import creativity_score as compute_creativity_score
+from creativity_score import (creativity_score as compute_creativity_score,
+                                  real_word_fraction)
 
 
 def take_tiny_seed(encoded: torch.Tensor, n_chars: int,
@@ -615,12 +616,44 @@ def train_with_self_distillation(name, train_seed, corpus_anchor, val_split,
           f"n_cycles={n_cycles}  distill_prob={distill_prob}  "
           f"params={n_params:,}", flush=True)
 
+    n_new = max(args.seq_len - 16, 32)
+
+    # Compute corpus creativity baseline (over random n_new-char windows of
+    # the actual corpus) -- the floor that refined output must beat to
+    # be admitted to the active_base. Stops the model from feeding
+    # itself sub-corpus-quality material.
+    corpus_creativity_samples = []
+    import random as _rng_seed
+    _rng_seed_inst = _rng_seed.Random(args.seed + 11)
+    sample_window = max(64, n_new + 16)
+    n_corpus_samples = 50
+    if corpus_text is not None and len(corpus_text) > sample_window + 1:
+        for _ in range(n_corpus_samples):
+            start = _rng_seed_inst.randint(0, len(corpus_text) - sample_window)
+            chunk = corpus_text[start: start + sample_window]
+            corpus_creativity_samples.append(
+                compute_creativity_score(chunk, corpus_text)["creativity_score"])
+        corpus_creativity_baseline = sorted(corpus_creativity_samples)[
+            len(corpus_creativity_samples) // 2]   # median
+    else:
+        corpus_creativity_baseline = 0.0
+    print(f"  corpus creativity baseline (median of {n_corpus_samples} "
+          f"{sample_window}-char windows): {corpus_creativity_baseline:.4f}")
+
+    # Anchor weight: original seed must remain at least this fraction of
+    # active_base. Stops the model's mediocre output from dominating.
+    seed_min_fraction = 0.70
+    orig_seed_chars = train_seed.numel()
+
     # Active training base: starts as tiny_seed, GROWS by appending each
-    # cycle's best refined output. Best-distilment becomes the new base.
+    # cycle's best refined output -- only if (a) creativity > corpus
+    # baseline AND (b) anchor weight constraint still satisfied.
     active_base = train_seed.clone()
     best_creativity = 0.0
     best_refined_seq = None
     cycle_summary = []
+    n_rejected_below_baseline = 0
+    n_rejected_anchor = 0
 
     steps_per_cycle = args.steps // n_cycles
     t0 = time.time()
@@ -629,7 +662,6 @@ def train_with_self_distillation(name, train_seed, corpus_anchor, val_split,
     eval_every = max(steps_per_cycle // 4, 100)
     global_step = 0
     prompt = train_seed[:16].unsqueeze(0)
-    n_new = max(args.seq_len - 16, 32)
 
     for cycle in range(n_cycles):
         print(f"\n  --- Cycle {cycle+1}/{n_cycles}  "
@@ -697,23 +729,52 @@ def train_with_self_distillation(name, train_seed, corpus_anchor, val_split,
         print(f"  cycle {cycle+1}: generated {samples_per_cycle} samples, "
               f"mean creativity={mean_score:.4f}, "
               f"top-{keep_top_k}={[round(s, 4) for s in kept_scores]}")
-        # Always append top-K (even if not new bests) -- the corpus grows
-        # with the model's best work from this cycle.
+        # Three filters: quality (> corpus baseline), anchor (seed >= 70%),
+        # real_words (>= min fraction). Real-words is the strict gate that
+        # stops "fan fan fan" gibberish from entering the corpus.
+        real_word_min = 0.6
         n_growth = 0
+        n_added_this_cycle = 0
+        n_rej_rw_this_cycle = 0
         for ref_seq, cr in kept:
-            active_base = torch.cat([active_base, ref_seq])
-            n_growth += ref_seq.numel()
             if cr > best_creativity:
                 best_creativity = cr
                 best_refined_seq = ref_seq.clone()
+            # Decode to check real-word fraction.
+            ref_text = ''.join(itos_map.get(int(t), '?')
+                                for t in ref_seq.tolist())
+            rw = real_word_fraction(ref_text, corpus_text, min_word_len=3)
+            new_size = active_base.numel() + ref_seq.numel()
+            seed_frac_after = orig_seed_chars / new_size
+            passes_q = cr > corpus_creativity_baseline
+            passes_a = seed_frac_after >= seed_min_fraction
+            passes_rw = rw >= real_word_min
+            if passes_q and passes_a and passes_rw:
+                active_base = torch.cat([active_base, ref_seq])
+                n_growth += ref_seq.numel()
+                n_added_this_cycle += 1
+            else:
+                if not passes_q:
+                    n_rejected_below_baseline += 1
+                if not passes_a:
+                    n_rejected_anchor += 1
+                if not passes_rw:
+                    n_rej_rw_this_cycle += 1
         cycle_summary.append({
             "cycle": cycle + 1,
             "samples_creativity": all_scores,
             "kept_top_k": kept_scores,
+            "n_added": n_added_this_cycle,
+            "n_rejected_baseline": n_rejected_below_baseline,
+            "n_rejected_anchor": n_rejected_anchor,
             "active_base_after": active_base.numel(),
         })
-        print(f"  active_base grew +{n_growth} chars -> "
-              f"{active_base.numel()} total  (best ever: {best_creativity:.4f})")
+        print(f"  added {n_added_this_cycle}/{len(kept)} samples  "
+              f"(rej_baseline={n_rejected_below_baseline}, "
+              f"rej_anchor={n_rejected_anchor}, "
+              f"rej_realword(this cycle)={n_rej_rw_this_cycle}) "
+              f"active_base={active_base.numel()} chars "
+              f"(best ever: {best_creativity:.4f})")
 
     # Final generation for inspection.
     final_gen = autoregressive_generate(model, prompt, n_new=n_new,
