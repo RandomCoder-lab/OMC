@@ -93,22 +93,110 @@ def sample_tiny_batch(seed: torch.Tensor, batch_size: int, window: int,
 
 
 _PHI_FOR_SAMPLING = (1.0 + 5.0 ** 0.5) / 2.0
-_PI_LOG_PHI = math.pi * math.log(_PHI_FOR_SAMPLING)   # base for substrate softmax
+# Substrate sampling sharpness, damped by 1/phi (golden ratio attenuation).
+# Same canonical phi^pi base, but the effective sharpness is reduced -- the
+# model can lock onto substrate-aligned tokens without collapsing to a
+# single token. Substrate-canonical (uses phi as the dampener).
+_PI_LOG_PHI = math.pi * math.log(_PHI_FOR_SAMPLING) / _PHI_FOR_SAMPLING
 
+
+# Substrate penalty unit: log(phi) ~ 0.481 (mild). The syntax prior
+# now does the heavy lifting; recency stays gentle.
+_LOG_PHI_FOR_PENALTY = math.log(_PHI_FOR_SAMPLING)   # ~0.481
+
+
+def build_bigram_prior(corpus_tokens: torch.Tensor, vocab_size: int):
+    """Build P(next | prev) bigram statistics from the corpus.
+
+    Returns a [V, V] tensor where row i is the normalized distribution
+    of tokens that followed token i in the corpus. Used as a substrate
+    syntax prior at generation time.
+    """
+    counts = torch.zeros(vocab_size, vocab_size, dtype=torch.float)
+    for i in range(corpus_tokens.numel() - 1):
+        prev = int(corpus_tokens[i])
+        nxt = int(corpus_tokens[i + 1])
+        counts[prev, nxt] += 1.0
+    row_sums = counts.sum(dim=-1, keepdim=True)
+    row_sums[row_sums == 0] = 1.0   # avoid div by zero
+    return counts / row_sums
+
+
+_SUBSTRATE_BIGRAM_ALPHA = 1.0 / (_PHI_FOR_SAMPLING ** math.pi)   # ~0.221
+
+
+def substrate_syntax_blend(prev_token: int, bigram_prior: torch.Tensor,
+                              probs: torch.Tensor) -> torch.Tensor:
+    """Blend model's probability distribution with corpus bigram prior.
+
+        out = (1 - alpha) * probs + alpha * bigram_prior[prev_token]
+
+    alpha = 1/phi^pi ~= 0.221, substrate-canonical mixing ratio.
+    Tokens that historically followed `prev_token` in the corpus
+    receive substantial probability mass (22% of total). The model's
+    own distribution provides the other 78%.
+
+    This is much stronger than a log-boost: the bigram has a
+    guaranteed share of sampling probability regardless of how
+    confident the model is in its own prediction.
+    """
+    prior_row = bigram_prior[prev_token].to(probs.device).to(probs.dtype)
+    return (1.0 - _SUBSTRATE_BIGRAM_ALPHA) * probs + _SUBSTRATE_BIGRAM_ALPHA * prior_row
+
+
+def substrate_syntax_boost(prev_token: int, bigram_prior: torch.Tensor,
+                              logits: torch.Tensor) -> torch.Tensor:
+    """Boost logits by log(phi^pi) * P(next | prev_token). DEPRECATED --
+    too weak vs the model's confident logits. Use substrate_syntax_blend
+    on probabilities instead."""
+    log_phi_pi = math.pi * math.log(_PHI_FOR_SAMPLING)
+    prior_row = bigram_prior[prev_token].to(logits.device).to(logits.dtype)
+    return logits + log_phi_pi * prior_row
+
+
+def substrate_recency_penalty(history_tokens: torch.Tensor, logits: torch.Tensor,
+                                 vocab_size: int) -> torch.Tensor:
+    """Vectorized substrate-canonical recency penalty.
+
+    Each token in `history_tokens` contributes a penalty to its own
+    logit, weighted by golden-ratio decay over position. Most-recent
+    position has weight 1.0; older positions decay by powers of phi.
+    Substrate-canonical: phi is the golden ratio (natural recursive
+    growth rate); log(phi) is the substrate's natural log-base unit.
+
+    Args:
+        history_tokens: 1D tensor of token IDs in chronological order.
+        logits: 1D tensor of logits over vocab.
+        vocab_size: V.
+
+    Returns:
+        Modified logits with penalties applied.
+    """
+    n = history_tokens.numel()
+    if n == 0:
+        return logits
+    # phi^-(n-1-i): most-recent (i=n-1) is 1.0; oldest (i=0) is phi^-(n-1).
+    pos = torch.arange(n, device=logits.device, dtype=logits.dtype)
+    pos_weights = torch.pow(_PHI_FOR_SAMPLING, -(n - 1 - pos))
+    penalty = torch.zeros(vocab_size, device=logits.device, dtype=logits.dtype)
+    penalty.scatter_add_(0, history_tokens.long(), pos_weights)
+    return logits - penalty * _LOG_PHI_FOR_PENALTY
 
 def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
                               vocab_size: int, temperature: float = 1.0,
-                              substrate_sampling: bool = True):
-    """Sample n_new tokens autoregressively from prompt.
+                              substrate_sampling: bool = True,
+                              recency_window: int = 21,
+                              recency_penalty: bool = True,
+                              bigram_prior: torch.Tensor = None):
+    """Sample n_new tokens autoregressively with substrate sampling AND
+    a substrate-canonical recency penalty.
 
-    substrate_sampling=True: use substrate-canonical softmax (base phi^pi)
-    instead of standard e^x. This is the same exponential base we use in
-    substrate attention -- the model's output distribution is now also
-    substrate-aligned, not e-based.
-
-    Effective temperature with substrate sampling = 1 / (pi * log phi) ~=
-    0.66, so attention is sharper. Combined with the user-supplied
-    `temperature` for fine control.
+    substrate_sampling: use phi^pi base (damped by 1/phi).
+    recency_penalty: for each token in the last `recency_window` (a
+        Fibonacci number = 13), subtract log(phi) from its logit per
+        occurrence. The golden ratio (~0.481 in log space) is the
+        substrate's natural growth rate; using it as the cooldown
+        coefficient is substrate-canonical (no arbitrary penalty).
     """
     model.eval()
     with torch.no_grad():
@@ -117,11 +205,19 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
             T = seq.shape[1]
             ctx = seq if T <= model.seq_len else seq[:, -model.seq_len:]
             logits = model(ctx)[:, -1, :] / temperature
+            if recency_penalty:
+                history_t = seq[0, -recency_window:]
+                logits[0] = substrate_recency_penalty(
+                    history_t, logits[0], vocab_size)
             if substrate_sampling:
-                # Substrate softmax: base phi^pi.
                 probs = F.softmax(logits * _PI_LOG_PHI, dim=-1)
             else:
                 probs = F.softmax(logits, dim=-1)
+            if bigram_prior is not None and seq.shape[1] >= 1:
+                # Blend corpus bigram prior into the sampling distribution.
+                prev_tok = int(seq[0, -1])
+                probs[0] = substrate_syntax_blend(
+                    prev_tok, bigram_prior, probs[0])
             next_tok = torch.multinomial(probs, num_samples=1)
             seq = torch.cat([seq, next_tok], dim=1)
     model.train()
@@ -131,7 +227,8 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
 def _single_stage_refine(model, draft, vocab_size, scorer, mode: str,
                             n_iters: int, resample_frac: float,
                             prompt_len: int, temperature: float,
-                            patience: int = 5):
+                            patience: int = 5,
+                            bigram_prior: torch.Tensor = None):
     """One refinement stage: optimize a single score until plateau.
 
     mode: 'min' (harmony, quality) or 'max' (creativity).
@@ -166,11 +263,22 @@ def _single_stage_refine(model, draft, vocab_size, scorer, mode: str,
             _, low_idx = confidences[0].topk(n_resample, largest=False)
 
             new = cur.clone()
+            recency_window = 21
+            vocab_size_local = logits.shape[-1]
             for idx in low_idx.tolist():
                 t_draft = idx + 1 + offset
                 if t_draft < new.shape[1] and t_draft >= prompt_len:
+                    start = max(0, t_draft - recency_window)
+                    history_t = new[0, start:t_draft]
+                    pos_logits = substrate_recency_penalty(
+                        history_t, logits[0, idx], vocab_size_local)
+                    pos_probs = F.softmax(pos_logits / temperature, dim=-1)
+                    if bigram_prior is not None and t_draft >= 1:
+                        prev_tok = int(new[0, t_draft - 1])
+                        pos_probs = substrate_syntax_blend(
+                            prev_tok, bigram_prior, pos_probs)
                     new[0, t_draft] = torch.multinomial(
-                        probs[0, idx], num_samples=1).item()
+                        pos_probs, num_samples=1).item()
 
             new_score = scorer(new) if scorer is not None else None
             trajectory.append(new_score)
@@ -197,7 +305,8 @@ def staged_refine(model, prompt, n_new, vocab_size,
                     n_iters_per_stage: int = 200,
                     resample_frac: float = 0.35,
                     prompt_len: int = 16,
-                    temperature: float = 0.5):
+                    temperature: float = 0.5,
+                    bigram_prior: torch.Tensor = None):
     """Staircase refinement: hit one score, then the next, then the next.
 
     Stage 1: substrate alignment (minimize harmony) -- match the shape.
@@ -213,7 +322,7 @@ def staged_refine(model, prompt, n_new, vocab_size,
     with torch.no_grad():
         draft = autoregressive_generate(model, prompt, n_new=n_new,
                                           vocab_size=vocab_size,
-                                          temperature=temperature)
+                                          temperature=temperature, bigram_prior=bigram_prior)
     stages_out = {}
     stages_out["initial"] = {"seq": draft.clone(),
                                 "harmony": harmony_scorer(draft),
@@ -226,7 +335,7 @@ def staged_refine(model, prompt, n_new, vocab_size,
                                             n_iters=n_iters_per_stage,
                                             resample_frac=resample_frac,
                                             prompt_len=prompt_len,
-                                            temperature=temperature)
+                                            temperature=temperature, bigram_prior=bigram_prior)
     stages_out["after_harmony"] = {"seq": draft.clone(),
                                        "trajectory": h_traj,
                                        "harmony": harmony_scorer(draft),
@@ -239,7 +348,7 @@ def staged_refine(model, prompt, n_new, vocab_size,
                                             n_iters=n_iters_per_stage,
                                             resample_frac=resample_frac,
                                             prompt_len=prompt_len,
-                                            temperature=temperature)
+                                            temperature=temperature, bigram_prior=bigram_prior)
     stages_out["after_quality"] = {"seq": draft.clone(),
                                        "trajectory": q_traj,
                                        "harmony": harmony_scorer(draft),
@@ -253,7 +362,7 @@ def staged_refine(model, prompt, n_new, vocab_size,
                                                 n_iters=n_iters_per_stage,
                                                 resample_frac=resample_frac,
                                                 prompt_len=prompt_len,
-                                                temperature=temperature)
+                                                temperature=temperature, bigram_prior=bigram_prior)
         stages_out["after_creativity"] = {"seq": draft.clone(),
                                               "trajectory": c_traj,
                                               "harmony": harmony_scorer(draft),
@@ -287,7 +396,7 @@ def iterative_refine(model, prompt, n_new, vocab_size,
         # Step 1: initial draft.
         draft = autoregressive_generate(model, prompt, n_new=n_new,
                                           vocab_size=vocab_size,
-                                          temperature=temperature)
+                                          temperature=temperature, bigram_prior=bigram_prior)
         history = []
         h0 = harmony_scorer(draft) if harmony_scorer is not None else None
         q0 = quality_scorer(draft) if quality_scorer is not None else None
@@ -665,6 +774,15 @@ def train_with_self_distillation(name, train_seed, corpus_anchor, val_split,
     seed_min_fraction = 0.70
     orig_seed_chars = train_seed.numel()
 
+    # Substrate syntax prior: bigram statistics from the full corpus.
+    # Used at generation time to boost tokens that historically followed
+    # the current token. Gives the substrate a NOTION of word-pair
+    # syntax that pure substrate ops don't capture.
+    print(f"  building bigram prior from corpus ({corpus_anchor.numel()} tokens)...")
+    bigram_prior = build_bigram_prior(corpus_anchor, vocab_size)
+    print(f"  bigram_prior shape: {bigram_prior.shape}, "
+          f"nonzero rows: {(bigram_prior.sum(-1) > 0).sum().item()}")
+
     # Active training base: starts as tiny_seed, GROWS by appending each
     # cycle's best refined output -- only if (a) creativity > corpus
     # baseline AND (b) anchor weight constraint still satisfied.
@@ -731,13 +849,15 @@ def train_with_self_distillation(name, train_seed, corpus_anchor, val_split,
             with torch.no_grad():
                 draft = autoregressive_generate(
                     model, prompt_s, n_new=growth_n_new,
-                    vocab_size=vocab_size, temperature=0.8)
+                    vocab_size=vocab_size, temperature=0.8,
+                    bigram_prior=bigram_prior)
             refined_s, _ = staged_refine(
                 model, prompt_s, n_new=growth_n_new, vocab_size=vocab_size,
                 harmony_scorer=harmony_fn, quality_scorer=quality_fn,
                 creativity_scorer=creativity_fn,
                 n_iters_per_stage=30, resample_frac=0.35,
-                prompt_len=16, temperature=0.5)
+                prompt_len=16, temperature=0.5,
+                bigram_prior=bigram_prior)
             samples.append((refined_s.squeeze(0).clone(),
                               creativity_fn(refined_s)))
         # Sort by creativity desc, keep top K.
@@ -806,13 +926,15 @@ def train_with_self_distillation(name, train_seed, corpus_anchor, val_split,
     # Final generation for inspection.
     final_gen = autoregressive_generate(model, prompt, n_new=n_new,
                                           vocab_size=vocab_size,
-                                          temperature=0.8)
+                                          temperature=0.8,
+                                          bigram_prior=bigram_prior)
     final_refined, _ = staged_refine(
         model, prompt, n_new=n_new, vocab_size=vocab_size,
         harmony_scorer=harmony_fn, quality_scorer=quality_fn,
         creativity_scorer=creativity_fn,
         n_iters_per_stage=200, resample_frac=0.35,
-        prompt_len=16, temperature=0.5)
+        prompt_len=16, temperature=0.5,
+        bigram_prior=bigram_prior)
 
     return {"name": name, "mode": "self_distillation",
              "n_params": n_params,
