@@ -1289,6 +1289,35 @@ def substrate_recency_penalty(history_tokens: torch.Tensor, logits: torch.Tensor
     penalty.scatter_add_(0, history_tokens.long(), pos_weights)
     return logits - penalty * _LOG_PHI_FOR_PENALTY
 
+
+# OMNIWEIGHT: shared log-pressure ledger. Each primitive contributes
+# delta_log_p to a single accumulator instead of chaining probs->probs
+# transforms. Total contribution is clamped to [-pi*log(phi), +pi*log(phi)]
+# (substrate-bounded), then applied once.
+_OMNIWEIGHT_CLAMP = math.pi * math.log(_PHI_FOR_SAMPLING)   # ~1.51
+
+
+def _omniweight_delta(base_probs: torch.Tensor,
+                          modified_probs: torch.Tensor) -> torch.Tensor:
+    """Compute delta_log_p = log(modified) - log(base). Each primitive
+    is wrapped: it still returns modified probs, the wrapper extracts
+    the log-space contribution.
+    """
+    eps = 1e-12
+    return (torch.log(modified_probs.clamp(min=eps))
+            - torch.log(base_probs.clamp(min=eps)))
+
+
+def _omniweight_apply(base_probs: torch.Tensor,
+                          delta_acc: torch.Tensor) -> torch.Tensor:
+    """Apply accumulated log-pressure to base probs. Clamped to
+    substrate-bounded range, then renormalized.
+    """
+    delta_clamped = delta_acc.clamp(-_OMNIWEIGHT_CLAMP, _OMNIWEIGHT_CLAMP)
+    out = base_probs * torch.exp(delta_clamped)
+    return out / (out.sum() + 1e-8)
+
+
 def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
                               vocab_size: int, temperature: float = 1.0,
                               substrate_sampling: bool = True,
@@ -1375,76 +1404,77 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
                 probs = F.softmax(logits * _PI_LOG_PHI, dim=-1)
             else:
                 probs = F.softmax(logits, dim=-1)
+            # OMNIWEIGHT: every primitive contributes delta_log_p to a
+            # shared accumulator. Total clamped, applied once.
+            base = probs[0]
+            delta_acc = torch.zeros_like(base)
             if bigram_prior is not None and seq.shape[1] >= 1:
                 ctx_back = seq[0, -7:].tolist()
-                probs[0] = substrate_syntax_blend(
-                    int(seq[0, -1]), bigram_prior, probs[0],
+                p = substrate_syntax_blend(
+                    int(seq[0, -1]), bigram_prior, base,
                     context_tokens=ctx_back, vocab=vocab)
-            # Iambic stress rhythm + pentameter line-completion.
-            probs[0] = substrate_iambic_phase(
-                syl_pos, probs[0], vocab_size,
-                newline_mask=newline_mask)
-            # Symbolic substitution disabled (v60).
-            # Symbolic reference chain (pronoun anaphora, self-cooling).
+                delta_acc += _omniweight_delta(base, p)
+            p = substrate_iambic_phase(
+                syl_pos, base, vocab_size, newline_mask=newline_mask)
+            delta_acc += _omniweight_delta(base, p)
             if pronoun_mask is not None and seq.shape[1] >= 1:
                 recent_list = seq[0, -13:].tolist()
-                probs[0] = substrate_reference_chain(
-                    recent_list, pronoun_mask, probs[0])
-            # Need-fill (punctuation-specific above F(5)).
+                p = substrate_reference_chain(
+                    recent_list, pronoun_mask, base)
+                delta_acc += _omniweight_delta(base, p)
             if open_needs > 0:
-                probs[0] = substrate_need_fill(
-                    open_needs, probs[0], vocab_size,
-                    punct_mask=punct_mask)
-            # Phonotactics (CV cluster relief).
+                p = substrate_need_fill(
+                    open_needs, base, vocab_size, punct_mask=punct_mask)
+                delta_acc += _omniweight_delta(base, p)
             if vowel_start_mask is not None and cluster_len >= 2:
-                probs[0] = substrate_phonotactics(
-                    cluster_len, probs[0], vowel_start_mask)
-            # Rhyme resonance (end-vowel echo).
+                p = substrate_phonotactics(
+                    cluster_len, base, vowel_start_mask)
+                delta_acc += _omniweight_delta(base, p)
             if end_vowels is not None and seq.shape[1] >= 1:
                 recent_list = seq[0, -13:].tolist()
-                probs[0] = substrate_rhyme_resonance(
-                    recent_list, end_vowels, probs[0])
-            # Bigram saturation (kill repeated-transition lock).
+                p = substrate_rhyme_resonance(
+                    recent_list, end_vowels, base)
+                delta_acc += _omniweight_delta(base, p)
             if seq.shape[1] >= 1:
-                probs[0] = substrate_bigram_saturation(
-                    int(seq[0, -1]), recent_pairs, probs[0])
-            # Agreement (subject -s flips next content -s shape).
+                p = substrate_bigram_saturation(
+                    int(seq[0, -1]), recent_pairs, base)
+                delta_acc += _omniweight_delta(base, p)
             if vocab is not None:
-                probs[0] = substrate_agreement(
-                    last_content_ends_s, probs[0], vocab)
-            # Word spacing (strict, post-word).
+                p = substrate_agreement(
+                    last_content_ends_s, base, vocab)
+                delta_acc += _omniweight_delta(base, p)
             if vocab is not None and seq.shape[1] >= 1:
-                probs[0] = substrate_word_spacing(
-                    int(seq[0, -1]), probs[0], vocab,
-                    n_chars=n_chars_local)
-            # Anti-char-cascade (suppress char tokens after F(3)=2 chars).
+                p = substrate_word_spacing(
+                    int(seq[0, -1]), base, vocab, n_chars=n_chars_local)
+                delta_acc += _omniweight_delta(base, p)
             if char_run >= _FIB_NUMS_FOR_BIGRAM[3]:
-                probs[0] = substrate_char_cascade(
-                    char_run, probs[0], n_chars_local)
-            # Pronounceability filter (suppress impossible shapes).
+                p = substrate_char_cascade(
+                    char_run, base, n_chars_local)
+                delta_acc += _omniweight_delta(base, p)
             if unpronounceable_mask is not None:
-                probs[0] = substrate_pronounceability(
-                    probs[0], unpronounceable_mask)
-            # Theme momentum (subject-matter coherence).
+                p = substrate_pronounceability(
+                    base, unpronounceable_mask)
+                delta_acc += _omniweight_delta(base, p)
             if token_signatures is not None and seq.shape[1] >= 1:
                 recent_list = seq[0, -13:].tolist()
-                probs[0] = substrate_theme_momentum(
-                    recent_list, token_signatures, probs[0])
-            # Cross-sentence subject threading at sentence-starts.
+                p = substrate_theme_momentum(
+                    recent_list, token_signatures, base)
+                delta_acc += _omniweight_delta(base, p)
             if vocab is not None and seq.shape[1] >= 1:
                 prev_tok_id = int(seq[0, -1])
                 prev_str = (vocab[prev_tok_id]
                             if prev_tok_id < len(vocab) else '')
                 if prev_str in ('.', '!', '?', '\n'):
                     seq_list = seq[0].tolist()
-                    probs[0] = substrate_subject_threading(
-                        seq_list, vocab, probs[0],
-                        is_sentence_start=True)
-            # Substrate anti-stagnation on the full window.
+                    p = substrate_subject_threading(
+                        seq_list, vocab, base, is_sentence_start=True)
+                    delta_acc += _omniweight_delta(base, p)
             history_aw = seq[0, -21:]
-            probs[0] = substrate_anti_stagnation(history_aw, probs[0],
-                                                     vocab_size)
-            # Vocab curriculum (applied last; hard mask high-rank).
+            p = substrate_anti_stagnation(history_aw, base, vocab_size)
+            delta_acc += _omniweight_delta(base, p)
+            # Apply accumulated omniweight pressure (clamped).
+            probs[0] = _omniweight_apply(base, delta_acc)
+            # Vocab curriculum (HARD mask, post-omniweight).
             if active_vocab_size is not None:
                 probs[0] = substrate_vocab_curriculum(
                     probs[0], active_vocab_size)
@@ -1550,44 +1580,55 @@ def _single_stage_refine(model, draft, vocab_size, scorer, mode: str,
                     history_t = new[0, start:t_draft]
                     pos_logits = substrate_recency_penalty(
                         history_t, logits[0, idx], vocab_size_local)
-                    pos_probs = F.softmax(pos_logits / temperature, dim=-1)
+                    base_probs = F.softmax(pos_logits / temperature, dim=-1)
+                    # OMNIWEIGHT accumulator.
+                    delta_acc = torch.zeros_like(base_probs)
                     if bigram_prior is not None and t_draft >= 1:
                         ctx_back_start = max(0, t_draft - 7)
                         ctx_back = new[0, ctx_back_start:t_draft].tolist()
-                        pos_probs = substrate_syntax_blend(
-                            int(new[0, t_draft - 1]), bigram_prior, pos_probs,
+                        p = substrate_syntax_blend(
+                            int(new[0, t_draft - 1]), bigram_prior, base_probs,
                             context_tokens=ctx_back, vocab=vocab)
-                    # Iambic stress rhythm (period-2 weak/STRONG).
+                        delta_acc += _omniweight_delta(base_probs, p)
                     if vocab is not None:
                         syl_pos = 0
                         for tid in new[0, :t_draft].tolist():
                             if tid < len(vocab):
                                 syl_pos += _approx_syllables(vocab[tid])
-                        pos_probs = substrate_iambic_phase(
-                            syl_pos, pos_probs, vocab_size_local,
+                        p = substrate_iambic_phase(
+                            syl_pos, base_probs, vocab_size_local,
                             newline_mask=newline_mask)
-                    # Symbolic substitution disabled (v60 results).
-                    # Symbolic reference chain (pronoun anaphora).
+                        delta_acc += _omniweight_delta(base_probs, p)
                     if pronoun_mask is not None and t_draft >= 1:
                         recent_start = max(0, t_draft - 13)
                         recent_list = new[0, recent_start:t_draft].tolist()
-                        pos_probs = substrate_reference_chain(
-                            recent_list, pronoun_mask, pos_probs)
-                    # Need-fill / phonotactics / rhyme: recompute state
-                    # from prefix (necessary for resample positions).
+                        p = substrate_reference_chain(
+                            recent_list, pronoun_mask, base_probs)
+                        delta_acc += _omniweight_delta(base_probs, p)
+                    # State-dependent primitives: compute from prefix.
+                    n_chars_r = sum(1 for t in vocab if len(t) == 1) if vocab else 65
+                    ct = n_chars_r + _FIB_NUMS_FOR_BIGRAM[7]
+                    op_needs = 0
+                    cl_len = 0
+                    char_run_r = 0
+                    rp = []
+                    last_s_r = False
                     if vocab is not None and t_draft >= 1:
-                        n_chars_r = sum(1 for t in vocab if len(t) == 1)
-                        ct = n_chars_r + _FIB_NUMS_FOR_BIGRAM[7]
-                        op_needs = 0
-                        cl_len = 0
-                        for tid in new[0, :t_draft].tolist():
+                        for j, tid in enumerate(new[0, :t_draft].tolist()):
                             if tid < len(vocab):
                                 tk = vocab[tid]
                                 if tk in ('.', '!', '?', '\n'):
                                     op_needs = 0
                                     cl_len = 0
+                                elif tk in (',', ';', ':'):
+                                    op_needs = max(0, op_needs - 2)
+                                    cl_len = 0
                                 elif tid > ct:
                                     op_needs += 1
+                                    if tk.endswith('s'):
+                                        last_s_r = True
+                                    elif len(tk) > 1:
+                                        last_s_r = False
                                 elif n_chars_r <= tid <= ct:
                                     op_needs = max(0, op_needs - 1)
                                 if tk:
@@ -1598,80 +1639,70 @@ def _single_stage_refine(model, draft, vocab_size, scorer, mode: str,
                                             cl_len += 1
                                         else:
                                             cl_len = 0
-                        if op_needs > 0:
-                            pos_probs = substrate_need_fill(
-                                op_needs, pos_probs, vocab_size_local,
-                                punct_mask=punct_mask)
-                        if vowel_start_mask is not None and cl_len >= 2:
-                            pos_probs = substrate_phonotactics(
-                                cl_len, pos_probs, vowel_start_mask)
-                        # Bigram saturation + agreement + word spacing.
-                        # Compute recent_pairs and last_content_ends_s
-                        # from prefix.
-                        rp = []
-                        last_s_r = False
-                        for j in range(1, t_draft):
-                            rp.append((int(new[0, j-1].item()),
-                                          int(new[0, j].item())))
-                            tid_j = int(new[0, j].item())
-                            if tid_j > ct and tid_j < len(vocab):
-                                t_j = vocab[tid_j]
-                                if t_j.endswith('s'):
-                                    last_s_r = True
-                                elif len(t_j) > 1:
-                                    last_s_r = False
-                        rp = rp[-13:]
-                        pos_probs = substrate_bigram_saturation(
-                            int(new[0, t_draft - 1]), rp, pos_probs)
-                        pos_probs = substrate_agreement(
-                            last_s_r, pos_probs, vocab)
-                        pos_probs = substrate_word_spacing(
-                            int(new[0, t_draft - 1]), pos_probs, vocab,
-                            n_chars=n_chars_r)
-                        # Anti-char-cascade: compute char_run from prefix.
-                        char_run_r = 0
-                        for tid in new[0, :t_draft].tolist():
-                            if tid < len(vocab):
-                                tk_r = vocab[tid]
-                                if tid < n_chars_r and tk_r not in (' ', '\n'):
+                                if tid < n_chars_r and tk not in (' ', '\n'):
                                     char_run_r += 1
                                 else:
                                     char_run_r = 0
+                            if j > 0:
+                                rp.append((int(new[0, j-1].item()), tid))
+                        rp = rp[-13:]
+                        if op_needs > 0:
+                            p = substrate_need_fill(
+                                op_needs, base_probs, vocab_size_local,
+                                punct_mask=punct_mask)
+                            delta_acc += _omniweight_delta(base_probs, p)
+                        if vowel_start_mask is not None and cl_len >= 2:
+                            p = substrate_phonotactics(
+                                cl_len, base_probs, vowel_start_mask)
+                            delta_acc += _omniweight_delta(base_probs, p)
+                        p = substrate_bigram_saturation(
+                            int(new[0, t_draft - 1]), rp, base_probs)
+                        delta_acc += _omniweight_delta(base_probs, p)
+                        p = substrate_agreement(
+                            last_s_r, base_probs, vocab)
+                        delta_acc += _omniweight_delta(base_probs, p)
+                        p = substrate_word_spacing(
+                            int(new[0, t_draft - 1]), base_probs, vocab,
+                            n_chars=n_chars_r)
+                        delta_acc += _omniweight_delta(base_probs, p)
                         if char_run_r >= _FIB_NUMS_FOR_BIGRAM[3]:
-                            pos_probs = substrate_char_cascade(
-                                char_run_r, pos_probs, n_chars_r)
-                        # Pronounceability filter.
+                            p = substrate_char_cascade(
+                                char_run_r, base_probs, n_chars_r)
+                            delta_acc += _omniweight_delta(base_probs, p)
                         if unpronounceable_mask is not None:
-                            pos_probs = substrate_pronounceability(
-                                pos_probs, unpronounceable_mask)
-                        # Rhyme resonance.
+                            p = substrate_pronounceability(
+                                base_probs, unpronounceable_mask)
+                            delta_acc += _omniweight_delta(base_probs, p)
                         if end_vowels is not None:
                             recent_start_ev = max(0, t_draft - 13)
                             recent_list_ev = new[0, recent_start_ev:t_draft].tolist()
-                            pos_probs = substrate_rhyme_resonance(
-                                recent_list_ev, end_vowels, pos_probs)
-                    # Theme momentum (subject-matter coherence).
+                            p = substrate_rhyme_resonance(
+                                recent_list_ev, end_vowels, base_probs)
+                            delta_acc += _omniweight_delta(base_probs, p)
                     if token_signatures is not None and t_draft >= 1:
                         recent_start = max(0, t_draft - 13)
                         recent_list = new[0, recent_start:t_draft].tolist()
-                        pos_probs = substrate_theme_momentum(
-                            recent_list, token_signatures, pos_probs)
-                    # Cross-sentence subject threading at sentence-starts.
+                        p = substrate_theme_momentum(
+                            recent_list, token_signatures, base_probs)
+                        delta_acc += _omniweight_delta(base_probs, p)
                     if vocab is not None and t_draft >= 1:
                         prev_tok_id = int(new[0, t_draft - 1])
                         prev_str = (vocab[prev_tok_id]
                                     if prev_tok_id < len(vocab) else '')
                         if prev_str in ('.', '!', '?', '\n'):
                             seq_list = new[0, :t_draft].tolist()
-                            pos_probs = substrate_subject_threading(
-                                seq_list, vocab, pos_probs,
+                            p = substrate_subject_threading(
+                                seq_list, vocab, base_probs,
                                 is_sentence_start=True)
-                    # Anti-stagnation on full prior context.
+                            delta_acc += _omniweight_delta(base_probs, p)
                     aw_start = max(0, t_draft - 21)
                     history_aw = new[0, aw_start:t_draft]
-                    pos_probs = substrate_anti_stagnation(
-                        history_aw, pos_probs, vocab_size_local)
-                    # Vocab curriculum (hard mask high-rank).
+                    p = substrate_anti_stagnation(
+                        history_aw, base_probs, vocab_size_local)
+                    delta_acc += _omniweight_delta(base_probs, p)
+                    # Apply omniweight pressure.
+                    pos_probs = _omniweight_apply(base_probs, delta_acc)
+                    # Vocab curriculum (HARD mask, post-omniweight).
                     if active_vocab_size is not None:
                         pos_probs = substrate_vocab_curriculum(
                             pos_probs, active_vocab_size)
