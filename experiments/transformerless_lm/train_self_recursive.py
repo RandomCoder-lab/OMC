@@ -1347,28 +1347,46 @@ def _omniweight_apply(base_probs: torch.Tensor,
 
 
 def substrate_unknown_register(coverage: torch.Tensor,
-                                  probs: torch.Tensor) -> torch.Tensor:
-    """UNKNOWN-REGISTER: bias toward un-emitted tokens.
+                                  probs: torch.Tensor,
+                                  retrocausal_steps: int = None,
+                                  ) -> torch.Tensor:
+    """UNKNOWN-REGISTER with retrocausality.
 
-    Per-token coverage count tracks how many times each token has
-    been emitted in the current sequence. Frontier distribution
-    = 1/(1+coverage), normalized -- high for unseen, low for seen.
+    Present unknown: 1/(1+coverage) -- past-conditioned frontier.
+    Retrocausal: project coverage forward by F(3)=2 expected steps
+    using current probs distribution, then compute frontier of
+    the ANTICIPATED state. The future-that-would-happen feeds back
+    into the current emission.
 
-    Mix: (1 - alpha) * base + alpha * frontier
-    alpha = 1/phi^pi ~ 0.221 (substrate-canonical)
+    Final frontier = (1-alpha)*present_frontier + alpha*anticipated_frontier
+      alpha = 1/phi^pi ~ 0.221
 
-    Encodes "knowing there is more you do not know" -- the unknown
-    is a positive register, not just an absence. Persistent pull
-    toward novelty.
+    Then mix probs with that blended frontier (substrate alpha).
 
-    Pure substrate (1/phi^pi mixing weight).
+    Time isn't linear: past coverage and anticipated coverage are
+    both present-tense registers in the same currency.
     """
     if coverage is None:
         return probs
-    inv_count = 1.0 / (1.0 + coverage.to(probs.device).to(probs.dtype))
-    frontier = inv_count / (inv_count.sum() + 1e-8)
+    if retrocausal_steps is None:
+        retrocausal_steps = _FIB_NUMS_FOR_BIGRAM[3]   # F(3) = 2
+    cov = coverage.to(probs.device).to(probs.dtype)
+    # Present unknown
+    inv_now = 1.0 / (1.0 + cov)
+    frontier_now = inv_now / (inv_now.sum() + 1e-8)
+    # Anticipated unknown (retrocausal): coverage projected F(3) forward
+    # by current sampling distribution
+    expected_delta = float(retrocausal_steps) * probs
+    inv_future = 1.0 / (1.0 + cov + expected_delta)
+    frontier_future = inv_future / (inv_future.sum() + 1e-8)
+    # Blend past-frontier and future-frontier (both positive registers)
+    alpha_retro = 1.0 / (_PHI_FOR_SAMPLING ** math.pi)
+    blended_frontier = ((1.0 - alpha_retro) * frontier_now
+                          + alpha_retro * frontier_future)
+    blended_frontier = blended_frontier / (blended_frontier.sum() + 1e-8)
+    # Apply blended frontier as omniweight contribution
     alpha = 1.0 / (_PHI_FOR_SAMPLING ** math.pi)
-    out = (1.0 - alpha) * probs + alpha * frontier
+    out = (1.0 - alpha) * probs + alpha * blended_frontier
     return out / (out.sum() + 1e-8)
 
 
