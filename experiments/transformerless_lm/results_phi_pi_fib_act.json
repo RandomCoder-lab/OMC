@@ -1,0 +1,9 @@
+{
+  "phi_pi_fib_activation": {
+    "name": "phi_pi_fib_activation",
+    "n_params": 327468,
+    "best_val": 2.6504673957824707,
+    "best_step": 7999,
+    "wall": 332.1004445552826
+  }
+}

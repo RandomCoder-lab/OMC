@@ -1,0 +1,99 @@
+/usr/local/lib/python3.11/dist-packages/torch/_subclasses/functional_tensor.py:362: UserWarning: Failed to initialize NumPy: No module named 'numpy' (Triggered internally at /pytorch/torch/csrc/utils/tensor_numpy.cpp:84.)
+  cpu = _conversion_method_template(device=torch.device("cpu"))
+Mixed-stream: 7842 chunks (128 chars each), distractor_frac=0.20; val on 111,540 clean chars
+d-scale ablation: d_models = 64,128,256,384
+Lazy data: P=11 tokens/seq
+
+============================================================
+d_model = 64
+============================================================
+
+[train dense_d64] params=204,224
+  step     0  val=48.0760  (0.1s) ← BEST
+  step   187  val=3.5965  (2.5s) ← BEST
+  step   374  val=3.1600  (5.0s) ← BEST
+  step   561  val=2.9478  (7.5s) ← BEST
+  step   748  val=2.7835  (10.2s) ← BEST
+  step   935  val=2.7755  (13.0s) ← BEST
+  step  1122  val=2.7012  (15.5s) ← BEST
+  step  1309  val=2.6900  (18.0s) ← BEST
+  step  1496  val=2.6312  (20.3s) ← BEST
+  step  1499  val=2.6075  (20.4s) ← BEST
+
+[train fibrec_fibadamw_d64] params=46,272  compression=4.4x
+  step     0  val=13.4369  (0.1s) ← BEST
+  step   187  val=3.2643  (5.0s) ← BEST
+  step   374  val=3.3329  (10.1s)
+  step   561  val=3.3013  (15.0s)
+  step   748  val=3.1791  (19.9s) ← BEST
+  step   935  val=3.1084  (24.8s) ← BEST
+  step  1122  val=3.0030  (29.9s) ← BEST
+  step  1309  val=2.8880  (35.0s) ← BEST
+  step  1496  val=2.8931  (40.0s)
+  step  1499  val=2.8581  (40.2s) ← BEST
+
+============================================================
+d_model = 128
+============================================================
+
+[train dense_d128] params=801,664
+  step     0  val=92.4337  (0.1s) ← BEST
+  step   187  val=3.2840  (3.7s) ← BEST
+  step   374  val=2.9085  (7.4s) ← BEST
+  step   561  val=2.7630  (11.2s) ← BEST
+  step   748  val=2.6460  (14.9s) ← BEST
+  step   935  val=2.6757  (18.6s)
+  step  1122  val=2.6108  (22.3s) ← BEST
+  step  1309  val=2.6351  (25.9s)
+  step  1496  val=2.5871  (29.5s) ← BEST
+  step  1499  val=2.5762  (29.7s) ← BEST
+
+[train fibrec_fibadamw_d128] params=51,584  compression=15.4x
+  step     0  val=22.0524  (0.2s) ← BEST
+  step   187  val=3.4995  (5.6s) ← BEST
+  step   374  val=3.3240  (11.2s) ← BEST
+  step   561  val=3.1914  (17.3s) ← BEST
+  step   748  val=3.0072  (23.3s) ← BEST
+  step   935  val=2.9792  (29.2s) ← BEST
+  step  1122  val=2.8527  (35.0s) ← BEST
+  step  1309  val=2.8509  (40.7s) ← BEST
+  step  1496  val=2.7887  (46.4s) ← BEST
+  step  1499  val=2.7475  (46.6s) ← BEST
+
+============================================================
+d_model = 256
+============================================================
+
+[train dense_d256] params=3,176,192
+  step     0  val=161.7125  (0.2s) ← BEST
+  step   187  val=3.0796  (7.1s) ← BEST
+  step   374  val=2.8284  (14.1s) ← BEST
+  step   561  val=2.7344  (21.8s) ← BEST
+  step   748  val=2.6284  (28.9s) ← BEST
+  step   935  val=2.6280  (36.3s) ← BEST
+  step  1122  val=2.6296  (43.3s)
+  step  1309  val=2.6303  (50.4s)
+  step  1496  val=2.6202  (57.6s) ← BEST
+  step  1499  val=2.5913  (57.9s) ← BEST
+
+[train fibrec_fibadamw_d256] params=62,208  compression=50.9x
+  step     0  val=30.5706  (0.2s) ← BEST
+  step   187  val=3.4924  (7.1s) ← BEST
+  step   374  val=3.5076  (14.4s)
+  step   561  val=3.3513  (21.6s) ← BEST
+  step   748  val=3.2505  (29.1s) ← BEST
+  step   935  val=3.2046  (36.5s) ← BEST
+  step  1122  val=3.2135  (44.3s)
+  step  1309  val=3.1818  (51.6s) ← BEST
+  step  1496  val=3.2043  (58.7s)
+  step  1499  val=3.1296  (59.0s) ← BEST
+
+============================================================
+d_model = 384
+============================================================
+
+[train dense_d384] params=7,123,584
+  step     0  val=231.1830  (0.4s) ← BEST
+  step   187  val=3.0442  (12.3s) ← BEST
+  step   374  val=2.7891  (24.2s) ← BEST
+  step   561  val=2.8098  (36.2s)

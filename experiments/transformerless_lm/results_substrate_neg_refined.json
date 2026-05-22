@@ -1,0 +1,9 @@
+{
+  "substrate_neg_multi_refined": {
+    "name": "substrate_neg_multi_refined",
+    "n_params": 327484,
+    "best_val": 2.5871008187532425,
+    "best_step": 7462,
+    "wall": 995.2480759620667
+  }
+}
