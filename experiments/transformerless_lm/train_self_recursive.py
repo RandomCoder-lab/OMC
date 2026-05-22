@@ -987,10 +987,8 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
             # Iambic stress rhythm (period-2 weak/STRONG alternation).
             probs[0] = substrate_iambic_phase(
                 syl_pos, probs[0], vocab_size)
-            # Symbolic substitution (within-class mass smoothing).
-            if class_id_tensor is not None and n_classes > 0:
-                probs[0] = substrate_symbolic_substitution(
-                    probs[0], class_id_tensor, n_classes)
+            # Symbolic substitution disabled (v60 showed caps-leak +
+            # mass-dilution drops mean ~0.04).
             # Symbolic reference chain (pronoun anaphora).
             if pronoun_mask is not None and seq.shape[1] >= 1:
                 recent_list = seq[0, -13:].tolist()
@@ -1099,10 +1097,7 @@ def _single_stage_refine(model, draft, vocab_size, scorer, mode: str,
                                 syl_pos += _approx_syllables(vocab[tid])
                         pos_probs = substrate_iambic_phase(
                             syl_pos, pos_probs, vocab_size_local)
-                    # Symbolic substitution (within-class smoothing).
-                    if class_id_tensor is not None and n_classes > 0:
-                        pos_probs = substrate_symbolic_substitution(
-                            pos_probs, class_id_tensor, n_classes)
+                    # Symbolic substitution disabled (v60 results).
                     # Symbolic reference chain (pronoun anaphora).
                     if pronoun_mask is not None and t_draft >= 1:
                         recent_start = max(0, t_draft - 13)
