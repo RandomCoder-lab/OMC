@@ -106,20 +106,53 @@ _LOG_PHI_FOR_PENALTY = math.log(_PHI_FOR_SAMPLING)   # ~0.481
 
 
 def build_bigram_prior(corpus_tokens: torch.Tensor, vocab_size: int):
-    """Build P(next | prev) bigram statistics from the corpus.
-
-    Returns a [V, V] tensor where row i is the normalized distribution
-    of tokens that followed token i in the corpus. Used as a substrate
-    syntax prior at generation time.
-    """
+    """Build P(next | prev) bigram statistics from the corpus."""
     counts = torch.zeros(vocab_size, vocab_size, dtype=torch.float)
     for i in range(corpus_tokens.numel() - 1):
         prev = int(corpus_tokens[i])
         nxt = int(corpus_tokens[i + 1])
         counts[prev, nxt] += 1.0
     row_sums = counts.sum(dim=-1, keepdim=True)
-    row_sums[row_sums == 0] = 1.0   # avoid div by zero
+    row_sums[row_sums == 0] = 1.0
     return counts / row_sums
+
+
+_FIB_NUMS_FOR_BIGRAM = [1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144]
+
+
+def build_substrate_bigram(vocab_size: int) -> torch.Tensor:
+    """Substrate-derived bigram prior: uses ONLY phi/pi/F(k) constants,
+    no corpus statistics.
+
+    Assumption: vocab is Fibonacci-tier-ranked (top-frequency tokens
+    at low positions; tail at high). For tokens at positions i, j the
+    prior of co-occurrence decays as F(k)/phi^(pi*k) where k is the
+    Fibonacci tier of the rank distance |i - j|.
+
+    This is the purest substrate-only syntax prior: the model needs
+    no corpus access to acquire syntactic structure -- the substrate's
+    recursive constants generate plausible co-occurrence directly
+    from vocabulary structure.
+
+    Vectorized: O(V^2) memory, O(V^2) compute, fast on 500-vocab.
+    """
+    K = len(_FIB_NUMS_FOR_BIGRAM)
+    log_phi = math.log(_PHI_FOR_SAMPLING)
+    # Pairwise rank distance |i - j|.
+    idx = torch.arange(vocab_size, dtype=torch.float)
+    d = (idx.unsqueeze(0) - idx.unsqueeze(1)).abs() + 1.0      # [V, V]
+    # Fibonacci tier k = floor(log_phi(d)).
+    k = torch.clamp(torch.log(d) / log_phi, 0.0, K - 1.0).floor().long()
+    # Lookup F(k)/phi^(pi*k).
+    fk_tensor = torch.tensor(
+        [_FIB_NUMS_FOR_BIGRAM[i] / (_PHI_FOR_SAMPLING ** (math.pi * i))
+         for i in range(K)], dtype=torch.float)
+    bigram = fk_tensor[k]                                      # [V, V]
+    # Zero the diagonal -- self-transitions cause repetition (already
+    # handled by substrate recency penalty; bigram should favor MOVING).
+    bigram.fill_diagonal_(0.0)
+    bigram = bigram / (bigram.sum(dim=-1, keepdim=True) + 1e-8)
+    return bigram
 
 
 _SUBSTRATE_BIGRAM_ALPHA = 1.0 / (_PHI_FOR_SAMPLING ** math.pi)   # ~0.221
@@ -774,14 +807,12 @@ def train_with_self_distillation(name, train_seed, corpus_anchor, val_split,
     seed_min_fraction = 0.70
     orig_seed_chars = train_seed.numel()
 
-    # Substrate syntax prior: bigram statistics from the full corpus.
-    # Used at generation time to boost tokens that historically followed
-    # the current token. Gives the substrate a NOTION of word-pair
-    # syntax that pure substrate ops don't capture.
-    print(f"  building bigram prior from corpus ({corpus_anchor.numel()} tokens)...")
-    bigram_prior = build_bigram_prior(corpus_anchor, vocab_size)
-    print(f"  bigram_prior shape: {bigram_prior.shape}, "
-          f"nonzero rows: {(bigram_prior.sum(-1) > 0).sum().item()}")
+    # Substrate-derived bigram prior: NO corpus statistics. Uses only
+    # phi/pi/F(k) and vocab Fibonacci-tier ranks. Substrate generates
+    # its own syntax prior from constants alone.
+    print(f"  building substrate-derived bigram (no corpus stats)...")
+    bigram_prior = build_substrate_bigram(vocab_size)
+    print(f"  substrate_bigram shape: {bigram_prior.shape}")
 
     # Active training base: starts as tiny_seed, GROWS by appending each
     # cycle's best refined output -- only if (a) creativity > corpus
