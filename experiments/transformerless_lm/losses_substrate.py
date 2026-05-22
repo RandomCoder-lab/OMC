@@ -83,6 +83,62 @@ def substrate_only_loss(logits: torch.Tensor, targets: torch.Tensor,
     return attractor_distance(scaled).mean()
 
 
+PHI = (1.0 + 5.0 ** 0.5) / 2.0
+PI_LOG_PHI = math.pi * math.log(PHI)
+
+
+def substrate_harmony_loss(logits: torch.Tensor, vocab_size: int) -> torch.Tensor:
+    """L1 distance from canonical F(k)/phi^(pi*k) decay at Fibonacci freqs.
+
+    NO TARGET REQUIRED. Measures how well the predicted distribution's
+    Fibonacci-frequency energy profile matches the substrate's canonical
+    tier-decay pattern. This is the model's *self-harmony* score:
+    higher harmony = output is in tune with the substrate prior.
+
+    Mechanism:
+      1. Project the predicted distribution onto K Fibonacci frequencies
+         (same basis substrate_fft_loss uses).
+      2. Compute energy per frequency: pred_cos^2 + pred_sin^2.
+      3. Normalize energies to a distribution (sum=1).
+      4. Compare to canonical F(k)/phi^(pi*k) tier decay (also normalized).
+      5. L1 distance between the two = harmony score (lower = more in tune).
+
+    Use cases:
+      - Self-recursive training (phase 2): model generates, scores its own
+        output by harmony, gradient steps to improve substrate alignment.
+        No external label needed -- the substrate IS the label.
+      - Regularizer on supervised training: pull predictions toward the
+        substrate's natural decay pattern, encourage tier structure.
+    """
+    fib_freqs = torch.tensor([1, 2, 3, 5, 8, 13, 21], dtype=logits.dtype,
+                              device=logits.device)
+    K = fib_freqs.numel()
+    # Canonical substrate decay: 1/phi^(pi*k) for k in [0, K).
+    # (F(k) prefactor washes out under normalization; pure decay term.)
+    canonical = torch.tensor(
+        [1.0 / (PHI ** (math.pi * k)) for k in range(K)],
+        dtype=logits.dtype, device=logits.device,
+    )
+    canonical = canonical / canonical.sum()  # normalize
+
+    # Project predicted distribution onto Fibonacci frequencies.
+    v_idx = torch.arange(vocab_size, dtype=logits.dtype, device=logits.device)
+    angles = 2 * math.pi * v_idx.unsqueeze(1) * fib_freqs.unsqueeze(0) / vocab_size
+    basis_cos = torch.cos(angles)
+    basis_sin = torch.sin(angles)
+
+    pred = F.softmax(logits, dim=-1)                  # [B, T, V]
+    pred_cos = pred @ basis_cos                        # [B, T, K]
+    pred_sin = pred @ basis_sin
+
+    # Energy per Fibonacci frequency, averaged over batch and time.
+    energy = (pred_cos ** 2 + pred_sin ** 2).mean(dim=(0, 1))  # [K]
+    energy = energy / (energy.sum() + 1e-8)            # normalize to dist
+
+    # L1 distance from canonical (substrate's natural decay pattern).
+    return (energy - canonical).abs().sum()
+
+
 def substrate_fft_loss(logits: torch.Tensor, targets: torch.Tensor,
                         vocab_size: int,
                         lambda_substrate: float = 0.01) -> torch.Tensor:
