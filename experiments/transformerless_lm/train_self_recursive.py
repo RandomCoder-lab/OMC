@@ -211,22 +211,38 @@ _SUBSTRATE_BIGRAM_ALPHA = 1.0 / (_PHI_FOR_SAMPLING ** math.pi)   # ~0.221
 
 
 def substrate_syntax_blend(prev_token: int, bigram_prior: torch.Tensor,
-                              probs: torch.Tensor) -> torch.Tensor:
-    """Blend model's probability distribution with corpus bigram prior.
+                              probs: torch.Tensor,
+                              prev_prev_token: int = None) -> torch.Tensor:
+    """Substrate syntax blend with TRIGRAM-tier context and gate.
 
-        out = (1 - alpha) * probs + alpha * bigram_prior[prev_token]
+    Two-back context (trigram-tier): bigram for token at t-1 weighted
+    F(0)=1; bigram for t-2 weighted F(1)/phi^pi ~= 0.22. Substrate-
+    tier-decayed combination. Approximates trigram statistics without
+    V^3 storage.
 
-    alpha = 1/phi^pi ~= 0.221, substrate-canonical mixing ratio.
-    Tokens that historically followed `prev_token` in the corpus
-    receive substantial probability mass (22% of total). The model's
-    own distribution provides the other 78%.
+    Then syntactic-incorrect gate: candidates with combined prior
+    below 1/(V*phi^pi) get suppressed by (prior/threshold).
 
-    This is much stronger than a log-boost: the bigram has a
-    guaranteed share of sampling probability regardless of how
-    confident the model is in its own prediction.
+    Finally blend with model probs at alpha = 1/phi^pi mass ratio.
     """
-    prior_row = bigram_prior[prev_token].to(probs.device).to(probs.dtype)
-    return (1.0 - _SUBSTRATE_BIGRAM_ALPHA) * probs + _SUBSTRATE_BIGRAM_ALPHA * prior_row
+    prior_1 = bigram_prior[prev_token].to(probs.device).to(probs.dtype)
+    if prev_prev_token is not None:
+        prior_2 = bigram_prior[prev_prev_token].to(probs.device).to(probs.dtype)
+        w1, w2 = 1.0, 1.0 / (_PHI_FOR_SAMPLING ** math.pi)
+        combined_prior = (w1 * prior_1 + w2 * prior_2) / (w1 + w2)
+        combined_prior = combined_prior / (combined_prior.sum() + 1e-8)
+    else:
+        combined_prior = prior_1
+    V = probs.numel()
+    threshold = 1.0 / (V * (_PHI_FOR_SAMPLING ** math.pi))
+    gate = torch.where(combined_prior >= threshold,
+                         torch.ones_like(combined_prior),
+                         combined_prior / threshold)
+    gated_probs = probs * gate
+    gated_probs = gated_probs / (gated_probs.sum() + 1e-8)
+    blended = ((1.0 - _SUBSTRATE_BIGRAM_ALPHA) * gated_probs
+                + _SUBSTRATE_BIGRAM_ALPHA * combined_prior)
+    return blended
 
 
 def substrate_syntax_boost(prev_token: int, bigram_prior: torch.Tensor,
@@ -299,10 +315,12 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
             else:
                 probs = F.softmax(logits, dim=-1)
             if bigram_prior is not None and seq.shape[1] >= 1:
-                # Blend corpus bigram prior into the sampling distribution.
                 prev_tok = int(seq[0, -1])
+                prev_prev_tok = (int(seq[0, -2])
+                                  if seq.shape[1] >= 2 else None)
                 probs[0] = substrate_syntax_blend(
-                    prev_tok, bigram_prior, probs[0])
+                    prev_tok, bigram_prior, probs[0],
+                    prev_prev_token=prev_prev_tok)
             next_tok = torch.multinomial(probs, num_samples=1)
             seq = torch.cat([seq, next_tok], dim=1)
     model.train()
@@ -360,8 +378,11 @@ def _single_stage_refine(model, draft, vocab_size, scorer, mode: str,
                     pos_probs = F.softmax(pos_logits / temperature, dim=-1)
                     if bigram_prior is not None and t_draft >= 1:
                         prev_tok = int(new[0, t_draft - 1])
+                        prev_prev_tok = (int(new[0, t_draft - 2])
+                                          if t_draft >= 2 else None)
                         pos_probs = substrate_syntax_blend(
-                            prev_tok, bigram_prior, pos_probs)
+                            prev_tok, bigram_prior, pos_probs,
+                            prev_prev_token=prev_prev_tok)
                     new[0, t_draft] = torch.multinomial(
                         pos_probs, num_samples=1).item()
 
