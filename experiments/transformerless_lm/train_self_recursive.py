@@ -1929,7 +1929,8 @@ def staged_refine(model, prompt, n_new, vocab_size,
                     end_vowels: list = None,
                     punct_mask: torch.Tensor = None,
                     newline_mask: torch.Tensor = None,
-                    unpronounceable_mask: torch.Tensor = None):
+                    unpronounceable_mask: torch.Tensor = None,
+                    allowed_after_word_mask: torch.Tensor = None):
     """Staircase refinement: hit one score, then the next, then the next.
 
     Stage 1: substrate alignment (minimize harmony) -- match the shape.
