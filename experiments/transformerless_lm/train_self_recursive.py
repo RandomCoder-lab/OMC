@@ -543,6 +543,175 @@ def measure_emergent_signatures(model, seed, batch_size, seq_len, vocab_size,
     return energy_mean, ms_mean
 
 
+def train_with_self_distillation(name, train_seed, corpus_anchor, val_split,
+                                    vocab_size, args, fib_positions,
+                                    harmony_kind="multiscale",
+                                    itos_map=None,
+                                    corpus_text=None,
+                                    n_cycles: int = 4,
+                                    distill_prob: float = 0.3):
+    """Self-distillation: model's high-creativity refined outputs become
+    training targets for the next cycle.
+
+    Each cycle:
+      1. Train for steps_per_cycle on (tiny_seed + distill_buffer)
+         -- with prob `distill_prob` each batch comes from buffer.
+      2. Generate a draft from current model.
+      3. Refine via staged loop targeting creativity (not harmony!).
+      4. Score the refined output's creativity.
+      5. If creativity > best_seen: add to distill_buffer.
+
+    Substrate stays as the scaffolding; creativity is the compass.
+    The model's parameters move toward fixed-points that are both
+    substrate-aligned AND linguistically creative (Shakespeare-like).
+    """
+    import random as _rng_mod
+    rng = _rng_mod.Random(args.seed + 7)
+    torch.manual_seed(args.seed)
+    gen = torch.Generator(); gen.manual_seed(args.seed + 1)
+
+    model = FibRecLMSubsim(
+        vocab_size=vocab_size, d_model=args.d_model, n_blocks=args.n_blocks,
+        seq_len=args.seq_len, K=args.K_init, mode="cross", K_sig=args.K_sig,
+    )
+    optimizer = FibonacciAdamW(model.parameters(), lr=args.lr)
+    sched = lambda s, T: K_schedule_tier_walk(s, T, K_init=args.K_init,
+                                                 K_min=args.K_min)
+    n_params = sum(p.numel() for p in model.parameters())
+
+    sig_char = corpus_char_signature(corpus_anchor, vocab_size)
+    sig_ms = corpus_multiscale_signature(corpus_anchor, vocab_size,
+                                            seq_len=args.seq_len)
+
+    full_corpus = corpus_text or ""
+    def creativity_fn(seq_tokens):
+        text = ''.join(itos_map.get(int(t), '?')
+                        for t in seq_tokens[0].tolist())
+        return compute_creativity_score(text, full_corpus)["creativity_score"]
+
+    def harmony_fn(seq_tokens):
+        with torch.no_grad():
+            T = seq_tokens.shape[1]
+            ctx = seq_tokens if T <= model.seq_len else seq_tokens[:, -model.seq_len:]
+            logits = model(ctx)
+            K_h = K_to_K_harmony(cur_K or args.K_init,
+                                  K_init=args.K_init, K_min=args.K_min)
+            return compute_harmony_grounded(logits, vocab_size, harmony_kind,
+                                              sig_char, sig_ms,
+                                              K_harmony=K_h).item()
+
+    def quality_fn(seq_tokens):
+        with torch.no_grad():
+            T = seq_tokens.shape[1]
+            ctx = seq_tokens if T <= model.seq_len else seq_tokens[:, -model.seq_len:]
+            logits = model(ctx)
+            return F.cross_entropy(logits[:, :-1].reshape(-1, vocab_size),
+                                     ctx[:, 1:].reshape(-1)).item()
+
+    print(f"\n[self_distill {name}]  harmony={harmony_kind}  "
+          f"n_cycles={n_cycles}  distill_prob={distill_prob}  "
+          f"params={n_params:,}", flush=True)
+
+    distill_buffer = []
+    best_creativity = 0.0
+    cycle_summary = []
+
+    steps_per_cycle = args.steps // n_cycles
+    t0 = time.time()
+    best_val = float("inf"); best_step = -1
+    cur_K = None
+    eval_every = max(steps_per_cycle // 4, 100)
+    global_step = 0
+    prompt = train_seed[:16].unsqueeze(0)
+    n_new = max(args.seq_len - 16, 32)
+
+    for cycle in range(n_cycles):
+        print(f"\n  --- Cycle {cycle+1}/{n_cycles}  "
+              f"distill_buffer={len(distill_buffer)} ---", flush=True)
+        for s in range(steps_per_cycle):
+            new_K = sched(global_step, args.steps)
+            if new_K != cur_K:
+                set_K_active_recursive(model, new_K)
+                cur_K = new_K
+            # Sample either from seed or from a distill_buffer entry.
+            if distill_buffer and rng.random() < distill_prob:
+                target_seq = distill_buffer[rng.randint(0, len(distill_buffer)-1)]
+                x, y = sample_tiny_batch(target_seq, args.batch_size,
+                                           args.seq_len, gen)
+            else:
+                x, y = sample_tiny_batch(train_seed, args.batch_size,
+                                           args.seq_len, gen)
+            logits = model(x)
+            ce_fft = substrate_fft_loss(logits, y, vocab_size,
+                                          lambda_substrate=args.lambda_sub)
+            K_h = K_to_K_harmony(cur_K or args.K_init,
+                                  K_init=args.K_init, K_min=args.K_min)
+            harmony = compute_harmony_grounded(logits, vocab_size, harmony_kind,
+                                                 sig_char, sig_ms,
+                                                 K_harmony=K_h)
+            loss = ce_fft + args.lambda_harmony * harmony
+            optimizer.zero_grad(); loss.backward(); optimizer.step()
+            if global_step % eval_every == 0:
+                vl = evaluate(model, val_split, args.batch_size, args.seq_len,
+                              fib_positions, gen)
+                marker = ""
+                if vl < best_val:
+                    best_val = vl; best_step = global_step
+                    marker = " ← BEST"
+                print(f"    step {global_step:5d}  val={vl:.4f}  "
+                      f"K={cur_K}  ({time.time()-t0:.1f}s){marker}",
+                      flush=True)
+            global_step += 1
+
+        # End of cycle: generate, refine, score, maybe distill.
+        with torch.no_grad():
+            draft = autoregressive_generate(model, prompt, n_new=n_new,
+                                              vocab_size=vocab_size,
+                                              temperature=0.8)
+        refined, stages_out = staged_refine(
+            model, prompt, n_new=n_new, vocab_size=vocab_size,
+            harmony_scorer=harmony_fn, quality_scorer=quality_fn,
+            creativity_scorer=creativity_fn,
+            n_iters_per_stage=200, resample_frac=0.35,
+            prompt_len=16, temperature=0.5)
+        draft_cr = creativity_fn(draft)
+        refined_cr = creativity_fn(refined)
+        print(f"  cycle {cycle+1}: draft_creativity={draft_cr:.4f}  "
+              f"refined_creativity={refined_cr:.4f}  "
+              f"best_seen={best_creativity:.4f}")
+        cycle_summary.append({
+            "cycle": cycle + 1,
+            "draft_creativity": draft_cr,
+            "refined_creativity": refined_cr,
+            "buffer_size_before": len(distill_buffer),
+        })
+        if refined_cr > best_creativity:
+            print(f"  NEW BEST creativity {refined_cr:.4f} -> distilling")
+            distill_buffer.append(refined.squeeze(0).clone())
+            best_creativity = refined_cr
+
+    # Final generation for inspection.
+    final_gen = autoregressive_generate(model, prompt, n_new=n_new,
+                                          vocab_size=vocab_size,
+                                          temperature=0.8)
+    final_refined, _ = staged_refine(
+        model, prompt, n_new=n_new, vocab_size=vocab_size,
+        harmony_scorer=harmony_fn, quality_scorer=quality_fn,
+        creativity_scorer=creativity_fn,
+        n_iters_per_stage=200, resample_frac=0.35,
+        prompt_len=16, temperature=0.5)
+
+    return {"name": name, "mode": "self_distillation",
+             "n_params": n_params,
+             "best_val": best_val, "best_step": best_step,
+             "wall": time.time() - t0,
+             "best_creativity_seen": best_creativity,
+             "distill_buffer_size": len(distill_buffer),
+             "cycle_summary": cycle_summary,
+             "generated_tokens": final_gen[0].tolist(),
+             "refined_tokens": final_refined[0].tolist()}
+
+
 def train_mutable_substrate(name, train_seed, corpus_anchor, val_split,
                               vocab_size, args, fib_positions,
                               harmony_kind="char",
@@ -991,26 +1160,21 @@ def main():
     anchor_size = min(20000, val_start)   # 20k chars of corpus structure
     corpus_anchor = encoded[anchor_start: anchor_start + anchor_size].clone()
 
-    # Aggressive search: many mutations, larger steps, shorter eval window.
-    arms = [
-        ("mutable_char",        "char"),
-        ("mutable_multiscale",  "multiscale"),
-    ]
     # Build itos and full corpus text for creativity scoring.
     itos_map = {i: c for i, c in enumerate(chars)}
     full_corpus_text = ''.join(itos_map.get(int(t), '?')
                                   for t in encoded.tolist())
 
+    arms = [
+        ("self_distill_multiscale",  "multiscale"),
+    ]
     results = {}
     for name, harmony_kind in arms:
-        results[name] = train_mutable_substrate(name, train_seed, corpus_anchor,
-                                                   val_split, vocab_size, args,
-                                                   fib_positions,
-                                                   harmony_kind=harmony_kind,
-                                                   mutation_every=100,
-                                                   mutation_alpha=0.9,
-                                                   itos_map=itos_map,
-                                                   corpus_text=full_corpus_text)
+        results[name] = train_with_self_distillation(
+            name, train_seed, corpus_anchor, val_split, vocab_size, args,
+            fib_positions, harmony_kind=harmony_kind,
+            itos_map=itos_map, corpus_text=full_corpus_text,
+            n_cycles=4, distill_prob=0.3)
 
     print()
     print("=" * 92)
