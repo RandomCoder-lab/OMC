@@ -120,6 +120,58 @@ def build_bigram_prior(corpus_tokens: torch.Tensor, vocab_size: int):
 _FIB_NUMS_FOR_BIGRAM = [1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144]
 
 
+def build_substrate_bigram_shape(vocab_size: int, vocab: list) -> torch.Tensor:
+    """Substrate bigram where each candidate next-token is weighted by
+    the SYNTACTIC SHAPE of its chunk. Syntactically-clean tokens
+    (real words, spaces, line breaks) get F(0)=1 full weight. Punctuation
+    gets F(1)/phi^pi attenuation. Single-char fragments get F(2)/phi^(2pi)
+    -- effectively suppressed unless they're whitespace/punct.
+
+    Combined with the substrate rank-distance decay, the bigram says:
+      "Prefer transitions whose target is itself a syntactic chunk,
+      and that's rank-adjacent to the source."
+    """
+    phi = _PHI_FOR_SAMPLING
+    pi_arg = math.pi
+    K = len(_FIB_NUMS_FOR_BIGRAM)
+    boundary = set([' ', '\n', '\t'])
+    punct = set('.,!?;:\'"-()')
+
+    # Sharper static shape weights -- shape DOMINATES, rank is just a
+    # mild preference. Real words get full weight; everything else
+    # strongly suppressed via substrate-canonical phi^(pi*k) scaling.
+    shape_w = torch.zeros(vocab_size)
+    for i in range(vocab_size):
+        tok = vocab[i] if i < len(vocab) else ''
+        if len(tok) >= 2:                                   # multi-char word
+            shape_w[i] = 1.0
+        elif tok in boundary:                               # whitespace (boundary)
+            shape_w[i] = 1.0 / phi                          # mild attenuation
+        elif tok in punct:                                  # punctuation
+            shape_w[i] = 1.0 / (phi ** pi_arg)              # phi^pi suppress
+        elif tok.isalpha():                                 # single letter
+            shape_w[i] = 1.0 / (phi ** (pi_arg * 2))        # phi^(2pi) suppress
+        else:                                               # digits/other
+            shape_w[i] = 1.0 / (phi ** (pi_arg * 3))        # phi^(3pi) suppress
+
+    # Rank-distance with Binet decay (flat) -- shape does the work now.
+    log_phi = math.log(phi)
+    idx = torch.arange(vocab_size, dtype=torch.float)
+    d = (idx.unsqueeze(0) - idx.unsqueeze(1)).abs() + 1.0
+    K_extended = 16
+    fib_extended = [1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610, 987]
+    k = torch.clamp(torch.log(d) / log_phi, 0.0, K_extended - 1.0).floor().long()
+    fk_tensor = torch.tensor(
+        [fib_extended[i] / (phi ** i) for i in range(K_extended)],
+        dtype=torch.float)
+    rank_decay = fk_tensor[k]                               # [V, V] flat decay
+    # Each candidate j weighted by ITS shape * rank_decay from i.
+    bigram = rank_decay * shape_w.unsqueeze(0)              # broadcast over j
+    bigram.fill_diagonal_(0.0)
+    bigram = bigram / (bigram.sum(dim=-1, keepdim=True) + 1e-8)
+    return bigram
+
+
 def build_substrate_bigram(vocab_size: int) -> torch.Tensor:
     """Substrate-derived bigram prior: uses ONLY phi/pi/F(k) constants,
     no corpus statistics.
@@ -710,6 +762,7 @@ def train_with_self_distillation(name, train_seed, corpus_anchor, val_split,
                                     harmony_kind="multiscale",
                                     itos_map=None,
                                     corpus_text=None,
+                                    vocab_for_bigram=None,
                                     n_cycles: int = 4,
                                     distill_prob: float = 0.3,
                                     samples_per_cycle: int = 8,
@@ -807,12 +860,17 @@ def train_with_self_distillation(name, train_seed, corpus_anchor, val_split,
     seed_min_fraction = 0.70
     orig_seed_chars = train_seed.numel()
 
-    # Substrate-derived bigram prior: NO corpus statistics. Uses only
-    # phi/pi/F(k) and vocab Fibonacci-tier ranks. Substrate generates
-    # its own syntax prior from constants alone.
-    print(f"  building substrate-derived bigram (no corpus stats)...")
-    bigram_prior = build_substrate_bigram(vocab_size)
-    print(f"  substrate_bigram shape: {bigram_prior.shape}")
+    # Shape-aware substrate bigram: each candidate weighted by syntactic
+    # chunk shape (real word vs punctuation vs fragment) combined with
+    # rank-distance decay. NO corpus stats -- substrate generates syntax
+    # from constants + tokenizer's chunk geometry.
+    print(f"  building shape-aware substrate bigram (no corpus stats)...")
+    if vocab_for_bigram is not None:
+        bigram_prior = build_substrate_bigram_shape(vocab_size,
+                                                       vocab_for_bigram)
+    else:
+        bigram_prior = build_substrate_bigram(vocab_size)
+    print(f"  shape-aware substrate_bigram shape: {bigram_prior.shape}")
 
     # Active training base: starts as tiny_seed, GROWS by appending each
     # cycle's best refined output -- only if (a) creativity > corpus
@@ -1457,6 +1515,7 @@ def main():
             name, train_seed, corpus_anchor, val_split, vocab_size, args,
             fib_positions, harmony_kind=harmony_kind,
             itos_map=itos_map, corpus_text=full_corpus_text,
+            vocab_for_bigram=sub_tok.vocab,
             n_cycles=6, distill_prob=0.3,
             samples_per_cycle=8, keep_top_k=4, growth_n_new=128)
 
