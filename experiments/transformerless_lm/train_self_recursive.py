@@ -107,6 +107,76 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
     return seq
 
 
+def iterative_refine(model, prompt, n_new, vocab_size,
+                       n_iters: int = 10,
+                       resample_frac: float = 0.2,
+                       prompt_len: int = 16,
+                       harmony_scorer=None,
+                       temperature: float = 0.8):
+    """Inference-time substrate-recursive refinement.
+
+    Step 1: Generate a draft via autoregressive sampling.
+    Step 2..N: Feed the draft back through the model as input. At each
+    iteration, find the positions where the model is LEAST confident
+    about the current token, resample those positions from the model's
+    predicted distribution. Score harmony after each iteration.
+    Continue until harmony stops improving.
+
+    This translates the substrate's recursive nature into the model's
+    inference dynamics -- output becomes input becomes output, and the
+    sequence converges to a substrate-stable fixed point.
+    """
+    model.eval()
+    with torch.no_grad():
+        # Step 1: initial draft.
+        draft = autoregressive_generate(model, prompt, n_new=n_new,
+                                          vocab_size=vocab_size,
+                                          temperature=temperature)
+        history = []
+        h = harmony_scorer(draft) if harmony_scorer is not None else None
+        history.append({"iter": 0, "harmony": h, "seq": draft.clone(),
+                          "n_resampled": 0})
+
+        # Refinement iterations.
+        for it in range(1, n_iters + 1):
+            T = draft.shape[1]
+            ctx = draft if T <= model.seq_len else draft[:, -model.seq_len:]
+            logits = model(ctx)
+            probs = F.softmax(logits / temperature, dim=-1)
+            # Position-wise confidence: P(current token | prefix).
+            # confidences[b, t] = P(seq[b, t+1] | seq[b, :t+1])
+            tokens_after_prefix = ctx[:, 1:]                    # [B, T-1]
+            confidences = probs[:, :-1].gather(
+                -1, tokens_after_prefix.unsqueeze(-1)).squeeze(-1)  # [B, T-1]
+
+            # Mask the prompt portion (don't resample prompt).
+            confidences[:, :prompt_len] = 1.0
+            n_resample = max(1, int(resample_frac * (T - prompt_len - 1)))
+            # Lowest-confidence positions.
+            _, low_idx = confidences[0].topk(n_resample, largest=False)
+
+            new_draft = draft.clone()
+            for idx in low_idx.tolist():
+                t = idx + 1   # token at position t+1 was predicted from logits[:, idx]
+                if t < new_draft.shape[1]:
+                    new_tok = torch.multinomial(probs[0, idx], num_samples=1)
+                    new_draft[0, t] = new_tok.item()
+
+            new_h = (harmony_scorer(new_draft) if harmony_scorer is not None
+                      else None)
+            history.append({"iter": it, "harmony": new_h,
+                              "seq": new_draft.clone(),
+                              "n_resampled": n_resample})
+            # Convergence: harmony stopped improving (lower = more harmonious).
+            if new_h is not None and h is not None and new_h >= h:
+                break
+            draft = new_draft
+            h = new_h
+
+    model.train()
+    return draft, history
+
+
 def compute_harmony(logits, vocab_size, kind):
     """kind in {'none', 'char', 'multiscale', 'combined'}."""
     if kind == "none":
@@ -456,11 +526,31 @@ def train_mutable_substrate(name, train_seed, corpus_anchor, val_split,
                           f"baseline_val={best_val:.4f}  "
                           f"(n_tried={n_mutations_tried})", flush=True)
 
-    # Final generation sample.
+    # Final generation: BOTH single-pass and iteratively-refined.
     prompt = train_seed[:16].unsqueeze(0)
-    final_gen = autoregressive_generate(model, prompt, n_new=240,
+    n_new = 240
+    final_gen = autoregressive_generate(model, prompt, n_new=n_new,
                                           vocab_size=vocab_size,
                                           temperature=0.8)
+    # Iterative refinement: re-feed output as input until harmony stabilizes.
+    def harmony_scorer(seq_tokens):
+        # Compute harmony of a sequence by running it through the model
+        # and scoring its predicted distribution against current substrate.
+        with torch.no_grad():
+            T = seq_tokens.shape[1]
+            ctx = seq_tokens if T <= model.seq_len else seq_tokens[:, -model.seq_len:]
+            logits = model(ctx)
+            K_h = K_to_K_harmony(cur_K or args.K_init,
+                                  K_init=args.K_init, K_min=args.K_min)
+            return compute_harmony_grounded(logits, vocab_size, harmony_kind,
+                                              sig_char, sig_ms,
+                                              K_harmony=K_h).item()
+    refined_gen, refine_history = iterative_refine(
+        model, prompt, n_new=n_new, vocab_size=vocab_size,
+        n_iters=15, resample_frac=0.15, prompt_len=16,
+        harmony_scorer=harmony_scorer, temperature=0.8)
+    print(f"  refinement: {len(refine_history)} iterations, "
+          f"harmony trajectory={[round(h['harmony'], 4) if h['harmony'] is not None else None for h in refine_history]}")
     best_state, best_state_val = min(history, key=lambda x: x[1])
     print(f"  best constants: {best_state.summary()}  val={best_state_val:.4f}")
     return {"name": name, "mode": "parametric_mutable", "n_params": n_params,
@@ -476,7 +566,11 @@ def train_mutable_substrate(name, train_seed, corpus_anchor, val_split,
              },
              "final_sig_char": sig_char.tolist(),
              "final_sig_ms": sig_ms.tolist(),
-             "generated_tokens": final_gen[0].tolist()}
+             "generated_tokens": final_gen[0].tolist(),
+             "refined_tokens": refined_gen[0].tolist(),
+             "refinement_iterations": len(refine_history),
+             "refinement_harmony_trajectory":
+                 [h["harmony"] for h in refine_history if h["harmony"] is not None]}
 
 
 def train_multi_cycle(name, train_seed, corpus_anchor, val_split, vocab_size,
@@ -765,18 +859,25 @@ def main():
         print(f"  {name:<24} val={r['best_val']:.4f}  "
               f"vs_baseline={d_base:+.2f}%  vs_char={d_char:+.2f}%")
 
-    # Print decoded generation samples per arm.
+    # Print decoded generation samples per arm: single-pass vs refined.
     itos_map = {i: c for i, c in enumerate(chars)}
     def decode(toks):
         return ''.join(itos_map.get(int(t), '?') for t in toks)
     print()
     print("=" * 92)
     print("Generated samples (prompt = first 16 chars of seed, temp=0.8)")
+    print("Comparing single-pass vs iterative-refinement (refined = output→input loop)")
     print('-' * 92)
     for name, r in results.items():
-        text = decode(r["generated_tokens"])
-        print(f"\n[{name}]")
-        print(repr(text[:240]))
+        sp = decode(r["generated_tokens"])
+        rf = decode(r["refined_tokens"])
+        n_iters = r.get("refinement_iterations", 0)
+        traj = r.get("refinement_harmony_trajectory", [])
+        print(f"\n[{name}]  refine_iters={n_iters}  "
+              f"harmony: {round(traj[0], 4) if traj else '?'} → "
+              f"{round(traj[-1], 4) if traj else '?'}")
+        print(f"  single-pass: {repr(sp[:200])}")
+        print(f"  refined:     {repr(rf[:200])}")
 
     out_path = Path(__file__).parent / args.out
     with open(out_path, "w") as f:
