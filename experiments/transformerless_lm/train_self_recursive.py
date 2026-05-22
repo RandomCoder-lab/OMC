@@ -1581,11 +1581,16 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
             # Local entropy of last F(5)=5 emissions (refined self-awareness).
             recent_emitted = seq[0, -_FIB_NUMS_FOR_BIGRAM[5]:].tolist()
             local_H = _local_entropy(recent_emitted, window=_FIB_NUMS_FOR_BIGRAM[5])
-            # Substrate thresholds: log(phi^2) for entropy, 1/phi for
-            # momentum bands, 1/phi^pi for collapse drop. Pure substrate.
-            entropy_threshold = 2.0 * math.log(_PHI_FOR_SAMPLING)  # log(phi^2)
-            mom_band = 1.0 / _PHI_FOR_SAMPLING                      # 1/phi
-            inv_phi_pi = 1.0 / (_PHI_FOR_SAMPLING ** math.pi)
+            # LIVING substrate thresholds: modulated by momentum_long
+            # via phi^tanh(momentum_long*phi). When sustained insight
+            # has been HIGH, thresholds tighten (high bar, stricter);
+            # when LOW, thresholds loosen (lower bar, more permissive).
+            # Pure substrate (phi exponentiated by tanh of state).
+            mod = math.tanh(momentum_long * _PHI_FOR_SAMPLING)
+            scale = _PHI_FOR_SAMPLING ** mod   # in [1/phi, phi]
+            entropy_threshold = (2.0 * math.log(_PHI_FOR_SAMPLING)) / scale
+            mom_band = (1.0 / _PHI_FOR_SAMPLING) * scale
+            inv_phi_pi = (1.0 / (_PHI_FOR_SAMPLING ** math.pi)) / scale
             stuck = (local_H < entropy_threshold and momentum_short < 0.0)
             # A. TACTICAL momentum drives sharpen/flatten.
             if stuck:
