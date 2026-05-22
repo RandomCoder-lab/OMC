@@ -1327,7 +1327,7 @@ def _omniweight_apply(base_probs: torch.Tensor,
 def _omniweight_apply_split(base_probs: torch.Tensor,
                                 math_delta: torch.Tensor,
                                 lang_delta: torch.Tensor) -> torch.Tensor:
-    """SPLIT-BRAIN omniweight: two registers, golden-weighted mixer.
+    """SPLIT-BRAIN omniweight: RESONANCE-AWARE mixer.
 
     Math hemisphere: bigram, recency, substrate sampling, anti-stag,
     bigram-saturation. Frequency / decay primitives.
@@ -1336,25 +1336,24 @@ def _omniweight_apply_split(base_probs: torch.Tensor,
     rhyme, agreement, word-spacing, char-cascade, pronounceability,
     subject-threading, theme. Purpose / structure primitives.
 
-    Each hemisphere builds its own fluid delta via tanh-scaled
-    substrate reserve. Final distribution = golden-weighted arithmetic
-    mean:  (phi * p_math + p_lang) / (phi + 1).
+    Per-token coherence gate (sign agreement of math_fluid x lang_fluid):
+      agree -> push through full sum (resonance)
+      conflict -> cancel back toward base (dissonance)
 
-    Math gets phi=1.618 weight (older substrate foundation, primary
-    signal). Lang gets 1.0 weight (modulator). Both contribute --
-    high-confidence proposals from either come through. Less
-    restrictive than geometric mean which required both-consent
-    (v73 was over-conservative).
+    Substrate-canonical: coherence = sign(math) * sign(lang) in
+    {-1, 0, +1}. Weight = (1 + coherence) / 2 in {0, 0.5, 1}.
+
+    This models the split-brain corpus-callosum gate: hemispheres
+    only push through when they agree.
     """
     math_fluid = _OMNIWEIGHT_RESERVE * torch.tanh(math_delta / _OMNIWEIGHT_RESERVE)
     lang_fluid = _OMNIWEIGHT_RESERVE * torch.tanh(lang_delta / _OMNIWEIGHT_RESERVE)
-    p_math = base_probs * torch.exp(math_fluid)
-    p_lang = base_probs * torch.exp(lang_fluid)
-    p_math = p_math / (p_math.sum() + 1e-8)
-    p_lang = p_lang / (p_lang.sum() + 1e-8)
-    phi = _PHI_FOR_SAMPLING
-    p_final = (phi * p_math + p_lang) / (phi + 1.0)
-    return p_final / (p_final.sum() + 1e-8)
+    # Per-token sign coherence.
+    coherence = torch.sign(math_fluid) * torch.sign(lang_fluid)
+    gate = (1.0 + coherence) / 2.0   # in {0, 0.5, 1}
+    combined_fluid = (math_fluid + lang_fluid) * gate
+    out = base_probs * torch.exp(combined_fluid)
+    return out / (out.sum() + 1e-8)
 
 
 def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
