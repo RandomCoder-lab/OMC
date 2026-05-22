@@ -108,6 +108,141 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
     return seq
 
 
+def _single_stage_refine(model, draft, vocab_size, scorer, mode: str,
+                            n_iters: int, resample_frac: float,
+                            prompt_len: int, temperature: float,
+                            patience: int = 5):
+    """One refinement stage: optimize a single score until plateau.
+
+    mode: 'min' (harmony, quality) or 'max' (creativity).
+    patience: stop after this many consecutive iters with no improvement.
+    n_iters acts as a safety cap; the stage typically ends earlier on
+    natural plateau.
+
+    Returns (best_seq, trajectory).
+    """
+    model.eval()
+    with torch.no_grad():
+        cur = draft.clone()
+        cur_score = scorer(cur) if scorer is not None else None
+        best_seq = cur.clone()
+        best_score = cur_score
+        trajectory = [cur_score]
+        steps_since_improve = 0
+        for it in range(n_iters):
+            T = cur.shape[1]
+            offset = max(0, T - model.seq_len)
+            ctx = cur if T <= model.seq_len else cur[:, -model.seq_len:]
+            logits = model(ctx)
+            probs = F.softmax(logits / temperature, dim=-1)
+            tokens_after_prefix = ctx[:, 1:]
+            confidences = probs[:, :-1].gather(
+                -1, tokens_after_prefix.unsqueeze(-1)).squeeze(-1)
+            prompt_in_ctx = max(0, prompt_len - offset)
+            confidences[:, :prompt_in_ctx] = 1.0
+            n_avail = confidences.shape[1] - prompt_in_ctx
+            n_resample = max(1, int(resample_frac * n_avail))
+            n_resample = min(n_resample, max(1, n_avail))
+            _, low_idx = confidences[0].topk(n_resample, largest=False)
+
+            new = cur.clone()
+            for idx in low_idx.tolist():
+                t_draft = idx + 1 + offset
+                if t_draft < new.shape[1] and t_draft >= prompt_len:
+                    new[0, t_draft] = torch.multinomial(
+                        probs[0, idx], num_samples=1).item()
+
+            new_score = scorer(new) if scorer is not None else None
+            trajectory.append(new_score)
+            improved = False
+            if new_score is not None:
+                if mode == "max":
+                    if best_score is None or new_score > best_score:
+                        best_score = new_score; best_seq = new.clone()
+                        improved = True
+                else:                      # 'min'
+                    if best_score is None or new_score < best_score:
+                        best_score = new_score; best_seq = new.clone()
+                        improved = True
+            cur = new
+            steps_since_improve = 0 if improved else steps_since_improve + 1
+            if steps_since_improve >= patience:
+                break
+    model.train()
+    return best_seq, trajectory
+
+
+def staged_refine(model, prompt, n_new, vocab_size,
+                    harmony_scorer, quality_scorer, creativity_scorer,
+                    n_iters_per_stage: int = 200,
+                    resample_frac: float = 0.35,
+                    prompt_len: int = 16,
+                    temperature: float = 0.5):
+    """Staircase refinement: hit one score, then the next, then the next.
+
+    Stage 1: substrate alignment (minimize harmony) -- match the shape.
+    Stage 2: model coherence (minimize self-perplexity) -- output that
+             the model itself finds plausible given the substrate shape.
+    Stage 3: Shakespeare creativity (maximize creativity score) -- output
+             that matches Shakespeare's char patterns and vocabulary.
+
+    Each stage starts from the PREVIOUS stage's best output. Output of
+    one objective becomes the input to the next.
+    """
+    model.eval()
+    with torch.no_grad():
+        draft = autoregressive_generate(model, prompt, n_new=n_new,
+                                          vocab_size=vocab_size,
+                                          temperature=temperature)
+    stages_out = {}
+    stages_out["initial"] = {"seq": draft.clone(),
+                                "harmony": harmony_scorer(draft),
+                                "quality": quality_scorer(draft),
+                                "creativity": creativity_scorer(draft)
+                                  if creativity_scorer else None}
+    # Stage 1: harmony.
+    draft, h_traj = _single_stage_refine(model, draft, vocab_size,
+                                            harmony_scorer, mode="min",
+                                            n_iters=n_iters_per_stage,
+                                            resample_frac=resample_frac,
+                                            prompt_len=prompt_len,
+                                            temperature=temperature)
+    stages_out["after_harmony"] = {"seq": draft.clone(),
+                                       "trajectory": h_traj,
+                                       "harmony": harmony_scorer(draft),
+                                       "quality": quality_scorer(draft),
+                                       "creativity": creativity_scorer(draft)
+                                         if creativity_scorer else None}
+    # Stage 2: quality.
+    draft, q_traj = _single_stage_refine(model, draft, vocab_size,
+                                            quality_scorer, mode="min",
+                                            n_iters=n_iters_per_stage,
+                                            resample_frac=resample_frac,
+                                            prompt_len=prompt_len,
+                                            temperature=temperature)
+    stages_out["after_quality"] = {"seq": draft.clone(),
+                                       "trajectory": q_traj,
+                                       "harmony": harmony_scorer(draft),
+                                       "quality": quality_scorer(draft),
+                                       "creativity": creativity_scorer(draft)
+                                         if creativity_scorer else None}
+    # Stage 3: creativity (if scorer provided).
+    if creativity_scorer is not None:
+        draft, c_traj = _single_stage_refine(model, draft, vocab_size,
+                                                creativity_scorer, mode="max",
+                                                n_iters=n_iters_per_stage,
+                                                resample_frac=resample_frac,
+                                                prompt_len=prompt_len,
+                                                temperature=temperature)
+        stages_out["after_creativity"] = {"seq": draft.clone(),
+                                              "trajectory": c_traj,
+                                              "harmony": harmony_scorer(draft),
+                                              "quality": quality_scorer(draft),
+                                              "creativity": creativity_scorer(draft)}
+    model.train()
+    return draft, stages_out
+
+
 def iterative_refine(model, prompt, n_new, vocab_size,
                        n_iters: int = 30,
                        resample_frac: float = 0.35,
@@ -561,27 +696,24 @@ def train_mutable_substrate(name, train_seed, corpus_anchor, val_split,
                             for t in seq_tokens[0].tolist())
             return compute_creativity_score(text, corpus_text)["creativity_score"]
 
-    refined_gen, refine_history = iterative_refine(
+    refined_gen, stages_out = staged_refine(
         model, prompt, n_new=n_new, vocab_size=vocab_size,
-        n_iters=30, resample_frac=0.35, prompt_len=16,
         harmony_scorer=harmony_scorer,
         quality_scorer=quality_scorer,
         creativity_scorer=creativity_fn,
-        temperature=0.5, force_run_all=True)
-    h_traj = [round(h["harmony"], 4) for h in refine_history
-                if h["harmony"] is not None]
-    q_traj = [round(h["quality"], 4) for h in refine_history
-                if h["quality"] is not None]
-    c_traj = [round(h["creativity"], 4) for h in refine_history
-                if h["creativity"] is not None]
-    print(f"  refinement: {len(refine_history)} iterations")
-    print(f"    harmony: {h_traj[0]} -> {min(h_traj):.4f} -> {h_traj[-1]}  "
-          f"(min iter={h_traj.index(min(h_traj))})")
-    print(f"    quality: {q_traj[0]} -> {min(q_traj):.4f} -> {q_traj[-1]}  "
-          f"(min iter={q_traj.index(min(q_traj))})")
-    if c_traj:
-        print(f"    creativity: {c_traj[0]} -> {max(c_traj):.4f} -> {c_traj[-1]}  "
-              f"(max iter={c_traj.index(max(c_traj))})")
+        n_iters_per_stage=200, resample_frac=0.35, prompt_len=16,
+        temperature=0.5)
+    print(f"  staged refinement (max 200 per stage, patience=5):")
+    for k, v in stages_out.items():
+        h = v.get("harmony"); q = v.get("quality"); c = v.get("creativity")
+        h_str = f"{h:.4f}" if h is not None else "n/a"
+        q_str = f"{q:.4f}" if q is not None else "n/a"
+        c_str = f"{c:.4f}" if c is not None else "n/a"
+        traj = v.get("trajectory")
+        iters_str = f"  (ran {len(traj)-1} iters)" if traj else ""
+        print(f"    [{k:<18}]  harmony={h_str}  quality={q_str}  "
+              f"creativity={c_str}{iters_str}")
+    refine_history = stages_out
     best_state, best_state_val = min(history, key=lambda x: x[1])
     print(f"  best constants: {best_state.summary()}  val={best_state_val:.4f}")
     return {"name": name, "mode": "parametric_mutable", "n_params": n_params,
@@ -599,13 +731,13 @@ def train_mutable_substrate(name, train_seed, corpus_anchor, val_split,
              "final_sig_ms": sig_ms.tolist(),
              "generated_tokens": final_gen[0].tolist(),
              "refined_tokens": refined_gen[0].tolist(),
-             "refinement_iterations": len(refine_history),
-             "refinement_harmony_trajectory":
-                 [h["harmony"] for h in refine_history if h["harmony"] is not None],
-             "refinement_quality_trajectory":
-                 [h["quality"] for h in refine_history if h["quality"] is not None],
-             "refinement_creativity_trajectory":
-                 [h["creativity"] for h in refine_history if h["creativity"] is not None]}
+             "refinement_stages": {
+                 k: {"harmony": v.get("harmony"),
+                      "quality": v.get("quality"),
+                      "creativity": v.get("creativity"),
+                      "tokens": v["seq"][0].tolist()}
+                 for k, v in stages_out.items()
+             }}
 
 
 def train_multi_cycle(name, train_seed, corpus_anchor, val_split, vocab_size,
@@ -913,25 +1045,27 @@ def main():
     for name, r in results.items():
         sp = decode(r["generated_tokens"])
         rf = decode(r["refined_tokens"])
-        n_iters = r.get("refinement_iterations", 0)
-        traj_h = r.get("refinement_harmony_trajectory", [])
-        traj_c = r.get("refinement_creativity_trajectory", [])
-        # Compute creativity on both.
         sp_cr = compute_creativity_score(sp, full_corpus_text)
         rf_cr = compute_creativity_score(rf, full_corpus_text)
-        print(f"\n[{name}]  refine_iters={n_iters}")
-        if traj_h:
-            print(f"  harmony:    {round(traj_h[0], 4)} → {round(traj_h[-1], 4)}")
-        if traj_c:
-            print(f"  creativity: {round(traj_c[0], 4)} → "
-                  f"max={round(max(traj_c), 4)} → {round(traj_c[-1], 4)}  "
-                  f"(picked iter {traj_c.index(max(traj_c))})")
-        print(f"  single-pass [creativity={sp_cr['creativity_score']:.3f}, "
+        print(f"\n[{name}]")
+        stages = r.get("refinement_stages", {})
+        if stages:
+            print(f"  Staircase progression (each stage targets next score):")
+            for stage_name, stage in stages.items():
+                print(f"    {stage_name:<18}  "
+                      f"h={stage['harmony']:.4f}  "
+                      f"q={stage['quality']:.4f}  "
+                      f"c={stage['creativity']:.4f}")
+        print(f"  single-pass [c={sp_cr['creativity_score']:.3f}, "
               f"n3={sp_cr['ngram_3']:.3f}, vocab={sp_cr['vocab_overlap']:.3f}]:")
-        print(f"    {repr(sp[:200])}")
-        print(f"  refined    [creativity={rf_cr['creativity_score']:.3f}, "
+        print(f"    {repr(sp[:160])}")
+        print(f"  refined    [c={rf_cr['creativity_score']:.3f}, "
               f"n3={rf_cr['ngram_3']:.3f}, vocab={rf_cr['vocab_overlap']:.3f}]:")
-        print(f"    {repr(rf[:200])}")
+        print(f"    {repr(rf[:160])}")
+        # Print each stage's output for inspection.
+        for stage_name, stage in stages.items():
+            stage_text = decode(stage["tokens"])
+            print(f"  [{stage_name}] {repr(stage_text[:160])}")
 
     out_path = Path(__file__).parent / args.out
     with open(out_path, "w") as f:
