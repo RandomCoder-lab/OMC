@@ -397,6 +397,53 @@ def build_substrate_bigram(vocab_size: int) -> torch.Tensor:
 _SUBSTRATE_BIGRAM_ALPHA = 1.0 / (_PHI_FOR_SAMPLING ** math.pi)   # ~0.221
 
 
+def substrate_subject_threading(sequence: list, vocab: list,
+                                    probs: torch.Tensor,
+                                    is_sentence_start: bool) -> torch.Tensor:
+    """Cross-sentence dependency: at sentence-start positions, boost
+    tokens that appeared at past sentence-starts (likely subjects).
+
+    Maintains a substrate-canonical memory: the last F(5)=8 sentence-
+    starts. Each contributes a boost F(k)/phi^(pi*k) where k = how
+    many sentences ago. Most-recent subject boosted full F(0)=1;
+    older subjects decay by phi^pi per sentence.
+
+    Substrate "topic threading" across paragraph scale.
+    """
+    if not is_sentence_start or not vocab:
+        return probs
+    # Find tokens at sentence-start positions in the sequence.
+    sentence_starts = []
+    for i, tok_id in enumerate(sequence):
+        tok = vocab[tok_id] if tok_id < len(vocab) else ''
+        # A token is a sentence-start if it follows .!?, newline,
+        # OR is at position 0.
+        if i == 0:
+            sentence_starts.append(tok_id)
+            continue
+        prev = vocab[sequence[i-1]] if sequence[i-1] < len(vocab) else ''
+        if prev in ('.', '!', '?', '\n'):
+            # The current token is the subject of a new sentence.
+            sentence_starts.append(tok_id)
+    if not sentence_starts:
+        return probs
+    # Keep last F(5)=8 sentence-starts.
+    sentence_starts = sentence_starts[-8:]
+    n = len(sentence_starts)
+    phi_pi = _PHI_FOR_SAMPLING ** math.pi
+    boost = torch.zeros_like(probs)
+    for i, tok_id in enumerate(reversed(sentence_starts)):
+        # i=0 = most recent sentence-start
+        k_tier = min(i, len(_FIB_NUMS_FOR_BIGRAM) - 1)
+        weight = (_FIB_NUMS_FOR_BIGRAM[k_tier]
+                  / (phi_pi ** k_tier))
+        boost[tok_id] += weight
+    # Apply boost multiplicatively (substrate-canonical log-boost).
+    boost_factor = 1.0 + boost * (math.pi * math.log(_PHI_FOR_SAMPLING))
+    out = probs * boost_factor
+    return out / (out.sum() + 1e-8)
+
+
 def substrate_sentence_boundary_boost(prev_token: int, vocab: list,
                                           probs: torch.Tensor) -> torch.Tensor:
     """Substrate sentence-boundary primitive.
@@ -612,6 +659,16 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
                 probs[0] = substrate_syntax_blend(
                     int(seq[0, -1]), bigram_prior, probs[0],
                     context_tokens=ctx_back, vocab=vocab)
+            # Cross-sentence subject threading at sentence-starts.
+            if vocab is not None and seq.shape[1] >= 1:
+                prev_tok_id = int(seq[0, -1])
+                prev_str = (vocab[prev_tok_id]
+                            if prev_tok_id < len(vocab) else '')
+                if prev_str in ('.', '!', '?', '\n'):
+                    seq_list = seq[0].tolist()
+                    probs[0] = substrate_subject_threading(
+                        seq_list, vocab, probs[0],
+                        is_sentence_start=True)
             # Substrate anti-stagnation on the full window.
             history_aw = seq[0, -21:]
             probs[0] = substrate_anti_stagnation(history_aw, probs[0],
@@ -678,6 +735,16 @@ def _single_stage_refine(model, draft, vocab_size, scorer, mode: str,
                         pos_probs = substrate_syntax_blend(
                             int(new[0, t_draft - 1]), bigram_prior, pos_probs,
                             context_tokens=ctx_back, vocab=vocab)
+                    # Cross-sentence subject threading at sentence-starts.
+                    if vocab is not None and t_draft >= 1:
+                        prev_tok_id = int(new[0, t_draft - 1])
+                        prev_str = (vocab[prev_tok_id]
+                                    if prev_tok_id < len(vocab) else '')
+                        if prev_str in ('.', '!', '?', '\n'):
+                            seq_list = new[0, :t_draft].tolist()
+                            pos_probs = substrate_subject_threading(
+                                seq_list, vocab, pos_probs,
+                                is_sentence_start=True)
                     # Anti-stagnation on full prior context.
                     aw_start = max(0, t_draft - 21)
                     history_aw = new[0, aw_start:t_draft]
