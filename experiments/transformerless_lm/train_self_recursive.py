@@ -557,9 +557,20 @@ def substrate_recency_penalty(history_tokens: torch.Tensor, logits: torch.Tensor
     n = history_tokens.numel()
     if n == 0:
         return logits
-    # phi^-(n-1-i): most-recent (i=n-1) is 1.0; oldest (i=0) is phi^-(n-1).
-    pos = torch.arange(n, device=logits.device, dtype=logits.dtype)
-    pos_weights = torch.pow(_PHI_FOR_SAMPLING, -(n - 1 - pos))
+    # Nested substrate decay: F(k)/phi^(pi*k) where k = pos_back.
+    # Same nested form as the bigram tier decay and harmony loss.
+    # Most-recent position (pos_back=0) gets F(0)/phi^0 = 1; older
+    # positions decay via the fully-nested F(k)/phi^(pi*k).
+    K = len(_FIB_NUMS_FOR_BIGRAM)
+    pi_arg = math.pi
+    pos_back = (n - 1 - torch.arange(n, device=logits.device,
+                                          dtype=logits.dtype))
+    pos_back_idx = torch.clamp(pos_back, 0, K - 1).long()
+    fk_tensor = torch.tensor(
+        [_FIB_NUMS_FOR_BIGRAM[i] / (_PHI_FOR_SAMPLING ** (pi_arg * i))
+         for i in range(K)],
+        dtype=logits.dtype, device=logits.device)
+    pos_weights = fk_tensor[pos_back_idx]
     penalty = torch.zeros(vocab_size, device=logits.device, dtype=logits.dtype)
     penalty.scatter_add_(0, history_tokens.long(), pos_weights)
     return logits - penalty * _LOG_PHI_FOR_PENALTY
