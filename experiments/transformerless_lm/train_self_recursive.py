@@ -108,23 +108,26 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
 
 
 def iterative_refine(model, prompt, n_new, vocab_size,
-                       n_iters: int = 10,
-                       resample_frac: float = 0.2,
+                       n_iters: int = 30,
+                       resample_frac: float = 0.35,
                        prompt_len: int = 16,
                        harmony_scorer=None,
-                       temperature: float = 0.8):
-    """Inference-time substrate-recursive refinement.
+                       quality_scorer=None,
+                       temperature: float = 0.5,
+                       force_run_all: bool = True):
+    """Aggressive inference-time substrate-recursive refinement.
 
-    Step 1: Generate a draft via autoregressive sampling.
-    Step 2..N: Feed the draft back through the model as input. At each
-    iteration, find the positions where the model is LEAST confident
-    about the current token, resample those positions from the model's
-    predicted distribution. Score harmony after each iteration.
-    Continue until harmony stops improving.
+    Pushes refinement harder than the conservative version:
+      - resample_frac=0.35: more positions resampled per iteration
+      - temperature=0.5: sharper sampling, less noise drift
+      - n_iters=30: run longer to see deep refinement
+      - force_run_all: don't stop on flat harmony -- keep refining to
+        explore the substrate fixed-point set
 
-    This translates the substrate's recursive nature into the model's
-    inference dynamics -- output becomes input becomes output, and the
-    sequence converges to a substrate-stable fixed point.
+    Returns the BEST sequence by quality_scorer (or harmony if no
+    quality_scorer), AND the full history. The "best" may not be the
+    last; substrate fixed-point exploration produces equally-aligned
+    variants of which one may be more meaningful.
     """
     model.eval()
     with torch.no_grad():
@@ -133,48 +136,64 @@ def iterative_refine(model, prompt, n_new, vocab_size,
                                           vocab_size=vocab_size,
                                           temperature=temperature)
         history = []
-        h = harmony_scorer(draft) if harmony_scorer is not None else None
-        history.append({"iter": 0, "harmony": h, "seq": draft.clone(),
-                          "n_resampled": 0})
+        h0 = harmony_scorer(draft) if harmony_scorer is not None else None
+        q0 = quality_scorer(draft) if quality_scorer is not None else None
+        history.append({"iter": 0, "harmony": h0, "quality": q0,
+                          "seq": draft.clone(), "n_resampled": 0})
 
-        # Refinement iterations.
+        best_seq = draft.clone()
+        best_score = q0 if q0 is not None else h0
+
         for it in range(1, n_iters + 1):
             T = draft.shape[1]
+            offset = max(0, T - model.seq_len)        # draft -> ctx index offset
             ctx = draft if T <= model.seq_len else draft[:, -model.seq_len:]
             logits = model(ctx)
             probs = F.softmax(logits / temperature, dim=-1)
-            # Position-wise confidence: P(current token | prefix).
-            # confidences[b, t] = P(seq[b, t+1] | seq[b, :t+1])
-            tokens_after_prefix = ctx[:, 1:]                    # [B, T-1]
+            tokens_after_prefix = ctx[:, 1:]
             confidences = probs[:, :-1].gather(
-                -1, tokens_after_prefix.unsqueeze(-1)).squeeze(-1)  # [B, T-1]
-
-            # Mask the prompt portion (don't resample prompt).
-            confidences[:, :prompt_len] = 1.0
-            n_resample = max(1, int(resample_frac * (T - prompt_len - 1)))
-            # Lowest-confidence positions.
+                -1, tokens_after_prefix.unsqueeze(-1)).squeeze(-1)
+            # Don't touch the prompt portion (in draft coords, indices < prompt_len).
+            # In ctx coords, that's indices < (prompt_len - offset).
+            prompt_in_ctx = max(0, prompt_len - offset)
+            confidences[:, :prompt_in_ctx] = 1.0
+            n_avail = confidences.shape[1] - prompt_in_ctx
+            n_resample = max(1, int(resample_frac * n_avail))
+            n_resample = min(n_resample, max(1, n_avail))
             _, low_idx = confidences[0].topk(n_resample, largest=False)
 
             new_draft = draft.clone()
             for idx in low_idx.tolist():
-                t = idx + 1   # token at position t+1 was predicted from logits[:, idx]
-                if t < new_draft.shape[1]:
+                t_ctx = idx + 1                       # position in ctx
+                t_draft = t_ctx + offset              # position in draft
+                if t_draft < new_draft.shape[1] and t_draft >= prompt_len:
                     new_tok = torch.multinomial(probs[0, idx], num_samples=1)
-                    new_draft[0, t] = new_tok.item()
+                    new_draft[0, t_draft] = new_tok.item()
 
             new_h = (harmony_scorer(new_draft) if harmony_scorer is not None
                       else None)
-            history.append({"iter": it, "harmony": new_h,
+            new_q = (quality_scorer(new_draft) if quality_scorer is not None
+                      else None)
+            history.append({"iter": it, "harmony": new_h, "quality": new_q,
                               "seq": new_draft.clone(),
                               "n_resampled": n_resample})
-            # Convergence: harmony stopped improving (lower = more harmonious).
-            if new_h is not None and h is not None and new_h >= h:
-                break
+
+            # Track best by quality (or harmony fallback).
+            this_score = new_q if new_q is not None else new_h
+            if (best_score is None or
+                (this_score is not None and this_score < best_score)):
+                best_seq = new_draft.clone()
+                best_score = this_score
+
             draft = new_draft
-            h = new_h
+            if not force_run_all:
+                # Early stopping on flat harmony (conservative mode).
+                if (new_h is not None and h0 is not None and new_h >= h0):
+                    break
+                h0 = new_h
 
     model.train()
-    return draft, history
+    return best_seq, history
 
 
 def compute_harmony(logits, vocab_size, kind):
@@ -404,35 +423,23 @@ def train_mutable_substrate(name, train_seed, corpus_anchor, val_split,
                                                  K_min=args.K_min)
     n_params = sum(p.numel() for p in model.parameters())
 
-    # Parametric substrate: starts at canonical phi, pi, F(k) values.
+    # Canonical substrate -- no mutation, no search. Constants are fixed:
+    # phi=1.618, pi_exp=pi, F=Fibonacci. The corpus signature is the
+    # harmony target (data's voice grounding the substrate).
     substrate = ParametricSubstrate()
     K_sig = len(_FIB_FREQS_LOCAL)
-    sig_char = substrate.get_signature(K_sig)
-    sig_ms = substrate.get_signature(K_sig)
-    # History of accepted substrate states.
     history = [(substrate.clone(), float("inf"))]
 
-    # CORPUS SIGNATURE -- the data's voice. Used as the data-guidance
-    # target for mutation gradient. Pre-computed once from the actual
-    # corpus_anchor slice (NOT used in token-level training).
-    corpus_sig_char = corpus_char_signature(corpus_anchor, vocab_size)
-    corpus_sig_ms = corpus_multiscale_signature(corpus_anchor, vocab_size,
-                                                   seq_len=args.seq_len)
-    # Pick the target signature based on harmony kind.
-    if harmony_kind == "multiscale":
-        corpus_target = corpus_sig_ms
-    elif harmony_kind == "combined":
-        corpus_target = (corpus_sig_char + corpus_sig_ms) / 2.0
-    else:
-        corpus_target = corpus_sig_char
+    sig_char = corpus_char_signature(corpus_anchor, vocab_size)
+    sig_ms = corpus_multiscale_signature(corpus_anchor, vocab_size,
+                                            seq_len=args.seq_len)
+    corpus_target = sig_ms if harmony_kind == "multiscale" else sig_char
 
-    print(f"\n[parametric_mutable {name}]  harmony={harmony_kind}  "
-          f"mutate_every={mutation_every}  data_guided={data_guided}  "
+    print(f"\n[canonical_substrate {name}]  harmony={harmony_kind}  "
           f"params={n_params:,}", flush=True)
-    print(f"  initial constants: {substrate.summary()}")
-    print(f"  initial parametric sig: {[round(x, 4) for x in sig_char.tolist()]}")
-    print(f"  corpus_sig_char: {[round(x, 4) for x in corpus_sig_char.tolist()]}")
-    print(f"  corpus_sig_ms:   {[round(x, 4) for x in corpus_sig_ms.tolist()]}")
+    print(f"  canonical constants: {substrate.summary()}")
+    print(f"  corpus sig_char: {[round(x, 4) for x in sig_char.tolist()]}")
+    print(f"  corpus sig_ms:   {[round(x, 4) for x in sig_ms.tolist()]}")
 
     t0 = time.time()
     best_val = float("inf"); best_step = -1
@@ -496,46 +503,20 @@ def train_mutable_substrate(name, train_seed, corpus_anchor, val_split,
                           f"reverted={n_mutations_reverted})", flush=True)
                 pending = None
 
-            # Apply a new mutation (no pending one, enough steps elapsed).
-            if pending is None and (step - last_mutation_step) >= mutation_every:
-                # Start from BEST historical state, then perturb. Data-guided
-                # mutation biases the proposal toward closing the gap to the
-                # corpus signature; blind mutation is uniform random.
-                best_state, _ = min(history, key=lambda x: x[1])
-                K_harmony_active = K_to_K_harmony(cur_K or args.K_init,
-                                                     K_init=args.K_init,
-                                                     K_min=args.K_min)
-                if data_guided:
-                    substrate = best_state.clone().data_guided_perturb(
-                        corpus_target, rng,
-                        step_size=0.05, noise_scale=0.4,
-                        K_active=K_harmony_active)
-                else:
-                    substrate = best_state.clone().perturb(
-                        rng, step_size=0.05, fib_step=0.10)
-                sig_char = substrate.get_signature(K_sig)
-                sig_ms = substrate.get_signature(K_sig)
-                n_mutations_tried += 1
-                last_mutation_step = step
-                pending = {
-                    "baseline_val": best_val,
-                    "eval_step": step + mutation_every,
-                }
-                if n_mutations_tried <= 5 or n_mutations_tried % 5 == 0:
-                    print(f"    [mutation TRIED]  {substrate.summary()}  "
-                          f"baseline_val={best_val:.4f}  "
-                          f"(n_tried={n_mutations_tried})", flush=True)
+            # Mutation disabled -- canonical substrate is final. The
+            # translation work belongs at inference (refinement), not at
+            # training (search for constants that the math already gave us).
 
     # Final generation: BOTH single-pass and iteratively-refined.
+    # n_new sized to fit within model.seq_len so refinement covers the
+    # whole draft (no out-of-window positions).
     prompt = train_seed[:16].unsqueeze(0)
-    n_new = 240
+    n_new = max(args.seq_len - 16, 32)
     final_gen = autoregressive_generate(model, prompt, n_new=n_new,
                                           vocab_size=vocab_size,
                                           temperature=0.8)
-    # Iterative refinement: re-feed output as input until harmony stabilizes.
+    # Iterative refinement: aggressive output->input loop.
     def harmony_scorer(seq_tokens):
-        # Compute harmony of a sequence by running it through the model
-        # and scoring its predicted distribution against current substrate.
         with torch.no_grad():
             T = seq_tokens.shape[1]
             ctx = seq_tokens if T <= model.seq_len else seq_tokens[:, -model.seq_len:]
@@ -545,12 +526,34 @@ def train_mutable_substrate(name, train_seed, corpus_anchor, val_split,
             return compute_harmony_grounded(logits, vocab_size, harmony_kind,
                                               sig_char, sig_ms,
                                               K_harmony=K_h).item()
+
+    def quality_scorer(seq_tokens):
+        """Self-perplexity: how surprising is the sequence to the model.
+        Lower = model is confident in this sequence = more substrate-
+        aligned in the model's own prediction-space."""
+        with torch.no_grad():
+            T = seq_tokens.shape[1]
+            ctx = seq_tokens if T <= model.seq_len else seq_tokens[:, -model.seq_len:]
+            logits = model(ctx)
+            ce = F.cross_entropy(logits[:, :-1].reshape(-1, vocab_size),
+                                   ctx[:, 1:].reshape(-1))
+            return ce.item()
+
     refined_gen, refine_history = iterative_refine(
         model, prompt, n_new=n_new, vocab_size=vocab_size,
-        n_iters=15, resample_frac=0.15, prompt_len=16,
-        harmony_scorer=harmony_scorer, temperature=0.8)
-    print(f"  refinement: {len(refine_history)} iterations, "
-          f"harmony trajectory={[round(h['harmony'], 4) if h['harmony'] is not None else None for h in refine_history]}")
+        n_iters=30, resample_frac=0.35, prompt_len=16,
+        harmony_scorer=harmony_scorer,
+        quality_scorer=quality_scorer,
+        temperature=0.5, force_run_all=True)
+    h_traj = [round(h["harmony"], 4) for h in refine_history
+                if h["harmony"] is not None]
+    q_traj = [round(h["quality"], 4) for h in refine_history
+                if h["quality"] is not None]
+    print(f"  refinement: {len(refine_history)} iterations")
+    print(f"    harmony: {h_traj[0]} -> {min(h_traj):.4f} -> {h_traj[-1]}  "
+          f"(min iter={h_traj.index(min(h_traj))})")
+    print(f"    quality: {q_traj[0]} -> {min(q_traj):.4f} -> {q_traj[-1]}  "
+          f"(min iter={q_traj.index(min(q_traj))})")
     best_state, best_state_val = min(history, key=lambda x: x[1])
     print(f"  best constants: {best_state.summary()}  val={best_state_val:.4f}")
     return {"name": name, "mode": "parametric_mutable", "n_params": n_params,
@@ -570,7 +573,9 @@ def train_mutable_substrate(name, train_seed, corpus_anchor, val_split,
              "refined_tokens": refined_gen[0].tolist(),
              "refinement_iterations": len(refine_history),
              "refinement_harmony_trajectory":
-                 [h["harmony"] for h in refine_history if h["harmony"] is not None]}
+                 [h["harmony"] for h in refine_history if h["harmony"] is not None],
+             "refinement_quality_trajectory":
+                 [h["quality"] for h in refine_history if h["quality"] is not None]}
 
 
 def train_multi_cycle(name, train_seed, corpus_anchor, val_split, vocab_size,
