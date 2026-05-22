@@ -741,27 +741,94 @@ def substrate_char_cascade(char_run: int, probs: torch.Tensor,
     return out / (out.sum() + 1e-8)
 
 
+def substrate_bigram_saturation(prev_tok: int, recent_pairs: list,
+                                    probs: torch.Tensor) -> torch.Tensor:
+    """Penalize bigram transitions that have already fired F(3)=2+ times
+    in the last F(7)=13 transitions. Substrate-tier exponential
+    suppression so a 3rd same-transition fade fast, 4th faster.
+
+    Kills 'of this of this of of' bigram-lock loops. Pure substrate
+    (F-tier counting + phi^pi penalty).
+    """
+    if not recent_pairs:
+        return probs
+    F = _FIB_NUMS_FOR_BIGRAM
+    counts = {}
+    for p, n in recent_pairs[-13:]:
+        if p == prev_tok:
+            counts[n] = counts.get(n, 0) + 1
+    if not counts:
+        return probs
+    suppress = torch.ones_like(probs)
+    for next_tok, c in counts.items():
+        if c >= F[3]:
+            excess = c - F[3] + 1
+            tier = min(excess, len(F) - 1)
+            penalty = 1.0 / (_PHI_FOR_SAMPLING ** (math.pi * F[tier]))
+            if 0 <= next_tok < probs.shape[0]:
+                suppress[next_tok] = penalty
+    out = probs * suppress
+    return out / (out.sum() + 1e-8)
+
+
+def substrate_agreement(last_content_ends_s: bool, probs: torch.Tensor,
+                            vocab: list) -> torch.Tensor:
+    """Number-agreement primitive: '-s' suffix as number marker.
+
+    If most-recent content token ends in 's' (likely plural noun or
+    third-person verb), suppress next tokens ending in 's' and boost
+    non-'s' endings -- and vice versa. Universal morphology bias.
+
+    Boost magnitude: phi (factor 1.618), bounded [1/phi, phi].
+    Pure substrate (suffix shape + Fibonacci-bounded boost).
+    """
+    if not vocab:
+        return probs
+    ends_s_mask = torch.zeros_like(probs)
+    for i, tok in enumerate(vocab):
+        if (tok and len(tok) > 1
+                and tok.endswith('s')
+                and not tok.endswith('ss')
+                and not tok.endswith('is')
+                and not tok.endswith('us')):
+            ends_s_mask[i] = 1.0
+    phi = _PHI_FOR_SAMPLING
+    if last_content_ends_s:
+        factor = 1.0 / phi
+    else:
+        factor = phi
+    boost = 1.0 + ends_s_mask * (factor - 1.0)
+    out = probs * boost
+    return out / (out.sum() + 1e-8)
+
+
 def substrate_word_spacing(prev_tid: int, probs: torch.Tensor,
                               vocab: list, n_chars: int = 65) -> torch.Tensor:
-    """After a word-token (rank >= n_chars), boost the space token to
-    encourage word-boundary spacing. Prevents adjacent-word
-    concatenation ("naygrumio", "thouA"). Pure substrate (rank tier +
-    char-class identification of space).
+    """STRICT word boundary enforcement.
 
-    Boost = phi (substrate-canonical). Penalty for other chars stays
-    flat (no suppression to avoid breaking punctuation flow).
+    After a word-token (rank >= n_chars), hard-suppress every token
+    except space, newline, and punctuation. Forces real word
+    boundaries; eliminates 'kinightmeirface' concat.
+
+    Suppression magnitude: 1/phi^pi ~ 0.221.
+    Pure substrate (rank tier + char-class identification).
     """
     if prev_tid < n_chars or not vocab:
         return probs
-    space_idx = None
+    # Allowed-after-word: space, newline, common clause punctuation.
+    allowed_chars = {' ', '\n', '.', ',', '!', '?', ';', ':',
+                       "'", '-'}
+    allowed_idx = []
     for i in range(min(n_chars, len(vocab))):
-        if vocab[i] == ' ':
-            space_idx = i
-            break
-    if space_idx is None:
+        if vocab[i] in allowed_chars:
+            allowed_idx.append(i)
+    if not allowed_idx:
         return probs
-    out = probs.clone()
-    out[space_idx] = out[space_idx] * _PHI_FOR_SAMPLING
+    suppress = 1.0 / (_PHI_FOR_SAMPLING ** math.pi)
+    mask = torch.full_like(probs, suppress)
+    for i in allowed_idx:
+        mask[i] = 1.0
+    out = probs * mask
     return out / (out.sum() + 1e-8)
 
 
@@ -1256,24 +1323,33 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
     content_thresh = n_chars_local + _FIB_NUMS_FOR_BIGRAM[7]   # 78
     with torch.no_grad():
         seq = prompt.clone()
-        # Iambic syllable counter: sum syllables of prompt tokens.
+        # State counters from prompt.
         syl_pos = 0
         open_needs = 0
         cluster_len = 0
         char_run = 0
+        recent_pairs = []   # (prev_tok, current_tok) bigram history
+        last_content_ends_s = False
         if vocab is not None:
-            for tid in seq[0].tolist():
+            prompt_list = seq[0].tolist()
+            for idx_pl, tid in enumerate(prompt_list):
                 if tid < len(vocab):
                     tok = vocab[tid]
                     syl_pos += _approx_syllables(tok)
                     if tok in ('.', '!', '?', '\n'):
                         open_needs = 0
                         cluster_len = 0
+                    elif tok in (',', ';', ':'):
+                        open_needs = max(0, open_needs - 2)  # constituent
+                        cluster_len = 0
                     elif tid > content_thresh:
                         open_needs += 1
+                        if tok.endswith('s'):
+                            last_content_ends_s = True
+                        elif len(tok) > 1:
+                            last_content_ends_s = False
                     elif n_chars_local <= tid <= content_thresh:
                         open_needs = max(0, open_needs - 1)
-                    # Cluster tracking from trailing chars of token.
                     if tok:
                         for ch in tok:
                             if ch in _IAMBIC_VOWELS:
@@ -1286,6 +1362,9 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
                         char_run += 1
                     else:
                         char_run = 0
+                    if idx_pl > 0:
+                        recent_pairs.append((prompt_list[idx_pl - 1], tid))
+            recent_pairs = recent_pairs[-13:]
         for _ in range(n_new):
             T = seq.shape[1]
             ctx = seq if T <= model.seq_len else seq[:, -model.seq_len:]
@@ -1327,7 +1406,15 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
                 recent_list = seq[0, -13:].tolist()
                 probs[0] = substrate_rhyme_resonance(
                     recent_list, end_vowels, probs[0])
-            # Word spacing (post-word space pressure).
+            # Bigram saturation (kill repeated-transition lock).
+            if seq.shape[1] >= 1:
+                probs[0] = substrate_bigram_saturation(
+                    int(seq[0, -1]), recent_pairs, probs[0])
+            # Agreement (subject -s flips next content -s shape).
+            if vocab is not None:
+                probs[0] = substrate_agreement(
+                    last_content_ends_s, probs[0], vocab)
+            # Word spacing (strict, post-word).
             if vocab is not None and seq.shape[1] >= 1:
                 probs[0] = substrate_word_spacing(
                     int(seq[0, -1]), probs[0], vocab,
@@ -1368,14 +1455,22 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
             # Advance state counters from emitted token.
             if vocab is not None:
                 nid = int(next_tok[0, 0])
+                prev_for_pair = int(seq[0, -2]) if seq.shape[1] >= 2 else -1
                 if nid < len(vocab):
                     tok = vocab[nid]
                     syl_pos += _approx_syllables(tok)
                     if tok in ('.', '!', '?', '\n'):
                         open_needs = 0
                         cluster_len = 0
+                    elif tok in (',', ';', ':'):
+                        open_needs = max(0, open_needs - 2)   # constituent
+                        cluster_len = 0
                     elif nid > content_thresh:
                         open_needs += 1
+                        if tok.endswith('s'):
+                            last_content_ends_s = True
+                        elif len(tok) > 1:
+                            last_content_ends_s = False
                     elif n_chars_local <= nid <= content_thresh:
                         open_needs = max(0, open_needs - 1)
                     if tok:
@@ -1386,12 +1481,14 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
                                 cluster_len += 1
                             else:
                                 cluster_len = 0
-                    # char_run: increment on plain char, reset on word/
-                    # space/newline.
                     if nid < n_chars_local and tok not in (' ', '\n'):
                         char_run += 1
                     else:
                         char_run = 0
+                if prev_for_pair >= 0:
+                    recent_pairs.append((prev_for_pair, nid))
+                    if len(recent_pairs) > 13:
+                        recent_pairs = recent_pairs[-13:]
     model.train()
     return seq
 
@@ -1510,7 +1607,26 @@ def _single_stage_refine(model, draft, vocab_size, scorer, mode: str,
                         if vowel_start_mask is not None and cl_len >= 2:
                             pos_probs = substrate_phonotactics(
                                 cl_len, pos_probs, vowel_start_mask)
-                        # Word spacing (post-word space pressure).
+                        # Bigram saturation + agreement + word spacing.
+                        # Compute recent_pairs and last_content_ends_s
+                        # from prefix.
+                        rp = []
+                        last_s_r = False
+                        for j in range(1, t_draft):
+                            rp.append((int(new[0, j-1].item()),
+                                          int(new[0, j].item())))
+                            tid_j = int(new[0, j].item())
+                            if tid_j > ct and tid_j < len(vocab):
+                                t_j = vocab[tid_j]
+                                if t_j.endswith('s'):
+                                    last_s_r = True
+                                elif len(t_j) > 1:
+                                    last_s_r = False
+                        rp = rp[-13:]
+                        pos_probs = substrate_bigram_saturation(
+                            int(new[0, t_draft - 1]), rp, pos_probs)
+                        pos_probs = substrate_agreement(
+                            last_s_r, pos_probs, vocab)
                         pos_probs = substrate_word_spacing(
                             int(new[0, t_draft - 1]), pos_probs, vocab,
                             n_chars=n_chars_r)
