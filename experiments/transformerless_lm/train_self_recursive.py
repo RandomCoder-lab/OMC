@@ -478,6 +478,24 @@ def substrate_theme_momentum(recent_tokens: list,
     return out / (out.sum() + 1e-8)
 
 
+def substrate_vocab_curriculum(probs: torch.Tensor,
+                                  active_vocab_size: int) -> torch.Tensor:
+    """Vocabulary expansion curriculum: restrict sampling to the first
+    `active_vocab_size` tokens. As substrate K shrinks across cycles,
+    vocab EXPANDS through Fibonacci tiers (F(8)=21 -> F(12)=144 -> full).
+    Functional/common tokens always available; content/proper nouns
+    unlock progressively. Pure substrate (Fibonacci-tier walk).
+    """
+    if active_vocab_size <= 0 or active_vocab_size >= probs.shape[0]:
+        return probs
+    out = probs.clone()
+    out[active_vocab_size:] = 0.0
+    s = out.sum()
+    if s < 1e-8:
+        return probs
+    return out / s
+
+
 def substrate_golden_phase(t_pos: int, probs: torch.Tensor,
                               vocab_size: int) -> torch.Tensor:
     """Golden-angle phase: functional/content rhythm primitive.
@@ -743,7 +761,8 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
                               recency_penalty: bool = True,
                               bigram_prior: torch.Tensor = None,
                               vocab: list = None,
-                              token_signatures: torch.Tensor = None):
+                              token_signatures: torch.Tensor = None,
+                              active_vocab_size: int = None):
     """Sample n_new tokens autoregressively with substrate sampling AND
     a substrate-canonical recency penalty.
 
@@ -796,6 +815,10 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
             history_aw = seq[0, -21:]
             probs[0] = substrate_anti_stagnation(history_aw, probs[0],
                                                      vocab_size)
+            # Vocab curriculum (applied last; hard mask high-rank).
+            if active_vocab_size is not None:
+                probs[0] = substrate_vocab_curriculum(
+                    probs[0], active_vocab_size)
             next_tok = torch.multinomial(probs, num_samples=1)
             seq = torch.cat([seq, next_tok], dim=1)
     model.train()
@@ -808,7 +831,8 @@ def _single_stage_refine(model, draft, vocab_size, scorer, mode: str,
                             patience: int = 5,
                             bigram_prior: torch.Tensor = None,
                             vocab: list = None,
-                            token_signatures: torch.Tensor = None):
+                            token_signatures: torch.Tensor = None,
+                            active_vocab_size: int = None):
     """One refinement stage: optimize a single score until plateau.
 
     mode: 'min' (harmony, quality) or 'max' (creativity).
@@ -883,6 +907,10 @@ def _single_stage_refine(model, draft, vocab_size, scorer, mode: str,
                     history_aw = new[0, aw_start:t_draft]
                     pos_probs = substrate_anti_stagnation(
                         history_aw, pos_probs, vocab_size_local)
+                    # Vocab curriculum (hard mask high-rank).
+                    if active_vocab_size is not None:
+                        pos_probs = substrate_vocab_curriculum(
+                            pos_probs, active_vocab_size)
                     new[0, t_draft] = torch.multinomial(
                         pos_probs, num_samples=1).item()
 
@@ -914,7 +942,8 @@ def staged_refine(model, prompt, n_new, vocab_size,
                     temperature: float = 0.5,
                     bigram_prior: torch.Tensor = None,
                     vocab: list = None,
-                    token_signatures: torch.Tensor = None):
+                    token_signatures: torch.Tensor = None,
+                    active_vocab_size: int = None):
     """Staircase refinement: hit one score, then the next, then the next.
 
     Stage 1: substrate alignment (minimize harmony) -- match the shape.
@@ -930,7 +959,7 @@ def staged_refine(model, prompt, n_new, vocab_size,
     with torch.no_grad():
         draft = autoregressive_generate(model, prompt, n_new=n_new,
                                           vocab_size=vocab_size,
-                                          temperature=temperature, bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures)
+                                          temperature=temperature, bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures, active_vocab_size=active_vocab_size)
     stages_out = {}
     stages_out["initial"] = {"seq": draft.clone(),
                                 "harmony": harmony_scorer(draft),
@@ -943,7 +972,7 @@ def staged_refine(model, prompt, n_new, vocab_size,
                                             n_iters=n_iters_per_stage,
                                             resample_frac=resample_frac,
                                             prompt_len=prompt_len,
-                                            temperature=temperature, bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures)
+                                            temperature=temperature, bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures, active_vocab_size=active_vocab_size)
     stages_out["after_harmony"] = {"seq": draft.clone(),
                                        "trajectory": h_traj,
                                        "harmony": harmony_scorer(draft),
@@ -956,7 +985,7 @@ def staged_refine(model, prompt, n_new, vocab_size,
                                             n_iters=n_iters_per_stage,
                                             resample_frac=resample_frac,
                                             prompt_len=prompt_len,
-                                            temperature=temperature, bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures)
+                                            temperature=temperature, bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures, active_vocab_size=active_vocab_size)
     stages_out["after_quality"] = {"seq": draft.clone(),
                                        "trajectory": q_traj,
                                        "harmony": harmony_scorer(draft),
@@ -970,7 +999,7 @@ def staged_refine(model, prompt, n_new, vocab_size,
                                                 n_iters=n_iters_per_stage,
                                                 resample_frac=resample_frac,
                                                 prompt_len=prompt_len,
-                                                temperature=temperature, bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures)
+                                                temperature=temperature, bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures, active_vocab_size=active_vocab_size)
         stages_out["after_creativity"] = {"seq": draft.clone(),
                                               "trajectory": c_traj,
                                               "harmony": harmony_scorer(draft),
@@ -1004,7 +1033,7 @@ def iterative_refine(model, prompt, n_new, vocab_size,
         # Step 1: initial draft.
         draft = autoregressive_generate(model, prompt, n_new=n_new,
                                           vocab_size=vocab_size,
-                                          temperature=temperature, bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures)
+                                          temperature=temperature, bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures, active_vocab_size=active_vocab_size)
         history = []
         h0 = harmony_scorer(draft) if harmony_scorer is not None else None
         q0 = quality_scorer(draft) if quality_scorer is not None else None
@@ -1425,9 +1454,18 @@ def train_with_self_distillation(name, train_seed, corpus_anchor, val_split,
     global_step = 0
     prompt = train_seed[:16].unsqueeze(0)
 
+    # Substrate vocab curriculum: tier-walked Fibonacci expansion.
+    # Cycle 1: F(8)=21 word slots; cycle 6: full vocab.
+    _VOCAB_TIERS = [21, 34, 55, 89, 144]   # F(8)..F(12)
+    n_chars = sum(1 for t in (vocab or []) if len(t) == 1) if vocab else 65
     for cycle in range(n_cycles):
+        if cycle < len(_VOCAB_TIERS):
+            active_vocab_size = n_chars + _VOCAB_TIERS[cycle]
+        else:
+            active_vocab_size = None  # full vocab unlocked
         print(f"\n  --- Cycle {cycle+1}/{n_cycles}  "
-              f"active_base_size={active_base.numel()} chars "
+              f"active_base_size={active_base.numel()} chars  "
+              f"active_vocab={active_vocab_size or vocab_size}  "
               f"best_creativity={best_creativity:.4f} ---", flush=True)
         for s in range(steps_per_cycle):
             new_K = sched(global_step, args.steps)
@@ -1471,14 +1509,14 @@ def train_with_self_distillation(name, train_seed, corpus_anchor, val_split,
                 draft = autoregressive_generate(
                     model, prompt_s, n_new=growth_n_new,
                     vocab_size=vocab_size, temperature=0.8,
-                    bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures)
+                    bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures, active_vocab_size=active_vocab_size)
             refined_s, _ = staged_refine(
                 model, prompt_s, n_new=growth_n_new, vocab_size=vocab_size,
                 harmony_scorer=harmony_fn, quality_scorer=quality_fn,
                 creativity_scorer=creativity_fn,
                 n_iters_per_stage=30, resample_frac=0.35,
                 prompt_len=16, temperature=0.5,
-                bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures)
+                bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures, active_vocab_size=active_vocab_size)
             samples.append((refined_s.squeeze(0).clone(),
                               creativity_fn(refined_s)))
         # Sort by creativity desc, keep top K.
@@ -1548,14 +1586,14 @@ def train_with_self_distillation(name, train_seed, corpus_anchor, val_split,
     final_gen = autoregressive_generate(model, prompt, n_new=n_new,
                                           vocab_size=vocab_size,
                                           temperature=0.8,
-                                          bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures)
+                                          bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures, active_vocab_size=active_vocab_size)
     final_refined, _ = staged_refine(
         model, prompt, n_new=n_new, vocab_size=vocab_size,
         harmony_scorer=harmony_fn, quality_scorer=quality_fn,
         creativity_scorer=creativity_fn,
         n_iters_per_stage=200, resample_frac=0.35,
         prompt_len=16, temperature=0.5,
-        bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures)
+        bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures, active_vocab_size=active_vocab_size)
 
     return {"name": name, "mode": "self_distillation",
              "n_params": n_params,
