@@ -1325,58 +1325,28 @@ def _omniweight_apply(base_probs: torch.Tensor,
 
 
 def _self_eval_insight(base_probs: torch.Tensor, emitted_tid: int,
-                          n_chars: int = 65,
-                          recent_tokens: list = None) -> float:
-    """Continuous insight score (substrate-pure).
+                          n_chars: int = 65) -> float:
+    """Compute self-evaluation insight signal for a just-emitted token.
 
-    insight = surprise_factor * real_word_factor * (1 - rep_factor)
-      surprise_factor = surprise / (pi*log(phi)), capped at F(3)=2
-      real_word_factor = 1.0 if word, 1/phi^pi (~0.221) if char
-      rep_factor = 1.0 if in last F(7)=13, else 0
+    insight = 1 if:
+      - emitted token is a real word (rank >= n_chars), AND
+      - surprise (-log p_emitted) >= pi*log(phi) ~ 1.51 (substrate threshold)
+    insight = 0 otherwise.
+
+    Recursive substrate self-monitoring: model rates its own emissions
+    against its own distribution.
     """
-    if emitted_tid < 0 or emitted_tid >= base_probs.shape[0]:
+    if emitted_tid < n_chars:
+        return 0.0
+    V = base_probs.shape[0]
+    if not (0 <= emitted_tid < V):
         return 0.0
     p = float(base_probs[emitted_tid].item())
     if p <= 0.0:
         return 0.0
     surprise = -math.log(p + 1e-12)
     threshold = math.pi * math.log(_PHI_FOR_SAMPLING)
-    cap = float(_FIB_NUMS_FOR_BIGRAM[3])   # F(3) = 2
-    surprise_factor = min(surprise / threshold, cap)
-    inv_phi_pi = 1.0 / (_PHI_FOR_SAMPLING ** math.pi)
-    real_word_factor = 1.0 if emitted_tid >= n_chars else inv_phi_pi
-    rep_factor = 0.0
-    if recent_tokens:
-        for tid in recent_tokens[-13:]:
-            if tid == emitted_tid:
-                rep_factor = 1.0
-                break
-    return surprise_factor * real_word_factor * (1.0 - rep_factor)
-
-
-def _local_entropy(recent_tokens: list, window: int = 5) -> float:
-    """Shannon entropy over last `window` (F(5)=5) emissions.
-
-    Low entropy = model is concentrating on few tokens (stuck).
-    High entropy = exploring diversity.
-
-    Returns H in nats; max for distinct tokens = log(window).
-    """
-    if not recent_tokens:
-        return 0.0
-    last = recent_tokens[-window:]
-    counts = {}
-    for t in last:
-        counts[t] = counts.get(t, 0) + 1
-    total = sum(counts.values())
-    if total == 0:
-        return 0.0
-    H = 0.0
-    for c in counts.values():
-        p = c / total
-        if p > 0:
-            H -= p * math.log(p)
-    return H
+    return 1.0 if surprise >= threshold else 0.0
 
 
 def _omniweight_apply_split(base_probs: torch.Tensor,
@@ -1451,10 +1421,8 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
         char_run = 0
         recent_pairs = []   # (prev_tok, current_tok) bigram history
         last_content_ends_s = False
-        # v79: two-tier momentum (refined self-awareness).
-        momentum_short = 0.0   # F(3)=2 step EMA -- tactical
-        momentum_long = 0.0    # F(7)=13 step EMA -- strategic
-        momentum_history = []   # recent momentum_short values
+        creative_momentum = 0.0   # self-eval EMA register
+        momentum_history = []     # recent momentum values, F(7)=13 deep
         if vocab is not None:
             prompt_list = seq[0].tolist()
             for idx_pl, tid in enumerate(prompt_list):
@@ -1574,41 +1542,28 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
                     p = substrate_subject_threading(
                         seq_list, vocab, base, is_sentence_start=True)
                     lang_delta += _omniweight_delta(base, p)
-            # Apply split-brain mixer; STRATEGIC momentum (long) drives reserve.
+            # Apply split-brain mixer with momentum-modulated reserve.
             probs = _omniweight_apply_split(
                 base, math_delta, lang_delta,
-                momentum=momentum_long).unsqueeze(0)
-            # Local entropy of last F(5)=5 emissions (refined self-awareness).
-            recent_emitted = seq[0, -_FIB_NUMS_FOR_BIGRAM[5]:].tolist()
-            local_H = _local_entropy(recent_emitted, window=_FIB_NUMS_FOR_BIGRAM[5])
-            # LIVING substrate thresholds: modulated by momentum_long
-            # via phi^tanh(momentum_long*phi). When sustained insight
-            # has been HIGH, thresholds tighten (high bar, stricter);
-            # when LOW, thresholds loosen (lower bar, more permissive).
-            # Pure substrate (phi exponentiated by tanh of state).
-            mod = math.tanh(momentum_long * _PHI_FOR_SAMPLING)
-            scale = _PHI_FOR_SAMPLING ** mod   # in [1/phi, phi]
-            entropy_threshold = (2.0 * math.log(_PHI_FOR_SAMPLING)) / scale
-            mom_band = (1.0 / _PHI_FOR_SAMPLING) * scale
-            inv_phi_pi = (1.0 / (_PHI_FOR_SAMPLING ** math.pi)) / scale
-            stuck = (local_H < entropy_threshold and momentum_short < 0.0)
-            # A. TACTICAL momentum drives sharpen/flatten.
-            if stuck:
-                p = probs[0] ** (1.0 / _PHI_FOR_SAMPLING)
-                probs[0] = p / (p.sum() + 1e-8)
-            elif momentum_short > mom_band:
+                momentum=creative_momentum).unsqueeze(0)
+            # A. Three-mode behavior based on momentum sign.
+            if creative_momentum > 0.5:
+                # Exploit: sharpen distribution.
                 p = probs[0] ** _PHI_FOR_SAMPLING
                 probs[0] = p / (p.sum() + 1e-8)
-            elif momentum_short < -mom_band:
+            elif creative_momentum < -0.5:
+                # Escape: flatten distribution.
                 p = probs[0] ** (1.0 / _PHI_FOR_SAMPLING)
                 probs[0] = p / (p.sum() + 1e-8)
-            # B. Backtrack-on-collapse, substrate thresholds.
+            # B. Backtrack-on-collapse: if recent momentum dropped
+            # >F(3)=2 mass over last F(5)=5 steps AND current is
+            # negative, force newline boost (substrate reset).
             collapsed = False
             if (len(momentum_history) >= _FIB_NUMS_FOR_BIGRAM[5]
                     and newline_mask is not None):
                 recent_window = momentum_history[-_FIB_NUMS_FOR_BIGRAM[5]:]
-                drop = max(recent_window) - momentum_short
-                if drop > inv_phi_pi and momentum_short < -inv_phi_pi:
+                drop = max(recent_window) - creative_momentum
+                if drop > 0.3 and creative_momentum < -0.2:
                     collapsed = True
             if collapsed and newline_mask is not None:
                 nm = newline_mask.to(probs[0].device).to(probs[0].dtype)
@@ -1658,20 +1613,13 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
                     recent_pairs.append((prev_for_pair, nid))
                     if len(recent_pairs) > 13:
                         recent_pairs = recent_pairs[-13:]
-                # Self-evaluation: continuous insight + two-tier momentum.
-                recent_emitted_list = seq[0, -13:].tolist()
-                insight = _self_eval_insight(
-                    base, nid, n_chars_local,
-                    recent_tokens=recent_emitted_list)
-                # Tactical short EMA: 1/F(3)=0.5 weight.
-                w_short = 1.0 / float(_FIB_NUMS_FOR_BIGRAM[3])
-                momentum_short = ((1.0 - w_short) * momentum_short
-                                    + w_short * insight)
-                # Strategic long EMA: 1/F(7)=0.077 weight.
-                w_long = 1.0 / float(_FIB_NUMS_FOR_BIGRAM[7])
-                momentum_long = ((1.0 - w_long) * momentum_long
-                                   + w_long * insight)
-                momentum_history.append(momentum_short)
+                # Self-evaluation: update creative momentum EMA.
+                insight = _self_eval_insight(base, nid, n_chars_local)
+                inv_phi = 1.0 / _PHI_FOR_SAMPLING
+                creative_momentum = (inv_phi * creative_momentum
+                                       + (1.0 - inv_phi) * insight)
+                # Track momentum history for backtrack detection.
+                momentum_history.append(creative_momentum)
                 if len(momentum_history) > 13:
                     momentum_history = momentum_history[-13:]
     model.train()
