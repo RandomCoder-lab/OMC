@@ -120,7 +120,7 @@ def train_arm(name, mode, train_seed, val_split, vocab_size, args,
     t0 = time.time()
     best_val = float("inf"); best_step = -1
     cur_K = None
-    eval_every = max(args.steps // 15, 250)
+    eval_every = max(args.steps // 20, 100)
     for step in range(args.steps):
         new_K = sched(step, args.steps)
         if new_K != cur_K:
@@ -170,15 +170,15 @@ def train_arm(name, mode, train_seed, val_split, vocab_size, args,
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--steps", type=int, default=3000)
-    parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--seq-len", type=int, default=128)
-    parser.add_argument("--d-model", type=int, default=128)
-    parser.add_argument("--n-blocks", type=int, default=4)
+    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--seq-len", type=int, default=64)
+    parser.add_argument("--d-model", type=int, default=64)
+    parser.add_argument("--n-blocks", type=int, default=2)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--K-init", type=int, default=89)
     parser.add_argument("--K-min", type=int, default=13)
-    parser.add_argument("--K-sig", type=int, default=32)
+    parser.add_argument("--K-sig", type=int, default=16)
     parser.add_argument("--lambda-sub", type=float, default=0.01)
     parser.add_argument("--lambda-harmony", type=float, default=0.05)
     parser.add_argument("--tiny-chars", type=int, default=1024,
