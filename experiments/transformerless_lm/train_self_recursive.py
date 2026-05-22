@@ -92,10 +92,24 @@ def sample_tiny_batch(seed: torch.Tensor, batch_size: int, window: int,
     return xs, ys
 
 
+_PHI_FOR_SAMPLING = (1.0 + 5.0 ** 0.5) / 2.0
+_PI_LOG_PHI = math.pi * math.log(_PHI_FOR_SAMPLING)   # base for substrate softmax
+
+
 def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
-                              vocab_size: int, temperature: float = 1.0):
-    """Sample n_new tokens autoregressively from prompt. Returns the full
-    sequence (prompt + generated). No gradient tracked."""
+                              vocab_size: int, temperature: float = 1.0,
+                              substrate_sampling: bool = True):
+    """Sample n_new tokens autoregressively from prompt.
+
+    substrate_sampling=True: use substrate-canonical softmax (base phi^pi)
+    instead of standard e^x. This is the same exponential base we use in
+    substrate attention -- the model's output distribution is now also
+    substrate-aligned, not e-based.
+
+    Effective temperature with substrate sampling = 1 / (pi * log phi) ~=
+    0.66, so attention is sharper. Combined with the user-supplied
+    `temperature` for fine control.
+    """
     model.eval()
     with torch.no_grad():
         seq = prompt.clone()
@@ -103,7 +117,11 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
             T = seq.shape[1]
             ctx = seq if T <= model.seq_len else seq[:, -model.seq_len:]
             logits = model(ctx)[:, -1, :] / temperature
-            probs = F.softmax(logits, dim=-1)
+            if substrate_sampling:
+                # Substrate softmax: base phi^pi.
+                probs = F.softmax(logits * _PI_LOG_PHI, dim=-1)
+            else:
+                probs = F.softmax(logits, dim=-1)
             next_tok = torch.multinomial(probs, num_samples=1)
             seq = torch.cat([seq, next_tok], dim=1)
     model.train()
@@ -777,6 +795,13 @@ def train_with_self_distillation(name, train_seed, corpus_anchor, val_split,
               f"rej_realword(this cycle)={n_rej_rw_this_cycle}) "
               f"active_base={active_base.numel()} chars "
               f"(best ever: {best_creativity:.4f})")
+        # Show the best refined sample from this cycle as text.
+        if itos_map is not None and kept:
+            best_in_cycle = kept[0][0]
+            sample_text = ''.join(itos_map.get(int(t), '?')
+                                    for t in best_in_cycle.tolist())
+            print(f"  best sample (c={kept[0][1]:.3f}):\n    "
+                  f"{repr(sample_text[:200])}")
 
     # Final generation for inspection.
     final_gen = autoregressive_generate(model, prompt, n_new=n_new,
@@ -1223,7 +1248,8 @@ def main():
 
     parser.add_argument("--K-sig", type=int, default=16)
     parser.add_argument("--lambda-sub", type=float, default=0.01)
-    parser.add_argument("--lambda-harmony", type=float, default=0.05)
+    parser.add_argument("--lambda-harmony", type=float,
+                          default=1.0 / (_PHI_FOR_SAMPLING ** math.pi))
     parser.add_argument("--tiny-chars", type=int, default=1024,
                           help="Size of the tiny training seed in chars")
     parser.add_argument("--out", type=str,
