@@ -37,6 +37,7 @@ import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).parent))
 from corpus import make_dataset
+from substrate_tokenizer import SubstrateTokenizer
 from models_fibrec import FibRecLM, stateless_fibgen_forward
 from optimizers_fib import FibonacciAdamW
 from lazy_data import fib_positions_in_window, get_fib_strided_batch
@@ -1231,15 +1232,28 @@ def main():
 
     chars, stoi, itos, encoded = make_dataset(seq_len=args.seq_len,
                                                  source="tinyshakespeare")
-    vocab_size = len(chars)
-    # Tiny train seed; full val for evaluation
-    train_seed = take_tiny_seed(encoded, args.tiny_chars, seed=args.seed)
+    # Build the substrate tokenizer from the FULL corpus (text form).
+    char_itos_map = {i: c for i, c in enumerate(chars)}
+    full_corpus_text = ''.join(char_itos_map.get(int(t), '?')
+                                  for t in encoded.tolist())
+    sub_tok = SubstrateTokenizer(full_corpus_text, max_vocab_size=500)
+    print(f"Substrate tokenizer: vocab={sub_tok.vocab_size}  "
+          f"(chars={len(chars)} -> +{sub_tok.vocab_size - len(chars)} fib-ngrams)")
+    # Re-encode the whole corpus into substrate tokens.
+    encoded = torch.tensor(sub_tok.encode(full_corpus_text), dtype=torch.long)
+    vocab_size = sub_tok.vocab_size
+    # itos/stoi for substrate tokens (used by creativity scoring & sample print).
+    chars = sub_tok.vocab        # list of token strings (some multi-char)
+    itos_map = {i: c for i, c in enumerate(chars)}
+    # Tiny train seed; full val for evaluation. Slice in TOKEN units.
+    tiny_tokens = max(args.tiny_chars // 2, 256)   # ~tiny_chars in chars
+    train_seed = take_tiny_seed(encoded, tiny_tokens, seed=args.seed)
     val_start = encoded.numel() // 10 * 9
     val_split = encoded[val_start:].clone()
     fib_positions = fib_positions_in_window(args.seq_len)
 
-    print(f"Tiny training seed: {train_seed.numel()} chars; "
-          f"val on {val_split.numel()} chars")
+    print(f"Tiny training seed: {train_seed.numel()} tokens; "
+          f"val on {val_split.numel()} tokens")
 
     # Multi-cycle adaptive substrate: corpus signatures are the truth
     # (anchor), seed corpus grows with model's most-harmonious generations.
