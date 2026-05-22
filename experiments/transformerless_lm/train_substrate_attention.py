@@ -39,20 +39,44 @@ from lazy_data import fib_positions_in_window, get_fib_strided_batch
 from train_K_shrink import K_schedule_tier_walk, set_K_active_recursive
 from losses_substrate import substrate_fft_loss
 from activations_substrate import SubstrateNegMultiAdvancedV2
+from substrate_embedding import SubstrateEmbedding
 
 
 class FibRecLMSubsim(FibRecLM):
     """FibRecLM with substrate-similarity attention (L1 distance) instead
     of Q·K^T dot product. Uses the first K_sig dims of Q and K as
     substrate signatures. V2 substrate activation in the FFN.
+
+    If substrate_embed=True, replace the plain nn.Embedding with the
+    SubstrateEmbedding (Fibonacci-frequency basis canonical mapping).
+    LM head stays tied to the (now substrate-derived) embedding weights.
     """
 
-    def __init__(self, *args, K_sig: int = 32, **kwargs):
+    def __init__(self, *args, K_sig: int = 32, substrate_embed: bool = False,
+                  **kwargs):
         super().__init__(*args, **kwargs)
         self.K_sig = K_sig
         self.activations = nn.ModuleList(
             [SubstrateNegMultiAdvancedV2() for _ in range(self.n_blocks)]
         )
+        if substrate_embed:
+            # Replace plain learnable embedding with substrate-canonical one.
+            vocab_size = self.embed.num_embeddings
+            d_model = self.embed.embedding_dim
+            self.embed = SubstrateEmbedding(vocab_size, d_model, K=7,
+                                              learnable_gamma=True)
+            # Tied head: head weight uses substrate embedding.
+            # FibRecLM.__init__ sets self.head.weight = self.embed.weight;
+            # because SubstrateEmbedding.weight is a property returning
+            # substrate_embed*gamma, we re-tie here so the forward call
+            # uses the up-to-date embedding.
+            self.head = nn.Linear(d_model, vocab_size, bias=False)
+            # We do NOT tie head to embedding here because the substrate
+            # embedding's weight is a non-leaf tensor (product of buffer
+            # and parameter). Instead, the head has its own learnable
+            # weights initialized to substrate values.
+            with torch.no_grad():
+                self.head.weight.copy_(self.embed.substrate_embed)
 
     def _layer_forward(self, x, mask, n, seeds_n):
         qkv_s, out_s, w1_s, w2_s = seeds_n

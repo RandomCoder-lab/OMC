@@ -577,6 +577,7 @@ def train_with_self_distillation(name, train_seed, corpus_anchor, val_split,
     model = FibRecLMSubsim(
         vocab_size=vocab_size, d_model=args.d_model, n_blocks=args.n_blocks,
         seq_len=args.seq_len, K=args.K_init, mode="cross", K_sig=args.K_sig,
+        substrate_embed=True,
     )
     optimizer = FibonacciAdamW(model.parameters(), lr=args.lr)
     sched = lambda s, T: K_schedule_tier_walk(s, T, K_init=args.K_init,
@@ -822,6 +823,7 @@ def train_mutable_substrate(name, train_seed, corpus_anchor, val_split,
     model = FibRecLMSubsim(
         vocab_size=vocab_size, d_model=args.d_model, n_blocks=args.n_blocks,
         seq_len=args.seq_len, K=args.K_init, mode="cross", K_sig=args.K_sig,
+        substrate_embed=True,
     )
     optimizer = FibonacciAdamW(model.parameters(), lr=args.lr)
     sched = lambda s, T: K_schedule_tier_walk(s, T, K_init=args.K_init,
@@ -1016,6 +1018,7 @@ def train_multi_cycle(name, train_seed, corpus_anchor, val_split, vocab_size,
     model = FibRecLMSubsim(
         vocab_size=vocab_size, d_model=args.d_model, n_blocks=args.n_blocks,
         seq_len=args.seq_len, K=args.K_init, mode="cross", K_sig=args.K_sig,
+        substrate_embed=True,
     )
     optimizer = FibonacciAdamW(model.parameters(), lr=args.lr)
     sched = lambda s, T: K_schedule_tier_walk(s, T, K_init=args.K_init,
@@ -1126,6 +1129,7 @@ def train_arm(name, mode, train_seed, val_split, vocab_size, args,
     model = FibRecLMSubsim(
         vocab_size=vocab_size, d_model=args.d_model, n_blocks=args.n_blocks,
         seq_len=args.seq_len, K=args.K_init, mode="cross", K_sig=args.K_sig,
+        substrate_embed=True,
     )
     optimizer = FibonacciAdamW(model.parameters(), lr=args.lr)
     sched = lambda s, T: K_schedule_tier_walk(s, T, K_init=args.K_init,
