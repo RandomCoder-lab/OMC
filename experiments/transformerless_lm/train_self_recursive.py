@@ -668,24 +668,24 @@ def build_vowel_start_mask(vocab: list) -> torch.Tensor:
 
 
 def build_unpronounceable_mask(vocab: list) -> torch.Tensor:
-    """Mask = 1 for tokens with impossible-shape lettering:
-      - max consonant cluster > F(4)=3
-      - same letter triple (F(3)=2 repetitions of same char in a row)
-      - vowel ratio < 1/phi^2 ~ 0.382 (too few vowels to be syllabic)
-    Char tokens (len=1) are exempt. Pure substrate (char-class
-    arithmetic + Fibonacci-tier thresholds).
+    """Mask = 1 for tokens with impossible-shape lettering.
+
+    Flags (any one disqualifies):
+      - max consonant cluster > F(5)=5 (allows 'strengths', 'twelfth')
+      - same letter triple (e.g., 'sss', 'fff', 'ttt')
+      - zero vowels in length > F(3)=2 token (all-consonant word)
+
+    Char tokens (len=1) exempt. Non-alpha tokens exempt (contractions
+    like "'tis"). Pure substrate (char-class + Fibonacci-tier).
     """
     V = len(vocab)
     mask = torch.zeros(V)
     F = _FIB_NUMS_FOR_BIGRAM
-    inv_phi2 = 1.0 / (_PHI_FOR_SAMPLING ** 2)
     for i, tok in enumerate(vocab):
         if not tok or len(tok) <= 1:
             continue
-        # Skip if not all alphabetic (punctuation/contractions).
         if not all(c.isalpha() for c in tok):
             continue
-        # Max consonant cluster.
         max_cluster = 0
         cur = 0
         for ch in tok:
@@ -695,16 +695,14 @@ def build_unpronounceable_mask(vocab: list) -> torch.Tensor:
                 cur += 1
                 if cur > max_cluster:
                     max_cluster = cur
-        # Same-letter triple.
         triple = False
         for j in range(len(tok) - 2):
             if tok[j] == tok[j + 1] == tok[j + 2]:
                 triple = True
                 break
-        # Vowel ratio.
         n_vowel = sum(1 for c in tok if c in _IAMBIC_VOWELS)
-        vowel_ratio = n_vowel / len(tok)
-        if max_cluster > F[4] or triple or vowel_ratio < inv_phi2:
+        all_consonant = (n_vowel == 0) and (len(tok) > F[3])
+        if max_cluster > F[5] or triple or all_consonant:
             mask[i] = 1.0
     return mask
 
@@ -1540,7 +1538,8 @@ def staged_refine(model, prompt, n_new, vocab_size,
                     vowel_start_mask: torch.Tensor = None,
                     end_vowels: list = None,
                     punct_mask: torch.Tensor = None,
-                    newline_mask: torch.Tensor = None):
+                    newline_mask: torch.Tensor = None,
+                    unpronounceable_mask: torch.Tensor = None):
     """Staircase refinement: hit one score, then the next, then the next.
 
     Stage 1: substrate alignment (minimize harmony) -- match the shape.
