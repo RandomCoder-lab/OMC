@@ -1292,9 +1292,14 @@ def substrate_recency_penalty(history_tokens: torch.Tensor, logits: torch.Tensor
 
 # OMNIWEIGHT: shared log-pressure ledger. Each primitive contributes
 # delta_log_p to a single accumulator instead of chaining probs->probs
-# transforms. Total contribution is clamped to [-pi*log(phi), +pi*log(phi)]
-# (substrate-bounded), then applied once.
-_OMNIWEIGHT_CLAMP = math.pi * math.log(_PHI_FOR_SAMPLING)   # ~1.51
+# transforms.
+#
+# FLUID backed-standard form (v72+): the substrate reserve phi^pi acts
+# as a backing standard. Accumulator passes through tanh scaled by
+# phi^pi -- small contributions pass nearly linear, large saturate
+# gracefully to +/- phi^pi. No hard clamp; growth allowed in
+# proportion to substrate trust.
+_OMNIWEIGHT_RESERVE = _PHI_FOR_SAMPLING ** math.pi   # ~4.53
 
 
 def _omniweight_delta(base_probs: torch.Tensor,
@@ -1310,11 +1315,19 @@ def _omniweight_delta(base_probs: torch.Tensor,
 
 def _omniweight_apply(base_probs: torch.Tensor,
                           delta_acc: torch.Tensor) -> torch.Tensor:
-    """Apply accumulated log-pressure to base probs. Clamped to
-    substrate-bounded range, then renormalized.
+    """Apply accumulated log-pressure via tanh-scaled substrate reserve.
+
+    fluid_delta = phi^pi * tanh(delta_acc / phi^pi)
+
+    Small contributions pass linear (tanh near origin ~ identity).
+    Large contributions saturate gracefully toward +/- phi^pi.
+    When primitives agree, deltas sum cleanly. When they disagree,
+    they cancel naturally within the sum.
+
+    Pure substrate (phi^pi as the reserve standard).
     """
-    delta_clamped = delta_acc.clamp(-_OMNIWEIGHT_CLAMP, _OMNIWEIGHT_CLAMP)
-    out = base_probs * torch.exp(delta_clamped)
+    fluid = _OMNIWEIGHT_RESERVE * torch.tanh(delta_acc / _OMNIWEIGHT_RESERVE)
+    out = base_probs * torch.exp(fluid)
     return out / (out.sum() + 1e-8)
 
 
