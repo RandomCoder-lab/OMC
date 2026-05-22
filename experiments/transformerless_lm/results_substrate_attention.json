@@ -1,0 +1,9 @@
+{
+  "subsim_attn": {
+    "name": "subsim_attn",
+    "n_params": 327504,
+    "best_val": 2.539715677499771,
+    "best_step": 7462,
+    "wall": 1067.1068177223206
+  }
+}
