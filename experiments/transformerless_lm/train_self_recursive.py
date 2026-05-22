@@ -1410,7 +1410,8 @@ def _single_stage_refine(model, draft, vocab_size, scorer, mode: str,
                             vowel_start_mask: torch.Tensor = None,
                             end_vowels: list = None,
                             punct_mask: torch.Tensor = None,
-                            newline_mask: torch.Tensor = None):
+                            newline_mask: torch.Tensor = None,
+                            unpronounceable_mask: torch.Tensor = None):
     """One refinement stage: optimize a single score until plateau.
 
     mode: 'min' (harmony, quality) or 'max' (creativity).
