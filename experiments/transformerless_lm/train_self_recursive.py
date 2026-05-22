@@ -1422,6 +1422,7 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
         recent_pairs = []   # (prev_tok, current_tok) bigram history
         last_content_ends_s = False
         creative_momentum = 0.0   # self-eval EMA register
+        momentum_history = []     # recent momentum values, F(7)=13 deep
         if vocab is not None:
             prompt_list = seq[0].tolist()
             for idx_pl, tid in enumerate(prompt_list):
@@ -1545,6 +1546,30 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
             probs = _omniweight_apply_split(
                 base, math_delta, lang_delta,
                 momentum=creative_momentum).unsqueeze(0)
+            # A. Three-mode behavior based on momentum sign.
+            if creative_momentum > 0.5:
+                # Exploit: sharpen distribution.
+                p = probs[0] ** _PHI_FOR_SAMPLING
+                probs[0] = p / (p.sum() + 1e-8)
+            elif creative_momentum < -0.5:
+                # Escape: flatten distribution.
+                p = probs[0] ** (1.0 / _PHI_FOR_SAMPLING)
+                probs[0] = p / (p.sum() + 1e-8)
+            # B. Backtrack-on-collapse: if recent momentum dropped
+            # >F(3)=2 mass over last F(5)=5 steps AND current is
+            # negative, force newline boost (substrate reset).
+            collapsed = False
+            if (len(momentum_history) >= _FIB_NUMS_FOR_BIGRAM[5]
+                    and newline_mask is not None):
+                recent_window = momentum_history[-_FIB_NUMS_FOR_BIGRAM[5]:]
+                drop = max(recent_window) - creative_momentum
+                if drop > 0.3 and creative_momentum < -0.2:
+                    collapsed = True
+            if collapsed and newline_mask is not None:
+                nm = newline_mask.to(probs[0].device).to(probs[0].dtype)
+                phi2 = _PHI_FOR_SAMPLING ** 2
+                probs[0] = probs[0] * (1.0 + nm * (phi2 - 1.0))
+                probs[0] = probs[0] / (probs[0].sum() + 1e-8)
             # Vocab curriculum (HARD mask, post-omniweight).
             if active_vocab_size is not None:
                 probs[0] = substrate_vocab_curriculum(
@@ -1593,6 +1618,10 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
                 inv_phi = 1.0 / _PHI_FOR_SAMPLING
                 creative_momentum = (inv_phi * creative_momentum
                                        + (1.0 - inv_phi) * insight)
+                # Track momentum history for backtrack detection.
+                momentum_history.append(creative_momentum)
+                if len(momentum_history) > 13:
+                    momentum_history = momentum_history[-13:]
     model.train()
     return seq
 
