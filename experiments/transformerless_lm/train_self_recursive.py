@@ -587,46 +587,42 @@ def substrate_symbolic_substitution(probs: torch.Tensor,
 
 
 def build_pronoun_mask(vocab: list) -> torch.Tensor:
-    """Identify pronoun-shape tokens: low rank + monosyllabic + no suffix
-    + starts-with-consonant. The starts-with-consonant filter excludes
-    'this'/'that' demonstratives which were over-amplified by anaphora
-    boost in v61/v62 ("this this this" cascade). Pure substrate:
-    char-class arithmetic on the first character.
+    """Identify pronoun-shape tokens: low rank + monosyllabic + no suffix.
+    Pure substrate (rank + syllable + morphology shape).
     """
     V = len(vocab)
     mask = torch.zeros(V)
     for i, tok in enumerate(vocab):
         if not tok or len(tok) == 1:
             continue
-        is_low_rank = i < 78
+        is_low_rank = i < 78   # 65 chars + F(7)=13 most common words
         no_suffix = _token_morphology(tok) == 'root'
         is_monosyl = _approx_syllables(tok) == 1
-        # Exclude demonstrative-shape: starts with 't' followed by 'h'.
-        is_demonstrative = (len(tok) >= 2
-                              and tok[0] == 't' and tok[1] == 'h')
-        if is_low_rank and no_suffix and is_monosyl and not is_demonstrative:
+        if is_low_rank and no_suffix and is_monosyl:
             mask[i] = 1.0
     return mask
 
 
 def substrate_need_fill(open_needs: int, probs: torch.Tensor,
                             vocab_size: int) -> torch.Tensor:
-    """Bracket-matching with F(7)=13 saturation cap to prevent runaway
-    pressure on extended content runs.
+    """Bracket-matching: as open expectations accumulate, push toward
+    closure. Pressure builds at Fibonacci thresholds.
 
     open_needs increments after CONTENT tokens (rank > 78),
     decrements after function tokens (65 <= rank < 78),
     resets at punctuation/newline.
+
+    Boost magnitude scales by F(tier)/phi^(pi*tier) where tier is the
+    largest Fibonacci index <= open_needs. Rank polarity (low-rank=
+    closer) modulates which tokens get the boost.
     """
     if open_needs <= 0 or vocab_size <= 1:
         return probs
     phi = _PHI_FOR_SAMPLING
     F = _FIB_NUMS_FOR_BIGRAM
-    # F(7) = 13 hard cap on accumulated pressure.
-    open_needs_eff = min(open_needs, F[7])
     pressure_tier = 0
     for k, f in enumerate(F):
-        if open_needs_eff >= f:
+        if open_needs >= f:
             pressure_tier = k
     boost_mag = F[pressure_tier] / (phi ** (math.pi * pressure_tier))
     ranks = torch.arange(vocab_size, dtype=probs.dtype,
@@ -684,21 +680,16 @@ def build_end_vowel_per_token(vocab: list) -> list:
 
 def substrate_rhyme_resonance(recent_tokens: list, end_vowels: list,
                                   probs: torch.Tensor) -> torch.Tensor:
-    """Reward sound-echo with F(3)=2 saturation cap.
+    """Reward sound-echo: tokens whose final vowel matches recent
+    tokens' final vowels. F(k) decay across last F(7)=13 tokens.
 
-    First echo boosts (pressure < F(3) -> exponent positive).
-    Excess repetition penalizes (pressure >= F(3) -> exponent negative).
-    Prevents 'light light light' cascade; preserves rhyme as a
-    self-limiting substrate signal.
-
-    Pure substrate (Fibonacci-tier saturation, phi-bounded boost).
+    Pure substrate (last-vowel-of-token + Fibonacci decay). No rhyme
+    dictionary; the echo emerges from substrate sampling pressure.
     """
     if not recent_tokens or not end_vowels:
         return probs
     phi = _PHI_FOR_SAMPLING
     phi_pi = phi ** math.pi
-    F = _FIB_NUMS_FOR_BIGRAM
-    sat = float(F[3])   # 2: saturation threshold
     V_ev = len(end_vowels)
     recent_pressure = {}
     for i, tid in enumerate(reversed(recent_tokens[-13:])):
@@ -707,17 +698,18 @@ def substrate_rhyme_resonance(recent_tokens: list, end_vowels: list,
         v = end_vowels[tid]
         if not v:
             continue
-        kt = min(i, len(F) - 1)
-        w = F[kt] / (phi_pi ** kt)
+        kt = min(i, len(_FIB_NUMS_FOR_BIGRAM) - 1)
+        w = _FIB_NUMS_FOR_BIGRAM[kt] / (phi_pi ** kt)
         recent_pressure[v] = recent_pressure.get(v, 0.0) + w
     if not recent_pressure:
         return probs
+    # Per-token log-boost halved by F(3)=2 -- substrate-canonical
+    # damping so anti-stagnation can override repeated same-vowel
+    # cascades (v62 'light light light' problem).
     boost = torch.ones_like(probs)
-    log_phi = math.log(phi)
+    rhyme_scale = math.log(phi) / float(_FIB_NUMS_FOR_BIGRAM[3])
     for v, p in recent_pressure.items():
-        # Echo boost below saturation; penalty above.
-        delta = (sat - p) / (sat + abs(p) + 1e-8)   # in [-1, +1]
-        log_boost = log_phi * delta
+        log_boost = rhyme_scale * p / (1.0 + p)
         bf = math.exp(log_boost)
         for i, ev in enumerate(end_vowels):
             if ev == v:
@@ -1096,17 +1088,14 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
             for tid in seq[0].tolist():
                 if tid < len(vocab):
                     tok = vocab[tid]
+                    syl_pos += _approx_syllables(tok)
                     if tok in ('.', '!', '?', '\n'):
-                        # Sentence/line boundary: reset iambic + needs.
-                        syl_pos = 0
                         open_needs = 0
                         cluster_len = 0
-                    else:
-                        syl_pos += _approx_syllables(tok)
-                        if tid > content_thresh:
-                            open_needs += 1
-                        elif n_chars_local <= tid <= content_thresh:
-                            open_needs = max(0, open_needs - 1)
+                    elif tid > content_thresh:
+                        open_needs += 1
+                    elif n_chars_local <= tid <= content_thresh:
+                        open_needs = max(0, open_needs - 1)
                     # Cluster tracking from trailing chars of token.
                     if tok:
                         for ch in tok:
@@ -1185,17 +1174,14 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
                 nid = int(next_tok[0, 0])
                 if nid < len(vocab):
                     tok = vocab[nid]
+                    syl_pos += _approx_syllables(tok)
                     if tok in ('.', '!', '?', '\n'):
-                        # Sentence boundary reset.
-                        syl_pos = 0
                         open_needs = 0
                         cluster_len = 0
-                    else:
-                        syl_pos += _approx_syllables(tok)
-                        if nid > content_thresh:
-                            open_needs += 1
-                        elif n_chars_local <= nid <= content_thresh:
-                            open_needs = max(0, open_needs - 1)
+                    elif nid > content_thresh:
+                        open_needs += 1
+                    elif n_chars_local <= nid <= content_thresh:
+                        open_needs = max(0, open_needs - 1)
                     if tok:
                         for ch in tok:
                             if ch in _IAMBIC_VOWELS:
@@ -1272,16 +1258,11 @@ def _single_stage_refine(model, draft, vocab_size, scorer, mode: str,
                             int(new[0, t_draft - 1]), bigram_prior, pos_probs,
                             context_tokens=ctx_back, vocab=vocab)
                     # Iambic stress rhythm (period-2 weak/STRONG).
-                    # Reset syl_pos at sentence boundaries.
                     if vocab is not None:
                         syl_pos = 0
                         for tid in new[0, :t_draft].tolist():
                             if tid < len(vocab):
-                                tk = vocab[tid]
-                                if tk in ('.', '!', '?', '\n'):
-                                    syl_pos = 0
-                                else:
-                                    syl_pos += _approx_syllables(tk)
+                                syl_pos += _approx_syllables(vocab[tid])
                         pos_probs = substrate_iambic_phase(
                             syl_pos, pos_probs, vocab_size_local)
                     # Symbolic substitution disabled (v60 results).
