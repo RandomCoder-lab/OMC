@@ -1369,7 +1369,9 @@ def substrate_unknown_register(coverage: torch.Tensor,
     if coverage is None:
         return probs
     if retrocausal_steps is None:
-        retrocausal_steps = _FIB_NUMS_FOR_BIGRAM[3]   # F(3) = 2
+        # F(2)=1: just ONE step lookahead, continuity-respecting.
+        # F(3)=2 was a discontinuous jump (ignored intermediate state).
+        retrocausal_steps = _FIB_NUMS_FOR_BIGRAM[2]   # F(2) = 1
     cov = coverage.to(probs.device).to(probs.dtype)
     # Present unknown
     inv_now = 1.0 / (1.0 + cov)
