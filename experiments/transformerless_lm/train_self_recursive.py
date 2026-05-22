@@ -189,29 +189,75 @@ class ParametricSubstrate:
 
     def perturb(self, rng, step_size: float = 0.05,
                   fib_step: float = 0.10) -> "ParametricSubstrate":
-        """Joint perturbation: phi, pi_exp, AND fib_weights all change.
-
-        Single-constant mutations get stuck on pi because phi/fib changes
-        alone don't help. Joint vector perturbation lets all three drift
-        together -- each mutation is a 9-dim move in (phi, pi, fib_0..K).
-
-        Bounds: phi within +/- 20% of golden, pi_exp within +/- 20% of
-        math.pi, fib_weights non-negative.
+        """Joint blind perturbation: phi, pi_exp, all fib_weights drift.
+        No data signal -- pure random move bounded to substrate-physical
+        ranges. Kept for ablation against data-guided perturbation.
         """
         new = self.clone()
         K = len(self.fib_weights)
-        # phi: small step
         d_phi = (rng.random() * 2 - 1) * step_size
         new.phi = max(PHI_LOCAL * 0.8,
                         min(PHI_LOCAL * 1.2, self.phi * (1 + d_phi)))
-        # pi_exp: small step
         d_pi = (rng.random() * 2 - 1) * step_size
         new.pi_exp = max(math.pi * 0.8,
                             min(math.pi * 1.2, self.pi_exp * (1 + d_pi)))
-        # fib_weights: larger step ("toss" the fibs more aggressively)
         for k in range(K):
             d_fib = (rng.random() * 2 - 1) * fib_step
             new.fib_weights[k] = max(0.1, self.fib_weights[k] * (1 + d_fib))
+        return new
+
+    def data_guided_perturb(self, target_sig: torch.Tensor, rng,
+                              step_size: float = 0.05,
+                              noise_scale: float = 0.5,
+                              K_active: int = None,
+                              ) -> "ParametricSubstrate":
+        """Mutation BIASED by the corpus signature gradient.
+
+        Computes d|parametric_sig - target_sig|/d(phi, pi_exp, fib_weights)
+        via autograd, mutates each constant in the descent direction with
+        added noise (noise_scale fraction of step_size). The corpus tells
+        the mutation where to push every constant; pure random + reward
+        is replaced by data-informed proposal + reward.
+
+        K_active: if set, only the first K_active components contribute
+        to the gradient (matches K-harmony schedule).
+        """
+        K_full = len(self.fib_weights)
+        K_use = K_full if K_active is None else min(K_active, K_full)
+        # Tensors with grad enabled (must be float).
+        phi_t = torch.tensor(float(self.phi), requires_grad=True)
+        pi_t = torch.tensor(float(self.pi_exp), requires_grad=True)
+        fib_t = torch.tensor([float(x) for x in self.fib_weights],
+                              dtype=torch.float32, requires_grad=True)
+        ks = torch.arange(K_use, dtype=torch.float)
+        # parametric signature at K_use
+        unnorm = fib_t[:K_use] / (phi_t ** (pi_t * ks))
+        sig = unnorm / (unnorm.sum() + 1e-8)
+        # gap to target (truncated to K_use)
+        target = target_sig[:K_use]
+        target = target / (target.sum() + 1e-8)
+        loss = (sig - target).abs().sum()
+        loss.backward()
+        # Read gradients (descent = -grad).
+        g_phi = float(phi_t.grad)
+        g_pi = float(pi_t.grad)
+        g_fib = fib_t.grad.tolist()
+
+        new = self.clone()
+        # phi: step in -g_phi direction (multiplicatively scaled) + noise.
+        d_phi_rel = -g_phi * step_size + (rng.random() * 2 - 1) * step_size * noise_scale
+        new.phi = max(PHI_LOCAL * 0.8,
+                        min(PHI_LOCAL * 1.2, self.phi + d_phi_rel * abs(self.phi)))
+        d_pi_rel = -g_pi * step_size + (rng.random() * 2 - 1) * step_size * noise_scale
+        new.pi_exp = max(math.pi * 0.8,
+                            min(math.pi * 1.2,
+                                 self.pi_exp + d_pi_rel * abs(self.pi_exp)))
+        for k in range(K_full):
+            grad_k = g_fib[k] if k < K_use else 0.0
+            d_fib_rel = (-grad_k * step_size
+                          + (rng.random() * 2 - 1) * step_size * noise_scale)
+            new.fib_weights[k] = max(0.1, self.fib_weights[k]
+                                            + d_fib_rel * abs(self.fib_weights[k]))
         return new
 
     def summary(self) -> str:
@@ -264,17 +310,16 @@ def train_mutable_substrate(name, train_seed, corpus_anchor, val_split,
                               vocab_size, args, fib_positions,
                               harmony_kind="char",
                               mutation_every: int = 200,
-                              mutation_alpha: float = 0.9):
-    """Parametric substrate mutation with best-revert.
+                              mutation_alpha: float = 0.9,
+                              data_guided: bool = True):
+    """Parametric substrate mutation with best-revert + data guidance.
 
     Constants (phi, pi_exp, fib_weights) are the ONLY mutable values.
-    Signatures are derived from them via F(k)/phi^(pi_exp*k). Mutations
-    stay congruent to the substrate formula by construction.
-
-    Best-revert history: every (state, val) is recorded after evaluation.
-    A failed mutation (val degraded over the mutation window) reverts
-    NOT to the immediately-previous state, but to the BEST state seen
-    historically -- the lowest-val phi_pi_fib triple we've discovered.
+    When data_guided=True, mutations are biased by the corpus
+    signature: compute the gradient of |parametric_sig - corpus_sig|
+    w.r.t. each constant via autograd, mutate in descent direction
+    with added noise. The corpus tells the mutation where to push;
+    val tells us whether to keep or revert.
     """
     import random as _rng_mod
     rng = _rng_mod.Random(args.seed + 7)
@@ -294,13 +339,30 @@ def train_mutable_substrate(name, train_seed, corpus_anchor, val_split,
     K_sig = len(_FIB_FREQS_LOCAL)
     sig_char = substrate.get_signature(K_sig)
     sig_ms = substrate.get_signature(K_sig)
-    # History of accepted substrate states. Format: list of (state, val).
+    # History of accepted substrate states.
     history = [(substrate.clone(), float("inf"))]
 
+    # CORPUS SIGNATURE -- the data's voice. Used as the data-guidance
+    # target for mutation gradient. Pre-computed once from the actual
+    # corpus_anchor slice (NOT used in token-level training).
+    corpus_sig_char = corpus_char_signature(corpus_anchor, vocab_size)
+    corpus_sig_ms = corpus_multiscale_signature(corpus_anchor, vocab_size,
+                                                   seq_len=args.seq_len)
+    # Pick the target signature based on harmony kind.
+    if harmony_kind == "multiscale":
+        corpus_target = corpus_sig_ms
+    elif harmony_kind == "combined":
+        corpus_target = (corpus_sig_char + corpus_sig_ms) / 2.0
+    else:
+        corpus_target = corpus_sig_char
+
     print(f"\n[parametric_mutable {name}]  harmony={harmony_kind}  "
-          f"mutate_every={mutation_every}  params={n_params:,}", flush=True)
+          f"mutate_every={mutation_every}  data_guided={data_guided}  "
+          f"params={n_params:,}", flush=True)
     print(f"  initial constants: {substrate.summary()}")
-    print(f"  initial sig: {[round(x, 4) for x in sig_char.tolist()]}")
+    print(f"  initial parametric sig: {[round(x, 4) for x in sig_char.tolist()]}")
+    print(f"  corpus_sig_char: {[round(x, 4) for x in corpus_sig_char.tolist()]}")
+    print(f"  corpus_sig_ms:   {[round(x, 4) for x in corpus_sig_ms.tolist()]}")
 
     t0 = time.time()
     best_val = float("inf"); best_step = -1
@@ -366,13 +428,21 @@ def train_mutable_substrate(name, train_seed, corpus_anchor, val_split,
 
             # Apply a new mutation (no pending one, enough steps elapsed).
             if pending is None and (step - last_mutation_step) >= mutation_every:
-                # Start from BEST historical state (selection pressure)
-                # then perturb from there. Aggressive exploration with
-                # larger steps: many tries -> better chance of finding
-                # productive directions in 9-D phi_pi_fib space.
+                # Start from BEST historical state, then perturb. Data-guided
+                # mutation biases the proposal toward closing the gap to the
+                # corpus signature; blind mutation is uniform random.
                 best_state, _ = min(history, key=lambda x: x[1])
-                substrate = best_state.clone().perturb(
-                    rng, step_size=0.10, fib_step=0.15)
+                K_harmony_active = K_to_K_harmony(cur_K or args.K_init,
+                                                     K_init=args.K_init,
+                                                     K_min=args.K_min)
+                if data_guided:
+                    substrate = best_state.clone().data_guided_perturb(
+                        corpus_target, rng,
+                        step_size=0.05, noise_scale=0.4,
+                        K_active=K_harmony_active)
+                else:
+                    substrate = best_state.clone().perturb(
+                        rng, step_size=0.05, fib_step=0.10)
                 sig_char = substrate.get_signature(K_sig)
                 sig_ms = substrate.get_signature(K_sig)
                 n_mutations_tried += 1
@@ -381,7 +451,6 @@ def train_mutable_substrate(name, train_seed, corpus_anchor, val_split,
                     "baseline_val": best_val,
                     "eval_step": step + mutation_every,
                 }
-                # Only print every 5th mutation to keep log readable.
                 if n_mutations_tried <= 5 or n_mutations_tried % 5 == 0:
                     print(f"    [mutation TRIED]  {substrate.summary()}  "
                           f"baseline_val={best_val:.4f}  "
