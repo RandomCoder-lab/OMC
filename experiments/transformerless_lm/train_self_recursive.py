@@ -1491,11 +1491,9 @@ def train_with_self_distillation(name, train_seed, corpus_anchor, val_split,
 
     # Substrate token signatures (theme momentum) -- F-frequency cos basis
     # over char codes, phi-decayed across positions. L2-normalized.
-    if vocab_for_bigram is not None:
-        token_signatures = build_substrate_token_signatures(vocab_for_bigram)
-        print(f"  substrate token signatures: {token_signatures.shape}")
-    else:
-        token_signatures = None
+    # NOTE: v57 showed theme momentum drags mean creativity ~-0.01.
+    # Disabled for v59 to isolate iambic + threading.
+    token_signatures = None
 
     # Active training base: starts as tiny_seed, GROWS by appending each
     # cycle's best refined output -- only if (a) creativity > corpus
@@ -1515,18 +1513,11 @@ def train_with_self_distillation(name, train_seed, corpus_anchor, val_split,
     global_step = 0
     prompt = train_seed[:16].unsqueeze(0)
 
-    # Substrate vocab curriculum: tier-walked Fibonacci expansion.
-    # Cycle 1: F(8)=21 word slots; cycle 6: full vocab.
-    _VOCAB_TIERS = [21, 34, 55, 89, 144]   # F(8)..F(12)
-    n_chars = sum(1 for t in (vocab or []) if len(t) == 1) if vocab else 65
+    # Vocab curriculum disabled for v59 -- v58 showed it hurts mid-cycles.
     for cycle in range(n_cycles):
-        if cycle < len(_VOCAB_TIERS):
-            active_vocab_size = n_chars + _VOCAB_TIERS[cycle]
-        else:
-            active_vocab_size = None  # full vocab unlocked
+        active_vocab_size = None
         print(f"\n  --- Cycle {cycle+1}/{n_cycles}  "
               f"active_base_size={active_base.numel()} chars  "
-              f"active_vocab={active_vocab_size or vocab_size}  "
               f"best_creativity={best_creativity:.4f} ---", flush=True)
         for s in range(steps_per_cycle):
             new_K = sched(global_step, args.steps)
