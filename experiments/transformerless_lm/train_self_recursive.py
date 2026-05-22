@@ -499,6 +499,143 @@ def substrate_vocab_curriculum(probs: torch.Tensor,
 _IAMBIC_VOWELS = set("aeiouAEIOU")
 
 
+def _token_morphology(tok: str) -> str:
+    """Universal morphology class from suffix (no English word lists).
+    char | verb_archaic | gerund | past | adverb | plural | root.
+    """
+    if not tok or len(tok) <= 1:
+        return 'char'
+    if tok.endswith('eth') or tok.endswith('est'):
+        return 'verb_archaic'
+    if tok.endswith('ing'):
+        return 'gerund'
+    if tok.endswith('ed'):
+        return 'past'
+    if tok.endswith('ly'):
+        return 'adverb'
+    if tok.endswith('s') and len(tok) > 2:
+        return 'plural'
+    return 'root'
+
+
+def build_symbol_classes(vocab: list, n_chars: int = 65) -> tuple:
+    """Each token's class = (rank_tier, morphology). Rank-tier is the
+    Fibonacci-walk band the token's rank falls into (within the word
+    region). Chars get their own tier. Morphology from suffix.
+    Pure substrate (F-tier + suffix shape, no word lists).
+
+    Returns (class_id_tensor[V], n_classes).
+    """
+    F = _FIB_NUMS_FOR_BIGRAM   # [1,1,2,3,5,8,13,21,34,55,89,144]
+    cum_tiers = []
+    cum = n_chars
+    for f in F:
+        cum += f
+        cum_tiers.append(cum)
+
+    def rank_tier(i: int) -> int:
+        if i < n_chars:
+            return -1
+        for ti, ct in enumerate(cum_tiers):
+            if i < ct:
+                return ti
+        return len(cum_tiers)
+
+    morphs = ['char', 'verb_archaic', 'gerund', 'past',
+                'adverb', 'plural', 'root']
+    morph_to_idx = {m: i for i, m in enumerate(morphs)}
+    n_morph = len(morphs)
+    # Class id = (tier + 1) * n_morph + morph_idx
+    class_ids = []
+    for i, tok in enumerate(vocab):
+        tier = rank_tier(i)
+        m = _token_morphology(tok)
+        cid = (tier + 1) * n_morph + morph_to_idx[m]
+        class_ids.append(cid)
+    class_id_tensor = torch.tensor(class_ids, dtype=torch.long)
+    n_classes = int(class_id_tensor.max().item()) + 1
+    return class_id_tensor, n_classes
+
+
+def substrate_symbolic_substitution(probs: torch.Tensor,
+                                       class_id_tensor: torch.Tensor,
+                                       n_classes: int,
+                                       alpha: float = None) -> torch.Tensor:
+    """Smooth probability mass within symbol equivalence classes.
+
+    Per class: redistribute alpha-fraction of mass uniformly across
+    siblings; keep (1-alpha) at the original spike. Variety without
+    breaking grammar -- tokens in the same (rank-tier, morphology)
+    class are mutually substitutable.
+
+    alpha defaults to 1/phi^pi (substrate-canonical, ~0.221).
+    """
+    if alpha is None:
+        alpha = 1.0 / (_PHI_FOR_SAMPLING ** math.pi)
+    cids = class_id_tensor.to(probs.device)
+    class_totals = torch.zeros(n_classes, dtype=probs.dtype,
+                                  device=probs.device)
+    class_totals.scatter_add_(0, cids, probs)
+    counts = torch.zeros(n_classes, dtype=probs.dtype,
+                            device=probs.device)
+    counts.scatter_add_(0, cids, torch.ones_like(probs))
+    counts.clamp_(min=1.0)
+    uniform_per_class = class_totals / counts
+    uniform_per_token = uniform_per_class[cids]
+    out = (1.0 - alpha) * probs + alpha * uniform_per_token
+    return out / (out.sum() + 1e-8)
+
+
+def build_pronoun_mask(vocab: list) -> torch.Tensor:
+    """Identify pronoun-shape tokens: low rank + monosyllabic + no suffix.
+    Pure substrate (rank + syllable + morphology shape).
+    """
+    V = len(vocab)
+    mask = torch.zeros(V)
+    for i, tok in enumerate(vocab):
+        if not tok or len(tok) == 1:
+            continue
+        is_low_rank = i < 78   # 65 chars + F(7)=13 most common words
+        no_suffix = _token_morphology(tok) == 'root'
+        is_monosyl = _approx_syllables(tok) == 1
+        if is_low_rank and no_suffix and is_monosyl:
+            mask[i] = 1.0
+    return mask
+
+
+def substrate_reference_chain(recent_tokens: list,
+                                  pronoun_mask: torch.Tensor,
+                                  probs: torch.Tensor,
+                                  n_chars: int = 65) -> torch.Tensor:
+    """Anaphora: boost pronoun-shape tokens when recent content tokens
+    create open reference slots.
+
+    Pressure = sum_k F(k)/phi^(pi*k) over recent CONTENT tokens at
+    distance k (k=0 most-recent). Bounded log-boost = log(phi) *
+    pressure / (1 + pressure). Pure substrate (F-decay + rank-tier).
+    """
+    if not recent_tokens:
+        return probs
+    phi = _PHI_FOR_SAMPLING
+    phi_pi = phi ** math.pi
+    content_thresh = n_chars + _FIB_NUMS_FOR_BIGRAM[7]   # 65 + 13 = 78
+    pressure = 0.0
+    for i, tid in enumerate(reversed(recent_tokens)):
+        if i >= 13:
+            break
+        if tid > content_thresh:
+            k = min(i, len(_FIB_NUMS_FOR_BIGRAM) - 1)
+            pressure += _FIB_NUMS_FOR_BIGRAM[k] / (phi_pi ** k)
+    if pressure <= 0:
+        return probs
+    log_boost = math.log(phi) * pressure / (1.0 + pressure)
+    boost_factor = math.exp(log_boost)
+    pmask = pronoun_mask.to(probs.device).to(probs.dtype)
+    boost = 1.0 + pmask * (boost_factor - 1.0)
+    out = probs * boost
+    return out / (out.sum() + 1e-8)
+
+
 def _approx_syllables(tok_str: str) -> int:
     """Approximate syllable count = number of vowel-clusters.
     Pure substrate (char-class arithmetic). Min 1 for non-empty tokens.
@@ -807,7 +944,10 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
                               bigram_prior: torch.Tensor = None,
                               vocab: list = None,
                               token_signatures: torch.Tensor = None,
-                              active_vocab_size: int = None):
+                              active_vocab_size: int = None,
+                              class_id_tensor: torch.Tensor = None,
+                              n_classes: int = 0,
+                              pronoun_mask: torch.Tensor = None):
     """Sample n_new tokens autoregressively with substrate sampling AND
     a substrate-canonical recency penalty.
 
@@ -847,6 +987,15 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
             # Iambic stress rhythm (period-2 weak/STRONG alternation).
             probs[0] = substrate_iambic_phase(
                 syl_pos, probs[0], vocab_size)
+            # Symbolic substitution (within-class mass smoothing).
+            if class_id_tensor is not None and n_classes > 0:
+                probs[0] = substrate_symbolic_substitution(
+                    probs[0], class_id_tensor, n_classes)
+            # Symbolic reference chain (pronoun anaphora).
+            if pronoun_mask is not None and seq.shape[1] >= 1:
+                recent_list = seq[0, -13:].tolist()
+                probs[0] = substrate_reference_chain(
+                    recent_list, pronoun_mask, probs[0])
             # Theme momentum (subject-matter coherence).
             if token_signatures is not None and seq.shape[1] >= 1:
                 recent_list = seq[0, -13:].tolist()
@@ -888,7 +1037,10 @@ def _single_stage_refine(model, draft, vocab_size, scorer, mode: str,
                             bigram_prior: torch.Tensor = None,
                             vocab: list = None,
                             token_signatures: torch.Tensor = None,
-                            active_vocab_size: int = None):
+                            active_vocab_size: int = None,
+                            class_id_tensor: torch.Tensor = None,
+                            n_classes: int = 0,
+                            pronoun_mask: torch.Tensor = None):
     """One refinement stage: optimize a single score until plateau.
 
     mode: 'min' (harmony, quality) or 'max' (creativity).
@@ -947,6 +1099,16 @@ def _single_stage_refine(model, draft, vocab_size, scorer, mode: str,
                                 syl_pos += _approx_syllables(vocab[tid])
                         pos_probs = substrate_iambic_phase(
                             syl_pos, pos_probs, vocab_size_local)
+                    # Symbolic substitution (within-class smoothing).
+                    if class_id_tensor is not None and n_classes > 0:
+                        pos_probs = substrate_symbolic_substitution(
+                            pos_probs, class_id_tensor, n_classes)
+                    # Symbolic reference chain (pronoun anaphora).
+                    if pronoun_mask is not None and t_draft >= 1:
+                        recent_start = max(0, t_draft - 13)
+                        recent_list = new[0, recent_start:t_draft].tolist()
+                        pos_probs = substrate_reference_chain(
+                            recent_list, pronoun_mask, pos_probs)
                     # Theme momentum (subject-matter coherence).
                     if token_signatures is not None and t_draft >= 1:
                         recent_start = max(0, t_draft - 13)
@@ -1004,7 +1166,10 @@ def staged_refine(model, prompt, n_new, vocab_size,
                     bigram_prior: torch.Tensor = None,
                     vocab: list = None,
                     token_signatures: torch.Tensor = None,
-                    active_vocab_size: int = None):
+                    active_vocab_size: int = None,
+                    class_id_tensor: torch.Tensor = None,
+                    n_classes: int = 0,
+                    pronoun_mask: torch.Tensor = None):
     """Staircase refinement: hit one score, then the next, then the next.
 
     Stage 1: substrate alignment (minimize harmony) -- match the shape.
@@ -1020,7 +1185,7 @@ def staged_refine(model, prompt, n_new, vocab_size,
     with torch.no_grad():
         draft = autoregressive_generate(model, prompt, n_new=n_new,
                                           vocab_size=vocab_size,
-                                          temperature=temperature, bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures, active_vocab_size=active_vocab_size)
+                                          temperature=temperature, bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures, active_vocab_size=active_vocab_size, class_id_tensor=class_id_tensor, n_classes=n_classes, pronoun_mask=pronoun_mask)
     stages_out = {}
     stages_out["initial"] = {"seq": draft.clone(),
                                 "harmony": harmony_scorer(draft),
@@ -1033,7 +1198,7 @@ def staged_refine(model, prompt, n_new, vocab_size,
                                             n_iters=n_iters_per_stage,
                                             resample_frac=resample_frac,
                                             prompt_len=prompt_len,
-                                            temperature=temperature, bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures, active_vocab_size=active_vocab_size)
+                                            temperature=temperature, bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures, active_vocab_size=active_vocab_size, class_id_tensor=class_id_tensor, n_classes=n_classes, pronoun_mask=pronoun_mask)
     stages_out["after_harmony"] = {"seq": draft.clone(),
                                        "trajectory": h_traj,
                                        "harmony": harmony_scorer(draft),
@@ -1046,7 +1211,7 @@ def staged_refine(model, prompt, n_new, vocab_size,
                                             n_iters=n_iters_per_stage,
                                             resample_frac=resample_frac,
                                             prompt_len=prompt_len,
-                                            temperature=temperature, bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures, active_vocab_size=active_vocab_size)
+                                            temperature=temperature, bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures, active_vocab_size=active_vocab_size, class_id_tensor=class_id_tensor, n_classes=n_classes, pronoun_mask=pronoun_mask)
     stages_out["after_quality"] = {"seq": draft.clone(),
                                        "trajectory": q_traj,
                                        "harmony": harmony_scorer(draft),
@@ -1060,7 +1225,7 @@ def staged_refine(model, prompt, n_new, vocab_size,
                                                 n_iters=n_iters_per_stage,
                                                 resample_frac=resample_frac,
                                                 prompt_len=prompt_len,
-                                                temperature=temperature, bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures, active_vocab_size=active_vocab_size)
+                                                temperature=temperature, bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures, active_vocab_size=active_vocab_size, class_id_tensor=class_id_tensor, n_classes=n_classes, pronoun_mask=pronoun_mask)
         stages_out["after_creativity"] = {"seq": draft.clone(),
                                               "trajectory": c_traj,
                                               "harmony": harmony_scorer(draft),
@@ -1094,7 +1259,7 @@ def iterative_refine(model, prompt, n_new, vocab_size,
         # Step 1: initial draft.
         draft = autoregressive_generate(model, prompt, n_new=n_new,
                                           vocab_size=vocab_size,
-                                          temperature=temperature, bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures, active_vocab_size=active_vocab_size)
+                                          temperature=temperature, bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures, active_vocab_size=active_vocab_size, class_id_tensor=class_id_tensor, n_classes=n_classes, pronoun_mask=pronoun_mask)
         history = []
         h0 = harmony_scorer(draft) if harmony_scorer is not None else None
         q0 = quality_scorer(draft) if quality_scorer is not None else None
@@ -1489,11 +1654,21 @@ def train_with_self_distillation(name, train_seed, corpus_anchor, val_split,
         bigram_prior = build_substrate_bigram(vocab_size)
     print(f"  refined substrate bigram (shape * POS): {bigram_prior.shape}")
 
-    # Substrate token signatures (theme momentum) -- F-frequency cos basis
-    # over char codes, phi-decayed across positions. L2-normalized.
-    # NOTE: v57 showed theme momentum drags mean creativity ~-0.01.
-    # Disabled for v59 to isolate iambic + threading.
+    # Theme momentum disabled (v57 showed it drags ~-0.01).
     token_signatures = None
+
+    # Symbolic primitives (v60+): equivalence classes + reference chain.
+    if vocab_for_bigram is not None:
+        n_chars_local = sum(1 for t in vocab_for_bigram if len(t) == 1)
+        class_id_tensor, n_classes = build_symbol_classes(
+            vocab_for_bigram, n_chars=n_chars_local)
+        pronoun_mask = build_pronoun_mask(vocab_for_bigram)
+        print(f"  symbol classes: {n_classes} | "
+              f"pronoun candidates: {int(pronoun_mask.sum().item())}")
+    else:
+        class_id_tensor = None
+        n_classes = 0
+        pronoun_mask = None
 
     # Active training base: starts as tiny_seed, GROWS by appending each
     # cycle's best refined output -- only if (a) creativity > corpus
@@ -1561,14 +1736,14 @@ def train_with_self_distillation(name, train_seed, corpus_anchor, val_split,
                 draft = autoregressive_generate(
                     model, prompt_s, n_new=growth_n_new,
                     vocab_size=vocab_size, temperature=0.8,
-                    bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures, active_vocab_size=active_vocab_size)
+                    bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures, active_vocab_size=active_vocab_size, class_id_tensor=class_id_tensor, n_classes=n_classes, pronoun_mask=pronoun_mask)
             refined_s, _ = staged_refine(
                 model, prompt_s, n_new=growth_n_new, vocab_size=vocab_size,
                 harmony_scorer=harmony_fn, quality_scorer=quality_fn,
                 creativity_scorer=creativity_fn,
                 n_iters_per_stage=30, resample_frac=0.35,
                 prompt_len=16, temperature=0.5,
-                bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures, active_vocab_size=active_vocab_size)
+                bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures, active_vocab_size=active_vocab_size, class_id_tensor=class_id_tensor, n_classes=n_classes, pronoun_mask=pronoun_mask)
             samples.append((refined_s.squeeze(0).clone(),
                               creativity_fn(refined_s)))
         # Sort by creativity desc, keep top K.
@@ -1638,14 +1813,14 @@ def train_with_self_distillation(name, train_seed, corpus_anchor, val_split,
     final_gen = autoregressive_generate(model, prompt, n_new=n_new,
                                           vocab_size=vocab_size,
                                           temperature=0.8,
-                                          bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures, active_vocab_size=active_vocab_size)
+                                          bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures, active_vocab_size=active_vocab_size, class_id_tensor=class_id_tensor, n_classes=n_classes, pronoun_mask=pronoun_mask)
     final_refined, _ = staged_refine(
         model, prompt, n_new=n_new, vocab_size=vocab_size,
         harmony_scorer=harmony_fn, quality_scorer=quality_fn,
         creativity_scorer=creativity_fn,
         n_iters_per_stage=200, resample_frac=0.35,
         prompt_len=16, temperature=0.5,
-        bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures, active_vocab_size=active_vocab_size)
+        bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures, active_vocab_size=active_vocab_size, class_id_tensor=class_id_tensor, n_classes=n_classes, pronoun_mask=pronoun_mask)
 
     return {"name": name, "mode": "self_distillation",
              "n_params": n_params,
