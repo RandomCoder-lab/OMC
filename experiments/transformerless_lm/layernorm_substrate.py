@@ -25,24 +25,33 @@ PHI_PI = PHI ** math.pi                # substrate's canonical contraction ≈ 4
 FIB = [1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89]
 
 
+MAD_OVER_STD = math.sqrt(2.0 / math.pi)   # ≈ 0.7979 for Gaussian
+
+
 class SubstrateL1LN(nn.Module):
     """LayerNorm with L1 mean-absolute-deviation instead of L2 std.
 
     Standard LN: (x − mean) / sqrt(var + eps)
     Substrate LN: (x − mean) / (mean_abs_dev + eps)
 
-    Same gamma/beta as standard. L1 deviation is the substrate's
-    canonical metric. For Gaussian-distributed activations, MAD ≈
-    0.7979 * std, so activations end up scaled slightly larger than
-    with L2 — gamma can absorb the difference during training.
+    Calibrated init: for Gaussian activations, MAD ≈ sqrt(2/pi)·std ≈
+    0.7979·std. Dividing by MAD inflates the output by ~1.253× vs
+    standard LN. Initializing gamma to sqrt(2/pi) cancels that inflation
+    so the output magnitude matches standard LN at init — preserves the
+    activation scale the rest of the model was calibrated for. The L1
+    nature of the spread differentiates from standard LN as training
+    proceeds; calibrated init means improvement is discernible early
+    rather than spent re-learning scales.
     """
 
-    def __init__(self, normalized_shape, eps: float = 1e-5):
+    def __init__(self, normalized_shape, eps: float = 1e-5,
+                 gamma_init: float = MAD_OVER_STD):
         super().__init__()
         if isinstance(normalized_shape, int):
             normalized_shape = (normalized_shape,)
         self.normalized_shape = tuple(normalized_shape)
-        self.gamma = nn.Parameter(torch.ones(*self.normalized_shape))
+        self.gamma = nn.Parameter(
+            torch.full(self.normalized_shape, float(gamma_init)))
         self.beta = nn.Parameter(torch.zeros(*self.normalized_shape))
         self.eps = eps
 

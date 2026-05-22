@@ -1,17 +1,22 @@
-"""A/B bench for refined substrate LayerNorm and Softmax v2.
+"""A/B bench for substrate LN and Softmax (calibrated remix).
 
 Stacks on top of SubstrateNegMultiAdvancedV2 (val=2.5889 on its own).
-After v1 attempts (median_ln, tier_softmax) underperformed, refined:
-  - SubstrateWeiszfeldLN: one-step Weiszfeld for smooth L1 center
-    (fixes median's sparse-gradient failure; full L1 alignment kept)
-  - substrate_attractor_softmax: exp-free, 1/(1 + d*phi^pi) on L1
-    attractor distance (matches activation's L1 attractor design)
+After median_ln and weiszfeld_ln both lagged hard early (model had
+to relearn the activation scale), pivot to scale-calibrated remix:
+
+  - SubstrateL1LN with gamma_init = sqrt(2/pi) ≈ 0.7979. For Gaussian
+    activations MAD ≈ 0.7979·std, so this calibrated gamma makes L1LN
+    output match standard LN scale at init -- L1 differentiates only
+    in distribution shape, not magnitude.
+  - substrate_softmax = F.softmax(x · pi·log(phi)): single-temp phi^pi
+    base. At init FibGen scores are small so it's near-uniform like
+    F.softmax; substrate temperature kicks in as scores grow.
 
 Four arms (all with V2 activation):
-  baseline_v2               standard LN + standard softmax (= 2.5889 ref)
-  + weiszfeld_ln            SubstrateWeiszfeldLN + standard softmax
-  + attractor_softmax       standard LN + substrate_attractor_softmax
-  + both                    SubstrateWeiszfeldLN + substrate_attractor_softmax
+  baseline_v2     standard LN + standard softmax (= 2.5889 ref)
+  + l1_ln_cal     SubstrateL1LN(gamma=0.798) + standard softmax
+  + phi_pi_sm     standard LN + substrate_softmax
+  + both          SubstrateL1LN(gamma=0.798) + substrate_softmax
 """
 
 import argparse
@@ -162,7 +167,7 @@ def main():
     parser.add_argument("--K-init", type=int, default=89)
     parser.add_argument("--K-min", type=int, default=13)
     parser.add_argument("--lambda-sub", type=float, default=0.01)
-    parser.add_argument("--out", type=str, default="results_substrate_norm_v3.json")
+    parser.add_argument("--out", type=str, default="results_substrate_norm_v4.json")
     args = parser.parse_args()
 
     chars, stoi, itos, encoded = make_dataset(seq_len=args.seq_len,
@@ -174,10 +179,10 @@ def main():
     fib_positions = fib_positions_in_window(args.seq_len)
 
     arms = [
-        ("baseline_v2",         nn.LayerNorm,           None),
-        ("weiszfeld_ln",        SubstrateWeiszfeldLN,   None),
-        ("attractor_softmax",   nn.LayerNorm,           substrate_attractor_softmax),
-        ("both",                SubstrateWeiszfeldLN,   substrate_attractor_softmax),
+        ("baseline_v2",   nn.LayerNorm,    None),
+        ("l1_ln_cal",     SubstrateL1LN,   None),
+        ("phi_pi_sm",     nn.LayerNorm,    substrate_softmax),
+        ("both",          SubstrateL1LN,   substrate_softmax),
     ]
     results = {}
     for name, ln_cls, sm_fn in arms:
