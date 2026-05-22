@@ -1544,9 +1544,13 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
             history_aw = seq[0, -21:]
             p = substrate_anti_stagnation(history_aw, base, vocab_size)
             math_delta += _omniweight_delta(base, p)
-            # Unknown-register: positive pull toward un-emitted tokens.
-            p = substrate_unknown_register(coverage, base)
-            math_delta += _omniweight_delta(base, p)
+            # Unknown-register: BOTH hemispheres feel curiosity equally.
+            # The frontier signal is meta -- exploration is neither pure
+            # frequency nor pure structure; both hemispheres receive it.
+            p_unknown = substrate_unknown_register(coverage, base)
+            d_unknown = _omniweight_delta(base, p_unknown)
+            math_delta += d_unknown
+            lang_delta += d_unknown
             # ---- Language hemisphere ----
             p = substrate_iambic_phase(
                 syl_pos, base, vocab_size, newline_mask=newline_mask)
