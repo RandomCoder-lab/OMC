@@ -42,7 +42,8 @@ from activations_substrate import SubstrateNegMultiAdvancedV2
 from layernorm_substrate import (SubstrateL1LN, SubstrateMedianLN,
                                    SubstrateWeiszfeldLN,
                                    substrate_softmax, substrate_tier_softmax,
-                                   substrate_attractor_softmax)
+                                   substrate_attractor_softmax,
+                                   SubstrateBlendedSoftmax)
 
 
 class FibRecLMSubstrateNorm(FibRecLM):
@@ -51,7 +52,8 @@ class FibRecLMSubstrateNorm(FibRecLM):
     Always uses SubstrateNegMultiRefined for the FFN activation.
     LN class and softmax fn are configurable per instance.
     """
-    def __init__(self, *args, ln_cls=nn.LayerNorm, softmax_fn=None, **kwargs):
+    def __init__(self, *args, ln_cls=nn.LayerNorm, softmax_param=None,
+                  **kwargs):
         super().__init__(*args, **kwargs)
         # Replace LN modules with the chosen class.
         if ln_cls is not nn.LayerNorm:
@@ -65,9 +67,19 @@ class FibRecLMSubstrateNorm(FibRecLM):
         self.activations = nn.ModuleList(
             [SubstrateNegMultiAdvancedV2() for _ in range(self.n_blocks)]
         )
-        self._softmax_fn = softmax_fn if softmax_fn is not None else \
-            (lambda x, dim=-1: F.softmax(x, dim=dim))
-        self._softmax_label = getattr(softmax_fn, "__name__", "F.softmax")
+        # Softmax can be None (=> F.softmax), a callable function, or a
+        # nn.Module class to instantiate per-block (for learnable params).
+        if softmax_param is None:
+            self._softmaxes = None
+            self._softmax_fn = lambda x, dim=-1: F.softmax(x, dim=dim)
+        elif isinstance(softmax_param, type) and issubclass(softmax_param,
+                                                              nn.Module):
+            self._softmaxes = nn.ModuleList(
+                [softmax_param() for _ in range(self.n_blocks)])
+            self._softmax_fn = None
+        else:
+            self._softmaxes = None
+            self._softmax_fn = softmax_param
 
     def _layer_forward(self, x, mask, n, seeds_n):
         qkv_s, out_s, w1_s, w2_s = seeds_n
@@ -79,7 +91,10 @@ class FibRecLMSubstrateNorm(FibRecLM):
         scale = 1.0 / math.sqrt(self.d_model)
         scores = (q @ k.transpose(-2, -1)) * scale
         scores = scores.masked_fill(mask == 0, float("-inf"))
-        attn = self._softmax_fn(scores, dim=-1)
+        if self._softmaxes is not None:
+            attn = self._softmaxes[n](scores, dim=-1)
+        else:
+            attn = self._softmax_fn(scores, dim=-1)
         out_basis = {"cos_i": self.out_cos_i, "sin_i": self.out_sin_i,
                       "cos_j": self.out_cos_j, "sin_j": self.out_sin_j}
         x = x + stateless_fibgen_forward(attn @ v, out_s, out_basis, self.K)
@@ -109,21 +124,21 @@ def evaluate(model, val_split, batch_size, window, fib_positions, generator,
     return sum(losses) / len(losses)
 
 
-def train_one(name, ln_cls, softmax_fn, train_split, val_split, vocab_size,
-               args, fib_positions):
+def train_one(name, ln_cls, softmax_param, train_split, val_split,
+               vocab_size, args, fib_positions):
     torch.manual_seed(args.seed)
     gen = torch.Generator(); gen.manual_seed(args.seed + 1)
     model = FibRecLMSubstrateNorm(
         vocab_size=vocab_size, d_model=args.d_model, n_blocks=args.n_blocks,
         seq_len=args.seq_len, K=args.K_init, mode="cross",
-        ln_cls=ln_cls, softmax_fn=softmax_fn,
+        ln_cls=ln_cls, softmax_param=softmax_param,
     )
     optimizer = FibonacciAdamW(model.parameters(), lr=args.lr)
     sched = lambda s, T: K_schedule_tier_walk(s, T, K_init=args.K_init,
                                                  K_min=args.K_min)
     n_params = sum(p.numel() for p in model.parameters())
     ln_name = ln_cls.__name__
-    sm_name = getattr(softmax_fn, "__name__", "F.softmax")
+    sm_name = getattr(softmax_param, "__name__", "F.softmax")
     print(f"\n[train {name}]  ln={ln_name}  softmax={sm_name}  "
           f"params={n_params:,}", flush=True)
     t0 = time.time()
@@ -148,8 +163,15 @@ def train_one(name, ln_cls, softmax_fn, train_split, val_split, vocab_size,
             if vl < best_val:
                 best_val = vl; best_step = step
                 marker = " ← BEST"
+            # Log per-block alphas if using a learnable blend softmax.
+            alpha_str = ""
+            if isinstance(model._softmaxes, nn.ModuleList) and \
+                isinstance(model._softmaxes[0], SubstrateBlendedSoftmax):
+                alphas = [torch.sigmoid(sm.logit_alpha).item()
+                          for sm in model._softmaxes]
+                alpha_str = f"  alphas={[round(a, 4) for a in alphas]}"
             print(f"  step {step:5d}  val={vl:.4f}  K={cur_K}  "
-                  f"({time.time()-t0:.1f}s){marker}", flush=True)
+                  f"({time.time()-t0:.1f}s){marker}{alpha_str}", flush=True)
     return {"name": name, "n_params": n_params, "best_val": best_val,
              "best_step": best_step, "wall": time.time() - t0}
 
@@ -178,12 +200,14 @@ def main():
     )
     fib_positions = fib_positions_in_window(args.seq_len)
 
-    # L1-based LN of any flavor lags badly (median, weiszfeld, l1_ln_cal
-    # all 8-14% behind baseline; K-shrink doesn't help). Activations are
-    # roughly Gaussian -- L2 std normalization is the right metric here.
-    # Isolate softmax substrate test on its own.
+    # All previous wholesale substrate softmaxes lagged baseline
+    # (substrate_softmax +7.5% at step 533, K-shrink didn't close gap).
+    # Switch to learnable blend -- at init this IS F.softmax (alpha=0),
+    # model can grow alpha if substrate adds signal. Definitive answer:
+    # if alpha stays near 0, substrate softmax doesn't help; if grows,
+    # we see real substrate signal in attention.
     arms = [
-        ("phi_pi_sm",     nn.LayerNorm,    substrate_softmax),
+        ("blended_sm",   nn.LayerNorm,    SubstrateBlendedSoftmax),
     ]
     results = {}
     for name, ln_cls, sm_fn in arms:

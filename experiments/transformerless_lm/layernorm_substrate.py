@@ -169,6 +169,47 @@ def substrate_tier_softmax(x: torch.Tensor, dim: int = -1,
     return out
 
 
+class SubstrateBlendedSoftmax(nn.Module):
+    """Learnable blend between F.softmax and substrate_softmax.
+
+    Wholesale replacements (substrate_softmax, tier, attractor) all
+    lagged baseline. Either substrate softmax has no signal at this
+    scale, or its sharper temperature hurts the model -- benchmarks
+    can't tell us which.
+
+    Solution: blend.
+
+        out = (1 - alpha) * F.softmax(x)
+             +     alpha  * F.softmax(x * pi*log(phi))
+
+    alpha = sigmoid(logit_alpha) in [0, 1]; init logit_alpha = -10 so
+    alpha ≈ 4.5e-5 ≈ 0 -- at init this IS F.softmax exactly. The
+    model can grow alpha over training only if the substrate signal
+    helps. If alpha stays near 0, substrate softmax doesn't help and
+    we get a clear negative result. If alpha grows, substrate has
+    real signal at the layer where alpha grew.
+
+    Either way, the answer is discernible -- worst case we match
+    baseline (alpha stays at 0), best case we improve on it.
+    """
+
+    def __init__(self, init_alpha: float = 0.0):
+        super().__init__()
+        if init_alpha <= 0.0:
+            init_logit = -10.0
+        elif init_alpha >= 1.0:
+            init_logit = 10.0
+        else:
+            init_logit = math.log(init_alpha / (1.0 - init_alpha))
+        self.logit_alpha = nn.Parameter(torch.tensor(float(init_logit)))
+
+    def forward(self, x: torch.Tensor, dim: int = -1) -> torch.Tensor:
+        alpha = torch.sigmoid(self.logit_alpha)
+        std = F.softmax(x, dim=dim)
+        sub = F.softmax(x * PI_LOG_PHI, dim=dim)
+        return (1.0 - alpha) * std + alpha * sub
+
+
 def substrate_attractor_softmax(x: torch.Tensor,
                                   dim: int = -1) -> torch.Tensor:
     """Exp-free substrate-canonical normalization via L1 attractor distance.
