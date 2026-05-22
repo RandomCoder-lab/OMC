@@ -496,6 +496,51 @@ def substrate_vocab_curriculum(probs: torch.Tensor,
     return out / s
 
 
+_IAMBIC_VOWELS = set("aeiouAEIOU")
+
+
+def _approx_syllables(tok_str: str) -> int:
+    """Approximate syllable count = number of vowel-clusters.
+    Pure substrate (char-class arithmetic). Min 1 for non-empty tokens.
+    """
+    if not tok_str:
+        return 0
+    n = 0
+    prev_v = False
+    for ch in tok_str:
+        v = ch in _IAMBIC_VOWELS
+        if v and not prev_v:
+            n += 1
+        prev_v = v
+    return max(1, n)
+
+
+def substrate_iambic_phase(syl_pos: int, probs: torch.Tensor,
+                              vocab_size: int) -> torch.Tensor:
+    """Iambic stress rhythm: period-2 (F(3)) weak/STRONG alternation.
+
+      syl_pos even -> WEAK position  -> boost LOW rank (function words)
+      syl_pos odd  -> STRONG position -> boost HIGH rank (content words)
+
+    Polarity: 1 - 2*rank/(V-1). Log-boost: log(phi) * (+1 or -1) * pol.
+    Bounded [1/phi, phi]. Pure substrate (period 2 = F(3), polarity from
+    rank-tier).
+
+    Shakespeare's iambic-pentameter signature reified as a sampling-time
+    bias.
+    """
+    if vocab_size <= 1:
+        return probs
+    sign = 1.0 if (syl_pos % 2 == 0) else -1.0
+    ranks = torch.arange(vocab_size, dtype=probs.dtype,
+                          device=probs.device)
+    rank_pol = 1.0 - 2.0 * ranks / (vocab_size - 1)
+    log_boost = math.log(_PHI_FOR_SAMPLING) * sign * rank_pol
+    boost = torch.exp(log_boost)
+    out = probs * boost
+    return out / (out.sum() + 1e-8)
+
+
 def substrate_golden_phase(t_pos: int, probs: torch.Tensor,
                               vocab_size: int) -> torch.Tensor:
     """Golden-angle phase: functional/content rhythm primitive.
@@ -776,6 +821,12 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
     model.eval()
     with torch.no_grad():
         seq = prompt.clone()
+        # Iambic syllable counter: sum syllables of prompt tokens.
+        syl_pos = 0
+        if vocab is not None:
+            for tid in seq[0].tolist():
+                if tid < len(vocab):
+                    syl_pos += _approx_syllables(vocab[tid])
         for _ in range(n_new):
             T = seq.shape[1]
             ctx = seq if T <= model.seq_len else seq[:, -model.seq_len:]
@@ -793,9 +844,9 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
                 probs[0] = substrate_syntax_blend(
                     int(seq[0, -1]), bigram_prior, probs[0],
                     context_tokens=ctx_back, vocab=vocab)
-            # Golden-phase rhythm (functional/content alternation).
-            probs[0] = substrate_golden_phase(
-                seq.shape[1], probs[0], vocab_size)
+            # Iambic stress rhythm (period-2 weak/STRONG alternation).
+            probs[0] = substrate_iambic_phase(
+                syl_pos, probs[0], vocab_size)
             # Theme momentum (subject-matter coherence).
             if token_signatures is not None and seq.shape[1] >= 1:
                 recent_list = seq[0, -13:].tolist()
@@ -821,6 +872,11 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
                     probs[0], active_vocab_size)
             next_tok = torch.multinomial(probs, num_samples=1)
             seq = torch.cat([seq, next_tok], dim=1)
+            # Advance iambic syllable counter.
+            if vocab is not None:
+                nid = int(next_tok[0, 0])
+                if nid < len(vocab):
+                    syl_pos += _approx_syllables(vocab[nid])
     model.train()
     return seq
 
@@ -883,9 +939,14 @@ def _single_stage_refine(model, draft, vocab_size, scorer, mode: str,
                         pos_probs = substrate_syntax_blend(
                             int(new[0, t_draft - 1]), bigram_prior, pos_probs,
                             context_tokens=ctx_back, vocab=vocab)
-                    # Golden-phase rhythm (functional/content alternation).
-                    pos_probs = substrate_golden_phase(
-                        t_draft, pos_probs, vocab_size_local)
+                    # Iambic stress rhythm (period-2 weak/STRONG).
+                    if vocab is not None:
+                        syl_pos = 0
+                        for tid in new[0, :t_draft].tolist():
+                            if tid < len(vocab):
+                                syl_pos += _approx_syllables(vocab[tid])
+                        pos_probs = substrate_iambic_phase(
+                            syl_pos, pos_probs, vocab_size_local)
                     # Theme momentum (subject-matter coherence).
                     if token_signatures is not None and t_draft >= 1:
                         recent_start = max(0, t_draft - 13)
