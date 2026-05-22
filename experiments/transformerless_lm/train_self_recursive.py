@@ -1324,6 +1324,60 @@ def substrate_recency_penalty(history_tokens: torch.Tensor, logits: torch.Tensor
 _OMNIWEIGHT_RESERVE = _PHI_FOR_SAMPLING ** math.pi   # ~4.53
 
 
+def _regret_score(seq: torch.Tensor, t: int, vocab: list,
+                     n_chars: int = 65) -> float:
+    """Per-position regret: how badly this emission shouldn't be there.
+
+    Factors (substrate-pure):
+      - over-emission: same token used F(5)+ times in last F(7)=13
+      - immediate repetition: identical to previous token
+      - bigram saturation: (prev, current) fired F(4)+ times in last F(7)
+      - double punctuation: punct immediately after punct
+      - mid-word char: char emission after another alpha char (no space)
+
+    Higher score = more regret = should be resampled.
+    """
+    if t < 1 or t >= seq.shape[1]:
+        return 0.0
+    tid = int(seq[0, t].item())
+    if tid >= len(vocab) or tid < 0:
+        return 0.0
+    tok = vocab[tid]
+    regret = 0.0
+    F = _FIB_NUMS_FOR_BIGRAM
+    # Last F(7)=13 prior tokens.
+    start = max(0, t - F[7])
+    prior = seq[0, start:t].tolist()
+    # Factor 1: over-emission
+    same_count = sum(1 for x in prior if x == tid)
+    if same_count > F[5]:
+        regret += float(same_count - F[5]) / float(F[5])
+    # Factor 2: immediate repetition
+    prev_tid = int(seq[0, t - 1].item())
+    if prev_tid == tid:
+        regret += 1.0
+    # Factor 3: bigram saturation
+    bigram_count = 0
+    for i in range(1, len(prior)):
+        if prior[i - 1] == prev_tid and prior[i] == tid:
+            bigram_count += 1
+    if bigram_count > F[4]:
+        regret += float(bigram_count - F[4]) / float(F[4])
+    # Factor 4: double punctuation
+    if tok in (',', '.', '!', '?', ';', ':') and prev_tid < len(vocab):
+        prev_tok = vocab[prev_tid]
+        if prev_tok in (',', '.', '!', '?', ';', ':'):
+            regret += 1.0
+    # Factor 5: mid-word char emission (char after another alpha char)
+    if (tid < n_chars and tok and tok.isalpha()
+            and prev_tid < len(vocab)):
+        prev_tok = vocab[prev_tid]
+        if (prev_tok and prev_tok != ' '
+                and prev_tok[-1].isalpha()):
+            regret += 0.5
+    return regret
+
+
 def _omniweight_delta(base_probs: torch.Tensor,
                           modified_probs: torch.Tensor) -> torch.Tensor:
     """Compute delta_log_p = log(modified) - log(base). Each primitive
@@ -1759,7 +1813,20 @@ def _single_stage_refine(model, draft, vocab_size, scorer, mode: str,
             n_avail = confidences.shape[1] - prompt_in_ctx
             n_resample = max(1, int(resample_frac * n_avail))
             n_resample = min(n_resample, max(1, n_avail))
-            _, low_idx = confidences[0].topk(n_resample, largest=False)
+            # REGRET-DRIVEN SELECTION: judge each position by substrate
+            # criteria (over-emission, bigram lock, double punct, mid-word
+            # char) and pick highest-regret positions to resample.
+            # Falls back to low-confidence ordering as a tiebreaker.
+            regret_scores = torch.zeros(confidences.shape[1])
+            n_chars_rg = sum(1 for t in vocab if len(t) == 1) if vocab else 65
+            for j in range(prompt_in_ctx, confidences.shape[1]):
+                t_in_cur = j + 1 + offset
+                if 0 < t_in_cur < cur.shape[1]:
+                    regret_scores[j] = _regret_score(
+                        cur, t_in_cur, vocab or [], n_chars=n_chars_rg)
+            combined = regret_scores - 0.1 * confidences[0].cpu()
+            combined[:prompt_in_ctx] = -1e9
+            _, low_idx = combined.topk(n_resample, largest=True)
 
             new = cur.clone()
             recency_window = 21
