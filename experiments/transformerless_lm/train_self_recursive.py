@@ -702,9 +702,43 @@ def build_unpronounceable_mask(vocab: list) -> torch.Tensor:
                 break
         n_vowel = sum(1 for c in tok if c in _IAMBIC_VOWELS)
         all_consonant = (n_vowel == 0) and (len(tok) > F[3])
-        if max_cluster > F[5] or triple or all_consonant:
+        # Long words with very low vowel ratio: 6+ chars, < 1/phi^3 ~ 0.236.
+        # Eases past legit proper nouns ('northumberland' 0.29,
+        # 'buckingham' 0.30) but flags consonant-soup tokens.
+        low_vowel_long = (
+            len(tok) > F[5]
+            and (n_vowel / len(tok)) < (1.0 / (_PHI_FOR_SAMPLING ** 3))
+        )
+        if max_cluster > F[5] or triple or all_consonant or low_vowel_long:
             mask[i] = 1.0
     return mask
+
+
+def substrate_char_cascade(char_run: int, probs: torch.Tensor,
+                              n_chars: int) -> torch.Tensor:
+    """Anti-char-cascade: once F(3)=2 consecutive char tokens have been
+    emitted (rank < n_chars), suppress further char emissions.
+
+    Prevents sampling-time artifacts like 'thouA', 'drinesa',
+    'mensFDoroyali' where the model strings together raw chars after
+    a word without spacing.
+
+    Exempts space (rank may be very low) and newline; both end the
+    cascade naturally. Suppression magnitude grows by F(k) above
+    threshold.
+
+    Pure substrate (F(3) threshold + char-class identification).
+    """
+    if char_run < _FIB_NUMS_FOR_BIGRAM[3] or n_chars <= 0:
+        return probs
+    if n_chars >= probs.shape[0]:
+        return probs
+    excess = char_run - _FIB_NUMS_FOR_BIGRAM[3] + 1
+    tier = min(excess, len(_FIB_NUMS_FOR_BIGRAM) - 1)
+    penalty = 1.0 / (_PHI_FOR_SAMPLING ** (math.pi * _FIB_NUMS_FOR_BIGRAM[tier]))
+    out = probs.clone()
+    out[:n_chars] = out[:n_chars] * penalty
+    return out / (out.sum() + 1e-8)
 
 
 def substrate_word_spacing(prev_tid: int, probs: torch.Tensor,
@@ -1226,6 +1260,7 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
         syl_pos = 0
         open_needs = 0
         cluster_len = 0
+        char_run = 0
         if vocab is not None:
             for tid in seq[0].tolist():
                 if tid < len(vocab):
@@ -1247,6 +1282,10 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
                                 cluster_len += 1
                             else:
                                 cluster_len = 0
+                    if tid < n_chars_local and tok not in (' ', '\n'):
+                        char_run += 1
+                    else:
+                        char_run = 0
         for _ in range(n_new):
             T = seq.shape[1]
             ctx = seq if T <= model.seq_len else seq[:, -model.seq_len:]
@@ -1293,6 +1332,10 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
                 probs[0] = substrate_word_spacing(
                     int(seq[0, -1]), probs[0], vocab,
                     n_chars=n_chars_local)
+            # Anti-char-cascade (suppress char tokens after F(3)=2 chars).
+            if char_run >= _FIB_NUMS_FOR_BIGRAM[3]:
+                probs[0] = substrate_char_cascade(
+                    char_run, probs[0], n_chars_local)
             # Pronounceability filter (suppress impossible shapes).
             if unpronounceable_mask is not None:
                 probs[0] = substrate_pronounceability(
@@ -1343,6 +1386,12 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
                                 cluster_len += 1
                             else:
                                 cluster_len = 0
+                    # char_run: increment on plain char, reset on word/
+                    # space/newline.
+                    if nid < n_chars_local and tok not in (' ', '\n'):
+                        char_run += 1
+                    else:
+                        char_run = 0
     model.train()
     return seq
 
@@ -1464,6 +1513,18 @@ def _single_stage_refine(model, draft, vocab_size, scorer, mode: str,
                         pos_probs = substrate_word_spacing(
                             int(new[0, t_draft - 1]), pos_probs, vocab,
                             n_chars=n_chars_r)
+                        # Anti-char-cascade: compute char_run from prefix.
+                        char_run_r = 0
+                        for tid in new[0, :t_draft].tolist():
+                            if tid < len(vocab):
+                                tk_r = vocab[tid]
+                                if tid < n_chars_r and tk_r not in (' ', '\n'):
+                                    char_run_r += 1
+                                else:
+                                    char_run_r = 0
+                        if char_run_r >= _FIB_NUMS_FOR_BIGRAM[3]:
+                            pos_probs = substrate_char_cascade(
+                                char_run_r, pos_probs, n_chars_r)
                         # Pronounceability filter.
                         if unpronounceable_mask is not None:
                             pos_probs = substrate_pronounceability(
