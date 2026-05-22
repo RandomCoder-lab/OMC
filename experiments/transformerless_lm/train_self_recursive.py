@@ -1324,24 +1324,50 @@ def _omniweight_apply(base_probs: torch.Tensor,
     return out / (out.sum() + 1e-8)
 
 
+def _self_eval_insight(base_probs: torch.Tensor, emitted_tid: int,
+                          n_chars: int = 65) -> float:
+    """Compute self-evaluation insight signal for a just-emitted token.
+
+    insight = 1 if:
+      - emitted token is a real word (rank >= n_chars), AND
+      - surprise (-log p_emitted) >= pi*log(phi) ~ 1.51 (substrate threshold)
+    insight = 0 otherwise.
+
+    Recursive substrate self-monitoring: model rates its own emissions
+    against its own distribution.
+    """
+    if emitted_tid < n_chars:
+        return 0.0
+    V = base_probs.shape[0]
+    if not (0 <= emitted_tid < V):
+        return 0.0
+    p = float(base_probs[emitted_tid].item())
+    if p <= 0.0:
+        return 0.0
+    surprise = -math.log(p + 1e-12)
+    threshold = math.pi * math.log(_PHI_FOR_SAMPLING)
+    return 1.0 if surprise >= threshold else 0.0
+
+
 def _omniweight_apply_split(base_probs: torch.Tensor,
                                 math_delta: torch.Tensor,
-                                lang_delta: torch.Tensor) -> torch.Tensor:
-    """SPLIT-BRAIN omniweight: RANK-MODULATED mixer.
+                                lang_delta: torch.Tensor,
+                                momentum: float = 0.0) -> torch.Tensor:
+    """RANK-MODULATED split-brain mixer with momentum-modulated reserve.
 
-    Per-token weight derived from substrate rank position:
-      rank 0 (most-functional)    -> math_weight = 1, lang_weight = 0
-      rank V/2                    -> math_weight = 0.5, lang_weight = 0.5
-      rank V-1 (rarest content)   -> math_weight = 0, lang_weight = 1
+    Each hemisphere builds fluid delta via tanh-scaled reserve.
+    Reserve scaled by (1 + tanh(momentum)) -- when recent emissions
+    have been insightful (high surprise + real word), primitives get
+    more room. When noisy/expected, primitives constrained.
 
-    Each hemisphere gets sovereignty over its natural domain:
-      Math owns frequency/decay -> dominates function words.
-      Language owns purpose/structure -> dominates content words.
-
-    No more mixing in regions where one hemisphere doesn't belong.
+    Per-token weight by rank: math owns low rank, lang owns high rank.
     """
-    math_fluid = _OMNIWEIGHT_RESERVE * torch.tanh(math_delta / _OMNIWEIGHT_RESERVE)
-    lang_fluid = _OMNIWEIGHT_RESERVE * torch.tanh(lang_delta / _OMNIWEIGHT_RESERVE)
+    # Momentum-modulated reserve (recursive substrate self-trust).
+    reserve = _OMNIWEIGHT_RESERVE * (1.0 + math.tanh(momentum))
+    if reserve < 1e-3:
+        reserve = 1e-3
+    math_fluid = reserve * torch.tanh(math_delta / reserve)
+    lang_fluid = reserve * torch.tanh(lang_delta / reserve)
     p_math = base_probs * torch.exp(math_fluid)
     p_lang = base_probs * torch.exp(lang_fluid)
     p_math = p_math / (p_math.sum() + 1e-8)
@@ -1395,6 +1421,7 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
         char_run = 0
         recent_pairs = []   # (prev_tok, current_tok) bigram history
         last_content_ends_s = False
+        creative_momentum = 0.0   # self-eval EMA register
         if vocab is not None:
             prompt_list = seq[0].tolist()
             for idx_pl, tid in enumerate(prompt_list):
@@ -1514,9 +1541,10 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
                     p = substrate_subject_threading(
                         seq_list, vocab, base, is_sentence_start=True)
                     lang_delta += _omniweight_delta(base, p)
-            # Apply split-brain mixer (geometric mean).
+            # Apply split-brain mixer with momentum-modulated reserve.
             probs = _omniweight_apply_split(
-                base, math_delta, lang_delta).unsqueeze(0)
+                base, math_delta, lang_delta,
+                momentum=creative_momentum).unsqueeze(0)
             # Vocab curriculum (HARD mask, post-omniweight).
             if active_vocab_size is not None:
                 probs[0] = substrate_vocab_curriculum(
@@ -1560,6 +1588,11 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
                     recent_pairs.append((prev_for_pair, nid))
                     if len(recent_pairs) > 13:
                         recent_pairs = recent_pairs[-13:]
+                # Self-evaluation: update creative momentum EMA.
+                insight = _self_eval_insight(base, nid, n_chars_local)
+                inv_phi = 1.0 / _PHI_FOR_SAMPLING
+                creative_momentum = (inv_phi * creative_momentum
+                                       + (1.0 - inv_phi) * insight)
     model.train()
     return seq
 
@@ -1755,9 +1788,11 @@ def _single_stage_refine(model, draft, vocab_size, scorer, mode: str,
                     p = substrate_anti_stagnation(
                         history_aw, base_probs, vocab_size_local)
                     math_delta += _omniweight_delta(base_probs, p)
-                    # Apply split-brain mixer (geometric mean).
+                    # Apply split-brain mixer. Momentum=0 in refine
+                    # (no streaming history of base distributions).
                     pos_probs = _omniweight_apply_split(
-                        base_probs, math_delta, lang_delta)
+                        base_probs, math_delta, lang_delta,
+                        momentum=0.0)
                     # Vocab curriculum (HARD mask, post-omniweight).
                     if active_vocab_size is not None:
                         pos_probs = substrate_vocab_curriculum(
