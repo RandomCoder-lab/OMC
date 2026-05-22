@@ -397,6 +397,39 @@ def build_substrate_bigram(vocab_size: int) -> torch.Tensor:
 _SUBSTRATE_BIGRAM_ALPHA = 1.0 / (_PHI_FOR_SAMPLING ** math.pi)   # ~0.221
 
 
+def substrate_golden_phase(t_pos: int, probs: torch.Tensor,
+                              vocab_size: int) -> torch.Tensor:
+    """Golden-angle phase: functional/content rhythm primitive.
+
+    Each position advances a phase counter by the golden angle
+    2*pi/phi^2 -- the irrational angle that maximizes spread
+    (sunflower/phyllotaxis canon). cos(phase) modulates rank polarity:
+
+      cos(phase) ≈ +1  -> boost LOW rank (functional, common)
+      cos(phase) ≈ -1  -> boost HIGH rank (content, rare/proper-noun)
+      cos(phase) ≈  0  -> neutral (mixed)
+
+    Positional axis = "how far". Phase axis = "what kind, now".
+    Together they collapse word order into the substrate groove.
+
+    Polarity:  pol(r) = 1 - 2*r/(V-1)  in [-1, +1].
+    Log-boost: log(phi) * cos(phase) * pol  (max boost phi, min 1/phi).
+    Substrate-bounded.
+    """
+    phi = _PHI_FOR_SAMPLING
+    if vocab_size <= 1:
+        return probs
+    golden_angle = 2.0 * math.pi / (phi ** 2)
+    cos_phase = math.cos(t_pos * golden_angle)
+    ranks = torch.arange(vocab_size, dtype=probs.dtype,
+                          device=probs.device)
+    rank_pol = 1.0 - 2.0 * ranks / (vocab_size - 1)
+    log_boost = math.log(phi) * cos_phase * rank_pol
+    boost = torch.exp(log_boost)
+    out = probs * boost
+    return out / (out.sum() + 1e-8)
+
+
 def substrate_subject_threading(sequence: list, vocab: list,
                                     probs: torch.Tensor,
                                     is_sentence_start: bool) -> torch.Tensor:
@@ -659,6 +692,9 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
                 probs[0] = substrate_syntax_blend(
                     int(seq[0, -1]), bigram_prior, probs[0],
                     context_tokens=ctx_back, vocab=vocab)
+            # Golden-phase rhythm (functional/content alternation).
+            probs[0] = substrate_golden_phase(
+                seq.shape[1], probs[0], vocab_size)
             # Cross-sentence subject threading at sentence-starts.
             if vocab is not None and seq.shape[1] >= 1:
                 prev_tok_id = int(seq[0, -1])
@@ -735,6 +771,9 @@ def _single_stage_refine(model, draft, vocab_size, scorer, mode: str,
                         pos_probs = substrate_syntax_blend(
                             int(new[0, t_draft - 1]), bigram_prior, pos_probs,
                             context_tokens=ctx_back, vocab=vocab)
+                    # Golden-phase rhythm (functional/content alternation).
+                    pos_probs = substrate_golden_phase(
+                        t_draft, pos_probs, vocab_size_local)
                     # Cross-sentence subject threading at sentence-starts.
                     if vocab is not None and t_draft >= 1:
                         prev_tok_id = int(new[0, t_draft - 1])
