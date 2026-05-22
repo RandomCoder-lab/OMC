@@ -397,6 +397,87 @@ def build_substrate_bigram(vocab_size: int) -> torch.Tensor:
 _SUBSTRATE_BIGRAM_ALPHA = 1.0 / (_PHI_FOR_SAMPLING ** math.pi)   # ~0.221
 
 
+def build_substrate_token_signatures(vocab: list,
+                                          sig_dim: int = 8) -> torch.Tensor:
+    """Substrate-pure per-token signature derived from char codes.
+
+    Each token gets a sig_dim vector. Dim k samples the token's chars at
+    Fibonacci frequency F(k), cosine-projected, decayed across positions
+    in the token by phi^(-pos). Substrate-canonical: only phi, F(k), pi,
+    and char-code arithmetic. No corpus statistics, no English priors.
+
+    The signature places tokens in a substrate-similarity space: tokens
+    with similar char "shape" cluster, with longer/positional variation
+    discounted by the golden ratio (so suffixes matter less than roots).
+    """
+    V = len(vocab)
+    sigs = torch.zeros(V, sig_dim)
+    F = _FIB_NUMS_FOR_BIGRAM
+    phi = _PHI_FOR_SAMPLING
+    for i, tok in enumerate(vocab):
+        if not tok:
+            continue
+        for pos, ch in enumerate(tok):
+            code = ord(ch)
+            decay = phi ** (-pos)
+            for k in range(sig_dim):
+                freq = F[k] if k < len(F) else 1
+                sigs[i, k] += math.cos(code * freq * 2.0 * math.pi / 128.0) * decay
+    # Per-token L2 normalize so distances are comparable.
+    norms = sigs.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+    return sigs / norms
+
+
+def substrate_theme_momentum(recent_tokens: list,
+                                signatures: torch.Tensor,
+                                probs: torch.Tensor) -> torch.Tensor:
+    """Subject-matter coherence primitive: bias toward tokens whose
+    substrate signature aligns with the running theme.
+
+    Theme = F(k)/phi^(pi*k)-decayed weighted average of the last F(7)=13
+    token signatures (recent content dominates, older fades). Similarity
+    between candidate token and theme is 1/(1 + L1-distance) -- the
+    same Subsim metric used inside the model's attention, surfaced at
+    generation time as topical commitment.
+
+    Log-boost: log(phi) * normalized_sim. Bounded by [1/phi, phi].
+    Pure substrate: no corpus, no English word lists.
+    """
+    if not recent_tokens or signatures.shape[0] == 0:
+        return probs
+    n = min(len(recent_tokens), 13)
+    last = recent_tokens[-n:]
+    phi = _PHI_FOR_SAMPLING
+    phi_pi = phi ** math.pi
+    V_sig, D = signatures.shape
+    theme = torch.zeros(D, dtype=signatures.dtype, device=signatures.device)
+    total_w = 0.0
+    for i, tid in enumerate(reversed(last)):
+        if tid >= V_sig:
+            continue
+        k_tier = min(i, len(_FIB_NUMS_FOR_BIGRAM) - 1)
+        w = _FIB_NUMS_FOR_BIGRAM[k_tier] / (phi_pi ** k_tier)
+        theme = theme + signatures[tid] * w
+        total_w += w
+    if total_w < 1e-8:
+        return probs
+    theme = theme / total_w
+    # L1 distance from each vocab signature to theme.
+    dists = (signatures - theme.unsqueeze(0)).abs().sum(dim=-1)
+    sims = 1.0 / (1.0 + dists)
+    # Center and bound similarity to [-1, +1] band.
+    sim_centered = sims - sims.mean()
+    s_std = sim_centered.std()
+    if s_std > 1e-8:
+        sim_centered = sim_centered / s_std
+    sim_centered = sim_centered.clamp(-1.0, 1.0)
+    # Log-boost (substrate-bounded by phi).
+    log_boost = math.log(phi) * sim_centered.to(probs.dtype).to(probs.device)
+    boost = torch.exp(log_boost)
+    out = probs * boost
+    return out / (out.sum() + 1e-8)
+
+
 def substrate_golden_phase(t_pos: int, probs: torch.Tensor,
                               vocab_size: int) -> torch.Tensor:
     """Golden-angle phase: functional/content rhythm primitive.
@@ -661,7 +742,8 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
                               recency_window: int = 21,
                               recency_penalty: bool = True,
                               bigram_prior: torch.Tensor = None,
-                              vocab: list = None):
+                              vocab: list = None,
+                              token_signatures: torch.Tensor = None):
     """Sample n_new tokens autoregressively with substrate sampling AND
     a substrate-canonical recency penalty.
 
@@ -695,6 +777,11 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
             # Golden-phase rhythm (functional/content alternation).
             probs[0] = substrate_golden_phase(
                 seq.shape[1], probs[0], vocab_size)
+            # Theme momentum (subject-matter coherence).
+            if token_signatures is not None and seq.shape[1] >= 1:
+                recent_list = seq[0, -13:].tolist()
+                probs[0] = substrate_theme_momentum(
+                    recent_list, token_signatures, probs[0])
             # Cross-sentence subject threading at sentence-starts.
             if vocab is not None and seq.shape[1] >= 1:
                 prev_tok_id = int(seq[0, -1])
@@ -720,7 +807,8 @@ def _single_stage_refine(model, draft, vocab_size, scorer, mode: str,
                             prompt_len: int, temperature: float,
                             patience: int = 5,
                             bigram_prior: torch.Tensor = None,
-                            vocab: list = None):
+                            vocab: list = None,
+                            token_signatures: torch.Tensor = None):
     """One refinement stage: optimize a single score until plateau.
 
     mode: 'min' (harmony, quality) or 'max' (creativity).
@@ -774,6 +862,12 @@ def _single_stage_refine(model, draft, vocab_size, scorer, mode: str,
                     # Golden-phase rhythm (functional/content alternation).
                     pos_probs = substrate_golden_phase(
                         t_draft, pos_probs, vocab_size_local)
+                    # Theme momentum (subject-matter coherence).
+                    if token_signatures is not None and t_draft >= 1:
+                        recent_start = max(0, t_draft - 13)
+                        recent_list = new[0, recent_start:t_draft].tolist()
+                        pos_probs = substrate_theme_momentum(
+                            recent_list, token_signatures, pos_probs)
                     # Cross-sentence subject threading at sentence-starts.
                     if vocab is not None and t_draft >= 1:
                         prev_tok_id = int(new[0, t_draft - 1])
@@ -819,7 +913,8 @@ def staged_refine(model, prompt, n_new, vocab_size,
                     prompt_len: int = 16,
                     temperature: float = 0.5,
                     bigram_prior: torch.Tensor = None,
-                    vocab: list = None):
+                    vocab: list = None,
+                    token_signatures: torch.Tensor = None):
     """Staircase refinement: hit one score, then the next, then the next.
 
     Stage 1: substrate alignment (minimize harmony) -- match the shape.
@@ -835,7 +930,7 @@ def staged_refine(model, prompt, n_new, vocab_size,
     with torch.no_grad():
         draft = autoregressive_generate(model, prompt, n_new=n_new,
                                           vocab_size=vocab_size,
-                                          temperature=temperature, bigram_prior=bigram_prior, vocab=vocab)
+                                          temperature=temperature, bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures)
     stages_out = {}
     stages_out["initial"] = {"seq": draft.clone(),
                                 "harmony": harmony_scorer(draft),
@@ -848,7 +943,7 @@ def staged_refine(model, prompt, n_new, vocab_size,
                                             n_iters=n_iters_per_stage,
                                             resample_frac=resample_frac,
                                             prompt_len=prompt_len,
-                                            temperature=temperature, bigram_prior=bigram_prior, vocab=vocab)
+                                            temperature=temperature, bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures)
     stages_out["after_harmony"] = {"seq": draft.clone(),
                                        "trajectory": h_traj,
                                        "harmony": harmony_scorer(draft),
@@ -861,7 +956,7 @@ def staged_refine(model, prompt, n_new, vocab_size,
                                             n_iters=n_iters_per_stage,
                                             resample_frac=resample_frac,
                                             prompt_len=prompt_len,
-                                            temperature=temperature, bigram_prior=bigram_prior, vocab=vocab)
+                                            temperature=temperature, bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures)
     stages_out["after_quality"] = {"seq": draft.clone(),
                                        "trajectory": q_traj,
                                        "harmony": harmony_scorer(draft),
@@ -875,7 +970,7 @@ def staged_refine(model, prompt, n_new, vocab_size,
                                                 n_iters=n_iters_per_stage,
                                                 resample_frac=resample_frac,
                                                 prompt_len=prompt_len,
-                                                temperature=temperature, bigram_prior=bigram_prior, vocab=vocab)
+                                                temperature=temperature, bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures)
         stages_out["after_creativity"] = {"seq": draft.clone(),
                                               "trajectory": c_traj,
                                               "harmony": harmony_scorer(draft),
@@ -909,7 +1004,7 @@ def iterative_refine(model, prompt, n_new, vocab_size,
         # Step 1: initial draft.
         draft = autoregressive_generate(model, prompt, n_new=n_new,
                                           vocab_size=vocab_size,
-                                          temperature=temperature, bigram_prior=bigram_prior, vocab=vocab)
+                                          temperature=temperature, bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures)
         history = []
         h0 = harmony_scorer(draft) if harmony_scorer is not None else None
         q0 = quality_scorer(draft) if quality_scorer is not None else None
@@ -1304,6 +1399,14 @@ def train_with_self_distillation(name, train_seed, corpus_anchor, val_split,
         bigram_prior = build_substrate_bigram(vocab_size)
     print(f"  refined substrate bigram (shape * POS): {bigram_prior.shape}")
 
+    # Substrate token signatures (theme momentum) -- F-frequency cos basis
+    # over char codes, phi-decayed across positions. L2-normalized.
+    if vocab_for_bigram is not None:
+        token_signatures = build_substrate_token_signatures(vocab_for_bigram)
+        print(f"  substrate token signatures: {token_signatures.shape}")
+    else:
+        token_signatures = None
+
     # Active training base: starts as tiny_seed, GROWS by appending each
     # cycle's best refined output -- only if (a) creativity > corpus
     # baseline AND (b) anchor weight constraint still satisfied.
@@ -1368,14 +1471,14 @@ def train_with_self_distillation(name, train_seed, corpus_anchor, val_split,
                 draft = autoregressive_generate(
                     model, prompt_s, n_new=growth_n_new,
                     vocab_size=vocab_size, temperature=0.8,
-                    bigram_prior=bigram_prior, vocab=vocab)
+                    bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures)
             refined_s, _ = staged_refine(
                 model, prompt_s, n_new=growth_n_new, vocab_size=vocab_size,
                 harmony_scorer=harmony_fn, quality_scorer=quality_fn,
                 creativity_scorer=creativity_fn,
                 n_iters_per_stage=30, resample_frac=0.35,
                 prompt_len=16, temperature=0.5,
-                bigram_prior=bigram_prior, vocab=vocab)
+                bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures)
             samples.append((refined_s.squeeze(0).clone(),
                               creativity_fn(refined_s)))
         # Sort by creativity desc, keep top K.
@@ -1445,14 +1548,14 @@ def train_with_self_distillation(name, train_seed, corpus_anchor, val_split,
     final_gen = autoregressive_generate(model, prompt, n_new=n_new,
                                           vocab_size=vocab_size,
                                           temperature=0.8,
-                                          bigram_prior=bigram_prior, vocab=vocab)
+                                          bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures)
     final_refined, _ = staged_refine(
         model, prompt, n_new=n_new, vocab_size=vocab_size,
         harmony_scorer=harmony_fn, quality_scorer=quality_fn,
         creativity_scorer=creativity_fn,
         n_iters_per_stage=200, resample_frac=0.35,
         prompt_len=16, temperature=0.5,
-        bigram_prior=bigram_prior, vocab=vocab)
+        bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures)
 
     return {"name": name, "mode": "self_distillation",
              "n_params": n_params,
