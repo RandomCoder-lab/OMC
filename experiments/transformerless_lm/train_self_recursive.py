@@ -1318,17 +1318,39 @@ def _omniweight_apply(base_probs: torch.Tensor,
     """Apply accumulated log-pressure via tanh-scaled substrate reserve.
 
     fluid_delta = phi^pi * tanh(delta_acc / phi^pi)
-
-    Small contributions pass linear (tanh near origin ~ identity).
-    Large contributions saturate gracefully toward +/- phi^pi.
-    When primitives agree, deltas sum cleanly. When they disagree,
-    they cancel naturally within the sum.
-
-    Pure substrate (phi^pi as the reserve standard).
     """
     fluid = _OMNIWEIGHT_RESERVE * torch.tanh(delta_acc / _OMNIWEIGHT_RESERVE)
     out = base_probs * torch.exp(fluid)
     return out / (out.sum() + 1e-8)
+
+
+def _omniweight_apply_split(base_probs: torch.Tensor,
+                                math_delta: torch.Tensor,
+                                lang_delta: torch.Tensor) -> torch.Tensor:
+    """SPLIT-BRAIN omniweight: two registers, geometric-mean mixer.
+
+    Math hemisphere: bigram, recency, substrate sampling, anti-stag,
+    bigram-saturation. Frequency / decay primitives.
+
+    Language hemisphere: iambic, anaphora, need-fill, phonotactics,
+    rhyme, agreement, word-spacing, char-cascade, pronunciation,
+    subject-threading, theme. Purpose / structure primitives.
+
+    Each hemisphere builds its own fluid delta via tanh-scaled
+    substrate reserve. Final distribution = geometric mean of the
+    two -- a token survives only if both hemispheres consent.
+
+    Pure substrate (phi^pi reserve, sqrt mixing = Bayesian PoE).
+    """
+    math_fluid = _OMNIWEIGHT_RESERVE * torch.tanh(math_delta / _OMNIWEIGHT_RESERVE)
+    lang_fluid = _OMNIWEIGHT_RESERVE * torch.tanh(lang_delta / _OMNIWEIGHT_RESERVE)
+    p_math = base_probs * torch.exp(math_fluid)
+    p_lang = base_probs * torch.exp(lang_fluid)
+    p_math = p_math / (p_math.sum() + 1e-8)
+    p_lang = p_lang / (p_lang.sum() + 1e-8)
+    # Geometric mean (Bayesian product of experts).
+    p_final = torch.sqrt(p_math * p_lang)
+    return p_final / (p_final.sum() + 1e-8)
 
 
 def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
@@ -1409,70 +1431,77 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
             T = seq.shape[1]
             ctx = seq if T <= model.seq_len else seq[:, -model.seq_len:]
             logits = model(ctx)[:, -1, :] / temperature
+            # SPLIT-BRAIN: base = softmax(plain logits); recency &
+            # substrate-sampling become math omniweight contributors.
+            base = F.softmax(logits[0], dim=-1)
+            math_delta = torch.zeros_like(base)
+            lang_delta = torch.zeros_like(base)
+            # ---- Math hemisphere ----
             if recency_penalty:
                 history_t = seq[0, -recency_window:]
-                logits[0] = substrate_recency_penalty(
+                rec_logits = substrate_recency_penalty(
                     history_t, logits[0], vocab_size)
+                p = F.softmax(rec_logits, dim=-1)
+                math_delta += _omniweight_delta(base, p)
             if substrate_sampling:
-                probs = F.softmax(logits * _PI_LOG_PHI, dim=-1)
-            else:
-                probs = F.softmax(logits, dim=-1)
-            # OMNIWEIGHT: every primitive contributes delta_log_p to a
-            # shared accumulator. Total clamped, applied once.
-            base = probs[0]
-            delta_acc = torch.zeros_like(base)
+                p = F.softmax(logits[0] * _PI_LOG_PHI, dim=-1)
+                math_delta += _omniweight_delta(base, p)
             if bigram_prior is not None and seq.shape[1] >= 1:
                 ctx_back = seq[0, -7:].tolist()
                 p = substrate_syntax_blend(
                     int(seq[0, -1]), bigram_prior, base,
                     context_tokens=ctx_back, vocab=vocab)
-                delta_acc += _omniweight_delta(base, p)
+                math_delta += _omniweight_delta(base, p)
+            if seq.shape[1] >= 1:
+                p = substrate_bigram_saturation(
+                    int(seq[0, -1]), recent_pairs, base)
+                math_delta += _omniweight_delta(base, p)
+            history_aw = seq[0, -21:]
+            p = substrate_anti_stagnation(history_aw, base, vocab_size)
+            math_delta += _omniweight_delta(base, p)
+            # ---- Language hemisphere ----
             p = substrate_iambic_phase(
                 syl_pos, base, vocab_size, newline_mask=newline_mask)
-            delta_acc += _omniweight_delta(base, p)
+            lang_delta += _omniweight_delta(base, p)
             if pronoun_mask is not None and seq.shape[1] >= 1:
                 recent_list = seq[0, -13:].tolist()
                 p = substrate_reference_chain(
                     recent_list, pronoun_mask, base)
-                delta_acc += _omniweight_delta(base, p)
+                lang_delta += _omniweight_delta(base, p)
             if open_needs > 0:
                 p = substrate_need_fill(
                     open_needs, base, vocab_size, punct_mask=punct_mask)
-                delta_acc += _omniweight_delta(base, p)
+                lang_delta += _omniweight_delta(base, p)
             if vowel_start_mask is not None and cluster_len >= 2:
                 p = substrate_phonotactics(
                     cluster_len, base, vowel_start_mask)
-                delta_acc += _omniweight_delta(base, p)
+                lang_delta += _omniweight_delta(base, p)
             if end_vowels is not None and seq.shape[1] >= 1:
                 recent_list = seq[0, -13:].tolist()
                 p = substrate_rhyme_resonance(
                     recent_list, end_vowels, base)
-                delta_acc += _omniweight_delta(base, p)
-            if seq.shape[1] >= 1:
-                p = substrate_bigram_saturation(
-                    int(seq[0, -1]), recent_pairs, base)
-                delta_acc += _omniweight_delta(base, p)
+                lang_delta += _omniweight_delta(base, p)
             if vocab is not None:
                 p = substrate_agreement(
                     last_content_ends_s, base, vocab)
-                delta_acc += _omniweight_delta(base, p)
+                lang_delta += _omniweight_delta(base, p)
             if vocab is not None and seq.shape[1] >= 1:
                 p = substrate_word_spacing(
                     int(seq[0, -1]), base, vocab, n_chars=n_chars_local)
-                delta_acc += _omniweight_delta(base, p)
+                lang_delta += _omniweight_delta(base, p)
             if char_run >= _FIB_NUMS_FOR_BIGRAM[3]:
                 p = substrate_char_cascade(
                     char_run, base, n_chars_local)
-                delta_acc += _omniweight_delta(base, p)
+                lang_delta += _omniweight_delta(base, p)
             if unpronounceable_mask is not None:
                 p = substrate_pronounceability(
                     base, unpronounceable_mask)
-                delta_acc += _omniweight_delta(base, p)
+                lang_delta += _omniweight_delta(base, p)
             if token_signatures is not None and seq.shape[1] >= 1:
                 recent_list = seq[0, -13:].tolist()
                 p = substrate_theme_momentum(
                     recent_list, token_signatures, base)
-                delta_acc += _omniweight_delta(base, p)
+                lang_delta += _omniweight_delta(base, p)
             if vocab is not None and seq.shape[1] >= 1:
                 prev_tok_id = int(seq[0, -1])
                 prev_str = (vocab[prev_tok_id]
@@ -1481,12 +1510,10 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
                     seq_list = seq[0].tolist()
                     p = substrate_subject_threading(
                         seq_list, vocab, base, is_sentence_start=True)
-                    delta_acc += _omniweight_delta(base, p)
-            history_aw = seq[0, -21:]
-            p = substrate_anti_stagnation(history_aw, base, vocab_size)
-            delta_acc += _omniweight_delta(base, p)
-            # Apply accumulated omniweight pressure (clamped).
-            probs[0] = _omniweight_apply(base, delta_acc)
+                    lang_delta += _omniweight_delta(base, p)
+            # Apply split-brain mixer (geometric mean).
+            probs = _omniweight_apply_split(
+                base, math_delta, lang_delta).unsqueeze(0)
             # Vocab curriculum (HARD mask, post-omniweight).
             if active_vocab_size is not None:
                 probs[0] = substrate_vocab_curriculum(
@@ -1591,18 +1618,27 @@ def _single_stage_refine(model, draft, vocab_size, scorer, mode: str,
                 if t_draft < new.shape[1] and t_draft >= prompt_len:
                     start = max(0, t_draft - recency_window)
                     history_t = new[0, start:t_draft]
-                    pos_logits = substrate_recency_penalty(
+                    base_probs = F.softmax(logits[0, idx] / temperature, dim=-1)
+                    # SPLIT-BRAIN: math + lang accumulators.
+                    math_delta = torch.zeros_like(base_probs)
+                    lang_delta = torch.zeros_like(base_probs)
+                    # ---- Math hemisphere ----
+                    # Recency penalty.
+                    rec_logits = substrate_recency_penalty(
                         history_t, logits[0, idx], vocab_size_local)
-                    base_probs = F.softmax(pos_logits / temperature, dim=-1)
-                    # OMNIWEIGHT accumulator.
-                    delta_acc = torch.zeros_like(base_probs)
+                    p = F.softmax(rec_logits / temperature, dim=-1)
+                    math_delta += _omniweight_delta(base_probs, p)
+                    # Substrate sampling (phi^pi sharpening).
+                    p = F.softmax(logits[0, idx] * _PI_LOG_PHI, dim=-1)
+                    math_delta += _omniweight_delta(base_probs, p)
                     if bigram_prior is not None and t_draft >= 1:
                         ctx_back_start = max(0, t_draft - 7)
                         ctx_back = new[0, ctx_back_start:t_draft].tolist()
                         p = substrate_syntax_blend(
                             int(new[0, t_draft - 1]), bigram_prior, base_probs,
                             context_tokens=ctx_back, vocab=vocab)
-                        delta_acc += _omniweight_delta(base_probs, p)
+                        math_delta += _omniweight_delta(base_probs, p)
+                    # ---- Language hemisphere ----
                     if vocab is not None:
                         syl_pos = 0
                         for tid in new[0, :t_draft].tolist():
@@ -1611,13 +1647,13 @@ def _single_stage_refine(model, draft, vocab_size, scorer, mode: str,
                         p = substrate_iambic_phase(
                             syl_pos, base_probs, vocab_size_local,
                             newline_mask=newline_mask)
-                        delta_acc += _omniweight_delta(base_probs, p)
+                        lang_delta += _omniweight_delta(base_probs, p)
                     if pronoun_mask is not None and t_draft >= 1:
                         recent_start = max(0, t_draft - 13)
                         recent_list = new[0, recent_start:t_draft].tolist()
                         p = substrate_reference_chain(
                             recent_list, pronoun_mask, base_probs)
-                        delta_acc += _omniweight_delta(base_probs, p)
+                        lang_delta += _omniweight_delta(base_probs, p)
                     # State-dependent primitives: compute from prefix.
                     n_chars_r = sum(1 for t in vocab if len(t) == 1) if vocab else 65
                     ct = n_chars_r + _FIB_NUMS_FOR_BIGRAM[7]
@@ -1659,45 +1695,48 @@ def _single_stage_refine(model, draft, vocab_size, scorer, mode: str,
                             if j > 0:
                                 rp.append((int(new[0, j-1].item()), tid))
                         rp = rp[-13:]
+                        # Language hemisphere primitives.
                         if op_needs > 0:
                             p = substrate_need_fill(
                                 op_needs, base_probs, vocab_size_local,
                                 punct_mask=punct_mask)
-                            delta_acc += _omniweight_delta(base_probs, p)
+                            lang_delta += _omniweight_delta(base_probs, p)
                         if vowel_start_mask is not None and cl_len >= 2:
                             p = substrate_phonotactics(
                                 cl_len, base_probs, vowel_start_mask)
-                            delta_acc += _omniweight_delta(base_probs, p)
+                            lang_delta += _omniweight_delta(base_probs, p)
+                        # Math hemisphere primitives.
                         p = substrate_bigram_saturation(
                             int(new[0, t_draft - 1]), rp, base_probs)
-                        delta_acc += _omniweight_delta(base_probs, p)
+                        math_delta += _omniweight_delta(base_probs, p)
+                        # Language hemisphere.
                         p = substrate_agreement(
                             last_s_r, base_probs, vocab)
-                        delta_acc += _omniweight_delta(base_probs, p)
+                        lang_delta += _omniweight_delta(base_probs, p)
                         p = substrate_word_spacing(
                             int(new[0, t_draft - 1]), base_probs, vocab,
                             n_chars=n_chars_r)
-                        delta_acc += _omniweight_delta(base_probs, p)
+                        lang_delta += _omniweight_delta(base_probs, p)
                         if char_run_r >= _FIB_NUMS_FOR_BIGRAM[3]:
                             p = substrate_char_cascade(
                                 char_run_r, base_probs, n_chars_r)
-                            delta_acc += _omniweight_delta(base_probs, p)
+                            lang_delta += _omniweight_delta(base_probs, p)
                         if unpronounceable_mask is not None:
                             p = substrate_pronounceability(
                                 base_probs, unpronounceable_mask)
-                            delta_acc += _omniweight_delta(base_probs, p)
+                            lang_delta += _omniweight_delta(base_probs, p)
                         if end_vowels is not None:
                             recent_start_ev = max(0, t_draft - 13)
                             recent_list_ev = new[0, recent_start_ev:t_draft].tolist()
                             p = substrate_rhyme_resonance(
                                 recent_list_ev, end_vowels, base_probs)
-                            delta_acc += _omniweight_delta(base_probs, p)
+                            lang_delta += _omniweight_delta(base_probs, p)
                     if token_signatures is not None and t_draft >= 1:
                         recent_start = max(0, t_draft - 13)
                         recent_list = new[0, recent_start:t_draft].tolist()
                         p = substrate_theme_momentum(
                             recent_list, token_signatures, base_probs)
-                        delta_acc += _omniweight_delta(base_probs, p)
+                        lang_delta += _omniweight_delta(base_probs, p)
                     if vocab is not None and t_draft >= 1:
                         prev_tok_id = int(new[0, t_draft - 1])
                         prev_str = (vocab[prev_tok_id]
@@ -1707,14 +1746,15 @@ def _single_stage_refine(model, draft, vocab_size, scorer, mode: str,
                             p = substrate_subject_threading(
                                 seq_list, vocab, base_probs,
                                 is_sentence_start=True)
-                            delta_acc += _omniweight_delta(base_probs, p)
+                            lang_delta += _omniweight_delta(base_probs, p)
                     aw_start = max(0, t_draft - 21)
                     history_aw = new[0, aw_start:t_draft]
                     p = substrate_anti_stagnation(
                         history_aw, base_probs, vocab_size_local)
-                    delta_acc += _omniweight_delta(base_probs, p)
-                    # Apply omniweight pressure.
-                    pos_probs = _omniweight_apply(base_probs, delta_acc)
+                    math_delta += _omniweight_delta(base_probs, p)
+                    # Apply split-brain mixer (geometric mean).
+                    pos_probs = _omniweight_apply_split(
+                        base_probs, math_delta, lang_delta)
                     # Vocab curriculum (HARD mask, post-omniweight).
                     if active_vocab_size is not None:
                         pos_probs = substrate_vocab_curriculum(
