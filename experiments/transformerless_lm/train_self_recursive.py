@@ -492,6 +492,50 @@ def substrate_syntax_boost(prev_token: int, bigram_prior: torch.Tensor,
     return logits + log_phi_pi * prior_row
 
 
+def substrate_anti_stagnation(history_tokens: torch.Tensor,
+                                  probs: torch.Tensor,
+                                  vocab_size: int) -> torch.Tensor:
+    """Substrate-tier-stepped anti-stagnation correction.
+
+    Counts each token's occurrences in the history window. At each
+    Fibonacci threshold of repetition, applies progressively stronger
+    phi^(pi*k) suppression to that token's sampling probability:
+
+        count >= F(3)=3:  divide prob by phi^pi    (~0.22x)
+        count >= F(4)=5:  divide prob by phi^(2pi) (~0.049x)
+        count >= F(5)=8:  hard suppress (prob = 0)
+
+    Substrate divergent: forces new tokens when current ones
+    saturate.  Substrate-corrective: uses Fibonacci-tier thresholds
+    + phi^pi suppression -- both signals from substrate constants
+    alone.
+    """
+    n = history_tokens.numel()
+    if n == 0:
+        return probs
+    counts = torch.bincount(history_tokens.long(), minlength=vocab_size)
+    counts_f = counts.to(probs.device).to(probs.dtype)
+    phi_pi = _PHI_FOR_SAMPLING ** math.pi
+    # Substrate-canonical thresholds: at deeper Fibonacci counts.
+    # Allows natural Shakespeare repetition (this, the, of...) but
+    # catches true stagnation. Thresholds: F(6)=8, F(7)=13, F(8)=21.
+    #   count >= 8:  divide prob by phi^pi    (~0.22x mild penalty)
+    #   count >= 13: divide prob by phi^(2pi) (~0.05x strong)
+    #   count >= 21: hard suppress (saturation reached, force change)
+    suppress = torch.ones_like(probs)
+    suppress = torch.where(counts_f >= 21.0,
+                              torch.zeros_like(probs),
+                              suppress)
+    suppress = torch.where((counts_f >= 13.0) & (counts_f < 21.0),
+                              torch.full_like(probs, 1.0 / (phi_pi ** 2)),
+                              suppress)
+    suppress = torch.where((counts_f >= 8.0) & (counts_f < 13.0),
+                              torch.full_like(probs, 1.0 / phi_pi),
+                              suppress)
+    out = probs * suppress
+    return out / (out.sum() + 1e-8)
+
+
 def substrate_recency_penalty(history_tokens: torch.Tensor, logits: torch.Tensor,
                                  vocab_size: int) -> torch.Tensor:
     """Vectorized substrate-canonical recency penalty.
@@ -557,6 +601,10 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
                 probs[0] = substrate_syntax_blend(
                     int(seq[0, -1]), bigram_prior, probs[0],
                     context_tokens=ctx_back, vocab=vocab)
+            # Substrate anti-stagnation on the full window.
+            history_aw = seq[0, -21:]
+            probs[0] = substrate_anti_stagnation(history_aw, probs[0],
+                                                     vocab_size)
             next_tok = torch.multinomial(probs, num_samples=1)
             seq = torch.cat([seq, next_tok], dim=1)
     model.train()
@@ -619,6 +667,11 @@ def _single_stage_refine(model, draft, vocab_size, scorer, mode: str,
                         pos_probs = substrate_syntax_blend(
                             int(new[0, t_draft - 1]), bigram_prior, pos_probs,
                             context_tokens=ctx_back, vocab=vocab)
+                    # Anti-stagnation on full prior context.
+                    aw_start = max(0, t_draft - 21)
+                    history_aw = new[0, aw_start:t_draft]
+                    pos_probs = substrate_anti_stagnation(
+                        history_aw, pos_probs, vocab_size_local)
                     new[0, t_draft] = torch.multinomial(
                         pos_probs, num_samples=1).item()
 
