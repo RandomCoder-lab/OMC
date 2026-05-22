@@ -743,12 +743,11 @@ def substrate_char_cascade(char_run: int, probs: torch.Tensor,
 
 def substrate_bigram_saturation(prev_tok: int, recent_pairs: list,
                                     probs: torch.Tensor) -> torch.Tensor:
-    """Penalize bigram transitions that have already fired F(3)=2+ times
-    in the last F(7)=13 transitions. Substrate-tier exponential
-    suppression so a 3rd same-transition fade fast, 4th faster.
-
-    Kills 'of this of this of of' bigram-lock loops. Pure substrate
-    (F-tier counting + phi^pi penalty).
+    """Penalize bigram transitions that have already fired F(4)=3+ times
+    in the last F(7)=13 transitions. Loosened from F(3)=2 (v69) which
+    over-suppressed legitimate intentional repeats like 'this happy
+    breed of MEN, this LITTLE world'. Substrate-tier exponential
+    suppression so a 4th same-transition fades fast.
     """
     if not recent_pairs:
         return probs
@@ -760,9 +759,10 @@ def substrate_bigram_saturation(prev_tok: int, recent_pairs: list,
     if not counts:
         return probs
     suppress = torch.ones_like(probs)
+    threshold = F[4]
     for next_tok, c in counts.items():
-        if c >= F[3]:
-            excess = c - F[3] + 1
+        if c >= threshold:
+            excess = c - threshold + 1
             tier = min(excess, len(F) - 1)
             penalty = 1.0 / (_PHI_FOR_SAMPLING ** (math.pi * F[tier]))
             if 0 <= next_tok < probs.shape[0]:
@@ -804,18 +804,16 @@ def substrate_agreement(last_content_ends_s: bool, probs: torch.Tensor,
 
 def substrate_word_spacing(prev_tid: int, probs: torch.Tensor,
                               vocab: list, n_chars: int = 65) -> torch.Tensor:
-    """STRICT word boundary enforcement.
+    """Word boundary enforcement with gentler suppression magnitude.
 
-    After a word-token (rank >= n_chars), hard-suppress every token
-    except space, newline, and punctuation. Forces real word
-    boundaries; eliminates 'kinightmeirface' concat.
-
-    Suppression magnitude: 1/phi^pi ~ 0.221.
-    Pure substrate (rank tier + char-class identification).
+    After a word-token (rank >= n_chars), suppress every token except
+    space, newline, and punctuation. Magnitude eased from 1/phi^pi
+    (v69) to 1/phi^2 ~ 0.382: still strong enough to encourage
+    spacing but doesn't over-block apostrophe-internal sequences
+    ('tis, he's, etc.).
     """
     if prev_tid < n_chars or not vocab:
         return probs
-    # Allowed-after-word: space, newline, common clause punctuation.
     allowed_chars = {' ', '\n', '.', ',', '!', '?', ';', ':',
                        "'", '-'}
     allowed_idx = []
@@ -824,7 +822,7 @@ def substrate_word_spacing(prev_tid: int, probs: torch.Tensor,
             allowed_idx.append(i)
     if not allowed_idx:
         return probs
-    suppress = 1.0 / (_PHI_FOR_SAMPLING ** math.pi)
+    suppress = 1.0 / (_PHI_FOR_SAMPLING ** 2)
     mask = torch.full_like(probs, suppress)
     for i in allowed_idx:
         mask[i] = 1.0
@@ -2120,7 +2118,9 @@ def train_with_self_distillation(name, train_seed, corpus_anchor, val_split,
         substrate_embed=True,
     )
     optimizer = FibonacciAdamW(model.parameters(), lr=args.lr)
-    sched = lambda s, T: K_schedule_tier_walk(s, T, K_init=args.K_init,
+    # Slower K-shrink: double T so K decreases at half speed (each tier
+    # held ~2 cycles). v69 showed K-shrink-induced drop at cycle 5.
+    sched = lambda s, T: K_schedule_tier_walk(s, 2 * T, K_init=args.K_init,
                                                  K_min=args.K_min)
     n_params = sum(p.numel() for p in model.parameters())
 
