@@ -549,7 +549,10 @@ def train_with_self_distillation(name, train_seed, corpus_anchor, val_split,
                                     itos_map=None,
                                     corpus_text=None,
                                     n_cycles: int = 4,
-                                    distill_prob: float = 0.3):
+                                    distill_prob: float = 0.3,
+                                    samples_per_cycle: int = 8,
+                                    keep_top_k: int = 4,
+                                    growth_n_new: int = 128):
     """Self-distillation: model's high-creativity refined outputs become
     training targets for the next cycle.
 
@@ -664,36 +667,53 @@ def train_with_self_distillation(name, train_seed, corpus_anchor, val_split,
                       flush=True)
             global_step += 1
 
-        # End of cycle: generate, refine, score, maybe distill.
-        with torch.no_grad():
-            draft = autoregressive_generate(model, prompt, n_new=n_new,
-                                              vocab_size=vocab_size,
-                                              temperature=0.8)
-        refined, stages_out = staged_refine(
-            model, prompt, n_new=n_new, vocab_size=vocab_size,
-            harmony_scorer=harmony_fn, quality_scorer=quality_fn,
-            creativity_scorer=creativity_fn,
-            n_iters_per_stage=200, resample_frac=0.35,
-            prompt_len=16, temperature=0.5)
-        draft_cr = creativity_fn(draft)
-        refined_cr = creativity_fn(refined)
-        print(f"  cycle {cycle+1}: draft_creativity={draft_cr:.4f}  "
-              f"refined_creativity={refined_cr:.4f}  "
-              f"best_seen={best_creativity:.4f}")
+        # End of cycle: HEAVY extrapolation. Generate samples_per_cycle
+        # drafts from varied prompts, refine each, score creativity, and
+        # APPEND the top-K to active_base. The substrate ratchet turns
+        # multiple clicks per cycle.
+        samples = []   # list of (refined_seq, creativity)
+        for s_idx in range(samples_per_cycle):
+            # Diverse prompts: random 16-char windows from active_base.
+            start = rng.randint(0, max(0, active_base.numel() - 17))
+            prompt_s = active_base[start: start + 16].unsqueeze(0)
+            with torch.no_grad():
+                draft = autoregressive_generate(
+                    model, prompt_s, n_new=growth_n_new,
+                    vocab_size=vocab_size, temperature=0.8)
+            refined_s, _ = staged_refine(
+                model, prompt_s, n_new=growth_n_new, vocab_size=vocab_size,
+                harmony_scorer=harmony_fn, quality_scorer=quality_fn,
+                creativity_scorer=creativity_fn,
+                n_iters_per_stage=30, resample_frac=0.35,
+                prompt_len=16, temperature=0.5)
+            samples.append((refined_s.squeeze(0).clone(),
+                              creativity_fn(refined_s)))
+        # Sort by creativity desc, keep top K.
+        samples.sort(key=lambda x: x[1], reverse=True)
+        kept = samples[:keep_top_k]
+        kept_scores = [s[1] for s in kept]
+        all_scores = [s[1] for s in samples]
+        mean_score = sum(all_scores) / len(all_scores)
+        print(f"  cycle {cycle+1}: generated {samples_per_cycle} samples, "
+              f"mean creativity={mean_score:.4f}, "
+              f"top-{keep_top_k}={[round(s, 4) for s in kept_scores]}")
+        # Always append top-K (even if not new bests) -- the corpus grows
+        # with the model's best work from this cycle.
+        n_growth = 0
+        for ref_seq, cr in kept:
+            active_base = torch.cat([active_base, ref_seq])
+            n_growth += ref_seq.numel()
+            if cr > best_creativity:
+                best_creativity = cr
+                best_refined_seq = ref_seq.clone()
         cycle_summary.append({
             "cycle": cycle + 1,
-            "draft_creativity": draft_cr,
-            "refined_creativity": refined_cr,
-            "active_base_before": active_base.numel(),
+            "samples_creativity": all_scores,
+            "kept_top_k": kept_scores,
+            "active_base_after": active_base.numel(),
         })
-        if refined_cr > best_creativity:
-            best_creativity = refined_cr
-            best_refined_seq = refined.squeeze(0).clone()
-            # APPEND best-refined to active_base: the model trains on
-            # its own best work alongside the original seed.
-            active_base = torch.cat([active_base, best_refined_seq])
-            print(f"  NEW BEST creativity {refined_cr:.4f} -> "
-                  f"active_base grew to {active_base.numel()} chars")
+        print(f"  active_base grew +{n_growth} chars -> "
+              f"{active_base.numel()} total  (best ever: {best_creativity:.4f})")
 
     # Final generation for inspection.
     final_gen = autoregressive_generate(model, prompt, n_new=n_new,
@@ -1179,7 +1199,8 @@ def main():
             name, train_seed, corpus_anchor, val_split, vocab_size, args,
             fib_positions, harmony_kind=harmony_kind,
             itos_map=itos_map, corpus_text=full_corpus_text,
-            n_cycles=4, distill_prob=0.3)
+            n_cycles=6, distill_prob=0.3,
+            samples_per_cycle=8, keep_top_k=4, growth_n_new=128)
 
     print()
     print("=" * 92)

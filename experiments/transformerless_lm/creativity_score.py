@@ -24,6 +24,8 @@ import string
 from collections import Counter
 
 
+
+
 VOWELS = set("aeiouAEIOU")
 LETTERS = set(string.ascii_letters)
 WHITESPACE = set(" \n\t")
@@ -102,9 +104,88 @@ def line_length_match(generated: str, corpus_text: str) -> float:
     return sum(abs(g - c) for g, c in zip(gen_h, corp_h))
 
 
+def common_word_presence(generated: str, corpus_text: str,
+                            top_k: int = 50) -> float:
+    """How many of the corpus's top-K most-common words appear in the
+    generated text. This is the strongest anti-gibberish signal:
+    Shakespeare uses 'the', 'and', 'of', 'my', 'I' frequently;
+    gibberish doesn't.
+    """
+    def clean(s):
+        return s.lower().strip(string.punctuation)
+    corpus_words = [clean(w) for w in corpus_text.split() if clean(w)]
+    corpus_freq = Counter(corpus_words)
+    top_words = set(w for w, _ in corpus_freq.most_common(top_k))
+    gen_words = set(clean(w) for w in generated.split() if clean(w))
+    if not top_words:
+        return 0.0
+    overlap = len(gen_words & top_words)
+    return overlap / len(top_words)
+
+
+def avg_word_length_match(generated: str, corpus_text: str) -> float:
+    """How close is generated avg word length to corpus avg?
+    Returns 1.0 - normalized_distance, clamped to [0, 1]."""
+    def clean(s):
+        return s.lower().strip(string.punctuation)
+    def avg(text):
+        words = [clean(w) for w in text.split() if clean(w)]
+        return (sum(len(w) for w in words) / len(words)) if words else 0.0
+    g = avg(generated); c = avg(corpus_text)
+    if c == 0:
+        return 0.0
+    return max(0.0, 1.0 - abs(g - c) / c)
+
+
+def ngram_diversity(generated: str, n: int = 3) -> float:
+    """Fraction of n-grams in the generated text that are UNIQUE.
+    1.0 = every n-gram appears once (max diversity).
+    0.0 = all n-grams identical (max repetition).
+    Counter-Goodhart against the model gaming overlap by repetition."""
+    if len(generated) < n:
+        return 0.0
+    ngrams = [generated[i:i+n] for i in range(len(generated) - n + 1)]
+    if not ngrams:
+        return 0.0
+    return len(set(ngrams)) / len(ngrams)
+
+
+def repetition_penalty(generated: str, n: int = 4,
+                         max_freq_threshold: int = 3) -> float:
+    """Penalty in [0, 1] for excessive n-gram repetition. 0 = no penalty.
+
+    For each n-gram appearing more than max_freq_threshold times, add a
+    penalty proportional to the excess. Strong signal against the
+    'fan fan, fan, fan' failure mode.
+    """
+    if len(generated) < n:
+        return 0.0
+    ngrams = [generated[i:i+n] for i in range(len(generated) - n + 1)]
+    counts = Counter(ngrams)
+    excess = sum(max(0, c - max_freq_threshold) for c in counts.values())
+    # Normalize by total ngrams; cap penalty at 1.0
+    return min(1.0, excess / max(1, len(ngrams)))
+
+
+def lexical_diversity(generated: str) -> float:
+    """Type-token ratio over 'words' (whitespace-split). Higher = more
+    varied vocabulary, lower = repetitive word use."""
+    import string as _s
+    words = [w.lower().strip(_s.punctuation) for w in generated.split()]
+    words = [w for w in words if w]
+    if not words:
+        return 0.0
+    return len(set(words)) / len(words)
+
+
 def creativity_score(generated: str, corpus_text: str) -> dict:
-    """Comprehensive Shakespeare-creativity score. Returns a dict of
-    individual metrics and a composite creativity_score in [0, 1].
+    """Comprehensive Shakespeare-creativity score with anti-gibberish.
+
+    Penalties added in v2 to counter Goodhart's failure (model gaming
+    overlap metrics by repetition):
+      - ngram_diversity (multiplier; low = repetitive output)
+      - lexical_diversity (multiplier; low = same word over and over)
+      - repetition_penalty (subtractive; n-gram appears too many times)
     """
     n2 = char_ngram_overlap(generated, corpus_text, 2)
     n3 = char_ngram_overlap(generated, corpus_text, 3)
@@ -113,18 +194,33 @@ def creativity_score(generated: str, corpus_text: str) -> dict:
     vc = vc_alternation_rate(generated)
     line_dist = line_length_match(generated, corpus_text)
     line_stats = line_structure_stats(generated)
-    # Composite: weighted blend, higher = more creative & Shakespeare-aligned.
-    # n3 + vocab are the strongest signal; vc shows English-like; line_dist
-    # is inverted because it's a distance (lower = better).
-    composite = 0.35 * n3 + 0.25 * vocab + 0.15 * n2 + 0.15 * vc \
-                + 0.10 * max(0.0, 1.0 - line_dist)
+    # Strong anti-gibberish: common-word presence and word-length match.
+    cw = common_word_presence(generated, corpus_text, top_k=50)
+    awl = avg_word_length_match(generated, corpus_text)
+    # Repetition penalty: only severe excess counts now (threshold scales
+    # with text length so real text's natural repetition doesn't penalize).
+    threshold = max(2, len(generated) // 50)
+    rep_pen = repetition_penalty(generated, n=4, max_freq_threshold=threshold)
+
+    composite = (
+        0.20 * cw +              # common-word presence (anti-gibberish)
+        0.25 * vocab +           # any vocab overlap (length-weighted via cw)
+        0.15 * awl +             # word-length sanity
+        0.20 * n3 +              # 3-gram match (corpus patterns)
+        0.10 * n4 +              # 4-gram match (longer patterns)
+        0.10 * max(0.0, 1.0 - line_dist)   # line structure
+    ) - 0.3 * rep_pen
+    composite = max(0.0, min(1.0, composite))
     return {
         "ngram_2": n2,
         "ngram_3": n3,
         "ngram_4": n4,
         "vocab_overlap": vocab,
+        "common_word_presence": cw,
+        "avg_word_len_match": awl,
         "vc_alternation": vc,
         "line_dist": line_dist,
         "line_stats": line_stats,
+        "repetition_penalty": rep_pen,
         "creativity_score": composite,
     }
