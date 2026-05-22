@@ -612,8 +612,11 @@ def train_with_self_distillation(name, train_seed, corpus_anchor, val_split,
           f"n_cycles={n_cycles}  distill_prob={distill_prob}  "
           f"params={n_params:,}", flush=True)
 
-    distill_buffer = []
+    # Active training base: starts as tiny_seed, GROWS by appending each
+    # cycle's best refined output. Best-distilment becomes the new base.
+    active_base = train_seed.clone()
     best_creativity = 0.0
+    best_refined_seq = None
     cycle_summary = []
 
     steps_per_cycle = args.steps // n_cycles
@@ -627,20 +630,18 @@ def train_with_self_distillation(name, train_seed, corpus_anchor, val_split,
 
     for cycle in range(n_cycles):
         print(f"\n  --- Cycle {cycle+1}/{n_cycles}  "
-              f"distill_buffer={len(distill_buffer)} ---", flush=True)
+              f"active_base_size={active_base.numel()} chars "
+              f"best_creativity={best_creativity:.4f} ---", flush=True)
         for s in range(steps_per_cycle):
             new_K = sched(global_step, args.steps)
             if new_K != cur_K:
                 set_K_active_recursive(model, new_K)
                 cur_K = new_K
-            # Sample either from seed or from a distill_buffer entry.
-            if distill_buffer and rng.random() < distill_prob:
-                target_seq = distill_buffer[rng.randint(0, len(distill_buffer)-1)]
-                x, y = sample_tiny_batch(target_seq, args.batch_size,
-                                           args.seq_len, gen)
-            else:
-                x, y = sample_tiny_batch(train_seed, args.batch_size,
-                                           args.seq_len, gen)
+            # Train entirely on the active_base (which is seed + appended
+            # best-refined outputs). No mixing logic -- the active_base IS
+            # the model's corpus, growing with every successful distillation.
+            x, y = sample_tiny_batch(active_base, args.batch_size,
+                                       args.seq_len, gen)
             logits = model(x)
             ce_fft = substrate_fft_loss(logits, y, vocab_size,
                                           lambda_substrate=args.lambda_sub)
@@ -683,12 +684,16 @@ def train_with_self_distillation(name, train_seed, corpus_anchor, val_split,
             "cycle": cycle + 1,
             "draft_creativity": draft_cr,
             "refined_creativity": refined_cr,
-            "buffer_size_before": len(distill_buffer),
+            "active_base_before": active_base.numel(),
         })
         if refined_cr > best_creativity:
-            print(f"  NEW BEST creativity {refined_cr:.4f} -> distilling")
-            distill_buffer.append(refined.squeeze(0).clone())
             best_creativity = refined_cr
+            best_refined_seq = refined.squeeze(0).clone()
+            # APPEND best-refined to active_base: the model trains on
+            # its own best work alongside the original seed.
+            active_base = torch.cat([active_base, best_refined_seq])
+            print(f"  NEW BEST creativity {refined_cr:.4f} -> "
+                  f"active_base grew to {active_base.numel()} chars")
 
     # Final generation for inspection.
     final_gen = autoregressive_generate(model, prompt, n_new=n_new,
@@ -706,7 +711,7 @@ def train_with_self_distillation(name, train_seed, corpus_anchor, val_split,
              "best_val": best_val, "best_step": best_step,
              "wall": time.time() - t0,
              "best_creativity_seen": best_creativity,
-             "distill_buffer_size": len(distill_buffer),
+             "active_base_final_size": active_base.numel(),
              "cycle_summary": cycle_summary,
              "generated_tokens": final_gen[0].tolist(),
              "refined_tokens": final_refined[0].tolist()}
