@@ -49,6 +49,7 @@ from losses_substrate import (substrate_fft_loss, substrate_harmony_loss,
                                 substrate_multiscale_harmony_loss_grounded)
 from activations_substrate import SubstrateNegMultiAdvancedV2
 from train_substrate_attention import FibRecLMSubsim
+from creativity_score import creativity_score as compute_creativity_score
 
 
 def take_tiny_seed(encoded: torch.Tensor, n_chars: int,
@@ -113,21 +114,18 @@ def iterative_refine(model, prompt, n_new, vocab_size,
                        prompt_len: int = 16,
                        harmony_scorer=None,
                        quality_scorer=None,
+                       creativity_scorer=None,
                        temperature: float = 0.5,
                        force_run_all: bool = True):
     """Aggressive inference-time substrate-recursive refinement.
 
-    Pushes refinement harder than the conservative version:
-      - resample_frac=0.35: more positions resampled per iteration
-      - temperature=0.5: sharper sampling, less noise drift
-      - n_iters=30: run longer to see deep refinement
-      - force_run_all: don't stop on flat harmony -- keep refining to
-        explore the substrate fixed-point set
+    Selection priority for returning the BEST sequence:
+      creativity_scorer (HIGHER is better) > quality_scorer (LOWER) >
+      harmony_scorer (LOWER).
 
-    Returns the BEST sequence by quality_scorer (or harmony if no
-    quality_scorer), AND the full history. The "best" may not be the
-    last; substrate fixed-point exploration produces equally-aligned
-    variants of which one may be more meaningful.
+    The selection target matters: val/harmony/quality reward exact
+    replication or substrate alignment; creativity rewards
+    Shakespeare-LIKE patterns without requiring exact word match.
     """
     model.eval()
     with torch.no_grad():
@@ -138,11 +136,19 @@ def iterative_refine(model, prompt, n_new, vocab_size,
         history = []
         h0 = harmony_scorer(draft) if harmony_scorer is not None else None
         q0 = quality_scorer(draft) if quality_scorer is not None else None
+        c0 = creativity_scorer(draft) if creativity_scorer is not None else None
         history.append({"iter": 0, "harmony": h0, "quality": q0,
+                          "creativity": c0,
                           "seq": draft.clone(), "n_resampled": 0})
 
         best_seq = draft.clone()
-        best_score = q0 if q0 is not None else h0
+        # Selection priority: creativity (max), quality (min), harmony (min).
+        if c0 is not None:
+            best_score = c0; best_mode = "creativity_max"
+        elif q0 is not None:
+            best_score = q0; best_mode = "quality_min"
+        else:
+            best_score = h0; best_mode = "harmony_min"
 
         for it in range(1, n_iters + 1):
             T = draft.shape[1]
@@ -174,16 +180,23 @@ def iterative_refine(model, prompt, n_new, vocab_size,
                       else None)
             new_q = (quality_scorer(new_draft) if quality_scorer is not None
                       else None)
+            new_c = (creativity_scorer(new_draft) if creativity_scorer is not None
+                      else None)
             history.append({"iter": it, "harmony": new_h, "quality": new_q,
+                              "creativity": new_c,
                               "seq": new_draft.clone(),
                               "n_resampled": n_resample})
 
-            # Track best by quality (or harmony fallback).
-            this_score = new_q if new_q is not None else new_h
-            if (best_score is None or
-                (this_score is not None and this_score < best_score)):
-                best_seq = new_draft.clone()
-                best_score = this_score
+            # Selection: creativity higher is better, quality/harmony lower.
+            if best_mode == "creativity_max" and new_c is not None:
+                if best_score is None or new_c > best_score:
+                    best_seq = new_draft.clone(); best_score = new_c
+            elif best_mode == "quality_min" and new_q is not None:
+                if best_score is None or new_q < best_score:
+                    best_seq = new_draft.clone(); best_score = new_q
+            elif new_h is not None:
+                if best_score is None or new_h < best_score:
+                    best_seq = new_draft.clone(); best_score = new_h
 
             draft = new_draft
             if not force_run_all:
@@ -400,7 +413,9 @@ def train_mutable_substrate(name, train_seed, corpus_anchor, val_split,
                               harmony_kind="char",
                               mutation_every: int = 200,
                               mutation_alpha: float = 0.9,
-                              data_guided: bool = True):
+                              data_guided: bool = True,
+                              itos_map: dict = None,
+                              corpus_text: str = None):
     """Parametric substrate mutation with best-revert + data guidance.
 
     Constants (phi, pi_exp, fib_weights) are the ONLY mutable values.
@@ -528,9 +543,7 @@ def train_mutable_substrate(name, train_seed, corpus_anchor, val_split,
                                               K_harmony=K_h).item()
 
     def quality_scorer(seq_tokens):
-        """Self-perplexity: how surprising is the sequence to the model.
-        Lower = model is confident in this sequence = more substrate-
-        aligned in the model's own prediction-space."""
+        """Self-perplexity: how surprising is the sequence to the model."""
         with torch.no_grad():
             T = seq_tokens.shape[1]
             ctx = seq_tokens if T <= model.seq_len else seq_tokens[:, -model.seq_len:]
@@ -539,21 +552,36 @@ def train_mutable_substrate(name, train_seed, corpus_anchor, val_split,
                                    ctx[:, 1:].reshape(-1))
             return ce.item()
 
+    creativity_fn = None
+    if corpus_text is not None and itos_map is not None:
+        def creativity_fn(seq_tokens):
+            """Shakespeare-creativity: n-gram + vocab + structural match.
+            Higher = more Shakespeare-LIKE without exact replication."""
+            text = ''.join(itos_map.get(int(t), '?')
+                            for t in seq_tokens[0].tolist())
+            return compute_creativity_score(text, corpus_text)["creativity_score"]
+
     refined_gen, refine_history = iterative_refine(
         model, prompt, n_new=n_new, vocab_size=vocab_size,
         n_iters=30, resample_frac=0.35, prompt_len=16,
         harmony_scorer=harmony_scorer,
         quality_scorer=quality_scorer,
+        creativity_scorer=creativity_fn,
         temperature=0.5, force_run_all=True)
     h_traj = [round(h["harmony"], 4) for h in refine_history
                 if h["harmony"] is not None]
     q_traj = [round(h["quality"], 4) for h in refine_history
                 if h["quality"] is not None]
+    c_traj = [round(h["creativity"], 4) for h in refine_history
+                if h["creativity"] is not None]
     print(f"  refinement: {len(refine_history)} iterations")
     print(f"    harmony: {h_traj[0]} -> {min(h_traj):.4f} -> {h_traj[-1]}  "
           f"(min iter={h_traj.index(min(h_traj))})")
     print(f"    quality: {q_traj[0]} -> {min(q_traj):.4f} -> {q_traj[-1]}  "
           f"(min iter={q_traj.index(min(q_traj))})")
+    if c_traj:
+        print(f"    creativity: {c_traj[0]} -> {max(c_traj):.4f} -> {c_traj[-1]}  "
+              f"(max iter={c_traj.index(max(c_traj))})")
     best_state, best_state_val = min(history, key=lambda x: x[1])
     print(f"  best constants: {best_state.summary()}  val={best_state_val:.4f}")
     return {"name": name, "mode": "parametric_mutable", "n_params": n_params,
@@ -575,7 +603,9 @@ def train_mutable_substrate(name, train_seed, corpus_anchor, val_split,
              "refinement_harmony_trajectory":
                  [h["harmony"] for h in refine_history if h["harmony"] is not None],
              "refinement_quality_trajectory":
-                 [h["quality"] for h in refine_history if h["quality"] is not None]}
+                 [h["quality"] for h in refine_history if h["quality"] is not None],
+             "refinement_creativity_trajectory":
+                 [h["creativity"] for h in refine_history if h["creativity"] is not None]}
 
 
 def train_multi_cycle(name, train_seed, corpus_anchor, val_split, vocab_size,
@@ -834,6 +864,11 @@ def main():
         ("mutable_char",        "char"),
         ("mutable_multiscale",  "multiscale"),
     ]
+    # Build itos and full corpus text for creativity scoring.
+    itos_map = {i: c for i, c in enumerate(chars)}
+    full_corpus_text = ''.join(itos_map.get(int(t), '?')
+                                  for t in encoded.tolist())
+
     results = {}
     for name, harmony_kind in arms:
         results[name] = train_mutable_substrate(name, train_seed, corpus_anchor,
@@ -841,7 +876,9 @@ def main():
                                                    fib_positions,
                                                    harmony_kind=harmony_kind,
                                                    mutation_every=100,
-                                                   mutation_alpha=0.9)
+                                                   mutation_alpha=0.9,
+                                                   itos_map=itos_map,
+                                                   corpus_text=full_corpus_text)
 
     print()
     print("=" * 92)
@@ -877,12 +914,24 @@ def main():
         sp = decode(r["generated_tokens"])
         rf = decode(r["refined_tokens"])
         n_iters = r.get("refinement_iterations", 0)
-        traj = r.get("refinement_harmony_trajectory", [])
-        print(f"\n[{name}]  refine_iters={n_iters}  "
-              f"harmony: {round(traj[0], 4) if traj else '?'} → "
-              f"{round(traj[-1], 4) if traj else '?'}")
-        print(f"  single-pass: {repr(sp[:200])}")
-        print(f"  refined:     {repr(rf[:200])}")
+        traj_h = r.get("refinement_harmony_trajectory", [])
+        traj_c = r.get("refinement_creativity_trajectory", [])
+        # Compute creativity on both.
+        sp_cr = compute_creativity_score(sp, full_corpus_text)
+        rf_cr = compute_creativity_score(rf, full_corpus_text)
+        print(f"\n[{name}]  refine_iters={n_iters}")
+        if traj_h:
+            print(f"  harmony:    {round(traj_h[0], 4)} → {round(traj_h[-1], 4)}")
+        if traj_c:
+            print(f"  creativity: {round(traj_c[0], 4)} → "
+                  f"max={round(max(traj_c), 4)} → {round(traj_c[-1], 4)}  "
+                  f"(picked iter {traj_c.index(max(traj_c))})")
+        print(f"  single-pass [creativity={sp_cr['creativity_score']:.3f}, "
+              f"n3={sp_cr['ngram_3']:.3f}, vocab={sp_cr['vocab_overlap']:.3f}]:")
+        print(f"    {repr(sp[:200])}")
+        print(f"  refined    [creativity={rf_cr['creativity_score']:.3f}, "
+              f"n3={rf_cr['ngram_3']:.3f}, vocab={rf_cr['vocab_overlap']:.3f}]:")
+        print(f"    {repr(rf[:200])}")
 
     out_path = Path(__file__).parent / args.out
     with open(out_path, "w") as f:
