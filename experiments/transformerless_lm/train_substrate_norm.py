@@ -178,12 +178,12 @@ def main():
     )
     fib_positions = fib_positions_in_window(args.seq_len)
 
-    # Skip baseline_v2 (known reference val=2.5889) and failed v1
-    # primitives (median_ln, weiszfeld_ln, tier_softmax, attractor_softmax).
+    # L1-based LN of any flavor lags badly (median, weiszfeld, l1_ln_cal
+    # all 8-14% behind baseline; K-shrink doesn't help). Activations are
+    # roughly Gaussian -- L2 std normalization is the right metric here.
+    # Isolate softmax substrate test on its own.
     arms = [
-        ("l1_ln_cal",     SubstrateL1LN,   None),
         ("phi_pi_sm",     nn.LayerNorm,    substrate_softmax),
-        ("both",          SubstrateL1LN,   substrate_softmax),
     ]
     results = {}
     for name, ln_cls, sm_fn in arms:
