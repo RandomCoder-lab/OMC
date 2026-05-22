@@ -120,6 +120,193 @@ def build_bigram_prior(corpus_tokens: torch.Tensor, vocab_size: int):
 _FIB_NUMS_FOR_BIGRAM = [1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144]
 
 
+# Morphology-based POS classifier for substrate POS-aware bigram.
+# Uses ONLY token shape -- no corpus statistics, no NLP library.
+def classify_pos(token: str, rank: int = None) -> str:
+    """Universal POS classification from MORPHOLOGY + RANK only.
+
+    No hardcoded word lists -- the substrate framework's claim is that
+    structure emerges from token shape + Fibonacci-tier rank position,
+    not English-specific dictionaries.
+
+    Signals:
+      - Token shape: length, single-char, all-punct, whitespace.
+      - Morphological suffixes: -eth/-est/-ing/-ed mark verbs in many
+        Indo-European languages (universal-ish inflectional pattern).
+      - Fibonacci-rank tier: most-frequent tokens (rank < F(7)=13) are
+        statistically functional (articles, pronouns); next tier
+        (rank < F(9)=34) are common content; tail are rare nouns.
+
+    Categories collapse to: 'function' (high-freq functional words),
+    'common' (mid-freq content words), 'verb' (morphological), 'noun'
+    (default rest), plus shape categories.
+    """
+    if len(token) == 0:
+        return 'fragment'
+    if token in (' ', '\n', '\t'):
+        return 'space'
+    if all(c in '.,!?;:\'"-()' for c in token):
+        return 'punct'
+    if len(token) == 1:
+        return 'fragment'
+
+    tl = token.lower()
+    # Morphological verb suffixes (cross-lingual Indo-European pattern).
+    if tl.endswith('eth') or tl.endswith('est'):
+        return 'verb'
+    if tl.endswith('ing') and len(tl) >= 5:
+        return 'verb'
+    if tl.endswith('ed') and len(tl) >= 4:
+        return 'verb'
+
+    # Rank-tier classification (universal: most-frequent ranks ARE
+    # functional words in any language).
+    if rank is not None:
+        if rank < 13:           # F(7): top-13 most-frequent
+            return 'function'   # articles, pronouns, conjunctions
+        if rank < 34:           # F(9): top-34
+            return 'common'     # common content words
+    return 'noun'               # default for content words
+
+
+_POS_CATEGORIES = ['function', 'common', 'verb', 'noun',
+                     'punct', 'space', 'fragment']
+
+
+def build_pos_transition_matrix() -> dict:
+    """Self-referential POS transition matrix from substrate alone.
+
+    Each POS category has a Fibonacci-derived VALUE based on its
+    position in the substrate hierarchy:
+      function: F(0) = 1   (highest-tier, most abstract)
+      common:   F(1) = 1   (next-tier content)
+      verb:     F(2) = 2   (action -- function + common)
+      noun:     F(3) = 3   (entity -- common + verb)
+      punct:    F(4) = 5   (boundary -- verb + noun)
+      space:    F(5) = 8   (separator -- noun + punct)
+      fragment: F(6) = 13  (sub-word -- punct + space)
+
+    Each value is the sum of the two previous (Fibonacci recurrence).
+    Transitions decay by phi^(pi * F-tier-distance):
+      adjacent categories: 1.0
+      one tier apart: 1/phi^pi  ~ 0.22
+      two tiers apart: 1/phi^(2pi) ~ 0.049
+      n tiers apart: 1/phi^(n*pi)
+
+    This is fully substrate-derived: no hardcoded weights, no
+    English-specific patterns. Just F(k) values and phi^pi decay.
+    """
+    F = _FIB_NUMS_FOR_BIGRAM
+    cats = _POS_CATEGORIES
+    # F-derived values per category (their Fibonacci position).
+    pos_value = {cats[k]: F[k] for k in range(len(cats))}
+    pos_tier = {cats[k]: k for k in range(len(cats))}
+    phi_pi = _PHI_FOR_SAMPLING ** math.pi
+
+    table = {}
+    for a in cats:
+        table[a] = {}
+        for b in cats:
+            tier_diff = abs(pos_tier[a] - pos_tier[b])
+            # Substrate decay: closer tiers = higher transition.
+            table[a][b] = 1.0 / (phi_pi ** tier_diff)
+    return table
+
+
+def build_model_derived_bigram(model, vocab_size: int) -> torch.Tensor:
+    """Bigram emerges from the trained model's OWN predictions.
+
+    For each token i, the bigram[i] is the model's next-token
+    distribution given input [i]. This is purely substrate -- the
+    model was trained with substrate operations (substrate harmony,
+    substrate sampling, substrate embedding), so its learned
+    transitions reflect substrate-aware structure.
+
+    No corpus statistics injected; the bigram derives from the model
+    itself. As the model improves during training, this bigram
+    evolves with it.
+
+    Substrate principle: derive from the substrate-trained system,
+    not from external data.
+    """
+    bigram = torch.zeros(vocab_size, vocab_size, dtype=torch.float)
+    model.eval()
+    with torch.no_grad():
+        # Batch all single-token inputs for efficiency.
+        idx = torch.arange(vocab_size, dtype=torch.long).unsqueeze(1)
+        # Process in chunks to manage memory.
+        chunk = 32
+        for start in range(0, vocab_size, chunk):
+            end = min(start + chunk, vocab_size)
+            x = idx[start:end]
+            logits = model(x)[:, -1, :]
+            probs = F.softmax(logits, dim=-1)
+            bigram[start:end] = probs
+    model.train()
+    # Zero diagonal (prevent self-loops).
+    bigram.fill_diagonal_(0.0)
+    bigram = bigram / (bigram.sum(dim=-1, keepdim=True) + 1e-8)
+    return bigram
+
+
+def build_substrate_pos_bigram(vocab_size: int, vocab: list) -> torch.Tensor:
+    """Substrate POS-aware bigram: each (i, j) weighted by the POS
+    transition table (above) * shape attenuation * rank-distance decay.
+
+    Adds linguistic structure (noun-verb, article-noun, etc.) without
+    using corpus n-gram statistics. POS classification is morphology-
+    only (token shape + simple word lists).
+    """
+    phi = _PHI_FOR_SAMPLING
+    pi_arg = math.pi
+    K = len(_FIB_NUMS_FOR_BIGRAM)
+    pos_table = build_pos_transition_matrix()
+    # Classify all vocab tokens (passing rank so rank-tier signal works).
+    pos_per_token = [classify_pos(vocab[i] if i < len(vocab) else '',
+                                       rank=(i - 65 if i >= 65 else None))
+                       for i in range(vocab_size)]
+    # Build POS transition for each token pair via lookup.
+    pos_weight = torch.zeros(vocab_size, vocab_size)
+    for i in range(vocab_size):
+        pos_i = pos_per_token[i]
+        row = pos_table.get(pos_i, {})
+        for j in range(vocab_size):
+            pos_j = pos_per_token[j]
+            pos_weight[i, j] = row.get(pos_j, _FIB_NUMS_FOR_BIGRAM[2]
+                                                / (phi ** (pi_arg * 2)))
+    # Rank-distance decay (mild, Binet-like).
+    log_phi = math.log(phi)
+    idx = torch.arange(vocab_size, dtype=torch.float)
+    d = (idx.unsqueeze(0) - idx.unsqueeze(1)).abs() + 1.0
+    K_ext = 16
+    fib_ext = [1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610, 987]
+    k = torch.clamp(torch.log(d) / log_phi, 0.0, K_ext - 1.0).floor().long()
+    fk_tensor = torch.tensor([fib_ext[i] / (phi ** i) for i in range(K_ext)],
+                                dtype=torch.float)
+    rank_decay = fk_tensor[k]
+    # Shape attenuation (consistent with shape-bigram): multi-char words
+    # full weight; punct phi^pi attenuated; single-char phi^(2pi); etc.
+    shape_attenuation = torch.ones(vocab_size)
+    for i in range(vocab_size):
+        tok = vocab[i] if i < len(vocab) else ''
+        if len(tok) >= 2:
+            shape_attenuation[i] = 1.0
+        elif tok in (' ', '\n', '\t'):
+            shape_attenuation[i] = 1.0 / phi
+        elif tok in '.,!?;:\'"-()':
+            shape_attenuation[i] = 1.0 / (phi ** pi_arg)
+        elif tok.isalpha():
+            shape_attenuation[i] = 1.0 / (phi ** (pi_arg * 2))
+        else:
+            shape_attenuation[i] = 1.0 / (phi ** (pi_arg * 3))
+    # Combined: POS weight (structure) * rank decay (proximity)
+    # * shape attenuation (suppress fragments).
+    bigram = pos_weight * rank_decay * shape_attenuation.unsqueeze(0)
+    bigram.fill_diagonal_(0.0)
+    bigram = bigram / (bigram.sum(dim=-1, keepdim=True) + 1e-8)
+    return bigram
+
+
 def build_substrate_bigram_shape(vocab_size: int, vocab: list) -> torch.Tensor:
     """Substrate bigram where each candidate next-token is weighted by
     the SYNTACTIC SHAPE of its chunk. Syntactically-clean tokens
@@ -212,29 +399,45 @@ _SUBSTRATE_BIGRAM_ALPHA = 1.0 / (_PHI_FOR_SAMPLING ** math.pi)   # ~0.221
 
 def substrate_syntax_blend(prev_token: int, bigram_prior: torch.Tensor,
                               probs: torch.Tensor,
-                              prev_prev_token: int = None) -> torch.Tensor:
-    """Substrate syntax blend with TRIGRAM-tier context and gate.
+                              prev_prev_token: int = None,
+                              context_tokens: list = None) -> torch.Tensor:
+    """Substrate syntax blend with GRADUATED multi-back context + gate.
 
-    Two-back context (trigram-tier): bigram for token at t-1 weighted
-    F(0)=1; bigram for t-2 weighted F(1)/phi^pi ~= 0.22. Substrate-
-    tier-decayed combination. Approximates trigram statistics without
-    V^3 storage.
+    Graduated form: contributions from t-1, t-2, ..., t-N positions
+    are weighted F(0), F(1)/phi^pi, F(2)/phi^(2pi), ..., F(k)/phi^(pi*k).
+    Substrate-tier-decayed influence across the recent context window.
+    Beyond simple bigram or 2-back trigram -- arbitrary lookback,
+    each position contributing per substrate decay.
 
-    Then syntactic-incorrect gate: candidates with combined prior
-    below 1/(V*phi^pi) get suppressed by (prior/threshold).
+    Then syntactic-incorrect gate suppresses low-prior candidates.
+    Then 1/phi^pi blend with model probs.
 
-    Finally blend with model probs at alpha = 1/phi^pi mass ratio.
+    context_tokens: list of previous tokens (most recent last). If
+    None, falls back to prev_token + prev_prev_token. Pure substrate
+    tier-decay multi-back is the deepest version.
     """
-    prior_1 = bigram_prior[prev_token].to(probs.device).to(probs.dtype)
-    if prev_prev_token is not None:
-        prior_2 = bigram_prior[prev_prev_token].to(probs.device).to(probs.dtype)
-        w1, w2 = 1.0, 1.0 / (_PHI_FOR_SAMPLING ** math.pi)
-        combined_prior = (w1 * prior_1 + w2 * prior_2) / (w1 + w2)
-        combined_prior = combined_prior / (combined_prior.sum() + 1e-8)
-    else:
-        combined_prior = prior_1
+    if context_tokens is None:
+        context_tokens = [prev_token]
+        if prev_prev_token is not None:
+            context_tokens = [prev_prev_token, prev_token]
+
+    # Graduated tier-weighted combination of bigrams from each position.
+    K = len(_FIB_NUMS_FOR_BIGRAM)
+    phi_pi = _PHI_FOR_SAMPLING ** math.pi
+    n = len(context_tokens)
+    combined_prior = torch.zeros_like(probs)
+    total_w = 0.0
+    for i, tok in enumerate(reversed(context_tokens[-K:])):
+        # i=0 -> most recent (t-1), i=1 -> t-2, etc.
+        w = _FIB_NUMS_FOR_BIGRAM[i] / (phi_pi ** i)
+        prior_i = bigram_prior[tok].to(probs.device).to(probs.dtype)
+        combined_prior = combined_prior + w * prior_i
+        total_w += w
+    combined_prior = combined_prior / (total_w + 1e-8)
+    combined_prior = combined_prior / (combined_prior.sum() + 1e-8)
+
     V = probs.numel()
-    threshold = 1.0 / (V * (_PHI_FOR_SAMPLING ** math.pi))
+    threshold = 1.0 / (V * phi_pi)
     gate = torch.where(combined_prior >= threshold,
                          torch.ones_like(combined_prior),
                          combined_prior / threshold)
@@ -315,12 +518,11 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
             else:
                 probs = F.softmax(logits, dim=-1)
             if bigram_prior is not None and seq.shape[1] >= 1:
-                prev_tok = int(seq[0, -1])
-                prev_prev_tok = (int(seq[0, -2])
-                                  if seq.shape[1] >= 2 else None)
+                # Graduated context: last min(K, seq_len) tokens.
+                ctx_back = seq[0, -7:].tolist()
                 probs[0] = substrate_syntax_blend(
-                    prev_tok, bigram_prior, probs[0],
-                    prev_prev_token=prev_prev_tok)
+                    int(seq[0, -1]), bigram_prior, probs[0],
+                    context_tokens=ctx_back)
             next_tok = torch.multinomial(probs, num_samples=1)
             seq = torch.cat([seq, next_tok], dim=1)
     model.train()
@@ -377,12 +579,12 @@ def _single_stage_refine(model, draft, vocab_size, scorer, mode: str,
                         history_t, logits[0, idx], vocab_size_local)
                     pos_probs = F.softmax(pos_logits / temperature, dim=-1)
                     if bigram_prior is not None and t_draft >= 1:
-                        prev_tok = int(new[0, t_draft - 1])
-                        prev_prev_tok = (int(new[0, t_draft - 2])
-                                          if t_draft >= 2 else None)
+                        # Graduated context: last 7 tokens.
+                        ctx_back_start = max(0, t_draft - 7)
+                        ctx_back = new[0, ctx_back_start:t_draft].tolist()
                         pos_probs = substrate_syntax_blend(
-                            prev_tok, bigram_prior, pos_probs,
-                            prev_prev_token=prev_prev_tok)
+                            int(new[0, t_draft - 1]), bigram_prior, pos_probs,
+                            context_tokens=ctx_back)
                     new[0, t_draft] = torch.multinomial(
                         pos_probs, num_samples=1).item()
 
@@ -881,17 +1083,20 @@ def train_with_self_distillation(name, train_seed, corpus_anchor, val_split,
     seed_min_fraction = 0.70
     orig_seed_chars = train_seed.numel()
 
-    # Shape-aware substrate bigram: each candidate weighted by syntactic
-    # chunk shape (real word vs punctuation vs fragment) combined with
-    # rank-distance decay. NO corpus stats -- substrate generates syntax
-    # from constants + tokenizer's chunk geometry.
-    print(f"  building shape-aware substrate bigram (no corpus stats)...")
+    # Refined substrate bigram: shape-aware (chunk geometry) + POS-aware
+    # (universal POS tiers). No corpus statistics, no model-derived noise.
+    # Two layers of substrate structural prior combined multiplicatively.
     if vocab_for_bigram is not None:
-        bigram_prior = build_substrate_bigram_shape(vocab_size,
+        bigram_shape = build_substrate_bigram_shape(vocab_size,
                                                        vocab_for_bigram)
+        bigram_pos = build_substrate_pos_bigram(vocab_size,
+                                                   vocab_for_bigram)
+        # Multiplicative combination -- both signals must agree.
+        bigram_prior = bigram_shape * bigram_pos
+        bigram_prior = bigram_prior / (bigram_prior.sum(-1, keepdim=True) + 1e-8)
     else:
         bigram_prior = build_substrate_bigram(vocab_size)
-    print(f"  shape-aware substrate_bigram shape: {bigram_prior.shape}")
+    print(f"  refined substrate bigram (shape * POS): {bigram_prior.shape}")
 
     # Active training base: starts as tiny_seed, GROWS by appending each
     # cycle's best refined output -- only if (a) creativity > corpus
@@ -947,10 +1152,7 @@ def train_with_self_distillation(name, train_seed, corpus_anchor, val_split,
                       flush=True)
             global_step += 1
 
-        # End of cycle: HEAVY extrapolation. Generate samples_per_cycle
-        # drafts from varied prompts, refine each, score creativity, and
-        # APPEND the top-K to active_base. The substrate ratchet turns
-        # multiple clicks per cycle.
+        # End of cycle: HEAVY extrapolation.
         samples = []   # list of (refined_seq, creativity)
         for s_idx in range(samples_per_cycle):
             # Diverse prompts: random 16-char windows from active_base.
