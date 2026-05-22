@@ -1585,7 +1585,11 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
             recent_emitted = seq[0, -_FIB_NUMS_FOR_BIGRAM[5]:].tolist()
             local_H = _local_entropy(recent_emitted, window=_FIB_NUMS_FOR_BIGRAM[5])
             entropy_threshold = math.log(2.0)  # F(3)=2 distinct tokens
-            stuck = (local_H < entropy_threshold)
+            # Entropy override fires only when BOTH conditions hold:
+            #   low entropy (stuck) AND negative momentum (bad repetition).
+            # Shakespeare anaphora has low entropy but POSITIVE momentum --
+            # don't penalize it.
+            stuck = (local_H < entropy_threshold and momentum_short < 0.0)
             # A. TACTICAL momentum (short) drives sharpen/flatten.
             if stuck:
                 # Entropy override: force flatten regardless of momentum.
