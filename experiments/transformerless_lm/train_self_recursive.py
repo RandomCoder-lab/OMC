@@ -1324,6 +1324,32 @@ def _omniweight_apply(base_probs: torch.Tensor,
     return out / (out.sum() + 1e-8)
 
 
+def substrate_unknown_register(coverage: torch.Tensor,
+                                  probs: torch.Tensor) -> torch.Tensor:
+    """UNKNOWN-REGISTER: bias toward un-emitted tokens.
+
+    Per-token coverage count tracks how many times each token has
+    been emitted in the current sequence. Frontier distribution
+    = 1/(1+coverage), normalized -- high for unseen, low for seen.
+
+    Mix: (1 - alpha) * base + alpha * frontier
+    alpha = 1/phi^pi ~ 0.221 (substrate-canonical)
+
+    Encodes "knowing there is more you do not know" -- the unknown
+    is a positive register, not just an absence. Persistent pull
+    toward novelty.
+
+    Pure substrate (1/phi^pi mixing weight).
+    """
+    if coverage is None:
+        return probs
+    inv_count = 1.0 / (1.0 + coverage.to(probs.device).to(probs.dtype))
+    frontier = inv_count / (inv_count.sum() + 1e-8)
+    alpha = 1.0 / (_PHI_FOR_SAMPLING ** math.pi)
+    out = (1.0 - alpha) * probs + alpha * frontier
+    return out / (out.sum() + 1e-8)
+
+
 def _self_eval_insight(base_probs: torch.Tensor, emitted_tid: int,
                           n_chars: int = 65) -> float:
     """Compute self-evaluation insight signal for a just-emitted token.
@@ -1423,6 +1449,11 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
         last_content_ends_s = False
         creative_momentum = 0.0   # self-eval EMA register
         momentum_history = []     # recent momentum values, F(7)=13 deep
+        coverage = torch.zeros(vocab_size)   # unknown-register
+        if vocab is not None:
+            for tid in seq[0].tolist():
+                if 0 <= tid < vocab_size:
+                    coverage[tid] += 1.0
         if vocab is not None:
             prompt_list = seq[0].tolist()
             for idx_pl, tid in enumerate(prompt_list):
@@ -1489,6 +1520,9 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
                 math_delta += _omniweight_delta(base, p)
             history_aw = seq[0, -21:]
             p = substrate_anti_stagnation(history_aw, base, vocab_size)
+            math_delta += _omniweight_delta(base, p)
+            # Unknown-register: positive pull toward un-emitted tokens.
+            p = substrate_unknown_register(coverage, base)
             math_delta += _omniweight_delta(base, p)
             # ---- Language hemisphere ----
             p = substrate_iambic_phase(
@@ -1622,6 +1656,9 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
                 momentum_history.append(creative_momentum)
                 if len(momentum_history) > 13:
                     momentum_history = momentum_history[-13:]
+                # Update unknown-register coverage.
+                if 0 <= nid < vocab_size:
+                    coverage[nid] += 1.0
     model.train()
     return seq
 
