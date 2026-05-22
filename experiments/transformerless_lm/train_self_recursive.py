@@ -802,31 +802,32 @@ def substrate_agreement(last_content_ends_s: bool, probs: torch.Tensor,
     return out / (out.sum() + 1e-8)
 
 
-def substrate_word_spacing(prev_tid: int, probs: torch.Tensor,
-                              vocab: list, n_chars: int = 65) -> torch.Tensor:
-    """Word boundary enforcement with gentler suppression magnitude.
-
-    After a word-token (rank >= n_chars), suppress every token except
-    space, newline, and punctuation. Magnitude eased from 1/phi^pi
-    (v69) to 1/phi^2 ~ 0.382: still strong enough to encourage
-    spacing but doesn't over-block apostrophe-internal sequences
-    ('tis, he's, etc.).
+def build_allowed_after_word_mask(vocab: list, n_chars: int = 65,
+                                       suppress: float = None) -> torch.Tensor:
+    """Per-token multiplier mask for word_spacing primitive.
+    All tokens suppressed by 1/phi^2 except space/newline/punct chars
+    in the char region. Precomputed once.
     """
-    if prev_tid < n_chars or not vocab:
-        return probs
-    allowed_chars = {' ', '\n', '.', ',', '!', '?', ';', ':',
-                       "'", '-'}
-    allowed_idx = []
-    for i in range(min(n_chars, len(vocab))):
+    V = len(vocab)
+    if suppress is None:
+        suppress = 1.0 / (_PHI_FOR_SAMPLING ** 2)
+    mask = torch.full((V,), suppress)
+    allowed_chars = {' ', '\n', '.', ',', '!', '?', ';', ':', "'", '-'}
+    for i in range(min(n_chars, V)):
         if vocab[i] in allowed_chars:
-            allowed_idx.append(i)
-    if not allowed_idx:
+            mask[i] = 1.0
+    return mask
+
+
+def substrate_word_spacing(prev_tid: int, probs: torch.Tensor,
+                              vocab: list, n_chars: int = 65,
+                              allowed_mask: torch.Tensor = None
+                              ) -> torch.Tensor:
+    """Word boundary enforcement (vectorized via precomputed mask).
+    """
+    if prev_tid < n_chars or allowed_mask is None:
         return probs
-    suppress = 1.0 / (_PHI_FOR_SAMPLING ** 2)
-    mask = torch.full_like(probs, suppress)
-    for i in allowed_idx:
-        mask[i] = 1.0
-    out = probs * mask
+    out = probs * allowed_mask.to(probs.device).to(probs.dtype)
     return out / (out.sum() + 1e-8)
 
 
@@ -865,6 +866,10 @@ def substrate_phonotactics(cluster_len: int, probs: torch.Tensor,
     return out / (out.sum() + 1e-8)
 
 
+_VOWEL_ORDER = ['a', 'e', 'i', 'o', 'u']
+_VOWEL_TO_IDX = {v: i for i, v in enumerate(_VOWEL_ORDER)}
+
+
 def build_end_vowel_per_token(vocab: list) -> list:
     """Each token's final vowel (or '' if none). For rhyme primitive.
     """
@@ -879,42 +884,59 @@ def build_end_vowel_per_token(vocab: list) -> list:
     return end_vowels
 
 
-def substrate_rhyme_resonance(recent_tokens: list, end_vowels: list,
-                                  probs: torch.Tensor) -> torch.Tensor:
-    """Reward sound-echo: tokens whose final vowel matches recent
-    tokens' final vowels. F(k) decay across last F(7)=13 tokens.
-
-    Pure substrate (last-vowel-of-token + Fibonacci decay). No rhyme
-    dictionary; the echo emerges from substrate sampling pressure.
+def build_end_vowel_idx_tensor(vocab: list) -> torch.Tensor:
+    """Per-token end-vowel index in {0..4} or -1 if no vowel.
+    Vectorizes the rhyme primitive's V-loop.
     """
-    if not recent_tokens or not end_vowels:
+    V = len(vocab)
+    idx = torch.full((V,), -1, dtype=torch.long)
+    for i, tok in enumerate(vocab):
+        for ch in reversed(tok or ''):
+            if ch in _IAMBIC_VOWELS:
+                idx[i] = _VOWEL_TO_IDX.get(ch.lower(), -1)
+                break
+    return idx
+
+
+def substrate_rhyme_resonance(recent_tokens: list,
+                                   end_vowel_idx: torch.Tensor,
+                                   probs: torch.Tensor) -> torch.Tensor:
+    """Vectorized rhyme resonance.
+
+    end_vowel_idx: LongTensor[V] in {-1, 0..4}. Precomputed once.
+    Pressure per vowel computed by Python loop (~13 iters); boost
+    lookup is one tensor index op replacing the prior 500-elt loop.
+    """
+    if not recent_tokens or end_vowel_idx is None:
         return probs
     phi = _PHI_FOR_SAMPLING
     phi_pi = phi ** math.pi
-    V_ev = len(end_vowels)
-    recent_pressure = {}
+    pressure = torch.zeros(len(_VOWEL_ORDER), dtype=probs.dtype,
+                              device=probs.device)
+    V_ev = end_vowel_idx.shape[0]
     for i, tid in enumerate(reversed(recent_tokens[-13:])):
-        if tid >= V_ev:
+        if tid >= V_ev or tid < 0:
             continue
-        v = end_vowels[tid]
-        if not v:
+        v_idx = int(end_vowel_idx[tid].item())
+        if v_idx < 0:
             continue
         kt = min(i, len(_FIB_NUMS_FOR_BIGRAM) - 1)
         w = _FIB_NUMS_FOR_BIGRAM[kt] / (phi_pi ** kt)
-        recent_pressure[v] = recent_pressure.get(v, 0.0) + w
-    if not recent_pressure:
+        pressure[v_idx] += w
+    if pressure.sum() <= 0:
         return probs
-    # Per-token log-boost halved by F(3)=2 -- substrate-canonical
-    # damping so anti-stagnation can override repeated same-vowel
-    # cascades (v62 'light light light' problem).
-    boost = torch.ones_like(probs)
     rhyme_scale = math.log(phi) / float(_FIB_NUMS_FOR_BIGRAM[3])
-    for v, p in recent_pressure.items():
-        log_boost = rhyme_scale * p / (1.0 + p)
-        bf = math.exp(log_boost)
-        for i, ev in enumerate(end_vowels):
-            if ev == v:
-                boost[i] = bf
+    log_boost_per_vowel = (rhyme_scale * pressure / (1.0 + pressure))
+    # Vectorized lookup: for each token, fetch its vowel's boost.
+    evi = end_vowel_idx.to(probs.device)
+    valid = (evi >= 0)
+    safe_idx = evi.clamp(min=0)
+    log_boost_per_token = torch.where(
+        valid,
+        log_boost_per_vowel[safe_idx],
+        torch.zeros_like(probs),
+    )
+    boost = torch.exp(log_boost_per_token)
     out = probs * boost
     return out / (out.sum() + 1e-8)
 
@@ -1424,7 +1446,8 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
                               end_vowels: list = None,
                               punct_mask: torch.Tensor = None,
                               newline_mask: torch.Tensor = None,
-                              unpronounceable_mask: torch.Tensor = None):
+                              unpronounceable_mask: torch.Tensor = None,
+                              allowed_after_word_mask: torch.Tensor = None):
     """Sample n_new tokens autoregressively with substrate sampling AND
     a substrate-canonical recency penalty.
 
@@ -1552,7 +1575,8 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
                 lang_delta += _omniweight_delta(base, p)
             if vocab is not None and seq.shape[1] >= 1:
                 p = substrate_word_spacing(
-                    int(seq[0, -1]), base, vocab, n_chars=n_chars_local)
+                    int(seq[0, -1]), base, vocab, n_chars=n_chars_local,
+                    allowed_mask=allowed_after_word_mask)
                 lang_delta += _omniweight_delta(base, p)
             if char_run >= _FIB_NUMS_FOR_BIGRAM[3]:
                 p = substrate_char_cascade(
@@ -1678,7 +1702,8 @@ def _single_stage_refine(model, draft, vocab_size, scorer, mode: str,
                             end_vowels: list = None,
                             punct_mask: torch.Tensor = None,
                             newline_mask: torch.Tensor = None,
-                            unpronounceable_mask: torch.Tensor = None):
+                            unpronounceable_mask: torch.Tensor = None,
+                            allowed_after_word_mask: torch.Tensor = None):
     """One refinement stage: optimize a single score until plateau.
 
     mode: 'min' (harmony, quality) or 'max' (creativity).
@@ -1817,7 +1842,8 @@ def _single_stage_refine(model, draft, vocab_size, scorer, mode: str,
                         lang_delta += _omniweight_delta(base_probs, p)
                         p = substrate_word_spacing(
                             int(new[0, t_draft - 1]), base_probs, vocab,
-                            n_chars=n_chars_r)
+                            n_chars=n_chars_r,
+                            allowed_mask=allowed_after_word_mask)
                         lang_delta += _omniweight_delta(base_probs, p)
                         if char_run_r >= _FIB_NUMS_FOR_BIGRAM[3]:
                             p = substrate_char_cascade(
@@ -1919,7 +1945,7 @@ def staged_refine(model, prompt, n_new, vocab_size,
     with torch.no_grad():
         draft = autoregressive_generate(model, prompt, n_new=n_new,
                                           vocab_size=vocab_size,
-                                          temperature=temperature, bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures, active_vocab_size=active_vocab_size, class_id_tensor=class_id_tensor, n_classes=n_classes, pronoun_mask=pronoun_mask, vowel_start_mask=vowel_start_mask, end_vowels=end_vowels, punct_mask=punct_mask, newline_mask=newline_mask, unpronounceable_mask=unpronounceable_mask)
+                                          temperature=temperature, bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures, active_vocab_size=active_vocab_size, class_id_tensor=class_id_tensor, n_classes=n_classes, pronoun_mask=pronoun_mask, vowel_start_mask=vowel_start_mask, end_vowels=end_vowels, punct_mask=punct_mask, newline_mask=newline_mask, unpronounceable_mask=unpronounceable_mask, allowed_after_word_mask=allowed_after_word_mask)
     stages_out = {}
     stages_out["initial"] = {"seq": draft.clone(),
                                 "harmony": harmony_scorer(draft),
@@ -1932,7 +1958,7 @@ def staged_refine(model, prompt, n_new, vocab_size,
                                             n_iters=n_iters_per_stage,
                                             resample_frac=resample_frac,
                                             prompt_len=prompt_len,
-                                            temperature=temperature, bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures, active_vocab_size=active_vocab_size, class_id_tensor=class_id_tensor, n_classes=n_classes, pronoun_mask=pronoun_mask, vowel_start_mask=vowel_start_mask, end_vowels=end_vowels, punct_mask=punct_mask, newline_mask=newline_mask, unpronounceable_mask=unpronounceable_mask)
+                                            temperature=temperature, bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures, active_vocab_size=active_vocab_size, class_id_tensor=class_id_tensor, n_classes=n_classes, pronoun_mask=pronoun_mask, vowel_start_mask=vowel_start_mask, end_vowels=end_vowels, punct_mask=punct_mask, newline_mask=newline_mask, unpronounceable_mask=unpronounceable_mask, allowed_after_word_mask=allowed_after_word_mask)
     stages_out["after_harmony"] = {"seq": draft.clone(),
                                        "trajectory": h_traj,
                                        "harmony": harmony_scorer(draft),
@@ -1945,7 +1971,7 @@ def staged_refine(model, prompt, n_new, vocab_size,
                                             n_iters=n_iters_per_stage,
                                             resample_frac=resample_frac,
                                             prompt_len=prompt_len,
-                                            temperature=temperature, bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures, active_vocab_size=active_vocab_size, class_id_tensor=class_id_tensor, n_classes=n_classes, pronoun_mask=pronoun_mask, vowel_start_mask=vowel_start_mask, end_vowels=end_vowels, punct_mask=punct_mask, newline_mask=newline_mask, unpronounceable_mask=unpronounceable_mask)
+                                            temperature=temperature, bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures, active_vocab_size=active_vocab_size, class_id_tensor=class_id_tensor, n_classes=n_classes, pronoun_mask=pronoun_mask, vowel_start_mask=vowel_start_mask, end_vowels=end_vowels, punct_mask=punct_mask, newline_mask=newline_mask, unpronounceable_mask=unpronounceable_mask, allowed_after_word_mask=allowed_after_word_mask)
     stages_out["after_quality"] = {"seq": draft.clone(),
                                        "trajectory": q_traj,
                                        "harmony": harmony_scorer(draft),
@@ -1959,7 +1985,7 @@ def staged_refine(model, prompt, n_new, vocab_size,
                                                 n_iters=n_iters_per_stage,
                                                 resample_frac=resample_frac,
                                                 prompt_len=prompt_len,
-                                                temperature=temperature, bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures, active_vocab_size=active_vocab_size, class_id_tensor=class_id_tensor, n_classes=n_classes, pronoun_mask=pronoun_mask, vowel_start_mask=vowel_start_mask, end_vowels=end_vowels, punct_mask=punct_mask, newline_mask=newline_mask, unpronounceable_mask=unpronounceable_mask)
+                                                temperature=temperature, bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures, active_vocab_size=active_vocab_size, class_id_tensor=class_id_tensor, n_classes=n_classes, pronoun_mask=pronoun_mask, vowel_start_mask=vowel_start_mask, end_vowels=end_vowels, punct_mask=punct_mask, newline_mask=newline_mask, unpronounceable_mask=unpronounceable_mask, allowed_after_word_mask=allowed_after_word_mask)
         stages_out["after_creativity"] = {"seq": draft.clone(),
                                               "trajectory": c_traj,
                                               "harmony": harmony_scorer(draft),
@@ -1993,7 +2019,7 @@ def iterative_refine(model, prompt, n_new, vocab_size,
         # Step 1: initial draft.
         draft = autoregressive_generate(model, prompt, n_new=n_new,
                                           vocab_size=vocab_size,
-                                          temperature=temperature, bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures, active_vocab_size=active_vocab_size, class_id_tensor=class_id_tensor, n_classes=n_classes, pronoun_mask=pronoun_mask, vowel_start_mask=vowel_start_mask, end_vowels=end_vowels, punct_mask=punct_mask, newline_mask=newline_mask, unpronounceable_mask=unpronounceable_mask)
+                                          temperature=temperature, bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures, active_vocab_size=active_vocab_size, class_id_tensor=class_id_tensor, n_classes=n_classes, pronoun_mask=pronoun_mask, vowel_start_mask=vowel_start_mask, end_vowels=end_vowels, punct_mask=punct_mask, newline_mask=newline_mask, unpronounceable_mask=unpronounceable_mask, allowed_after_word_mask=allowed_after_word_mask)
         history = []
         h0 = harmony_scorer(draft) if harmony_scorer is not None else None
         q0 = quality_scorer(draft) if quality_scorer is not None else None
@@ -2400,7 +2426,9 @@ def train_with_self_distillation(name, train_seed, corpus_anchor, val_split,
             vocab_for_bigram, n_chars=n_chars_local)
         pronoun_mask = build_pronoun_mask(vocab_for_bigram)
         vowel_start_mask = build_vowel_start_mask(vocab_for_bigram)
-        end_vowels = build_end_vowel_per_token(vocab_for_bigram)
+        end_vowels = build_end_vowel_idx_tensor(vocab_for_bigram)
+        allowed_after_word_mask = build_allowed_after_word_mask(
+            vocab_for_bigram, n_chars=n_chars_local)
         punct_mask = build_punct_mask(vocab_for_bigram)
         newline_mask = build_newline_mask(vocab_for_bigram)
         unpronounceable_mask = build_unpronounceable_mask(vocab_for_bigram)
@@ -2411,7 +2439,7 @@ def train_with_self_distillation(name, train_seed, corpus_anchor, val_split,
               f"newline: {int(newline_mask.sum().item())} | "
               f"unpronounceable: "
               f"{int(unpronounceable_mask.sum().item())} | "
-              f"end-vowel: {sum(1 for v in end_vowels if v)}")
+              f"end-vowel: {int((end_vowels >= 0).sum().item())}")
     else:
         class_id_tensor = None
         n_classes = 0
@@ -2421,6 +2449,7 @@ def train_with_self_distillation(name, train_seed, corpus_anchor, val_split,
         punct_mask = None
         newline_mask = None
         unpronounceable_mask = None
+        allowed_after_word_mask = None
 
     # Active training base: starts as tiny_seed, GROWS by appending each
     # cycle's best refined output -- only if (a) creativity > corpus
@@ -2488,14 +2517,14 @@ def train_with_self_distillation(name, train_seed, corpus_anchor, val_split,
                 draft = autoregressive_generate(
                     model, prompt_s, n_new=growth_n_new,
                     vocab_size=vocab_size, temperature=0.8,
-                    bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures, active_vocab_size=active_vocab_size, class_id_tensor=class_id_tensor, n_classes=n_classes, pronoun_mask=pronoun_mask, vowel_start_mask=vowel_start_mask, end_vowels=end_vowels, punct_mask=punct_mask, newline_mask=newline_mask, unpronounceable_mask=unpronounceable_mask)
+                    bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures, active_vocab_size=active_vocab_size, class_id_tensor=class_id_tensor, n_classes=n_classes, pronoun_mask=pronoun_mask, vowel_start_mask=vowel_start_mask, end_vowels=end_vowels, punct_mask=punct_mask, newline_mask=newline_mask, unpronounceable_mask=unpronounceable_mask, allowed_after_word_mask=allowed_after_word_mask)
             refined_s, _ = staged_refine(
                 model, prompt_s, n_new=growth_n_new, vocab_size=vocab_size,
                 harmony_scorer=harmony_fn, quality_scorer=quality_fn,
                 creativity_scorer=creativity_fn,
                 n_iters_per_stage=30, resample_frac=0.35,
                 prompt_len=16, temperature=0.5,
-                bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures, active_vocab_size=active_vocab_size, class_id_tensor=class_id_tensor, n_classes=n_classes, pronoun_mask=pronoun_mask, vowel_start_mask=vowel_start_mask, end_vowels=end_vowels, punct_mask=punct_mask, newline_mask=newline_mask, unpronounceable_mask=unpronounceable_mask)
+                bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures, active_vocab_size=active_vocab_size, class_id_tensor=class_id_tensor, n_classes=n_classes, pronoun_mask=pronoun_mask, vowel_start_mask=vowel_start_mask, end_vowels=end_vowels, punct_mask=punct_mask, newline_mask=newline_mask, unpronounceable_mask=unpronounceable_mask, allowed_after_word_mask=allowed_after_word_mask)
             samples.append((refined_s.squeeze(0).clone(),
                               creativity_fn(refined_s)))
         # Sort by creativity desc, keep top K.
@@ -2565,14 +2594,14 @@ def train_with_self_distillation(name, train_seed, corpus_anchor, val_split,
     final_gen = autoregressive_generate(model, prompt, n_new=n_new,
                                           vocab_size=vocab_size,
                                           temperature=0.8,
-                                          bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures, active_vocab_size=active_vocab_size, class_id_tensor=class_id_tensor, n_classes=n_classes, pronoun_mask=pronoun_mask, vowel_start_mask=vowel_start_mask, end_vowels=end_vowels, punct_mask=punct_mask, newline_mask=newline_mask, unpronounceable_mask=unpronounceable_mask)
+                                          bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures, active_vocab_size=active_vocab_size, class_id_tensor=class_id_tensor, n_classes=n_classes, pronoun_mask=pronoun_mask, vowel_start_mask=vowel_start_mask, end_vowels=end_vowels, punct_mask=punct_mask, newline_mask=newline_mask, unpronounceable_mask=unpronounceable_mask, allowed_after_word_mask=allowed_after_word_mask)
     final_refined, _ = staged_refine(
         model, prompt, n_new=n_new, vocab_size=vocab_size,
         harmony_scorer=harmony_fn, quality_scorer=quality_fn,
         creativity_scorer=creativity_fn,
         n_iters_per_stage=200, resample_frac=0.35,
         prompt_len=16, temperature=0.5,
-        bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures, active_vocab_size=active_vocab_size, class_id_tensor=class_id_tensor, n_classes=n_classes, pronoun_mask=pronoun_mask, vowel_start_mask=vowel_start_mask, end_vowels=end_vowels, punct_mask=punct_mask, newline_mask=newline_mask, unpronounceable_mask=unpronounceable_mask)
+        bigram_prior=bigram_prior, vocab=vocab, token_signatures=token_signatures, active_vocab_size=active_vocab_size, class_id_tensor=class_id_tensor, n_classes=n_classes, pronoun_mask=pronoun_mask, vowel_start_mask=vowel_start_mask, end_vowels=end_vowels, punct_mask=punct_mask, newline_mask=newline_mask, unpronounceable_mask=unpronounceable_mask, allowed_after_word_mask=allowed_after_word_mask)
 
     return {"name": name, "mode": "self_distillation",
              "n_params": n_params,
