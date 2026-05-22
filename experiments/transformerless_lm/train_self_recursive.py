@@ -1327,17 +1327,12 @@ def _omniweight_apply(base_probs: torch.Tensor,
 def _self_eval_insight(base_probs: torch.Tensor, emitted_tid: int,
                           n_chars: int = 65,
                           recent_tokens: list = None) -> float:
-    """Continuous insight score in [0, ~2].
+    """Continuous insight score (substrate-pure).
 
-    insight = surprise_factor * real_word_factor * (1 - repetition_factor)
-
-    surprise_factor: surprise / (pi*log(phi)) capped at 2.
-      surprise = -log p_emitted under model's distribution.
-    real_word_factor: 1.0 if word-region (rank >= n_chars), 0.3 if char.
-    repetition_factor: 1.0 if token in last F(7)=13 emissions, 0 if novel.
-
-    Continuous scale (v79+) replaces binary insight (v77/v78).
-    Substrate-pure: phi/pi/F-tier thresholds.
+    insight = surprise_factor * real_word_factor * (1 - rep_factor)
+      surprise_factor = surprise / (pi*log(phi)), capped at F(3)=2
+      real_word_factor = 1.0 if word, 1/phi^pi (~0.221) if char
+      rep_factor = 1.0 if in last F(7)=13, else 0
     """
     if emitted_tid < 0 or emitted_tid >= base_probs.shape[0]:
         return 0.0
@@ -1346,8 +1341,10 @@ def _self_eval_insight(base_probs: torch.Tensor, emitted_tid: int,
         return 0.0
     surprise = -math.log(p + 1e-12)
     threshold = math.pi * math.log(_PHI_FOR_SAMPLING)
-    surprise_factor = min(surprise / threshold, 2.0)
-    real_word_factor = 1.0 if emitted_tid >= n_chars else 0.3
+    cap = float(_FIB_NUMS_FOR_BIGRAM[3])   # F(3) = 2
+    surprise_factor = min(surprise / threshold, cap)
+    inv_phi_pi = 1.0 / (_PHI_FOR_SAMPLING ** math.pi)
+    real_word_factor = 1.0 if emitted_tid >= n_chars else inv_phi_pi
     rep_factor = 0.0
     if recent_tokens:
         for tid in recent_tokens[-13:]:
@@ -1584,30 +1581,29 @@ def autoregressive_generate(model, prompt: torch.Tensor, n_new: int,
             # Local entropy of last F(5)=5 emissions (refined self-awareness).
             recent_emitted = seq[0, -_FIB_NUMS_FOR_BIGRAM[5]:].tolist()
             local_H = _local_entropy(recent_emitted, window=_FIB_NUMS_FOR_BIGRAM[5])
-            entropy_threshold = math.log(2.0)  # F(3)=2 distinct tokens
-            # Entropy override fires only when BOTH conditions hold:
-            #   low entropy (stuck) AND negative momentum (bad repetition).
-            # Shakespeare anaphora has low entropy but POSITIVE momentum --
-            # don't penalize it.
+            # Substrate thresholds: log(phi^2) for entropy, 1/phi for
+            # momentum bands, 1/phi^pi for collapse drop. Pure substrate.
+            entropy_threshold = 2.0 * math.log(_PHI_FOR_SAMPLING)  # log(phi^2)
+            mom_band = 1.0 / _PHI_FOR_SAMPLING                      # 1/phi
+            inv_phi_pi = 1.0 / (_PHI_FOR_SAMPLING ** math.pi)
             stuck = (local_H < entropy_threshold and momentum_short < 0.0)
-            # A. TACTICAL momentum (short) drives sharpen/flatten.
+            # A. TACTICAL momentum drives sharpen/flatten.
             if stuck:
-                # Entropy override: force flatten regardless of momentum.
                 p = probs[0] ** (1.0 / _PHI_FOR_SAMPLING)
                 probs[0] = p / (p.sum() + 1e-8)
-            elif momentum_short > 0.5:
+            elif momentum_short > mom_band:
                 p = probs[0] ** _PHI_FOR_SAMPLING
                 probs[0] = p / (p.sum() + 1e-8)
-            elif momentum_short < -0.5:
+            elif momentum_short < -mom_band:
                 p = probs[0] ** (1.0 / _PHI_FOR_SAMPLING)
                 probs[0] = p / (p.sum() + 1e-8)
-            # B. Backtrack-on-collapse on momentum_short history.
+            # B. Backtrack-on-collapse, substrate thresholds.
             collapsed = False
             if (len(momentum_history) >= _FIB_NUMS_FOR_BIGRAM[5]
                     and newline_mask is not None):
                 recent_window = momentum_history[-_FIB_NUMS_FOR_BIGRAM[5]:]
                 drop = max(recent_window) - momentum_short
-                if drop > 0.3 and momentum_short < -0.2:
+                if drop > inv_phi_pi and momentum_short < -inv_phi_pi:
                     collapsed = True
             if collapsed and newline_mask is not None:
                 nm = newline_mask.to(probs[0].device).to(probs[0].dtype)
