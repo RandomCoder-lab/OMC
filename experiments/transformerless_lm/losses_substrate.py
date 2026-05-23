@@ -344,3 +344,95 @@ def substrate_fft_loss(logits: torch.Tensor, targets: torch.Tensor,
     tgt_sin = target_onehot @ basis_sin
     fft_mismatch = ((pred_cos - tgt_cos) ** 2 + (pred_sin - tgt_sin) ** 2).mean()
     return ce + lambda_substrate * fft_mismatch
+
+
+_PHI = (1.0 + 5.0 ** 0.5) / 2.0
+_PHI_PI = _PHI ** math.pi
+_LOG_PHI_PI = math.log(_PHI_PI)
+
+
+def substrate_omniweight_loss(logits: torch.Tensor, targets: torch.Tensor,
+                                  vocab_size: int,
+                                  lambda_substrate: float = 0.01,
+                                  window: int = 21) -> torch.Tensor:
+    """CE weighted by the substrate omniweight ledger evaluated on targets.
+
+    Ports the inference-side omniweight standard (fluid form
+    phi^pi * tanh(delta / phi^pi)) to the training loss. Each target
+    token's CE contribution is multiplied by exp(fluid_delta) where
+    fluid_delta is the substrate's verdict on that token at its
+    position. Tokens the inference ledger would suppress (stagnating
+    repetitions) get their training gradient muted by the same standard
+    -- closes the train/inference omniweight asymmetry.
+
+    Minimum-surface port: only the anti-stagnation primitive contributes
+    to the ledger here (Fibonacci-tier counts F(6)=8, F(7)=13, F(8)=21
+    over the preceding window, matching substrate_anti_stagnation).
+    All deltas pass through the same phi^pi * tanh standard so
+    additional primitives can be added without architectural change.
+
+    Weights are renormalized so mean weight = 1, preserving loss scale.
+
+    Args:
+        logits: [B, T, V]
+        targets: [B, T]
+        vocab_size: V
+        lambda_substrate: weight on the FFT-spectrum term (matches
+            substrate_fft_loss; the CE term is the omniweight-modulated one)
+        window: anti-stagnation window in tokens (default F(8)=21)
+
+    Returns:
+        scalar loss
+    """
+    B, T = targets.shape
+    V = vocab_size
+    device = logits.device
+    dtype = logits.dtype
+
+    # Per-position count of target[b,t] occurrences in targets[b, t-window:t].
+    pos_idx = torch.arange(T, device=device)
+    diff = pos_idx.unsqueeze(1) - pos_idx.unsqueeze(0)             # [T, T]
+    win_mask = ((diff > 0) & (diff <= window)).to(dtype)           # [T, T]
+    eq = (targets.unsqueeze(2) == targets.unsqueeze(1)).to(dtype)  # [B, T, T]
+    counts = (eq * win_mask.unsqueeze(0)).sum(dim=2)               # [B, T]
+
+    # Anti-stagnation contribution to the ledger (matches inference thresholds:
+    #   count >= F(6)=8  -> divide by phi^pi    -> delta = -log(phi^pi)
+    #   count >= F(7)=13 -> divide by phi^(2pi) -> delta = -2*log(phi^pi)
+    #   count >= F(8)=21 -> hard suppression    -> delta = -4*log(phi^pi)
+    # (the inference path sets prob=0 at F(8); here we let tanh saturate.)
+    delta = torch.zeros_like(counts)
+    m_8 = (counts >= 8.0) & (counts < 13.0)
+    m_13 = (counts >= 13.0) & (counts < 21.0)
+    m_21 = counts >= 21.0
+    delta = torch.where(m_8, torch.full_like(delta, -_LOG_PHI_PI), delta)
+    delta = torch.where(m_13, torch.full_like(delta, -2.0 * _LOG_PHI_PI), delta)
+    delta = torch.where(m_21, torch.full_like(delta, -4.0 * _LOG_PHI_PI), delta)
+
+    # Fluid substrate standard: phi^pi * tanh(delta / phi^pi). Same form
+    # the inference omniweight uses (_omniweight_apply).
+    fluid_delta = _PHI_PI * torch.tanh(delta / _PHI_PI)
+    weight = torch.exp(fluid_delta)  # bounded in [exp(-phi^pi), 1]
+
+    # Per-token CE, weighted by the omniweight ledger.
+    ce_per_tok = F.cross_entropy(
+        logits.reshape(-1, V),
+        targets.reshape(-1),
+        reduction='none',
+    ).reshape(B, T)
+    ce = (ce_per_tok * weight).sum() / (weight.sum() + 1e-8)
+
+    # Same FFT-spectrum substrate term as substrate_fft_loss.
+    fib_freqs = torch.tensor([1, 2, 3, 5, 8, 13, 21], dtype=dtype, device=device)
+    v_idx = torch.arange(vocab_size, dtype=dtype, device=device)
+    angles = 2 * math.pi * v_idx.unsqueeze(1) * fib_freqs.unsqueeze(0) / vocab_size
+    basis_cos = torch.cos(angles)
+    basis_sin = torch.sin(angles)
+    pred = F.softmax(logits, dim=-1)
+    target_onehot = F.one_hot(targets, vocab_size).to(pred.dtype)
+    pred_cos = pred @ basis_cos
+    pred_sin = pred @ basis_sin
+    tgt_cos = target_onehot @ basis_cos
+    tgt_sin = target_onehot @ basis_sin
+    fft_mismatch = ((pred_cos - tgt_cos) ** 2 + (pred_sin - tgt_sin) ** 2).mean()
+    return ce + lambda_substrate * fft_mismatch
