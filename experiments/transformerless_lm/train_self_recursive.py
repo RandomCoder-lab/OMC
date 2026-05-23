@@ -47,7 +47,8 @@ from losses_substrate import (substrate_fft_loss, substrate_harmony_loss,
                                 corpus_char_signature,
                                 corpus_multiscale_signature,
                                 substrate_harmony_loss_grounded,
-                                substrate_multiscale_harmony_loss_grounded)
+                                substrate_multiscale_harmony_loss_grounded,
+                                substrate_omniweight_loss)
 from activations_substrate import SubstrateNegMultiAdvancedV2
 from train_substrate_attention import FibRecLMSubsim
 from creativity_score import (creativity_score as compute_creativity_score,
@@ -2688,8 +2689,13 @@ def train_with_self_distillation(name, train_seed, corpus_anchor, val_split,
             x, y = sample_tiny_batch(active_base, args.batch_size,
                                        args.seq_len, gen)
             logits = model(x)
-            ce_fft = substrate_fft_loss(logits, y, vocab_size,
-                                          lambda_substrate=args.lambda_sub)
+            if getattr(args, 'omniweight_loss', False):
+                ce_fft = substrate_omniweight_loss(
+                    logits, y, vocab_size,
+                    lambda_substrate=args.lambda_sub)
+            else:
+                ce_fft = substrate_fft_loss(logits, y, vocab_size,
+                                              lambda_substrate=args.lambda_sub)
             K_h = K_to_K_harmony(cur_K or args.K_init,
                                   K_init=args.K_init, K_min=args.K_min)
             harmony = compute_harmony_grounded(logits, vocab_size, harmony_kind,
@@ -3243,6 +3249,11 @@ def main():
                           default=1.0 / (_PHI_FOR_SAMPLING ** math.pi))
     parser.add_argument("--tiny-chars", type=int, default=1024,
                           help="Size of the tiny training seed in chars")
+    parser.add_argument("--omniweight-loss", action="store_true",
+                          help="Apply the inference-side omniweight standard "
+                                "(phi^pi tanh fluid form) to per-token CE "
+                                "during training. Closes the train/inference "
+                                "asymmetry on the anti-stagnation primitive.")
     parser.add_argument("--out", type=str,
                           default="results_self_recursive.json")
     args = parser.parse_args()
