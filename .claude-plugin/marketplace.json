@@ -1,0 +1,19 @@
+{
+  "name": "omc",
+  "owner": {
+    "name": "RandomCoder-lab",
+    "url": "https://github.com/RandomCoder-lab/OMC"
+  },
+  "metadata": {
+    "description": "OMNIcode plugins — substrate-native code tools (verified synthesis, content-addressing, self-improvement).",
+    "version": "1.8.5"
+  },
+  "plugins": [
+    {
+      "name": "substrate-synth",
+      "source": "./plugins/substrate-synth",
+      "description": "Verified, address-grounded code synthesis — the substrate address→generate→VERIFY→accept loop. Nothing invalid is ever accepted. Ships a skill teaching the loop, the in-core OMC builtins (gen_omc, fn_swap_verified, @memo, ...), and the codebase-agnostic scaffold.",
+      "keywords": ["code-synthesis", "verification", "content-addressing", "self-improvement", "omnicode"]
+    }
+  ]
+}

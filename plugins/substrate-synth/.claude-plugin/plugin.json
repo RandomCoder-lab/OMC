@@ -1,0 +1,22 @@
+{
+  "name": "substrate-synth",
+  "displayName": "Substrate-Synth",
+  "version": "1.8.5",
+  "description": "Verified, address-grounded code synthesis — the substrate address→generate→VERIFY→accept loop. Pairs an agnostic scaffold (content-addressing + grammar/execution verification) with you as the generator, so nothing invalid is ever accepted. Built on OMNIcode (OMC); the methodology is codebase-agnostic.",
+  "author": {
+    "name": "RandomCoder-lab",
+    "url": "https://github.com/RandomCoder-lab/OMC"
+  },
+  "homepage": "https://github.com/RandomCoder-lab/OMC/blob/master/SUBSTRATE.md",
+  "repository": "https://github.com/RandomCoder-lab/OMC",
+  "license": "MIT",
+  "keywords": [
+    "code-synthesis",
+    "verification",
+    "content-addressing",
+    "memoization",
+    "self-improvement",
+    "substrate",
+    "omnicode"
+  ]
+}
