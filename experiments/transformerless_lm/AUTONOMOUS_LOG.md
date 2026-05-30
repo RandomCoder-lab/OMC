@@ -655,3 +655,22 @@ PHASES 1-5 CONTINUATION (no-side-tracks pass, post-v1.8.0, 2026-05-30)
   domain (retrieve+compose+verify over a corpus); P1's correctness≈coverage is exact-retrieval (the
   held-out/composition gap — generalizing BEYOND the store — is still bounded by generator quality, but
   that too is CPU: grammar-gen + verify, not GPU). Task #43 (NEXT-7) DONE on CPU.
+
+PHASE 6 (step 2) — HBit REAL AT THE VALUE LEVEL [DONE + VERIFIED] (pervasive per-value dual-band)
+- value.rs: HInt gained `beta: Option<i64>` (β shadow band). None (default for ALL ordinary values)
+  = single-band, byte-identical to before. with_beta() constructor; Value::beta_band() accessor.
+  PartialEq still compares α only (no equality breakage). Only 2 struct literals touched; 413
+  HInt::new callers unaffected.
+- interpreter.rs: db_int() helper threads β through ALL six integer ops (Add/Sub/Mul/Div/Mod/Power):
+  NEITHER operand has β → exactly HInt::new(α) (unchanged); either has β → result β = op(lβ,rβ) with
+  α-fallback, div/mod zero-guarded. α is ALWAYS exact; β never alters a result — only records drift.
+- Builtins now REAL (were stubs): phi_shadow(v) attaches β = nearest Fibonacci attractor of α (was
+  identity); harmony(v) = 1000·harmony(α,β) if β present else 1000 (was constant 1000). NEW:
+  bands(v)->[α,β], value_divergence(v)->1000·(1-harmony).
+- VERIFIED (valueband_demo.omc): 7+3=10 harmony 1000 (single-band unchanged); phi_shadow(10) bands
+  [10,8]; phi_shadow(10)+3 → [13,11] (β rode through +); (phi_shadow(50)+1)*3 → [153,105],
+  value_divergence 933 (off-lattice); w==153 true (α exact). 172/172 core tests pass — the additive
+  Option<i64> field changed nothing for non-shadowed values.
+- The user's HBit dual-band model [[omc_hbit_dualband_vision]] made pervasive at the Value level:
+  every value CAN carry its β shadow, it propagates through arithmetic, divergence readable anywhere,
+  α always correct. Next horizons: value-granular SKIP form, then kernel/microcode HBit.

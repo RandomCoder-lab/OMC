@@ -2104,7 +2104,7 @@ impl Interpreter {
                 } else if lv.is_float() || rv.is_float() {
                     Ok(Value::HFloat(lv.to_float() + rv.to_float()))
                 } else {
-                    Ok(Value::HInt(HInt::new(lv.to_int().wrapping_add(rv.to_int()))))
+                    Ok(db_int(&lv, &rv, lv.to_int().wrapping_add(rv.to_int()), |a, b| a.wrapping_add(b)))
                 }
             }
             Expression::Sub(l, r) => {
@@ -2113,7 +2113,7 @@ impl Interpreter {
                 if lv.is_float() || rv.is_float() {
                     Ok(Value::HFloat(lv.to_float() - rv.to_float()))
                 } else {
-                    Ok(Value::HInt(HInt::new(lv.to_int().wrapping_sub(rv.to_int()))))
+                    Ok(db_int(&lv, &rv, lv.to_int().wrapping_sub(rv.to_int()), |a, b| a.wrapping_sub(b)))
                 }
             }
             Expression::Mul(l, r) => {
@@ -2122,7 +2122,7 @@ impl Interpreter {
                 if lv.is_float() || rv.is_float() {
                     Ok(Value::HFloat(lv.to_float() * rv.to_float()))
                 } else {
-                    Ok(Value::HInt(HInt::new(lv.to_int().wrapping_mul(rv.to_int()))))
+                    Ok(db_int(&lv, &rv, lv.to_int().wrapping_mul(rv.to_int()), |a, b| a.wrapping_mul(b)))
                 }
             }
             Expression::Div(l, r) => {
@@ -2148,7 +2148,7 @@ impl Interpreter {
                             context: "div".to_string(),
                         })
                     } else {
-                        Ok(Value::HInt(HInt::new(lv.to_int() / divisor)))
+                        Ok(db_int(&lv, &rv, lv.to_int() / divisor, |a, b| if b == 0 { 0 } else { a / b }))
                     }
                 }
             }
@@ -2167,7 +2167,7 @@ impl Interpreter {
                     if divisor == 0 {
                         Ok(Value::HInt(HInt::new(0)))
                     } else {
-                        Ok(Value::HInt(HInt::new(lv.to_int() % divisor)))
+                        Ok(db_int(&lv, &rv, lv.to_int() % divisor, |a, b| if b == 0 { 0 } else { a % b }))
                     }
                 }
             }
@@ -2181,7 +2181,7 @@ impl Interpreter {
                     if e < 0 {
                         Ok(Value::HFloat((bv.to_int() as f64).powi(e as i32)))
                     } else {
-                        Ok(Value::HInt(HInt::new(bv.to_int().pow(e as u32))))
+                        Ok(db_int(&bv, &ev, bv.to_int().pow(e as u32), |a, b| a.wrapping_pow(b.max(0) as u32)))
                     }
                 }
             }
@@ -2512,6 +2512,8 @@ impl Interpreter {
             | "gen_omc" | "gen_at"
             // HBit dual-band gate (Phase 6) — real two-band resonance/divergence
             | "hbit_harmony" | "hbit_divergence" | "band_divergence" | "band_route"
+            // Value-level dual-band (Phase 6 — HBit real at the Value level)
+            | "bands" | "value_divergence"
             // Traced variants — return [result, probe_indices_array]
             | "phi_pi_fib_search_traced" | "phi_pi_fib_nearest_traced"
             // Split-channel stats (explicit vs background substrate work)
@@ -11666,34 +11668,64 @@ impl Interpreter {
             // observation" so subsequent ops carry both bands through
             // computation. A later harmony() check decides whether
             // the value is behaving as predicted.
+            // phi_shadow(value) — Phase 6: HBit real at the Value level. Attaches the harmonic
+            // SHADOW band β = nearest Fibonacci attractor of α. The returned value carries BOTH
+            // bands: α (the exact value, unchanged) and β (the "on-lattice" companion). β then
+            // rides alongside α through arithmetic (db_int); harmony()/band_divergence() read the
+            // accumulated α/β drift. Was an identity stub; now the real dual-band entry point.
             "phi_shadow" => {
                 if args.is_empty() {
                     return Err("phi_shadow requires (value)".to_string());
                 }
                 let v = self.eval_expr(&args[0])?;
-                Ok(v)
+                let a = v.to_int();
+                let (att, _) = crate::phi_pi_fib::nearest_attractor_with_dist(a);
+                Ok(Value::HInt(HInt::with_beta(a, att)))
             }
-            // harmony(x) - HBit harmony reading.
-            //
-            // Tree-walk semantics: returns 1000 unconditionally. With
-            // no β to compare against, harmony is trivially perfect.
-            // The value's semantic content fits this — in tree-walk
-            // mode, "harmony" can be read as "agreement between α and
-            // α" which is always exact.
-            //
-            // Dual-band JIT semantics (omnimcode-codegen, Session G):
-            // intercepted as an intrinsic that emits a call to the
-            // extern Rust helper computing harmony from the two lanes.
-            //
-            // Return convention: i64 in [0, 1000]. 1000 = perfect
-            // harmony, 0 = maximally divergent. Floats avoided to
-            // keep the calling convention pure-i64.
+            // harmony(x) -> int 0..1000 — Phase 6: REAL dual-band reading. If x carries a β shadow
+            // (from phi_shadow + dual-band arithmetic), returns 1000·harmony(α,β) = how in-tune the
+            // computation stayed with the attractor lattice. If single-band (no β), returns 1000
+            // (a value is in perfect harmony with itself). Was a constant 1000 stub.
             "harmony" => {
                 if args.is_empty() {
                     return Err("harmony requires (value)".to_string());
                 }
-                let _ = self.eval_expr(&args[0])?;
-                Ok(Value::HInt(HInt::new(1000)))
+                let v = self.eval_expr(&args[0])?;
+                match v.beta_band() {
+                    Some(b) => {
+                        let h = crate::value::HBit::harmony(v.to_int(), b);
+                        Ok(Value::HInt(HInt::new((h * 1000.0).round() as i64)))
+                    }
+                    None => Ok(Value::HInt(HInt::new(1000))),
+                }
+            }
+            // bands(x) -> [α, β] — Phase 6: inspect both bands of a value. β = α when single-band.
+            "bands" => {
+                if args.is_empty() {
+                    return Err("bands requires (value)".to_string());
+                }
+                let v = self.eval_expr(&args[0])?;
+                let a = v.to_int();
+                let b = v.beta_band().unwrap_or(a);
+                Ok(Value::Array(HArray::from_vec(vec![
+                    Value::HInt(HInt::new(a)),
+                    Value::HInt(HInt::new(b)),
+                ])))
+            }
+            // value_divergence(x) -> int 0..1000 — Phase 6: the per-value drift = 1000·(1-harmony).
+            // 0 = on the lattice (trust the β skip); high = dissonant (α is the truth). The gate.
+            "value_divergence" => {
+                if args.is_empty() {
+                    return Err("value_divergence requires (value)".to_string());
+                }
+                let v = self.eval_expr(&args[0])?;
+                match v.beta_band() {
+                    Some(b) => {
+                        let h = crate::value::HBit::harmony(v.to_int(), b);
+                        Ok(Value::HInt(HInt::new(((1.0 - h) * 1000.0).round() as i64)))
+                    }
+                    None => Ok(Value::HInt(HInt::new(0))),
+                }
             }
             // phi_pi_fib_search_v2(sorted_arr, target) -> int
             //   F(k)/φ^(π·k) split-point search. Same return convention
@@ -15633,6 +15665,23 @@ pub(crate) fn stmts_contain_return(stmts: &[Statement]) -> bool {
     false
 }
 
+/// Dual-band integer arithmetic (Phase 6 — HBit real at the Value level). When NEITHER operand
+/// carries a β shadow (the default for all ordinary values), returns exactly `HInt::new(alpha)` —
+/// byte-identical to single-band behavior. When either carries β, the shadow rides alongside:
+/// result β = op(lβ, rβ), with missing bands falling back to the operand's α. α is ALWAYS the exact
+/// answer the caller already computed; β never alters it — it only records harmonic drift.
+#[inline]
+fn db_int(lv: &Value, rv: &Value, alpha: i64, op: impl Fn(i64, i64) -> i64) -> Value {
+    match (lv.beta_band(), rv.beta_band()) {
+        (None, None) => Value::HInt(HInt::new(alpha)),
+        (lb, rb) => {
+            let la = lb.unwrap_or_else(|| lv.to_int());
+            let ra = rb.unwrap_or_else(|| rv.to_int());
+            Value::HInt(HInt::with_beta(alpha, op(la, ra)))
+        }
+    }
+}
+
 /// Builtins whose evaluation has a side effect or is nondeterministic. `@memo`
 /// refuses a function that directly calls any of these (best-effort purity gate).
 const MEMO_IMPURE: &[&str] = &[
@@ -15979,6 +16028,7 @@ pub(crate) const HEAL_BUILTIN_NAMES: &[&str] = &[
     "gen_omc", "gen_at",
     // HBit dual-band gate (Phase 6)
     "hbit_harmony", "hbit_divergence", "band_divergence", "band_route",
+    "bands", "value_divergence",
     "phi_pi_fib_search_traced", "phi_pi_fib_nearest_traced",
     "phi_pi_fib_stats_bg", "phi_pi_fib_stats_all",
     // HBit dual-band intrinsics (Sessions F+G)

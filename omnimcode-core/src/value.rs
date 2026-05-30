@@ -14,6 +14,12 @@ pub struct HInt {
     pub resonance: f64,
     pub him_score: f64,
     pub is_singularity: bool,
+    /// β band (Phase 6): the harmonic SHADOW of this value — the "what if we'd stayed on the
+    /// Fibonacci attractor lattice" companion. `None` (the default for all ordinary values)
+    /// means single-band: behaves EXACTLY as before. `Some(β)` is attached by `phi_shadow` and
+    /// rides alongside α through arithmetic; `harmony`/`band_divergence` read the α/β drift.
+    /// α (the `value` field) is ALWAYS the exact answer — β never changes a result.
+    pub beta: Option<i64>,
 }
 
 impl HInt {
@@ -26,7 +32,16 @@ impl HInt {
             resonance,
             him_score,
             is_singularity: false,
+            beta: None,
         }
+    }
+
+    /// Construct a dual-band HInt: exact α `value` + harmonic shadow `beta` (Phase 6).
+    #[inline]
+    pub fn with_beta(value: i64, beta: i64) -> Self {
+        let mut h = Self::new(value);
+        h.beta = Some(beta);
+        h
     }
 
     /// Compute resonance (0-1) based on distance to nearest Fibonacci number.
@@ -66,6 +81,7 @@ impl HInt {
             resonance: 0.0,
             him_score: 0.0,
             is_singularity: true,
+            beta: None,
         }
     }
 }
@@ -342,6 +358,16 @@ impl Value {
         let mut h: u64 = 0xcbf2_9ce4_8422_2325; // FNV1a-64 offset basis
         go(&mut h, self);
         h
+    }
+
+    /// The β (harmonic-shadow) band of this value, if it carries one (Phase 6). Only dual-band
+    /// HInts (created via phi_shadow / dual-band arithmetic) return Some; everything else is None.
+    #[inline]
+    pub fn beta_band(&self) -> Option<i64> {
+        match self {
+            Value::HInt(h) => h.beta,
+            _ => None,
+        }
     }
 
     #[inline]

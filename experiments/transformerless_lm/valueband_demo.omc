@@ -1,0 +1,23 @@
+// Phase 6 — HBit real at the VALUE level: β shadow rides through arithmetic.
+print("-- ordinary values are single-band (β = α): unchanged behavior --");
+h x = 7 + 3;
+print(x);                       // 10
+print(harmony(x));              // 1000 (in tune with itself — no shadow)
+
+print("-- phi_shadow attaches the harmonic shadow band; it then RIDES through math --");
+h s = phi_shadow(10);           // α=10, β=nearest attractor of 10 = 8
+print(bands(s));                // [10, 8]
+h t = s + 3;                    // α=13, β=8+3=11  (β propagated through +)
+print(bands(t));                // [13, 11]
+print(value_divergence(t));     // drift of 13 vs 11 (|13-11|=2 is on-lattice → low)
+
+print("-- a chain that DRIFTS off the lattice raises divergence --");
+h u = phi_shadow(8) * 7;        // α=56, β=8*7=56 ... both same here
+print(bands(u));                // [56, 56]
+print(value_divergence(u));     // 0 (stayed in tune)
+h w = (phi_shadow(50) + 1) * 3; // α: (50+1)*3=153 ; β: (34+1)*3=105
+print(bands(w));                // [153, 105]
+print(value_divergence(w));     // > 0 (drifted — α is the truth, β shows lattice path)
+
+print("-- α is ALWAYS the exact answer; β never changes a result --");
+print(w == 153);                // true
