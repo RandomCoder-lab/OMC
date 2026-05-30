@@ -2469,7 +2469,7 @@ impl Interpreter {
             | "harmonic_checksum" | "harmonic_write_file" | "harmonic_read_file"
             | "harmonic_sort" | "harmonic_split" | "harmonic_partition"
             | "attractor_distance" | "nearest_attractor"
-            | "largest_attractor_at_most" | "crt_residues" | "hbit_tension"
+            | "largest_attractor_at_most" | "crt_residues" | "crt_pe" | "hbit_tension"
             | "is_attractor" | "resonance_band" | "crt_recover" | "fibonacci_index"
             | "harmonic_hash" | "harmonic_diff" | "harmonic_dedupe"
             // Phi-Pi-Fib search (Fibonacci-step binary search variant)
@@ -2509,7 +2509,7 @@ impl Interpreter {
             // Content-addressed dispatch (Phase 3.1) — typo/variant-tolerant, via locality
             | "nearest_fn" | "call_nearest"
             // Correct-by-construction synthesis (Phase 4)
-            | "gen_omc"
+            | "gen_omc" | "gen_at"
             // HBit dual-band gate (Phase 6) — real two-band resonance/divergence
             | "hbit_harmony" | "hbit_divergence" | "band_divergence" | "band_route"
             // Traced variants — return [result, probe_indices_array]
@@ -6062,6 +6062,36 @@ impl Interpreter {
                     Err("crt_residues: second arg must be an array".to_string())
                 }
             }
+            // crt_pe(pos, [moduli]) -> float[] (Phase 1.3): CRT positional encoding — the proven
+            // substrate position feature. Normalized residues [(pos % m) / m] in [0,1), one per
+            // modulus; default moduli {5,8,13,21} are pairwise-coprime → the code is UNIQUE over
+            // lcm = 10920 positions (the win: per-component 200/200 unique vs sinusoidal 64/200).
+            // Attenuable (law 2): it's a bounded positional feature the caller scales/mixes.
+            "crt_pe" => {
+                if args.is_empty() {
+                    return Err("crt_pe requires (pos, [moduli])".to_string());
+                }
+                let pos = self.eval_expr(&args[0])?.to_int();
+                let moduli: Vec<i64> = if args.len() > 1 {
+                    match self.eval_expr(&args[1])? {
+                        Value::Array(a) => a.items.borrow().iter().map(|v| v.to_int()).collect(),
+                        _ => return Err("crt_pe: moduli must be an array".to_string()),
+                    }
+                } else {
+                    vec![5, 8, 13, 21]
+                };
+                let out: Vec<Value> = moduli
+                    .iter()
+                    .map(|&m| {
+                        if m == 0 {
+                            Value::HFloat(0.0)
+                        } else {
+                            Value::HFloat(pos.rem_euclid(m) as f64 / m as f64)
+                        }
+                    })
+                    .collect();
+                Ok(Value::Array(HArray::from_vec(out)))
+            }
             // hbit_tension(value) — 1-D HBit tension, the cheap
             // OOD-detection primitive: distance from value to its
             // nearest Fibonacci attractor. Same as attractor_distance
@@ -6603,6 +6633,22 @@ impl Interpreter {
                     self.rng_next()
                 } else {
                     self.eval_expr(&args[0])?.to_int() as u64
+                };
+                Ok(Value::String(crate::synth::gen_program(seed)))
+            }
+            // gen_at(address_or_text) -> string (Phase 4.3): address-conditioned generation —
+            // seeds the valid-by-construction generator from the content address of the argument,
+            // so the SAME address/need deterministically maps to the same valid program (the
+            // address indexes the space of valid programs). Semantic match to an address's MEANING
+            // is the encoder/agent's job; this is the deterministic address→program substrate.
+            "gen_at" => {
+                if args.is_empty() {
+                    return Err("gen_at requires (address_or_text)".to_string());
+                }
+                let key = self.eval_expr(&args[0])?;
+                let seed = match &key {
+                    Value::String(s) => crate::cas::fnv64(s),
+                    other => other.content_hash(),
                 };
                 Ok(Value::String(crate::synth::gen_program(seed)))
             }
@@ -15892,7 +15938,7 @@ pub(crate) const HEAL_BUILTIN_NAMES: &[&str] = &[
     "harmonic_checksum", "harmonic_write_file", "harmonic_read_file",
     "harmonic_sort", "harmonic_split", "harmonic_partition",
     "attractor_distance", "nearest_attractor",
-    "largest_attractor_at_most", "crt_residues", "hbit_tension",
+    "largest_attractor_at_most", "crt_residues", "crt_pe", "hbit_tension",
     "is_attractor", "resonance_band", "crt_recover", "fibonacci_index",
     "harmonic_hash", "harmonic_diff", "harmonic_dedupe",
     // Phi-Pi-Fib search
@@ -15930,7 +15976,7 @@ pub(crate) const HEAL_BUILTIN_NAMES: &[&str] = &[
     "locality_fp", "locality_sim", "locality_nearest",
     "nearest_fn", "call_nearest",
     // Correct-by-construction synthesis (Phase 4)
-    "gen_omc",
+    "gen_omc", "gen_at",
     // HBit dual-band gate (Phase 6)
     "hbit_harmony", "hbit_divergence", "band_divergence", "band_route",
     "phi_pi_fib_search_traced", "phi_pi_fib_nearest_traced",

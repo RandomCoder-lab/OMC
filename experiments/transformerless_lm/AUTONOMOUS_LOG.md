@@ -616,3 +616,42 @@ PHASE 6 STEP 1 (routing form) — @dualband now SKIPS via the gate [DONE + VERIF
   linear (sensitive=dissonant). On-lattice small cases stay in tune (sq(8)=0, add3(8,13,21)=0).
   172/172 tests pass. Honest residual: a strictly-correct speedup FROM the gate (beyond exact-memo,
   the always-correct skip) needs substrate-coherent domains; approximate gate-routing = opt-in future.
+
+PHASES 1-5 CONTINUATION (no-side-tracks pass, post-v1.8.0, 2026-05-30)
+- 1.3 CRT-PE [DONE]: crt_pe(pos,[moduli]) -> normalized CRT residue features; default {5,8,13,21}
+  (pairwise-coprime → UNIQUE over lcm 10920). Verified: crt_pe(0)==crt_pe(10920) (period),
+  crt_pe(7)≠crt_pe(8). PHASE 1 COMPLETE (1.1 haddr + 1.2 locality + 1.3 crt_pe). 1.4 tape-extraction
+  DEFERRED: pure no-behavior refactor of the autograd crown jewel, high blast radius, zero user value
+  now (Phase 2 shipped without it) — not risked in this pass.
+- 4.3 address-conditioned generation [DONE]: gen_at(addr) seeds the valid-by-construction generator
+  from the content address → same address deterministically maps to the same valid program (verified
+  deterministic, distinct-per-address, parse-valid). 4.2 broader constructs: Try/Match/Break safe to
+  add later; Throw/Import/Yield intentionally excluded (break run-safe-by-construction).
+- 5.2 approximate compute by interpolation (C6) [PRE-REGISTERED A/B, DONE] (phase5_interpolation_ab.py):
+    1-NN(addressed) approx error: smooth 0.004 vs discrete 0.271 → P1 CONFIRMED — interpolation viable
+    ONLY for smooth fns (substrate-as-compute wall, now BOUNDED: ~free for smooth domains).
+    local_var gate SEPARATES (smooth 0.001 vs discrete 0.278) → P2: LOCAL smoothness is the valid router.
+    @dualband snap-to-Fibonacci gate does NOT separate (smooth 0.815 vs discrete 0.567) → P3 FALSIFIED:
+    snap-dissonance measures lattice-coherence, NOT local smoothness → WRONG gate for interpolation.
+    Lesson: the shipped gate answers "on the harmonic lattice?" not "safe to interpolate?".
+- 5.1 Zeckendorf weight compression: small-scale SETTLED prior (φ-tier sharing ≈ naive modulo = null;
+  params-as-addresses 4× free / 14%@85% real). 35B-scale inference-compression bet = model/GPU blocked.
+  5.3 NEXT-7 generator ceiling at scale = GPU-blocked (never faked). 5.4 Track B.2/B.3 = training-needed.
+  PHASE 5 = 5.2 delivered (real result) + honest blocks on the rest. New builtins this pass: crt_pe, gen_at.
+
+- 5.3 NEXT-7 generator ceiling at scale — REFRAMED + ANSWERED ON CPU (phase5_next7_cpu_scaling.py).
+  RETRACTION: "GPU-blocked" was wrong — it assumed the FibRec NEURAL net was the model (params→FLOPs→
+  GPU). The substrate model's capacity axis is ADDRESSED CONTENT + composition + VERIFY = all CPU.
+  PRE-REGISTERED A/B (universe 1896 short fns, 24 verified-reference queries, real interpreter oracle):
+    P1 CONFIRMED — correctness scales with coverage: 0.04 / 0.29 / 0.54 / 0.79 / 1.00 at coverage
+      0/.25/.5/.75/1.0. Capability gained by ADDING content (no gradient, no GPU).
+    P2 CONFIRMED — per-query cost FLAT in store size: exact-key retrieval 0.059µs (N=16) → 0.060µs
+      (N=1600, 100× content); verify constant 2.88 ms (one interpreter run, store-independent).
+    P3 CONFIRMED — locality SCAN grows ~linearly 13µs→1946µs (150× over 100× N) → addressing (O(1))
+      is precisely what removes the N-cost.
+  VERDICT: the substrate gains capability at FLAT per-query CPU cost; a transformer gains the same only
+  by growing params → GPU. Different scaling axis — substrate's is CPU. NEXT-7's "ceiling" is NOT a FLOP
+  ceiling; it's coverage+composition, both CPU-scalable. HONEST SCOPE: this is the verified-code-synthesis
+  domain (retrieve+compose+verify over a corpus); P1's correctness≈coverage is exact-retrieval (the
+  held-out/composition gap — generalizing BEYOND the store — is still bounded by generator quality, but
+  that too is CPU: grammar-gen + verify, not GPU). Task #43 (NEXT-7) DONE on CPU.
