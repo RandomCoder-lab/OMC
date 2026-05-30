@@ -674,3 +674,19 @@ PHASE 6 (step 2) — HBit REAL AT THE VALUE LEVEL [DONE + VERIFIED] (pervasive p
 - The user's HBit dual-band model [[omc_hbit_dualband_vision]] made pervasive at the Value level:
   every value CAN carry its β shadow, it propagates through arithmetic, divergence readable anywhere,
   α always correct. Next horizons: value-granular SKIP form, then kernel/microcode HBit.
+
+POST-PHASE-6 CONSOLIDATION + PLUGIN + 4.2 (releases v1.8.3–v1.8.6, 2026-05-30)
+- v1.8.3: docs::BUILTINS for all 22 new builtins (omc_help/MCP discoverable) + SUBSTRATE.md (public
+  reference) + examples/harmonic_mind.omc (capstone composing memo/cas/dual-band/synth/verify in OMC).
+- v1.8.4: README (dual-band now Value-level; new "identity is content" capability bullet) + CHANGELOG.
+- v1.8.5: tests/substrate_v18.rs — 11 interpreter-level conformance locks → 267 tests total. ROADMAP.md
+  refreshed (was stale at v0.6) with shipped table + honest forward path (grounded / needs-compute / horizon).
+- PLUGIN: substrate-synth published as an installable Claude Code plugin. PUBLIC marketplace `omc`
+  (.claude-plugin/marketplace.json → plugins/substrate-synth/); install via
+  `/plugin marketplace add RandomCoder-lab/OMC` + `/plugin install substrate-synth@omc`. Confirmed
+  installed + active locally (shows as substrate-synth:substrate-synth skill). See [[omc_repo_release]].
+- v1.8.6 (Phase 4.2): gen_omc helper-composition — emits 1-2 total/pure helper fns that g composes →
+  multi-function programs. parse/run 1.000 STILL HOLDS (300 seeds); 267 tests pass.
+- STATE: grounded roadmap (Phases 1-6) substantially COMPLETE. Remaining = needs-compute (5.1 at scale,
+  5.4 training, 3.2 weight-sharing) or the horizon (kernel/microcode HBit, a major JIT/LLVM undertaking)
+  or lower-value/risk polish (Phase 0.1 assistant unification, 4.2 try/match constructs).
