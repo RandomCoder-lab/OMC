@@ -21,6 +21,7 @@ struct Gen {
     counter: u32,
     vars: Vec<String>,
     protected: HashSet<String>,
+    helpers: Vec<String>, // names of emitted top-level helper fns g may compose (Phase 4.2)
 }
 
 impl Gen {
@@ -29,7 +30,7 @@ impl Gen {
             .wrapping_mul(0x9e37_79b9_7f4a_7c15)
             .wrapping_add(0x2545_f491_4f6c_dd1d)
             | 1;
-        Gen { rng: s, counter: 0, vars: Vec::new(), protected: HashSet::new() }
+        Gen { rng: s, counter: 0, vars: Vec::new(), protected: HashSet::new(), helpers: Vec::new() }
     }
     fn rand(&mut self) -> u64 {
         let mut x = self.rng;
@@ -47,14 +48,39 @@ impl Gen {
         format!("{}{}", prefix, self.counter)
     }
 
-    /// An int-valued atom: a declared variable or a small literal.
+    /// An int-valued atom: a declared variable, a small literal, or a call to a composed helper.
     fn atom(&mut self) -> String {
+        // toolbox composition: occasionally call a helper fn on a simple arg (helpers are total
+        // and pure, so any int arg is run-safe).
+        if !self.helpers.is_empty() && self.pick(4) == 0 {
+            let hi = self.pick(self.helpers.len());
+            let h = self.helpers[hi].clone();
+            let arg = if !self.vars.is_empty() && self.pick(2) == 0 {
+                let vi = self.pick(self.vars.len());
+                self.vars[vi].clone()
+            } else {
+                format!("{}", self.pick(10))
+            };
+            return format!("{}({})", h, arg);
+        }
         if !self.vars.is_empty() && self.pick(2) == 0 {
             let i = self.pick(self.vars.len());
             self.vars[i].clone()
         } else {
             format!("{}", self.pick(10))
         }
+    }
+
+    /// A small TOTAL, pure helper `fn name(x) { return <int_expr over x>; }`. Division/modulo in the
+    /// body are guarded by int_expr (nonzero literal divisor), so it terminates and never errors —
+    /// safe to call with any integer argument from g's body.
+    fn helper(&mut self, name: &str) -> String {
+        let saved_vars = std::mem::replace(&mut self.vars, vec!["x".to_string()]);
+        let saved_prot = std::mem::take(&mut self.protected);
+        let body = self.int_expr(2);
+        self.vars = saved_vars;
+        self.protected = saved_prot;
+        format!("fn {}(x) {{\n    return {};\n}}", name, body)
     }
 
     /// A run-safe int expression: division/modulo always by a nonzero literal.
@@ -152,7 +178,16 @@ impl Gen {
         self.vars = vec!["a".to_string(), "b".to_string()];
         self.protected.clear();
         self.counter = 0;
-        let mut out = vec!["fn g(a, b) {".to_string()];
+        self.helpers.clear();
+        // toolbox composition (Phase 4.2): maybe emit 1-2 total/pure helpers that g can call.
+        let mut prelude: Vec<String> = Vec::new();
+        for _ in 0..self.pick(3) {
+            let hname = self.fresh("h");
+            prelude.push(self.helper(&hname));
+            self.helpers.push(hname);
+        }
+        let mut out: Vec<String> = prelude;
+        out.push("fn g(a, b) {".to_string());
         // a couple of guaranteed declarations first so later statements have vars to use
         for _ in 0..2 {
             let v = self.fresh("v");
