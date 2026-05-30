@@ -34,7 +34,9 @@ These are concrete language features, not aspirations:
 
 - **The substrate is a primitive, not a library.** `HInt`, OMC's integer type, carries a φ-resonance and HIM score computed at construction. Every `Value::HInt(_)` ever created has been routed through `compute_resonance` and `nearest_attractor_with_dist`. Substrate-ness is at the type level.
 
-- **Dual-band executable code.** OMC values have a classical α-band and a harmonic shadow β-band, packed into LLVM `<2 x i64>` SSE2 vectors inside JIT'd functions. `phi_shadow(x)` makes β diverge; `harmony(x)` reads the substrate-routed coherence. **Branch elision based on harmony** is shipped: high-coherence inputs skip entire conditional blocks at native code speed (95.2% reduction on high-harmony inputs).
+- **Dual-band execution — now real at the Value level (v1.8).** OMC values carry a classical α-band and a harmonic shadow β-band. `phi_shadow(x)` attaches β (= nearest Fibonacci attractor); it then **rides through arithmetic** (`bands(x)` → `[α, β]`), and `harmony(x)` / `value_divergence(x)` read the accumulated drift — α is always the exact answer. In JIT'd functions the bands are packed into LLVM `<2 x i64>` SSE2 vectors, and **branch elision based on harmony** is shipped (95.2% reduction on high-harmony inputs).
+
+- **Substrate-into-core (v1.8): identity is content.** A value's address is a function of what it *is*. `@memo` gives transparent, **persistent, cross-run** memoization (`fib(90)` instant); `cas_put`/`cas_get` + `same_value` are a content-addressed heap with O(1) semantic equality; `locality_fp`/`nearest_fn` add content-similarity retrieval; `fn_swap_verified` is self-modification the interpreter must verify before it accepts; `gen_omc` emits valid-by-construction OMC (parse/run 1.000 over 300 seeds). Capability scales by **adding addressed content at flat per-query CPU cost** — see [`SUBSTRATE.md`](SUBSTRATE.md).
 
 - **O(log_φπfib N) algorithm family.** `substrate_search` and friends use F(k)/φ^(π·k) split-points — each iteration shrinks the live range by **φ^π ≈ 4.534**, not 2. The canonical iteration bound is `log_φπfib(n) ≈ 0.459 · log₂ n`. A complete primitive family is exposed: `substrate_lower_bound`, `substrate_upper_bound`, `substrate_rank`, `substrate_count_range`, `substrate_slice_range`, `substrate_intersect`, `substrate_difference`, `substrate_insert`, `substrate_quantile`, `substrate_select_k`, `substrate_nearest`, `substrate_min_distance`, `substrate_hash`.
 
@@ -246,6 +248,7 @@ The MCP server + substrate codec are the entry points designed for LLM agents dr
 | [`omnimcode-core/src/prometheus/README.md`](omnimcode-core/src/prometheus/README.md) | Substrate-native ML framework |
 | [`experiments/prometheus_parity/`](experiments/prometheus_parity/) | Substrate-attention findings (K, S-MOD, V), each with a `FINDING.md` |
 | [`docs/SUBSTRATE_NATIVE_AGENT.md`](docs/SUBSTRATE_NATIVE_AGENT.md) | Two-agent demo composing every substrate primitive |
+| [`SUBSTRATE.md`](SUBSTRATE.md) | **Substrate-into-core primitives (v1.8.x):** content-addressing, addressable heap + `@memo`, locality similarity, verify-gated self-modification, `gen_omc` synthesis, value-level dual-band — verified numbers + honest limits |
 | [`CHANGELOG.md`](CHANGELOG.md) | Chapter-by-chapter project history (mirrors the release notes) |
 | [`ROADMAP.md`](ROADMAP.md) | What's planned next |
 
