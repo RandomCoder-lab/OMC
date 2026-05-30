@@ -1,0 +1,51 @@
+// harmonic_mind.omc — the substrate primitives composed into one self-hosting loop, in pure OMC.
+// Addressing + memoization + dual-band coherence + verified self-synthesis, all in the language.
+// (Track E existence proof. Run: omnimcode-standalone examples/harmonic_mind.omc)
+
+print("=== OMC harmonic mind — substrate primitives, composed ===");
+
+// ── 1. Compute once, anywhere, ever (content-addressed memoization) ──
+@memo
+fn fib(n) { if n < 2 { return n; } return fib(n - 1) + fib(n - 2); }
+print("[1] fib(90) memoized:");
+print(fib(90));                                  // 2880067194370816120 — intractable without @memo
+
+// ── 2. The work is addressed by content; identical work shares one slot ──
+h k = cas_put(fib(40));
+print("[2] result addressed at key, retrieved by content:");
+print(cas_get(k));                               // 102334155
+print(same_value(fib(40), 102334155));           // true — O(1) semantic equality
+
+// ── 3. Dual-band coherence: watch a computation's harmonic drift (α exact, β shadow) ──
+print("[3] dual-band drift along a computation:");
+h a = phi_shadow(13);                            // 13 is on the lattice
+h b = a * 3;                                     // α 39 ; β 13*3=39
+print(bands(b));
+print(value_divergence(b));                      // 0 — stayed in tune
+h c = (phi_shadow(50) + 7) * 2;                  // drifts off the lattice
+print(bands(c));
+print(value_divergence(c));                      // high — α is the truth, β shows lattice path
+
+// ── 4. Self-synthesis with a verify gate: generate, test, accept only if it runs ──
+print("[4] generate -> verify -> accept (the super-tool loop, in-language):");
+fn target(n) { return 0 - 1; }                   // a stub to improve
+h cand = "fn target(n) { if n < 2 { return n; } h s = 0; h i = 0; while i <= n { s += i; i += 1; } return s; }";
+h spec = "h ok = 1; if target(5) != 15 { ok = 0; } if target(10) != 55 { ok = 0; } ok";
+h r = fn_swap_verified("target", cand, spec);
+print(r["accepted"]);                            // true — verified sum-to-n
+print(target(100));                              // 5050 — the accepted implementation
+
+// ── 5. Find the right tool by a rough name (content locality) ──
+fn quicksort(xs) { return xs; }
+fn binary_search(xs, x) { return x; }
+print("[5] route a rough need to the real function:");
+print(nearest_fn("quicksrt"));                   // quicksort
+print(nearest_fn("binarysearch"));               // binary_search
+
+// ── 6. Correct-by-construction: even a random program is valid OMC ──
+print("[6] generated program parses + runs by construction:");
+h prog = gen_omc(2026);
+h chk = code_parse_check(prog);
+print(chk["ok"]);                                // true
+
+print("=== the mind computes, remembers, verifies, and listens to its own harmony ===");
