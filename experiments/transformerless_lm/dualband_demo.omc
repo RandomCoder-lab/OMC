@@ -1,0 +1,19 @@
+// Phase 6 — opt-in @dualband: α (exact) + β (substrate-snapped) + the divergence gate.
+// Always returns the exact α; exposes how in-tune the substrate band is via band_divergence.
+
+@dualband
+fn sq(n) { return (n * n); }
+
+print("-- on-lattice input (8 is a Fibonacci attractor): bands AGREE --");
+print(sq(8));                     // 64 (exact α)
+print(band_divergence("sq"));    // 0  (β snapped 8->8, so β == α: gate fully open)
+
+print("-- off-lattice input (7): bands DIVERGE --");
+print(sq(7));                     // 49 (exact α — always correct)
+print(band_divergence("sq"));    // > 0 (β snapped 7->8 -> 64; α/β dissonance: gate closes)
+
+@dualband
+fn add3(a, b, c) { return ((a + b) + c); }
+print("-- all-Fibonacci inputs: perfectly in tune --");
+print(add3(8, 13, 21));          // 42
+print(band_divergence("add3"));  // 0

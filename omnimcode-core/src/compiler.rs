@@ -250,7 +250,10 @@ impl Compiler {
                         // Substrate growth rates
                         | "phi_pow" | "phi_pi_pow"
                         // Substrate-coherence + array-stat float returns
-                        | "harmonic_score" | "arr_avg_distance" => Some("float"),
+                        | "harmonic_score" | "arr_avg_distance"
+                        // Float-typed array accessor — forces float arithmetic
+                        // on indexed elements so the JIT emits MulFloat/AddFloat.
+                        | "arr_get_f" => Some("float"),
                         "to_string" | "string" | "str_concat"
                         | "str_uppercase" | "str_lowercase" | "str_reverse"
                         | "str_slice" | "concat_many"
@@ -688,7 +691,10 @@ impl Compiler {
                         // arr_push+arr_get benchmark slower under VM than
                         // tree-walk. ArrayIndex is polymorphic over arrays
                         // and dicts, so dict_get(d, k) inlines too.
-                        ("arr_get", 2) | ("dict_get", 2) => {
+                        // arr_get_f is a float-typed alias for arr_get —
+                        // same ArrayIndex op but type-tagged "float" above
+                        // so arithmetic on its results emits float ops.
+                        ("arr_get", 2) | ("dict_get", 2) | ("arr_get_f", 2) => {
                             self.compile_expr(&args[0])?;
                             self.compile_expr(&args[1])?;
                             self.emit(Op::ArrayIndex);

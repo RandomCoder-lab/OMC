@@ -1,0 +1,7 @@
+// Phase 2.2 — purity gate: @memo on an impure fn must be REFUSED at definition.
+@memo
+fn bad(n) {
+    print("side effect");   // impure → @memo should error here
+    return n * 2;
+}
+print(bad(3));

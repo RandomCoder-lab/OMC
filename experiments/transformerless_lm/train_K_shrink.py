@@ -111,8 +111,11 @@ def evaluate(model, val_split, batch_size, window, fib_positions, generator,
 
 
 def set_K_active_recursive(model, K_a: int):
+    # Match by capability (hasattr), not just FibGenLinear: FibRecLMSubsim also
+    # implements set_K_active (its forward uses the stateless fn, not FibGenLinear)
+    # and was silently skipped before — the K-shrink no-op found in EXP-2.
     for m in model.modules():
-        if isinstance(m, FibGenLinear):
+        if hasattr(m, 'set_K_active'):
             m.set_K_active(K_a)
 
 

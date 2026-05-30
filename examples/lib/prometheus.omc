@@ -491,10 +491,11 @@ fn _prom_harmonic_scale(grad_mag, alpha) {
     if gnorm < 0.0 { gnorm = 0.0 - gnorm; }
     h gi = gnorm + 0.5;
     h gint = gi - (gi - (gi / 1) * 1);   # truncate to int (gi/1*1 - frac)
-    # Use the existing attractor_distance builtin.
-    h dist = attractor_distance(gint);
-    # Smaller dist → more substrate-coherent → boost.
-    h reso = 1.0 / (1.0 + dist / 100.0);   # reso ∈ (0, 1]
+    # HBit β-divergence: StoreVar above set β = fold(gint).
+    # harmony(gint) returns harmony(gint, fold(gint)) ∈ [0, 1000].
+    # Gradient mags near Fibonacci → high harmony → strong boost.
+    # Gradient mags far from Fibonacci → low harmony → dampened update.
+    h reso = harmony(gint) / 1000.0;   # reso ∈ (0, 1]
     return 1.0 + alpha * (reso - 0.5);
 }
 

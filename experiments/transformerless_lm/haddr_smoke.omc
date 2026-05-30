@@ -1,0 +1,15 @@
+// Phase 1.1 smoke test — haddr through the real interpreter.
+print("-- haddr dict --");
+print(haddr("fibonacci"));
+print("-- haddr_face --");
+print(haddr_face("fibonacci"));
+print(haddr_face("quicksort"));
+print(haddr_face("gcd"));
+print("-- determinism (expect 1) --");
+print(haddr_face("gcd") == haddr_face("gcd"));
+print("-- distance self (expect 0) --");
+print(haddr_distance(haddr("fibonacci"), haddr("fibonacci")));
+print("-- distance differ (expect > 0) --");
+print(haddr_distance(haddr("fibonacci"), haddr("quicksort")));
+print("-- distance from raw strings --");
+print(haddr_distance("gcd", "lcm"));

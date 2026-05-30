@@ -1,0 +1,7 @@
+// @dualband must REFUSE an impure fn (the body runs twice → side effects would double).
+@dualband
+fn noisy(n) {
+    print("side effect");
+    return (n * n);
+}
+print(noisy(3));

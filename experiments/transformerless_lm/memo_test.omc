@@ -1,0 +1,21 @@
+// Phase 2.2 — @memo transparent content-addressed memoization.
+@memo
+fn mfib(n) {
+    if n < 2 { return n; }
+    return mfib(n - 1) + mfib(n - 2);
+}
+
+fn pfib(n) {
+    if n < 2 { return n; }
+    return pfib(n - 1) + pfib(n - 2);
+}
+
+print("-- correctness: memoized == plain --");
+print(mfib(20));                          // 6765
+print(pfib(20));                          // 6765
+print(same_value(mfib(25), pfib(25)));    // true (both 75025)
+
+print("-- speedup: fib that is intractable without memo --");
+print(mfib(40));                          // 102334155 (O(n) memoized; O(phi^n) plain)
+print(mfib(60));                          // 1548008755920 (only feasible memoized)
+print(mfib(90));                          // 2880067194370816120

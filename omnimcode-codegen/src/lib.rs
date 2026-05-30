@@ -570,6 +570,26 @@ impl JittedFn {
                         std::mem::transmute(self.fn_ptr);
                     Some(f(args[0], args[1], args[2], args[3]))
                 }
+                5 => {
+                    let f: unsafe extern "C" fn(i64, i64, i64, i64, i64) -> i64 =
+                        std::mem::transmute(self.fn_ptr);
+                    Some(f(args[0], args[1], args[2], args[3], args[4]))
+                }
+                6 => {
+                    let f: unsafe extern "C" fn(i64, i64, i64, i64, i64, i64) -> i64 =
+                        std::mem::transmute(self.fn_ptr);
+                    Some(f(args[0], args[1], args[2], args[3], args[4], args[5]))
+                }
+                7 => {
+                    let f: unsafe extern "C" fn(i64, i64, i64, i64, i64, i64, i64) -> i64 =
+                        std::mem::transmute(self.fn_ptr);
+                    Some(f(args[0], args[1], args[2], args[3], args[4], args[5], args[6]))
+                }
+                8 => {
+                    let f: unsafe extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64) -> i64 =
+                        std::mem::transmute(self.fn_ptr);
+                    Some(f(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7]))
+                }
                 _ => None,
             }
         }
@@ -1014,6 +1034,10 @@ impl<'ctx> JitContext<'ctx> {
             2 => by_arity!(unsafe extern "C" fn(i64, i64) -> i64),
             3 => by_arity!(unsafe extern "C" fn(i64, i64, i64) -> i64),
             4 => by_arity!(unsafe extern "C" fn(i64, i64, i64, i64) -> i64),
+            5 => by_arity!(unsafe extern "C" fn(i64, i64, i64, i64, i64) -> i64),
+            6 => by_arity!(unsafe extern "C" fn(i64, i64, i64, i64, i64, i64) -> i64),
+            7 => by_arity!(unsafe extern "C" fn(i64, i64, i64, i64, i64, i64, i64) -> i64),
+            8 => by_arity!(unsafe extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64) -> i64),
             _ => return Err(format!("arity {} not supported in Session D jit_module", arity)),
         };
         Ok(ptr)
@@ -1798,31 +1822,22 @@ fn pop<'ctx>(
         .ok_or_else(|| format!("stack underflow at op{} ({})", op_idx, context))
 }
 
-/// v0.8.8 JIT eligibility audit. Scan a CompiledFunction's bytecode for
-/// any op that creates or operates on collections (arrays / dicts /
-/// strings). If found, the fn is NOT JIT-eligible — its tree-walk
-/// semantics must be preserved because the dual-band lowerer returns
-/// an i64, which silently lies about the runtime type when a caller
-/// later does `arr_len(...)` or `dict_get(...)` on the return value.
+/// JIT eligibility audit. Scan a CompiledFunction's bytecode for ops that
+/// require dict or string semantics, which the dual-band lowerer has no
+/// support for. If found, the fn is NOT JIT-eligible.
 ///
-/// This filter is intentionally conservative: any collection-touching
-/// op disqualifies the fn even if collections are only used internally
-/// and the return is a pure number. Refining the analysis (return-value
-/// type inference) is a future chapter.
+/// Array ops (NewArray, ArrayLen, ArrayIndex, ArrayIndexAssign) are fully
+/// supported by the dual-band lowerer and do NOT disqualify a fn:
+///   - NewArray → alloca frame buffer, pointer-as-i64 on operand stack
+///   - ArrayLen/ArrayIndex → pointer dereferences, return i64
+///   - ArrayIndexAssign → pointer + offset write
+///   - @jit_returns_array_int → Return calls omc_arr_heapify on the pointer
 fn fn_uses_collections(cf: &CompiledFunction) -> bool {
     for op in &cf.ops {
         match op {
-            Op::NewArray(_)
-            | Op::NewDict(_)
+            Op::NewDict(_)
             | Op::DictSetNamed(_)
-            | Op::DictDelNamed(_)
-            | Op::ArrayIndex
-            | Op::ArrayIndexAssign(_)
-            | Op::ArrayLen => return true,
-            // String/array-returning builtins via Op::CallBuiltin would
-            // also disqualify. Check the constant pool for string
-            // constants — if a fn loads a string, it's likely doing
-            // collection / hashmap / display work.
+            | Op::DictDelNamed(_) => return true,
             _ => {}
         }
     }

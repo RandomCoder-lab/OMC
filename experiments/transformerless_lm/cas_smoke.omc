@@ -1,0 +1,23 @@
+// Phase 2.1 — content-addressed value heap + O(1) semantic equality.
+print("-- value_addr: same content -> same address --");
+print(value_addr(42));
+print(value_addr([1, 2, 3]));
+print("-- same_value: structural equality by content --");
+print(same_value([1, 2, 3], [1, 2, 3]));     // true
+print(same_value([1, 2, 3], [1, 2, 4]));     // false
+print(same_value(42, 42));                   // true
+print(same_value("gcd", "gcd"));             // true
+print(same_value({"a": 1}, {"a": 1}));       // true
+print(same_value({"a": 1}, {"a": 2}));       // false
+print("-- CAS round-trip --");
+h k = cas_put([10, 20, 30]);
+print(k);
+print(cas_get(k));                           // [10, 20, 30]
+print(cas_has(k));                           // true
+print("-- dedup: identical content reuses the key --");
+h k2 = cas_put([10, 20, 30]);
+print(same_value(k, k2));                    // true (same key string)
+print("-- distinct content, distinct key --");
+h k3 = cas_put([10, 20, 31]);
+print(same_value(k, k3));                    // false
+print(cas_has("999"));                       // false (nothing stored)

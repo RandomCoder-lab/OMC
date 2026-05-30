@@ -49,18 +49,18 @@ fn harmony_of_unshadowed_value_is_perfect() {
 
 #[test]
 fn harmony_of_shadowed_value_diverges() {
-    // After phi_shadow, β = phi_fold(α) * 1000. For most α the diff
-    // |α - β| lands OFF a Fibonacci attractor, so harmony < 1000.
+    // phi_shadow computes β = frac(α·φ)·1000. Passing that result
+    // *directly* to harmony() (no StoreVar) uses that β before the
+    // PhiShadow-store overwrites it. For most α the diff |α − β|
+    // lands OFF a Fibonacci attractor, so harmony < 1000.
     let source = r#"
         fn read_harmony_shadowed(x) {
-            h y = phi_shadow(x);
-            return harmony(y);
+            return harmony(phi_shadow(x));
         }
     "#;
     let (_jit, f) = jit_fn(source, "read_harmony_shadowed");
-    // Pick inputs whose phi-shadow diff is known to land off-attractor.
-    // For α=42: β = phi_fold(42)*1000 = frac(67.957...)*1000 = 957.
-    // diff = |42 - 957| = 915. Nearest attractor 987 (dist 72) →
+    // For α=42: β = frac(42·φ)·1000 = frac(67.957…)·1000 ≈ 957.
+    // diff = |42 − 957| = 915. Nearest Fib = 987 (dist 72) →
     // harmony = 1/(1+72) ≈ 0.0137 → 14 in [0,1000].
     let r42 = f.call(&[42]).expect("call");
     assert!(
@@ -73,8 +73,7 @@ fn harmony_of_shadowed_value_diverges() {
         "shadowed harmony(42) should be low (off-attractor); got {}",
         r42
     );
-    // α=0 is a corner case: phi_fold(0) = 0, β = 0, diff = 0,
-    // attractor 0, harmony = 1000.
+    // α=0: φ·0 = 0, frac = 0, β = 0, diff = 0, harmony = 1000.
     let r0 = f.call(&[0]).expect("call");
     assert_eq!(r0, 1000, "α=0 → β=0 → perfect harmony");
 }
@@ -100,8 +99,7 @@ fn harmony_gated_branch_elision() {
             return 0;
         }
         fn gated_shadowed(x) {
-            h y = phi_shadow(x);
-            if harmony(y) >= 500 {
+            if harmony(phi_shadow(x)) >= 500 {
                 return 1;
             }
             return 0;

@@ -101,7 +101,7 @@ fn handle(interp: &mut Interpreter, method: &str, params: &Json, id: Json) -> Rp
                 "capabilities": { "tools": {} },
                 "serverInfo": {
                     "name": "omnimcode-mcp",
-                    "version": "1.0.0"
+                    "version": env!("CARGO_PKG_VERSION")
                 }
             })),
             error: None,

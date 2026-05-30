@@ -49,6 +49,24 @@ pub struct Interpreter {
     /// `tape_value(id)` to get the substrate-annotated forward value
     /// alongside `tape_grad(id)` for the derivative.
     autograd_tape: Vec<TapeNode>,
+    /// Content-addressed value heap (Phase 2.1): content_hash → stored value.
+    /// `cas_put`/`cas_get`/`cas_has` expose it; identical content shares a key.
+    cas_store: HashMap<u64, Value>,
+    /// Functions declared `@memo` (Phase 2.2) — asserted pure, transparently
+    /// memoized. Populated at definition after a best-effort purity check.
+    memo_fns: HashSet<String>,
+    /// Memo results keyed by (fn name ⊕ argument content hashes).
+    memo_cache: HashMap<u64, Value>,
+    /// Per-fn body-hash salt for `@memo` keys — editing a memoized function's
+    /// body changes the salt, so a stale persisted result is never returned.
+    memo_salt: HashMap<String, u64>,
+    /// Functions declared `@dualband` (Phase 6) — run on two bands (α exact, β substrate-snapped)
+    /// with the divergence gate exposed; asserted pure (the body runs twice).
+    dualband_fns: HashSet<String>,
+    /// Re-entrancy depth so only the OUTERMOST dual-band call computes the β band.
+    dualband_depth: u32,
+    /// Last α/β divergence (0..1000) recorded per `@dualband` fn; read via band_divergence().
+    band_div: HashMap<String, i64>,
     /// Value of the most recently evaluated top-level
     /// `Statement::Expression`. The MCP server and any REPL frontend
     /// read this to surface "what did the last line evaluate to"
@@ -147,6 +165,13 @@ impl Interpreter {
         let initial = if seed == 0 { 0x9E3779B97F4A7C15 } else { seed };
         Interpreter {
             globals: HashMap::new(),
+            cas_store: HashMap::new(),
+            memo_fns: HashSet::new(),
+            memo_cache: HashMap::new(),
+            memo_salt: HashMap::new(),
+            dualband_fns: HashSet::new(),
+            dualband_depth: 0,
+            band_div: HashMap::new(),
             functions: HashMap::new(),
             fn_snapshots: HashMap::new(),
             jit_dispatch: None,
@@ -1739,9 +1764,38 @@ impl Interpreter {
                 name,
                 params,
                 body,
+                pragmas,
                 ..
             } => {
                 self.functions.insert(name.clone(), (params.clone(), body.clone()));
+                // @memo (Phase 2.2) and @dualband (Phase 6) both take the exact-memo FAST PATH (the
+                // A→Z skip — gate open on an exact hit). @dualband ALSO measures the α/β divergence
+                // (the gate / routing telemetry). Both require purity: a cache-skip — or a body that
+                // runs twice — must have no side effects. Best-effort purity check (direct calls).
+                let wants_dualband = pragmas.iter().any(|p| p == "dualband");
+                let wants_memo = wants_dualband || pragmas.iter().any(|p| p == "memo");
+                if wants_memo {
+                    if let Some(bad) = body_first_impure_call(body) {
+                        return Err(format!(
+                            "@{} on '{}' requires a pure function, but it calls '{}' (side effect / nondeterminism).",
+                            if wants_dualband { "dualband" } else { "memo" },
+                            name,
+                            bad
+                        ));
+                    }
+                    // Body-aware salt: editing the body invalidates any stale persisted result.
+                    let salt = crate::cas::fnv64(&crate::formatter::format_program(body));
+                    self.memo_salt.insert(name.clone(), salt);
+                    self.memo_fns.insert(name.clone());
+                } else {
+                    self.memo_fns.remove(name);
+                    self.memo_salt.remove(name);
+                }
+                if wants_dualband {
+                    self.dualband_fns.insert(name.clone());
+                } else {
+                    self.dualband_fns.remove(name);
+                }
                 Ok(())
             }
             Statement::ClassDef { name, parent, fields, methods } => {
@@ -2385,7 +2439,7 @@ impl Interpreter {
             | "http_get" | "http_post" | "http_post_json" | "http_put" | "http_delete"
             | "now_iso" | "now_unix" | "format_time" | "parse_time"
             // Arrays
-            | "arr_new" | "arr_from_range" | "arr_len" | "arr_get" | "arr_set"
+            | "arr_new" | "arr_from_range" | "arr_len" | "arr_get" | "arr_get_f" | "arr_set"
             | "arr_push" | "arr_first" | "arr_last" | "arr_slice" | "arr_concat"
             | "arr_contains" | "arr_index_of" | "arr_sort" | "arr_reverse" | "arr_join"
             | "arr_min" | "arr_max" | "arr_sum" | "arr_fold_elements"
@@ -2443,6 +2497,21 @@ impl Interpreter {
             | "attractor_table" | "harmonic_score"
             | "arr_min_int" | "arr_max_int" | "arr_avg_distance"
             | "is_phi_resonant"
+            // Dodecahedral content-addressing (Phase 1.1)
+            | "haddr" | "haddr_face" | "haddr_distance"
+            // Content-addressed value heap (Phase 2.1)
+            | "value_addr" | "value_hash" | "same_value"
+            | "cas_put" | "cas_get" | "cas_has"
+            // The super-tool as a language feature (Phase 3)
+            | "fn_swap_verified" | "fns_on_face"
+            // Locality fingerprint — similarity primitive (Phase 1.2)
+            | "locality_fp" | "locality_sim" | "locality_nearest"
+            // Content-addressed dispatch (Phase 3.1) — typo/variant-tolerant, via locality
+            | "nearest_fn" | "call_nearest"
+            // Correct-by-construction synthesis (Phase 4)
+            | "gen_omc"
+            // HBit dual-band gate (Phase 6) — real two-band resonance/divergence
+            | "hbit_harmony" | "hbit_divergence" | "band_divergence" | "band_route"
             // Traced variants — return [result, probe_indices_array]
             | "phi_pi_fib_search_traced" | "phi_pi_fib_nearest_traced"
             // Split-channel stats (explicit vs background substrate work)
@@ -4419,6 +4488,10 @@ impl Interpreter {
                 }
                 Err("arr_push: first argument must be an array variable".to_string())
             }
+            // Float-typed alias for arr_get — identical runtime behaviour,
+            // but the compiler knows the return type is "float" so it
+            // emits MulFloat/AddFloat for downstream arithmetic.
+            "arr_get_f" |
             "arr_get" => {
                 if args.len() < 2 {
                     return Err("arr_get requires (array, index)".to_string());
@@ -6191,6 +6264,401 @@ impl Interpreter {
                 } else {
                     Err("crt_recover: argument must be an array".to_string())
                 }
+            }
+            // ── Dodecahedral content-addressing (Phase 1.1) ──────────────────
+            // haddr(text) -> {face, sub_face, zeck}: the equal-area φ-address.
+            // Pure content→address (no dictionary); uniform face occupancy
+            // (χ²≈17, see address.rs). The proven addressing primitive, in-core.
+            "haddr" => {
+                if args.is_empty() {
+                    return Err("haddr requires (text)".to_string());
+                }
+                let s = self.eval_expr(&args[0])?.to_string();
+                let a = crate::address::haddr(&s);
+                let mut m = std::collections::BTreeMap::new();
+                m.insert("face".to_string(), Value::HInt(HInt::new(a.face as i64)));
+                m.insert("sub_face".to_string(), Value::HInt(HInt::new(a.sub_face as i64)));
+                let zeck: Vec<Value> =
+                    a.zeck.iter().map(|&f| Value::HInt(HInt::new(f))).collect();
+                m.insert("zeck".to_string(), Value::Array(HArray::from_vec(zeck)));
+                Ok(Value::dict_from(m))
+            }
+            // haddr_face(text) -> int: the dodecahedral face (0-11) only.
+            "haddr_face" => {
+                if args.is_empty() {
+                    return Err("haddr_face requires (text)".to_string());
+                }
+                let s = self.eval_expr(&args[0])?.to_string();
+                Ok(Value::HInt(HInt::new(crate::address::haddr(&s).face as i64)))
+            }
+            // haddr_distance(a, b) -> float: coarse address distance. Each of a, b
+            // may be an address dict (from haddr) or a string (addressed on the fly).
+            "haddr_distance" => {
+                if args.len() < 2 {
+                    return Err("haddr_distance requires (a, b)".to_string());
+                }
+                let av = self.eval_expr(&args[0])?;
+                let bv = self.eval_expr(&args[1])?;
+                let to_addr = |v: &Value| -> Result<crate::address::HAddr, String> {
+                    match v {
+                        Value::String(s) => Ok(crate::address::haddr(s)),
+                        Value::Dict(d) => {
+                            let m = d.borrow();
+                            let face =
+                                m.get("face").map(|x| x.to_int()).unwrap_or(0).max(0) as usize;
+                            let sub = m
+                                .get("sub_face")
+                                .map(|x| x.to_int())
+                                .unwrap_or(0)
+                                .max(0) as usize;
+                            let zeck = match m.get("zeck") {
+                                Some(Value::Array(a)) => {
+                                    a.items.borrow().iter().map(|x| x.to_int()).collect()
+                                }
+                                _ => Vec::new(),
+                            };
+                            Ok(crate::address::HAddr { face, sub_face: sub, zeck })
+                        }
+                        _ => Err(
+                            "haddr_distance: args must be address dicts or strings".to_string(),
+                        ),
+                    }
+                };
+                let a = to_addr(&av)?;
+                let b = to_addr(&bv)?;
+                Ok(Value::HFloat(crate::address::addr_distance(&a, &b)))
+            }
+            // ── Content-addressed value heap (Phase 2.1) ─────────────────────
+            // value_addr(v) -> {face, sub_face, zeck}: dodecahedral address of ANY
+            // value, by content. Same content → same address (structural).
+            "value_addr" => {
+                if args.is_empty() {
+                    return Err("value_addr requires (value)".to_string());
+                }
+                let v = self.eval_expr(&args[0])?;
+                let a = crate::address::haddr_hash(v.content_hash());
+                let mut m = std::collections::BTreeMap::new();
+                m.insert("face".to_string(), Value::HInt(HInt::new(a.face as i64)));
+                m.insert("sub_face".to_string(), Value::HInt(HInt::new(a.sub_face as i64)));
+                let zeck: Vec<Value> =
+                    a.zeck.iter().map(|&f| Value::HInt(HInt::new(f))).collect();
+                m.insert("zeck".to_string(), Value::Array(HArray::from_vec(zeck)));
+                Ok(Value::dict_from(m))
+            }
+            // value_hash(v) -> string: FNV1a-64 content hash as a decimal string
+            // (exceeds 2^53, so stringified — the canonical CAS key).
+            "value_hash" => {
+                if args.is_empty() {
+                    return Err("value_hash requires (value)".to_string());
+                }
+                let v = self.eval_expr(&args[0])?;
+                Ok(Value::String(v.content_hash().to_string()))
+            }
+            // same_value(a, b) -> bool: O(1) semantic equality by content hash.
+            // Two values with identical content collide regardless of provenance.
+            "same_value" => {
+                if args.len() < 2 {
+                    return Err("same_value requires (a, b)".to_string());
+                }
+                let a = self.eval_expr(&args[0])?;
+                let b = self.eval_expr(&args[1])?;
+                Ok(Value::Bool(a.content_hash() == b.content_hash()))
+            }
+            // cas_put(v) -> string key: store v in the content-addressed heap and
+            // return its key. Identical content reuses the same slot (dedup).
+            "cas_put" => {
+                if args.is_empty() {
+                    return Err("cas_put requires (value)".to_string());
+                }
+                let v = self.eval_expr(&args[0])?;
+                let key = v.content_hash();
+                crate::cas::store("cas", key, &v); // persist across runs (~/.omc/cas pool)
+                self.cas_store.insert(key, v);
+                Ok(Value::String(key.to_string()))
+            }
+            // cas_get(key) -> value | null: retrieve by content key (memory, then disk).
+            "cas_get" => {
+                if args.is_empty() {
+                    return Err("cas_get requires (key)".to_string());
+                }
+                let key = self.eval_expr(&args[0])?.to_string();
+                match key.parse::<u64>() {
+                    Ok(k) => {
+                        if let Some(v) = self.cas_store.get(&k) {
+                            return Ok(v.clone());
+                        }
+                        // Not in memory — a previous run may have stored it on disk.
+                        match crate::cas::load("cas", k) {
+                            Some(v) => {
+                                self.cas_store.insert(k, v.clone());
+                                Ok(v)
+                            }
+                            None => Ok(Value::Null),
+                        }
+                    }
+                    Err(_) => Ok(Value::Null),
+                }
+            }
+            // cas_has(key) -> bool: is a value stored at this content key (memory or disk)?
+            "cas_has" => {
+                if args.is_empty() {
+                    return Err("cas_has requires (key)".to_string());
+                }
+                let key = self.eval_expr(&args[0])?.to_string();
+                let present = key
+                    .parse::<u64>()
+                    .map(|k| self.cas_store.contains_key(&k) || crate::cas::has("cas", k))
+                    .unwrap_or(false);
+                Ok(Value::Bool(present))
+            }
+            // ── The super-tool as a language feature (Phase 3) ───────────────
+            // fn_swap_verified(name, new_source, test_source) -> {accepted, error, result}
+            // Safe self-modification (C4): install candidate code for `name`, run the
+            // test in a sandbox that sees the new fn but can't mutate the live program;
+            // KEEP the candidate only if the test runs clean and returns truthy, else
+            // roll back. The interpreter itself is the gate — nothing invalid is accepted.
+            "fn_swap_verified" => {
+                if args.len() < 3 {
+                    return Err("fn_swap_verified requires (name, new_source, test_source)".to_string());
+                }
+                let nm = self.eval_expr(&args[0])?.to_string();
+                let new_src = self.eval_expr(&args[1])?.to_string();
+                let test_src = self.eval_expr(&args[2])?.to_string();
+
+                // snapshot current state of `name` for rollback
+                let prev_fn = self.functions.get(&nm).cloned();
+                let prev_memo = self.memo_fns.contains(&nm);
+                let prev_salt = self.memo_salt.get(&nm).copied();
+
+                let mk = |accepted: bool, error: Option<String>, result: Value| {
+                    let mut m = std::collections::BTreeMap::new();
+                    m.insert("accepted".to_string(), Value::Bool(accepted));
+                    m.insert("error".to_string(), error.map(Value::String).unwrap_or(Value::Null));
+                    m.insert("result".to_string(), result);
+                    Value::dict_from(m)
+                };
+
+                // 1) parse + install the candidate into the live interpreter.
+                let mut parser = crate::parser::Parser::new(&new_src);
+                let stmts = match parser.parse() {
+                    Ok(s) => s,
+                    Err(e) => return Ok(mk(false, Some(format!("candidate parse error: {}", e)), Value::Null)),
+                };
+                self.register_user_functions(&stmts);
+                if let Err(e) = self.execute(stmts) {
+                    restore_fn(&mut self.functions, &mut self.memo_fns, &mut self.memo_salt,
+                               &nm, prev_fn.clone(), prev_memo, prev_salt);
+                    return Ok(mk(false, Some(format!("candidate exec error: {}", e)), Value::Null));
+                }
+
+                // 2) run the test in a sandbox seeded with our state (sees the new fn,
+                //    can't mutate us).
+                let mut tester = Interpreter::new();
+                tester.globals = self.globals.clone();
+                tester.functions = self.functions.clone();
+                tester.memo_fns = self.memo_fns.clone();
+                tester.memo_salt = self.memo_salt.clone();
+                let test_outcome: Result<Value, String> = (|| {
+                    let mut tp = crate::parser::Parser::new(&test_src);
+                    let tstmts = tp.parse().map_err(|e| format!("test parse error: {}", e))?;
+                    tester.register_user_functions(&tstmts);
+                    tester.execute(tstmts)?;
+                    Ok(tester.last_expression_value.take().unwrap_or(Value::Null))
+                })();
+
+                // 3) accept iff the test ran clean AND returned a truthy value.
+                match test_outcome {
+                    Ok(v) => {
+                        let truthy = match &v {
+                            Value::Bool(b) => *b,
+                            Value::HInt(n) => n.value != 0,
+                            Value::Null => false,
+                            _ => true,
+                        };
+                        if truthy {
+                            Ok(mk(true, None, v))
+                        } else {
+                            restore_fn(&mut self.functions, &mut self.memo_fns, &mut self.memo_salt,
+                                       &nm, prev_fn.clone(), prev_memo, prev_salt);
+                            Ok(mk(false, Some("test returned a non-truthy value".to_string()), v))
+                        }
+                    }
+                    Err(e) => {
+                        restore_fn(&mut self.functions, &mut self.memo_fns, &mut self.memo_salt,
+                                   &nm, prev_fn.clone(), prev_memo, prev_salt);
+                        Ok(mk(false, Some(format!("test error: {}", e)), Value::Null))
+                    }
+                }
+            }
+            // fns_on_face(face) -> [names]: defined functions whose name-address lands on
+            // dodecahedral `face` (0-11). Exact-key bucketing — the proven use of haddr
+            // (NOT similarity, which φ-addresses don't support — that needs locality_fp).
+            "fns_on_face" => {
+                if args.is_empty() {
+                    return Err("fns_on_face requires (face)".to_string());
+                }
+                let face = self.eval_expr(&args[0])?.to_int();
+                let mut names: Vec<String> = self
+                    .functions
+                    .keys()
+                    .filter(|n| crate::address::haddr(n).face as i64 == face)
+                    .cloned()
+                    .collect();
+                names.sort();
+                Ok(Value::Array(HArray::from_vec(
+                    names.into_iter().map(Value::String).collect(),
+                )))
+            }
+            // ── Locality fingerprint — the similarity primitive (Phase 1.2) ──
+            // locality_fp(text, [bigram]) -> float[]: normalized byte-histogram fingerprint.
+            // Content-locality (similar text → similar vector), unlike haddr. Default unigram
+            // (256-dim); pass bigram=1 for the 4096-dim variant (proven-better retrieval on prose).
+            "locality_fp" => {
+                if args.is_empty() {
+                    return Err("locality_fp requires (text, [bigram])".to_string());
+                }
+                let s = self.eval_expr(&args[0])?.to_string();
+                let bigram = args.len() > 1 && self.eval_expr(&args[1])?.to_int() != 0;
+                let v = crate::locality::fingerprint(&s, bigram);
+                Ok(Value::Array(HArray::from_vec(
+                    v.into_iter().map(Value::HFloat).collect(),
+                )))
+            }
+            // locality_sim(a, b, [bigram]) -> float: cosine similarity of two strings' locality fps.
+            "locality_sim" => {
+                if args.len() < 2 {
+                    return Err("locality_sim requires (a, b, [bigram])".to_string());
+                }
+                let a = self.eval_expr(&args[0])?.to_string();
+                let b = self.eval_expr(&args[1])?.to_string();
+                let bigram = args.len() > 2 && self.eval_expr(&args[2])?.to_int() != 0;
+                Ok(Value::HFloat(crate::locality::sim(&a, &b, bigram)))
+            }
+            // locality_nearest(query, candidates, [bigram]) -> int: index of the most similar
+            // candidate (or -1). The retrieval primitive — use this, NOT haddr, for similarity.
+            "locality_nearest" => {
+                if args.len() < 2 {
+                    return Err(
+                        "locality_nearest requires (query, candidates_array, [bigram])".to_string(),
+                    );
+                }
+                let q = self.eval_expr(&args[0])?.to_string();
+                let cands_v = self.eval_expr(&args[1])?;
+                let bigram = args.len() > 2 && self.eval_expr(&args[2])?.to_int() != 0;
+                if let Value::Array(arr) = cands_v {
+                    let cands: Vec<String> =
+                        arr.items.borrow().iter().map(|v| v.to_string()).collect();
+                    Ok(Value::HInt(HInt::new(crate::locality::nearest(&q, &cands, bigram))))
+                } else {
+                    Err("locality_nearest: candidates must be an array".to_string())
+                }
+            }
+            // ── Content-addressed dispatch (Phase 3.1) — via locality, NOT φ ──
+            // nearest_fn(need) -> name: the defined function whose NAME is closest by content
+            // locality. Typo/variant-tolerant ("quicksrt"→"quicksort"). NOT semantic NL→code
+            // (that matches characters, not meaning — the learned encoder is the tool for that).
+            "nearest_fn" => {
+                if args.is_empty() {
+                    return Err("nearest_fn requires (need)".to_string());
+                }
+                let need = self.eval_expr(&args[0])?.to_string();
+                let mut names: Vec<String> = self.functions.keys().cloned().collect();
+                names.sort();
+                let idx = crate::locality::nearest(&need, &names, false);
+                if idx < 0 {
+                    Ok(Value::Null)
+                } else {
+                    Ok(Value::String(names[idx as usize].clone()))
+                }
+            }
+            // call_nearest(need, args) -> result: dispatch to the nearest-named function (by
+            // locality) and call it with args (an array, or a single value). "Run the function
+            // I roughly named." Uses the same call path as a normal call (traces/heal apply).
+            "call_nearest" => {
+                if args.len() < 2 {
+                    return Err("call_nearest requires (need, args)".to_string());
+                }
+                let need = self.eval_expr(&args[0])?.to_string();
+                let args_v = self.eval_expr(&args[1])?;
+                let arg_vals: Vec<Value> = match args_v {
+                    Value::Array(arr) => arr.items.borrow().clone(),
+                    other => vec![other],
+                };
+                let mut names: Vec<String> = self.functions.keys().cloned().collect();
+                names.sort();
+                let idx = crate::locality::nearest(&need, &names, false);
+                if idx < 0 {
+                    return Err("call_nearest: no user functions defined".to_string());
+                }
+                let chosen = names[idx as usize].clone();
+                self.call_function_with_values(&chosen, &arg_vals)
+            }
+            // ── Correct-by-construction synthesis (Phase 4) ──────────────────
+            // gen_omc([seed]) -> string: a valid-by-construction OMC program. Emits only
+            // grammar-legal structure (always parses), tracks declared vars + guards division +
+            // bounds loops (almost always runs). Pair with code_parse_check/eval_omc/fn_swap_verified
+            // for a generate → VERIFY → accept loop. Deterministic per seed.
+            "gen_omc" => {
+                let seed = if args.is_empty() {
+                    self.rng_next()
+                } else {
+                    self.eval_expr(&args[0])?.to_int() as u64
+                };
+                Ok(Value::String(crate::synth::gen_program(seed)))
+            }
+            // ── HBit dual-band gate (Phase 6, first brick) ───────────────────
+            // The tree-walk `harmony(x)` is a constant 1000 (no β band to compare). These expose
+            // the REAL two-band comparison from the HBit machinery, so the β-vs-α divergence gate
+            // can actually fire: trust an addressed (β) skip while in tune; fall back to linear (α)
+            // when dissonance is high. hbit_harmony(a,b) -> 0..1000 (1000 = in tune);
+            // hbit_divergence(a,b) -> 0..1000 (0 = in tune) = the gate value.
+            "hbit_harmony" => {
+                if args.len() < 2 {
+                    return Err("hbit_harmony requires (alpha, beta)".to_string());
+                }
+                let a = self.eval_expr(&args[0])?.to_int();
+                let b = self.eval_expr(&args[1])?.to_int();
+                let h = crate::value::HBit::harmony(a, b);
+                Ok(Value::HInt(HInt::new((h * 1000.0).round() as i64)))
+            }
+            "hbit_divergence" => {
+                if args.len() < 2 {
+                    return Err("hbit_divergence requires (alpha, beta)".to_string());
+                }
+                let a = self.eval_expr(&args[0])?.to_int();
+                let b = self.eval_expr(&args[1])?.to_int();
+                let h = crate::value::HBit::harmony(a, b);
+                Ok(Value::HInt(HInt::new(((1.0 - h) * 1000.0).round() as i64)))
+            }
+            // band_divergence(fn_name) -> int: the α/β divergence (0..1000) recorded on the last
+            // call to a @dualband function, or -1 if none. The gate reading the function exposes.
+            "band_divergence" => {
+                if args.is_empty() {
+                    return Err("band_divergence requires (fn_name)".to_string());
+                }
+                let nm = self.eval_expr(&args[0])?.to_string();
+                Ok(Value::HInt(HInt::new(*self.band_div.get(&nm).unwrap_or(&-1))))
+            }
+            // band_route(fn_name) -> string: the gate's routing recommendation from the last
+            // @dualband call's divergence. "fast-substrate" (deeply in tune → substrate accelerator
+            // safe), "cached-exact" (moderate → exact-memo skip), "linear" (dissonant → exact path),
+            // or "unmeasured". The exact-memo skip is always-on; this advises further acceleration.
+            "band_route" => {
+                if args.is_empty() {
+                    return Err("band_route requires (fn_name)".to_string());
+                }
+                let nm = self.eval_expr(&args[0])?.to_string();
+                let d = *self.band_div.get(&nm).unwrap_or(&-1);
+                let r = if d < 0 {
+                    "unmeasured"
+                } else if d <= 50 {
+                    "fast-substrate"
+                } else if d <= 400 {
+                    "cached-exact"
+                } else {
+                    "linear"
+                };
+                Ok(Value::String(r.to_string()))
             }
             // fibonacci_index: return the index i such that fib(i) == n,
             // or -1 if n is not a Fibonacci number. Operates over the
@@ -12872,6 +13340,39 @@ impl Interpreter {
             ));
         }
 
+        // @memo (Phase 2.2): if this fn is memoized, key on (name ⊕ arg content
+        // hashes) and short-circuit on a hit. Argument side effects already ran
+        // above (we only skip the body). Recursion fills the cache bottom-up, so
+        // an exponential recursive fn becomes linear.
+        let memo_key: Option<u64> = if self.memo_fns.contains(name) {
+            // Seed with the body-aware salt (so a code edit invalidates stale results),
+            // then mix the fn name and each argument's content hash.
+            let mut h: u64 = self
+                .memo_salt
+                .get(name)
+                .copied()
+                .unwrap_or(0xcbf2_9ce4_8422_2325);
+            for b in name.as_bytes() {
+                h ^= *b as u64;
+                h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            for a in &eval_args {
+                h ^= a.content_hash();
+                h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            if let Some(hit) = self.memo_cache.get(&h) {
+                return Ok(hit.clone());
+            }
+            // Cross-run: a result computed in a previous process is on disk (~/.omc/cas).
+            if let Some(hit) = crate::cas::load("memo", h) {
+                self.memo_cache.insert(h, hit.clone());
+                return Ok(hit);
+            }
+            Some(h)
+        } else {
+            None
+        };
+
         // JIT dispatch: if a hook is registered (set by the standalone
         // CLI when OMC_HBIT_JIT=1), give it first refusal. A `Some(_)`
         // return means the hook handled the call — skip tree-walk
@@ -12881,6 +13382,14 @@ impl Interpreter {
             if let Some(result) = hook(name, &eval_args) {
                 return result;
             }
+        }
+
+        // @dualband (Phase 6): only the OUTERMOST dual-band call computes the β band.
+        let is_db = self.dualband_fns.contains(name);
+        let do_band = is_db && self.dualband_depth == 0;
+        let band_args = if do_band { Some(eval_args.clone()) } else { None };
+        if is_db {
+            self.dualband_depth += 1;
         }
 
         self.locals.push(std::rc::Rc::new(std::cell::RefCell::new(HashMap::new())));
@@ -12924,6 +13433,7 @@ impl Interpreter {
         if let Some(e) = exec_err {
             // Drop the generator's collector on error.
             if is_generator { self.yield_stacks.pop(); }
+            if is_db { self.dualband_depth -= 1; }
             return Err(format!(
                 "{}\n  at {}{}",
                 e,
@@ -12937,10 +13447,45 @@ impl Interpreter {
             // fn's return slot — generators communicate via yield.
             self.return_value.take();
             let yields = self.yield_stacks.pop().unwrap_or_default();
+            if is_db { self.dualband_depth -= 1; }
             return Ok(Value::Array(crate::value::HArray::from_vec(yields)));
         }
 
         let result = self.return_value.take().unwrap_or(Value::Null);
+        if let Some(k) = memo_key {
+            self.memo_cache.insert(k, result.clone());
+            crate::cas::store("memo", k, &result); // persist for future runs
+        }
+        // @dualband (Phase 6): compute the β band (same body, args snapped to the harmonic
+        // lattice) and record the α/β divergence. depth is still >=1, so this re-entry runs as
+        // a plain call (no nested β). We always RETURN α (exact) — β is the coherence reading.
+        if do_band {
+            if let Some(args0) = band_args {
+                let snapped: Vec<Value> = args0
+                    .iter()
+                    .map(|v| match v {
+                        Value::HInt(h) => Value::HInt(HInt::new(
+                            crate::phi_pi_fib::nearest_attractor_with_dist(h.value).0,
+                        )),
+                        other => other.clone(),
+                    })
+                    .collect();
+                let beta = self
+                    .call_function_with_values(name, &snapped)
+                    .unwrap_or(Value::Null);
+                let div = match (&result, &beta) {
+                    (Value::HInt(a), Value::HInt(b)) => {
+                        let h = crate::value::HBit::harmony(a.value, b.value);
+                        ((1.0 - h) * 1000.0).round() as i64
+                    }
+                    _ => -1,
+                };
+                self.band_div.insert(name.to_string(), div);
+            }
+        }
+        if is_db {
+            self.dualband_depth -= 1;
+        }
         Ok(result)
     }
 
@@ -15042,6 +15587,171 @@ pub(crate) fn stmts_contain_return(stmts: &[Statement]) -> bool {
     false
 }
 
+/// Builtins whose evaluation has a side effect or is nondeterministic. `@memo`
+/// refuses a function that directly calls any of these (best-effort purity gate).
+const MEMO_IMPURE: &[&str] = &[
+    "print", "println", "print_raw",
+    "read_file", "write_file", "file_exists", "file_ls",
+    "harmonic_read_file", "harmonic_write_file",
+    "random_int", "random_float", "random_seed",
+    "now_ms", "now_unix", "now_iso", "sleep",
+    "input", "getenv",
+    "http_get", "http_post", "http_post_json", "http_put", "http_delete",
+    "llm_call", "llm_chat", "llm_embed", "llm_models", "llm_system",
+    "llm_stream_print", "llm_judge", "llm_compare", "llm_tools",
+    "batch_llm_call", "batch_llm_chat",
+    "omc_spawn", "omc_pipe",
+    "cas_put",
+];
+
+/// Best-effort purity check for `@memo`: returns the first directly-called impure
+/// builtin in `body`, or None. Recurses through statements and expressions.
+/// Transitive impurity (via called user functions) is the author's contract.
+fn body_first_impure_call(body: &[Statement]) -> Option<String> {
+    body.iter().find_map(stmt_first_impure_call)
+}
+
+/// Restore function `nm` (and its `@memo` state) to a prior snapshot — used by
+/// `fn_swap_verified` to roll back a candidate that fails its test. `prev_fn = None`
+/// means the function didn't exist before, so it is removed.
+fn restore_fn(
+    functions: &mut HashMap<String, (Vec<String>, Vec<Statement>)>,
+    memo_fns: &mut HashSet<String>,
+    memo_salt: &mut HashMap<String, u64>,
+    nm: &str,
+    prev_fn: Option<(Vec<String>, Vec<Statement>)>,
+    prev_memo: bool,
+    prev_salt: Option<u64>,
+) {
+    match prev_fn {
+        Some(p) => {
+            functions.insert(nm.to_string(), p);
+        }
+        None => {
+            functions.remove(nm);
+        }
+    }
+    if prev_memo {
+        memo_fns.insert(nm.to_string());
+    } else {
+        memo_fns.remove(nm);
+    }
+    match prev_salt {
+        Some(s) => {
+            memo_salt.insert(nm.to_string(), s);
+        }
+        None => {
+            memo_salt.remove(nm);
+        }
+    }
+}
+
+fn stmt_first_impure_call(s: &Statement) -> Option<String> {
+    match s {
+        Statement::Print(_) => Some("print".to_string()),
+        Statement::Expression(e) | Statement::Throw(e) | Statement::Yield(e) => {
+            expr_first_impure_call(e)
+        }
+        Statement::Return(opt) => opt.as_ref().and_then(expr_first_impure_call),
+        Statement::VarDecl { value, .. }
+        | Statement::Parameter { value, .. }
+        | Statement::Assignment { value, .. } => expr_first_impure_call(value),
+        Statement::IndexAssignment { index, value, .. } => {
+            expr_first_impure_call(index).or_else(|| expr_first_impure_call(value))
+        }
+        Statement::ChainedIndexAssignment { first_index, second_index, value, .. } => {
+            expr_first_impure_call(first_index)
+                .or_else(|| expr_first_impure_call(second_index))
+                .or_else(|| expr_first_impure_call(value))
+        }
+        Statement::If { condition, then_body, elif_parts, else_body } => {
+            expr_first_impure_call(condition)
+                .or_else(|| then_body.iter().find_map(stmt_first_impure_call))
+                .or_else(|| {
+                    elif_parts.iter().find_map(|(c, b)| {
+                        expr_first_impure_call(c).or_else(|| b.iter().find_map(stmt_first_impure_call))
+                    })
+                })
+                .or_else(|| else_body.as_ref().and_then(|b| b.iter().find_map(stmt_first_impure_call)))
+        }
+        Statement::While { condition, body } => {
+            expr_first_impure_call(condition).or_else(|| body.iter().find_map(stmt_first_impure_call))
+        }
+        Statement::For { iterable, body, .. } => {
+            let it = match iterable {
+                ForIterable::Expr(e) => expr_first_impure_call(e),
+                _ => None,
+            };
+            it.or_else(|| body.iter().find_map(stmt_first_impure_call))
+        }
+        Statement::Try { body, handler, finally, .. } => body
+            .iter()
+            .find_map(stmt_first_impure_call)
+            .or_else(|| handler.iter().find_map(stmt_first_impure_call))
+            .or_else(|| finally.as_ref().and_then(|b| b.iter().find_map(stmt_first_impure_call))),
+        Statement::Match { scrutinee, arms } => expr_first_impure_call(scrutinee)
+            .or_else(|| arms.iter().find_map(|a| a.body.iter().find_map(stmt_first_impure_call))),
+        // FunctionDef (nested def, not a call), ClassDef, Break, Continue, Import: pure here.
+        _ => None,
+    }
+}
+
+fn expr_first_impure_call(e: &Expression) -> Option<String> {
+    match e {
+        Expression::Call { name, args, .. } => {
+            if MEMO_IMPURE.contains(&name.as_str()) {
+                return Some(name.clone());
+            }
+            args.iter().find_map(expr_first_impure_call)
+        }
+        Expression::CallExpr { callee, args, .. } => {
+            expr_first_impure_call(callee).or_else(|| args.iter().find_map(expr_first_impure_call))
+        }
+        Expression::Add(a, b)
+        | Expression::Sub(a, b)
+        | Expression::Mul(a, b)
+        | Expression::Div(a, b)
+        | Expression::Mod(a, b)
+        | Expression::Power(a, b)
+        | Expression::Eq(a, b)
+        | Expression::Ne(a, b)
+        | Expression::Lt(a, b)
+        | Expression::Le(a, b)
+        | Expression::Gt(a, b)
+        | Expression::Ge(a, b)
+        | Expression::And(a, b)
+        | Expression::Or(a, b)
+        | Expression::BitAnd(a, b)
+        | Expression::BitOr(a, b)
+        | Expression::BitXor(a, b)
+        | Expression::Shl(a, b)
+        | Expression::Shr(a, b) => {
+            expr_first_impure_call(a).or_else(|| expr_first_impure_call(b))
+        }
+        Expression::Not(x)
+        | Expression::BitNot(x)
+        | Expression::Resonance(x)
+        | Expression::Fold(x)
+        | Expression::Safe(x) => expr_first_impure_call(x),
+        Expression::Index { index, .. } => expr_first_impure_call(index),
+        Expression::ChainedIndex { object, index } => {
+            expr_first_impure_call(object).or_else(|| expr_first_impure_call(index))
+        }
+        Expression::Array(xs) => xs.iter().find_map(expr_first_impure_call),
+        Expression::Dict(pairs) => pairs
+            .iter()
+            .find_map(|(k, v)| expr_first_impure_call(k).or_else(|| expr_first_impure_call(v))),
+        Expression::IfExpr { condition, then_body, else_body } => {
+            expr_first_impure_call(condition)
+                .or_else(|| then_body.iter().find_map(stmt_first_impure_call))
+                .or_else(|| else_body.as_ref().and_then(|b| b.iter().find_map(stmt_first_impure_call)))
+        }
+        Expression::Lambda { body, .. } => body.iter().find_map(stmt_first_impure_call),
+        // Literals and Variable are pure.
+        _ => None,
+    }
+}
+
 fn stmt_contains_return(s: &Statement) -> bool {
     match s {
         Statement::Return(_) | Statement::Throw(_) => true,
@@ -15147,7 +15857,7 @@ pub(crate) const HEAL_BUILTIN_NAMES: &[&str] = &[
     "http_get", "http_post", "http_post_json", "http_put", "http_delete",
     "now_iso", "now_unix", "format_time", "parse_time",
     // Arrays
-    "arr_new", "arr_from_range", "arr_len", "arr_get", "arr_set",
+    "arr_new", "arr_from_range", "arr_len", "arr_get", "arr_get_f", "arr_set",
     "arr_push", "arr_first", "arr_last", "arr_slice", "arr_concat",
     "arr_contains", "arr_index_of", "arr_sort", "arr_reverse", "arr_join",
     "arr_min", "arr_max", "arr_sum", "arr_fold_elements",
@@ -15209,6 +15919,20 @@ pub(crate) const HEAL_BUILTIN_NAMES: &[&str] = &[
     "attractor_table", "harmonic_score",
     "arr_min_int", "arr_max_int", "arr_avg_distance",
     "is_phi_resonant",
+    // Dodecahedral content-addressing (Phase 1.1)
+    "haddr", "haddr_face", "haddr_distance",
+    // Content-addressed value heap (Phase 2.1)
+    "value_addr", "value_hash", "same_value",
+    "cas_put", "cas_get", "cas_has",
+    // The super-tool as a language feature (Phase 3)
+    "fn_swap_verified", "fns_on_face",
+    // Locality fingerprint — similarity primitive (Phase 1.2)
+    "locality_fp", "locality_sim", "locality_nearest",
+    "nearest_fn", "call_nearest",
+    // Correct-by-construction synthesis (Phase 4)
+    "gen_omc",
+    // HBit dual-band gate (Phase 6)
+    "hbit_harmony", "hbit_divergence", "band_divergence", "band_route",
     "phi_pi_fib_search_traced", "phi_pi_fib_nearest_traced",
     "phi_pi_fib_stats_bg", "phi_pi_fib_stats_all",
     // HBit dual-band intrinsics (Sessions F+G)

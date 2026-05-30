@@ -1,0 +1,16 @@
+// Phase 6 (first brick) — the divergence GATE is now real at the Value level.
+// (Tree-walk harmony(x) is a constant 1000: no β band. Two-band comparison fixes that.)
+print("-- two-band resonance / divergence --");
+print(hbit_harmony(8, 8));        // 1000  (in tune: alpha == beta)
+print(hbit_divergence(8, 8));     // 0     (the gate: no dissonance)
+print(hbit_divergence(8, 13));    // small (adjacent Fibonacci attractors)
+print(hbit_divergence(8, 977));   // large (divergent)
+
+print("-- contrast: the old single-band harmony is still a constant stub --");
+print(harmony(8));                // 1000  (nothing to compare against)
+
+print("-- the model: beta addressed-skip + alpha fallback, gated by divergence --");
+fn slow(n) { h s = 0; h i = 0; while i < n { s += i; i += 1; } return s; }
+h ans = slow(100);                // alpha: linear compute
+h key = cas_put(ans);             // beta: store at its content address (O(1) skip next time)
+print(cas_get(key));              // 4950 — retrieved by address, no recompute

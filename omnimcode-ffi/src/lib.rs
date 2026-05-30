@@ -92,7 +92,7 @@ pub unsafe extern "C" fn omnicode_evolver_free(evolver: *mut OmnimcodeEvolver) {
 /// Get the version string
 #[no_mangle]
 pub extern "C" fn omnicode_version() -> *const c_char {
-    const VERSION: &str = "1.0.0\0";
+    const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "\0");
     VERSION.as_ptr() as *const c_char
 }
 

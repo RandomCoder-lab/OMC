@@ -1,0 +1,11 @@
+// Phase 3.1 — content-addressed dispatch via LOCALITY (typo/variant-tolerant).
+fn quicksort(a) { return a; }
+fn binary_search(a, x) { return x; }
+fn gcd(a, b) { while b != 0 { h t = b; b = a % b; a = t; } return a; }
+
+print("-- nearest_fn: route a roughly-named need to the real function --");
+print(nearest_fn("quicksrt"));          // quicksort   (dropped a char)
+print(nearest_fn("binarysearch"));      // binary_search (missing underscore)
+print(nearest_fn("gdc"));               // gcd         (transposition)
+print("-- call_nearest: route AND run --");
+print(call_nearest("gdc", [48, 36]));   // -> gcd(48, 36) = 12

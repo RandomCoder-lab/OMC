@@ -1,0 +1,6 @@
+// B never called cas_put — its in-memory heap is empty. Any hit is from DISK.
+print(cas_has("8969147490401853188"));          // expect: true  (found on disk)
+print(cas_get("8969147490401853188"));          // expect: [10, 20, 30]  (loaded from disk)
+@memo
+fn mfib(n) { if n < 2 { return n; } return mfib(n - 1) + mfib(n - 2); }
+print(mfib(50));                 // expect: 12586269025 (cross-run consistent)

@@ -1,0 +1,12 @@
+// Phase 1.2 — locality fingerprint (the similarity primitive) through the interpreter.
+print("-- locality_sim: orders by content --");
+print(locality_sim("quicksort", "quicksort"));      // 1.0 (identical)
+print(locality_sim("quicksort", "quick_sort"));      // high (near-variant)
+print(locality_sim("quicksort", "fibonacci"));       // low (unrelated)
+print("-- locality_nearest: retrieves the similar candidate --");
+h cands = ["fibonacci", "quick_sort", "binary_search", "gcd"];
+print(locality_nearest("quicksort", cands));         // 1
+print("-- contrast: haddr (uniform, NO locality) --");
+print(haddr_distance("quicksort", "quick_sort"));    // large despite near-identical content
+print("-- bigram variant on a typo --");
+print(locality_sim("common divisor", "common divisor", 1));  // high

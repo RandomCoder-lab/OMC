@@ -32,7 +32,7 @@ import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).parent))
 from corpus import make_dataset
-from models_fibrec import FibRecLM, stateless_fibgen_forward
+from models_fibrec import FibRecLM, FibRecLMHomeo, stateless_fibgen_forward
 from optimizers_fib import FibonacciAdamW
 from train_distractor_mix import build_distractor_stream
 from lazy_data import fib_positions_in_window, get_fib_strided_batch
@@ -42,7 +42,7 @@ from activations_substrate import SubstrateNegMultiAdvancedV2
 from substrate_embedding import SubstrateEmbedding
 
 
-class FibRecLMSubsim(FibRecLM):
+class FibRecLMSubsim(FibRecLMHomeo):
     """FibRecLM with substrate-similarity attention (L1 distance) instead
     of Q·K^T dot product. Uses the first K_sig dims of Q and K as
     substrate signatures. V2 substrate activation in the FFN.
@@ -59,6 +59,26 @@ class FibRecLMSubsim(FibRecLM):
         self.activations = nn.ModuleList(
             [SubstrateNegMultiAdvancedV2() for _ in range(self.n_blocks)]
         )
+        # ── Self-Witness (Spell, derivation SELF_WITNESS_DERIVATION.md) ──
+        # Amplify hidden states that resonate with the consolidated "bloom"
+        # centroid b: h ← h·(1 + φ⁻¹·W_t), W_t = φ^(−‖h−b‖²/2d) ∈ (0,1].
+        # Attenuable by construction (factor ∈ [1, 1+φ⁻¹]); identity when off.
+        # b is an EMA of the batch-mean hidden (a parameter-free proxy for the
+        # bloom centroid until a trained bloom is wired in — Track D).
+        self.self_witness = False
+        self.register_buffer('bloom_centroid',
+                             torch.zeros(self.embed.embedding_dim))
+        self._sw_init = False
+        # sw_fixed: when True, bloom_centroid is a FIXED quality-selected target
+        # (the real bloom embedding, loaded externally) and is NOT overwritten by
+        # the EMA. REVISION (R1): the B.1 "failure" used an ungated EMA of the
+        # mean hidden — a moving average of the model chasing itself (no signal).
+        # A fixed, validity-selected centroid is the derivation's actual intent.
+        self.sw_fixed = False
+        # K_active: current number of active Fibonacci frequencies (K-shrink).
+        # None → full K (default). set_K_active() makes the K-shrink schedule
+        # actually affect this model's forward (previously a no-op — EXP-2).
+        self.K_active = None
         if substrate_embed:
             # Replace plain learnable embedding with substrate-canonical one.
             vocab_size = self.embed.num_embeddings
@@ -78,34 +98,91 @@ class FibRecLMSubsim(FibRecLM):
             with torch.no_grad():
                 self.head.weight.copy_(self.embed.substrate_embed)
 
+    def set_K_active(self, K_a: int):
+        """Set the active Fibonacci-frequency count (called by
+        set_K_active_recursive during K-shrink). Makes K-shrink functional."""
+        self.K_active = int(K_a) if K_a else None
+
+    def apply_self_witness(self, h: torch.Tensor) -> torch.Tensor:
+        if not self.self_witness:
+            return h
+        phi = (1.0 + 5.0 ** 0.5) / 2.0
+        d = h.shape[-1]
+        b = self.bloom_centroid.to(h.dtype)
+        dist2 = ((h - b) ** 2).sum(dim=-1) / (2.0 * d)      # [B,T]
+        W_t = phi ** (-dist2)                                # (0,1]
+        if self.training and not self.sw_fixed:
+            # Ungated EMA proxy (the original B.1 path). Skipped when sw_fixed:
+            # then bloom_centroid is the frozen quality-selected target (R1).
+            with torch.no_grad():
+                cur = h.detach().mean(dim=(0, 1))
+                if not self._sw_init:
+                    self.bloom_centroid.copy_(cur); self._sw_init = True
+                else:
+                    self.bloom_centroid.mul_(0.99).add_(0.01 * cur)
+        return h * (1.0 + (1.0 / phi) * W_t).unsqueeze(-1)
+
+    # CRT Fibonacci moduli — one per attention head, same coprime basis
+    # that made CRT-PE beat sinusoidal PE 200/200.
+    _CRT_MODULI = [5, 8, 13, 21]
+
+    @staticmethod
+    def _substrate_resample_v(v: torch.Tensor) -> torch.Tensor:
+        """Substrate-V: dampen off-attractor value components.
+        1/(1 + dist_to_nearest_fib / nearest_fib). Proven -2.52% win.
+        """
+        FIBS = torch.tensor([1., 2., 3., 5., 8., 13., 21.],
+                             dtype=v.dtype, device=v.device)
+        v_abs = v.abs().unsqueeze(-1)              # [..., 1]
+        dists = (v_abs - FIBS).abs()               # [..., 7]
+        min_dist, min_idx = dists.min(dim=-1)
+        nearest = FIBS[min_idx].clamp(min=0.1)
+        return v * (1.0 / (1.0 + min_dist / nearest))
+
     def _layer_forward(self, x, mask, n, seeds_n):
         qkv_s, out_s, w1_s, w2_s = seeds_n
         x_norm = self.ln1s[n](x)
         qkv_basis = {"cos_i": self.qkv_cos_i, "sin_i": self.qkv_sin_i,
                       "cos_j": self.qkv_cos_j, "sin_j": self.qkv_sin_j}
-        qkv = stateless_fibgen_forward(x_norm, qkv_s, qkv_basis, self.K)
-        q, k, v = qkv.chunk(3, dim=-1)
-        # Substrate-similarity attention: L1 distance on first K_sig dims
-        # of Q and K as substrate signatures.
-        sig_q = q[..., :self.K_sig]                          # [B, T, K_sig]
-        sig_k = k[..., :self.K_sig]
-        diff = sig_q.unsqueeze(2) - sig_k.unsqueeze(1)        # [B, T, T, K_sig]
-        dist = diff.abs().sum(dim=-1)                          # [B, T, T]
-        scores = -dist / math.sqrt(self.K_sig)
-        scores = scores.masked_fill(mask == 0, float("-inf"))
-        attn = F.softmax(scores, dim=-1)
+        ka = getattr(self, 'K_active', None)
+        qkv = stateless_fibgen_forward(x_norm, qkv_s, qkv_basis, self.K, K_active=ka)
+        q, k, v = qkv.chunk(3, dim=-1)           # each [B, T, d_model]
+
+        # Substrate-V modulation: dampen V components far from Fibonacci attractors.
+        v = self._substrate_resample_v(v)
+
+        # Multi-head CRT substrate attention.
+        # 4 heads × Fibonacci moduli [5,8,13,21] — each head computes L1
+        # distance in a different-resolution signature subspace.
+        # Same CRT principle as CRT-PE (200/200 wins over sinusoidal).
+        n_heads = len(self._CRT_MODULI)
+        head_dim = q.shape[-1] // n_heads         # 16 for d_model=64
+        q_heads = q.split(head_dim, dim=-1)
+        k_heads = k.split(head_dim, dim=-1)
+        v_heads = v.split(head_dim, dim=-1)
+
+        head_outs = []
+        for K_i, q_h, k_h, v_h in zip(self._CRT_MODULI, q_heads, k_heads, v_heads):
+            K_eff = min(K_i, head_dim)            # coarse heads use fewer dims
+            diff  = q_h[..., :K_eff].unsqueeze(2) - k_h[..., :K_eff].unsqueeze(1)
+            dist  = diff.abs().sum(dim=-1)         # [B, T, T]
+            sc    = (-dist / math.sqrt(K_eff)).masked_fill(mask == 0, float("-inf"))
+            head_outs.append(F.softmax(sc, dim=-1) @ v_h)   # [B, T, head_dim]
+
+        attn_out = torch.cat(head_outs, dim=-1)   # [B, T, d_model]
+
         out_basis = {"cos_i": self.out_cos_i, "sin_i": self.out_sin_i,
                       "cos_j": self.out_cos_j, "sin_j": self.out_sin_j}
-        x = x + stateless_fibgen_forward(attn @ v, out_s, out_basis, self.K)
+        x = x + stateless_fibgen_forward(attn_out, out_s, out_basis, self.K, K_active=ka)
         # FFN with substrate activation
         x_norm2 = self.ln2s[n](x)
         w1_basis = {"cos_i": self.w1_cos_i, "sin_i": self.w1_sin_i,
                       "cos_j": self.w1_cos_j, "sin_j": self.w1_sin_j}
         w2_basis = {"cos_i": self.w2_cos_i, "sin_i": self.w2_sin_i,
                       "cos_j": self.w2_cos_j, "sin_j": self.w2_sin_j}
-        h = stateless_fibgen_forward(x_norm2, w1_s, w1_basis, self.K)
+        h = stateless_fibgen_forward(x_norm2, w1_s, w1_basis, self.K, K_active=ka)
         h = self.activations[n](h)
-        x = x + stateless_fibgen_forward(h, w2_s, w2_basis, self.K)
+        x = x + stateless_fibgen_forward(h, w2_s, w2_basis, self.K, K_active=ka)
         return x
 
 

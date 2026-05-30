@@ -1,0 +1,44 @@
+# D-grow + K-shrink GPU samples  steps=5  d:34→384  K:144→3
+# prompt: 'ROMEO:\nWhat light through'
+
+
+======================================================================
+d_grow_k_shrink  best_val=4.0329  params=2,699,392
+======================================================================
+ROMEO:
+What light throughy TUUnnyv
+$H:HHLv&itiTII ETEzHvotv:qtDuKmmiTTfJ&feSbLOzRT:TQ:IQf!XYNtBAZvw!jYZZ
+
+
+RA?A?Mpr'IOb-qJv:
+
+lb?Oyb?;O
+wOq'K?;
+KKqq?qyyy?OoKoKqKO
+'bww'
+?'oy;bb
+'qwOmy'obOb;OOyyOOOwy??wy;K'y?;?K?KqyqK'Kb?Oq?wObKyb?K
+bqwm'y''mww'OyKoywqq
+bwKyq?OyyO'O'woqq'ybqoo'y?
+y?bwOwKyyyK'OoOO'
+w'K'qyOKOw'oowwwbb;b
+ywby
+b?KyKbqKyOy?KKKyOyq'wb?KbbO?KK?Oy
+
+'O'qqb
+o'OOOKOqqwoowmb;K?
+oqy
+qb
+'OOKOoq'
+qwoq
+ybbqy'b;byqwqOyO
+by;w'moywQomqoOyKywKooqbwoWKyKO
+
+oyK''yby'ooOwK
+qwQom'oKywq
+qq'bKbq'wKOywqKbO
+qoOmbK?ybbKqyOw'
+''qwwwbOKowOqKKy'OKwK?bKbKObwy''KK?;bKKqoKyKK?'qy'y
+oWKy;wKwOyqob;;qbOy
+bOy'OwqKKO'wbb
+'wQwbqOO'wyw'O'yOy?K

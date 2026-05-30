@@ -224,62 +224,104 @@ fn maybe_register_jit(
     let _ = jit_static; // currently unused; kept for documentation
     let dispatch: omnimcode_core::interpreter::JitDispatch = std::rc::Rc::new(
         move |name: &str, args: &[omnimcode_core::value::Value]| {
-            use omnimcode_core::value::{HInt, Value};
+            use omnimcode_core::value::{HArray, HInt, Value};
             let jf = jitted.get(name)?;
             if args.len() != jf.arity {
                 return None;
             }
-            // L1.6: Array↔JIT bridging. Convert each Value::Array (whose
-            // elements are all HInt) to a length-prefixed Box<[i64]> with
-            // layout `[len, v0, v1, ..., vN]`. The JIT'd fn was lowered
-            // assuming NewArray-style alloca layout (slot 0 = length,
-            // slots 1..=N = elements) so the same access pattern works
-            // for both internal and external arrays. We hand the raw
-            // pointer to the JIT as the i64 arg.
+            // L1.6+: Array↔JIT bridging. Convert each Value::Array to a
+            // length-prefixed Box<[i64]> with layout [len, v0, v1..vN].
+            // HInt/Bool elements are stored as-is; HFloat elements are
+            // stored as f64.to_bits() so the JIT's MulFloat/AddFloat ops
+            // (which bitcast i64↔f64) work correctly. The JIT sees one
+            // i64 per arg — the pointer to that buffer.
             //
-            // The Boxes are held in `_pinned` for the duration of the
-            // call so the JIT'd code can dereference them safely. Drop
-            // happens after .call() returns; the JIT'd fn must NOT
-            // retain the pointer beyond the call (it doesn't — arrays
-            // are stack-local in the lowered IR).
+            // After the JIT call, float array buffers are written back to
+            // the original HArray so that in-place mutations (e.g. the
+            // result buffer in _mat_mul_flat) are visible to the caller.
+            // Int-only arrays are not written back (read-only contract).
             //
-            // Read-only contract: we don't write back to the original
-            // HArray even if the JIT'd fn mutated the buffer. The
-            // common case (sum, score, count) is read-only; mutating
-            // array fns currently fall through to tree-walk on the
-            // OUTPUT side (their return is i64, not the array).
+            // Substrate-modulated dispatch: if OMC_HBIT_JIT_HARMONY is set
+            // to a threshold (e.g. 300), skip JIT when the average HBit
+            // harmony of integer arguments is below that threshold. This
+            // gates the fast-path to Fibonacci-aligned inputs — chaotic
+            // inputs fall through to tree-walk. Harmony is computed as
+            // harmony(arg, fold(arg)), i.e. via PhiShadow store semantics.
+            if let Ok(thresh_s) = std::env::var("OMC_HBIT_JIT_HARMONY") {
+                if let Ok(thresh) = thresh_s.parse::<i64>() {
+                    let int_harmonies: Vec<i64> = args.iter().filter_map(|a| {
+                        if let Value::HInt(h) = a {
+                            Some(omnimcode_codegen::omc_harmony(
+                                h.value,
+                                omnimcode_codegen::omc_fold(h.value),
+                            ))
+                        } else { None }
+                    }).collect();
+                    if !int_harmonies.is_empty() {
+                        let avg: i64 = int_harmonies.iter().sum::<i64>()
+                            / int_harmonies.len() as i64;
+                        if avg < thresh {
+                            return None; // low-harmony → tree-walk
+                        }
+                    }
+                }
+            }
+
             let mut int_args: Vec<i64> = Vec::with_capacity(args.len());
             let mut _pinned: Vec<Box<[i64]>> = Vec::new();
+            // Track float array args for write-back after the JIT call.
+            // Each entry: (original HArray, index into _pinned).
+            let mut float_writebacks: Vec<(HArray, usize)> = Vec::new();
             for a in args {
                 match a {
                     Value::HInt(h) => int_args.push(h.value),
                     Value::Bool(b) => int_args.push(if *b { 1 } else { 0 }),
                     Value::Array(arr) => {
                         let items = arr.items.borrow();
-                        // Only support int-typed arrays at the boundary.
-                        // Any non-int element → fall through to tree-walk.
-                        if !items.iter().all(|v| matches!(v, Value::HInt(_) | Value::Bool(_))) {
+                        let has_float = items.iter().any(|v| matches!(v, Value::HFloat(_)));
+                        // Support int, bool, and float elements. Non-numeric → tree-walk.
+                        if !items.iter().all(|v| matches!(v,
+                            Value::HInt(_) | Value::Bool(_) | Value::HFloat(_)
+                        )) {
                             return None;
                         }
                         // Layout: slot 0 = length, slots 1..=N = elements.
+                        // HFloat stored as f64.to_bits() so the JIT's bitcast
+                        // float ops (MulFloat/AddFloat) see correct bit patterns.
                         let mut buf: Vec<i64> = Vec::with_capacity(items.len() + 1);
                         buf.push(items.len() as i64);
                         for v in items.iter() {
                             buf.push(match v {
                                 Value::HInt(h) => h.value,
                                 Value::Bool(b) => if *b { 1 } else { 0 },
+                                Value::HFloat(f) => f.to_bits() as i64,
                                 _ => unreachable!(),
                             });
                         }
                         let boxed = buf.into_boxed_slice();
                         let ptr = boxed.as_ptr() as i64;
+                        let pinned_idx = _pinned.len();
                         _pinned.push(boxed);
                         int_args.push(ptr);
+                        if has_float {
+                            float_writebacks.push((arr.clone(), pinned_idx));
+                        }
                     }
-                    _ => return None, // other non-int args → fall through to tree-walk
+                    _ => return None, // non-scalar, non-array → fall through to tree-walk
                 }
             }
             let result = jf.call(&int_args);
+            // Write back float array buffers. The JIT may have mutated them
+            // in-place (e.g. the result buffer in _mat_mul_flat). Read each
+            // modified i64 back as f64::from_bits() and store as HFloat.
+            for (harray, pidx) in &float_writebacks {
+                let buf = &_pinned[*pidx];
+                let elem_count = buf[0] as usize;
+                let mut items = harray.items.borrow_mut();
+                for k in 0..elem_count.min(items.len()) {
+                    items[k] = Value::HFloat(f64::from_bits(buf[k + 1] as u64));
+                }
+            }
             // L1.6 output-side bridge: when the fn was marked with
             // `@jit_returns_array_int`, the returned i64 should be a
             // heap pointer to a length-prefixed buffer. The codegen

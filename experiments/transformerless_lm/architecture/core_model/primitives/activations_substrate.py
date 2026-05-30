@@ -1,0 +1,453 @@
+"""Substrate-aware activation functions.
+
+Every layer in the model passes activations through a nonlinearity
+(GELU in FFN, softmax in attention). These are substrate-BLIND —
+they produce continuous floats with no Fibonacci structure. Even
+when weights and gradients are substrate-aware, the actual NUMBERS
+flowing between layers live in arbitrary float space.
+
+substrate_gelu makes the activations themselves substrate-aligned:
+the forward output is snapped to the nearest Fibonacci-attractor
+magnitude, while the gradient flows through the smooth GELU
+(straight-through estimator). This forces every layer's output to
+live near Fibonacci values while keeping training differentiable.
+
+The model learns a per-layer scale so it can position its activations
+where attractors land (e.g., scaling small post-GELU values up to
+where the {±1, ±2, ±3, ±5, ...} attractors are meaningful).
+"""
+
+import math
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+_FIB_ATTRACTORS = [0.0, 1.0, 2.0, 3.0, 5.0, 8.0, 13.0, 21.0, 34.0, 55.0, 89.0]
+
+# Reciprocal Fibonacci attractors — dense near 0, sparse far from 0.
+# Matches the actual distribution of post-GELU activations (small values).
+_INV_FIB_ATTRACTORS = sorted(set([0.0] + [
+    1.0 / f for f in [1.0, 2.0, 3.0, 5.0, 8.0, 13.0, 21.0, 34.0, 55.0, 89.0]
+] + [1.0, 2.0, 3.0]))    # keep a few positive integers for tail coverage
+
+
+def _signed_attractor_table(device, dtype, inverse: bool = False):
+    pos = torch.tensor(
+        _INV_FIB_ATTRACTORS if inverse else _FIB_ATTRACTORS,
+        dtype=dtype, device=device,
+    )
+    return torch.cat([-pos[1:].flip(0), pos])
+
+
+def attractor_snap(x: torch.Tensor, inverse: bool = False) -> torch.Tensor:
+    """Snap each scalar to its nearest signed-Fibonacci attractor.
+    inverse=True uses reciprocal Fibonacci values (dense near 0)."""
+    table = _signed_attractor_table(x.device, x.dtype, inverse=inverse)
+    diffs = (x.unsqueeze(-1) - table).abs()
+    nearest_idx = diffs.argmin(dim=-1)
+    return table[nearest_idx]
+
+
+class SubstrateGELU(nn.Module):
+    """GELU + attractor snap with straight-through gradient.
+
+    inverse=True uses reciprocal Fibonacci attractors, which are dense
+    in [-1, 1] — much better matched to typical post-GELU magnitudes
+    than the forward Fibonacci attractors {1, 2, 3, 5, 8, ...} that
+    sit OUTSIDE the typical activation range.
+    """
+
+    def __init__(self, init_scale: float = 3.0, inverse: bool = False):
+        super().__init__()
+        self.scale = nn.Parameter(torch.tensor(float(init_scale)))
+        self.inverse = inverse
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h = F.gelu(x)
+        h_scaled = h * self.scale
+        snapped = attractor_snap(h_scaled, inverse=self.inverse) / self.scale
+        return h + (snapped - h).detach()
+
+
+class SubstrateGELUInverse(SubstrateGELU):
+    """Convenience subclass: SubstrateGELU with inverse=True (reciprocal Fib)."""
+    def __init__(self, init_scale: float = 3.0):
+        super().__init__(init_scale=init_scale, inverse=True)
+
+
+class SubstrateNegAsymmetric(nn.Module):
+    """Substrate-canonical asymmetric activation.
+
+    The substrate's contraction ratio φ handles BOTH branches without
+    needing exp() / softplus / sigmoid:
+
+        f(x) = x · (1 − φ^(−x))   if x > 0
+        f(x) = −|x| / φ^|x|       if x < 0
+
+    Properties:
+      - Positive branch saturates toward identity as x grows
+        (substrate-shaped soft ramp).
+      - Negative branch DECAYS toward 0 as |x| grows
+        (substrate contraction). Bounded magnitude |neg| ≤ 1/(e·ln φ) ≈ 0.76.
+      - Continuous at x=0 (both branches → 0).
+      - No divide-by-zero anywhere (φ^|x| ≥ 1).
+      - Uses ONLY φ. No exp, no sigmoid, no GELU.
+
+    The negative side's shape — peaks around |x|≈1.4 then decays — is
+    impossible to express via standard activations without infinite
+    terms. Substrate math gets it from a single closed form.
+    """
+
+    def __init__(self):
+        super().__init__()
+        phi = (1.0 + 5.0 ** 0.5) / 2.0
+        self.register_buffer("phi", torch.tensor(phi, dtype=torch.float))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # No clamp needed — log-domain formulation is numerically stable
+        # at any |x|. exp(-|x|·log φ) underflows cleanly to 0 for large
+        # |x| (float32 handles this gracefully).
+        #
+        # Positive branch: x · (1 − exp(−x·log φ))
+        # Negative branch: −|x| · exp(−|x|·log φ)
+        log_phi = torch.log(self.phi)
+        x_pos = x.clamp(min=0.0)
+        pos = x_pos * (1.0 - torch.exp(-x_pos * log_phi))
+        x_neg = (-x).clamp(min=0.0)
+        neg = -x_neg * torch.exp(-x_neg * log_phi)
+        pos_mask = (x > 0).to(x.dtype)
+        return pos * pos_mask + neg * (1.0 - pos_mask)
+
+
+class SubstrateNegAsymmetricMulti(nn.Module):
+    """Multi-tier substrate activation — F(k)/φ^(π·k)-weighted Fibonacci resonance.
+
+    The simple SubstrateNegAsymmetric uses one substrate constant (log φ).
+    This refinement uses the substrate's CANONICAL DECAY SEQUENCE
+    F(k)/φ^(π·k) as multi-tier weights, with each Fibonacci frequency
+    contributing its own ramp / peak-decay branch:
+
+        f(x) = Σ_k [F(k)/φ^(π·k)] · branch_k(x)
+
+    where:
+        branch_k(x) = x · (1 − exp(−F(k)·x·log φ))            if x > 0
+        branch_k(x) = −F(k)·|x| · exp(−F(k)·|x|·log φ)         if x < 0
+
+    Negative branch has K peaks at |x| = 1/(F(k)·log φ):
+        k=1: |x|≈2.08    k=2: |x|≈1.04    k=3: |x|≈0.69
+        k=5: |x|≈0.42    k=8: |x|≈0.26
+    weighted by 0.22, 0.097, 0.032, 0.012, 0.004 respectively.
+
+    Multi-frequency Fibonacci resonance — substrate-canonical at every
+    tier of its own hierarchy, expressed in a single closed form.
+    No clamp, no GELU, no exp other than the substrate's own decay.
+    """
+
+    def __init__(self, K: int = 5):
+        super().__init__()
+        phi = (1.0 + 5.0 ** 0.5) / 2.0
+        phi_pi = phi ** math.pi
+        FIB = [1.0, 2.0, 3.0, 5.0, 8.0, 13.0, 21.0, 34.0, 55.0, 89.0]
+        K = min(K, len(FIB))
+        self.K = K
+        freqs = torch.tensor(FIB[:K], dtype=torch.float)
+        # Substrate-canonical tier weights F(k)/φ^(π·k).
+        coeffs = torch.tensor([FIB[k] / (phi_pi ** (k + 1)) for k in range(K)],
+                                dtype=torch.float)
+        # Normalize so the sum of weights = 1 (otherwise the activation
+        # scale shifts massively from the standard).
+        coeffs = coeffs / coeffs.sum()
+        self.register_buffer("phi", torch.tensor(phi, dtype=torch.float))
+        self.register_buffer("freqs", freqs)        # F(k)
+        self.register_buffer("coeffs", coeffs)       # F(k)/φ^(π·k), normalized
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        log_phi = torch.log(self.phi)
+        # Expand x to multiply by each Fibonacci frequency.
+        # x: [..., D]; freqs: [K]; want [..., D, K].
+        x_expanded = x.unsqueeze(-1) * self.freqs                    # [..., D, K]
+        x_pos = x_expanded.clamp(min=0.0)
+        x_neg = (-x_expanded).clamp(min=0.0)
+        # Per-tier substrate branches
+        branch_pos = x_pos * (1.0 - torch.exp(-x_pos * log_phi))      # [..., D, K]
+        branch_neg = -x_neg * torch.exp(-x_neg * log_phi)
+        pos_mask = (x_expanded > 0).to(x.dtype)
+        branches = branch_pos * pos_mask + branch_neg * (1.0 - pos_mask)
+        # Weighted sum across K tiers via substrate-decay coefficients.
+        return (branches * self.coeffs).sum(dim=-1)
+
+
+class SubstrateNegMultiRefined(nn.Module):
+    """Refined multi-tier substrate activation.
+
+    Improvements over SubstrateNegAsymmetricMulti:
+      (R2) per-layer LEARNABLE tier weights, initialized at the
+           substrate-canonical F(k)/phi^(pi·k) sequence. The model
+           discovers its own per-tier coupling strength via gradient.
+      (R6) tanh saturation by phi^pi (substrate's canonical contraction)
+           keeps activation magnitudes bounded — prevents runaway
+           from any single tier dominating.
+
+    Untouched (in this variant):
+      (R1) K depth — kept fixed at 5
+      (R3) coordination with K-shrink — separate concern
+      (R4) per-tier asymmetry — kept symmetric for simplicity
+      (R5) frequency scaling — kept at F(k), substrate-canonical
+    """
+
+    def __init__(self, K: int = 5):
+        super().__init__()
+        phi = (1.0 + 5.0 ** 0.5) / 2.0
+        phi_pi = phi ** math.pi
+        FIB = [1.0, 2.0, 3.0, 5.0, 8.0, 13.0, 21.0, 34.0, 55.0, 89.0]
+        K = min(K, len(FIB))
+        self.K = K
+        freqs = torch.tensor(FIB[:K], dtype=torch.float)
+        # Substrate-canonical init for tier weights — model can learn away.
+        init_coeffs = torch.tensor(
+            [FIB[k] / (phi_pi ** (k + 1)) for k in range(K)], dtype=torch.float,
+        )
+        init_coeffs = init_coeffs / init_coeffs.sum()
+        # LEARNABLE tier weights (R2)
+        self.tier_weights = nn.Parameter(init_coeffs.clone())
+        self.register_buffer("phi", torch.tensor(phi, dtype=torch.float))
+        self.register_buffer("phi_pi", torch.tensor(phi_pi, dtype=torch.float))
+        self.register_buffer("freqs", freqs)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        log_phi = torch.log(self.phi)
+        x_expanded = x.unsqueeze(-1) * self.freqs
+        x_pos = x_expanded.clamp(min=0.0)
+        x_neg = (-x_expanded).clamp(min=0.0)
+        branch_pos = x_pos * (1.0 - torch.exp(-x_pos * log_phi))
+        branch_neg = -x_neg * torch.exp(-x_neg * log_phi)
+        pos_mask = (x_expanded > 0).to(x.dtype)
+        branches = branch_pos * pos_mask + branch_neg * (1.0 - pos_mask)
+        # R2: weighted sum with learnable tier weights
+        f_sum = (branches * self.tier_weights).sum(dim=-1)
+        # R6: substrate-bounded magnitude via tanh saturation by phi^pi
+        return self.phi_pi * torch.tanh(f_sum / self.phi_pi)
+
+
+class SubstrateNegMultiAdvanced(nn.Module):
+    """R2 + R4 + R5 + R6 merged activation refinement.
+
+    R2 — LEARNABLE per-tier weights (already in refined)
+    R4 — per-tier ASYMMETRY: positive uses F(k)/phi^(pi*k), negative uses
+         1/F(k). Two independent tier sequences for the two branches.
+    R5 — FREQUENCY rescaling: x · sqrt(F(k)) instead of x · F(k).
+         Gentler frequency spread; peaks at |x|=1/(sqrt(F(k))·log phi)
+         shift to {2.08, 1.47, 1.20, 0.93, 0.74} for k=1..5 (closer
+         spacing).
+    R6 — tanh saturation by phi^pi (already in refined)
+    """
+
+    def __init__(self, K: int = 5):
+        super().__init__()
+        phi = (1.0 + 5.0 ** 0.5) / 2.0
+        phi_pi = phi ** math.pi
+        FIB = [1.0, 2.0, 3.0, 5.0, 8.0, 13.0, 21.0, 34.0, 55.0, 89.0]
+        K = min(K, len(FIB))
+        self.K = K
+        # R5: sqrt(F(k)) frequencies — gentler spread, peaks closer together
+        freqs = torch.tensor([math.sqrt(FIB[k]) for k in range(K)],
+                              dtype=torch.float)
+        # R4: asymmetric tier weight init.
+        # Positive: substrate-canonical F(k)/phi^(pi·k)
+        pos_init = torch.tensor(
+            [FIB[k] / (phi_pi ** (k + 1)) for k in range(K)], dtype=torch.float)
+        pos_init = pos_init / pos_init.sum()
+        # Negative: reciprocal Fibonacci 1/F(k)
+        neg_init = torch.tensor([1.0 / FIB[k] for k in range(K)], dtype=torch.float)
+        neg_init = neg_init / neg_init.sum()
+        # R2: learnable per-branch tier weights
+        self.tier_weights_pos = nn.Parameter(pos_init.clone())
+        self.tier_weights_neg = nn.Parameter(neg_init.clone())
+        self.register_buffer("phi", torch.tensor(phi, dtype=torch.float))
+        self.register_buffer("phi_pi", torch.tensor(phi_pi, dtype=torch.float))
+        self.register_buffer("freqs", freqs)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        log_phi = torch.log(self.phi)
+        x_expanded = x.unsqueeze(-1) * self.freqs
+        x_pos = x_expanded.clamp(min=0.0)
+        x_neg = (-x_expanded).clamp(min=0.0)
+        branch_pos = x_pos * (1.0 - torch.exp(-x_pos * log_phi))
+        branch_neg = -x_neg * torch.exp(-x_neg * log_phi)
+        pos_mask = (x_expanded > 0).to(x.dtype)
+        # R4: asymmetric weighted sum -- positive tiers and negative
+        # tiers use independent learnable mixes
+        pos_sum = (branch_pos * pos_mask * self.tier_weights_pos).sum(dim=-1)
+        neg_sum = (branch_neg * (1.0 - pos_mask) * self.tier_weights_neg).sum(dim=-1)
+        f_sum = pos_sum + neg_sum
+        # R6: substrate-bounded magnitude
+        return self.phi_pi * torch.tanh(f_sum / self.phi_pi)
+
+
+class SubstrateNegMultiAdvancedV2(nn.Module):
+    """Refined R4 + R5 — substrate-canonical reformulations.
+
+    Replaces the failing R4/R5 init choices with substrate-canonical
+    alternatives discovered from the V1 failure analysis:
+
+    R4 (per-tier asymmetry, reformulated):
+      Positive tier weights init: F(k)/phi^(pi*k)   (decay — substrate canonical)
+      Negative tier weights init: F(k)*phi^(pi*k)   (EXPANSION — pushes peak
+                                                       to higher k, captures
+                                                       finer negative structure)
+      Both learnable.
+
+    R5 (frequency rescaling, reformulated):
+      freqs = F(k)/phi   (substrate-decayed via golden ratio — gentler
+                          than F(k), more spread than sqrt(F(k)))
+      Values: 0.618, 1.236, 1.854, 3.090, 4.944
+
+    R2 + R6 kept unchanged.
+    """
+
+    def __init__(self, K: int = 5):
+        super().__init__()
+        phi = (1.0 + 5.0 ** 0.5) / 2.0
+        phi_pi = phi ** math.pi
+        FIB = [1.0, 2.0, 3.0, 5.0, 8.0, 13.0, 21.0, 34.0, 55.0, 89.0]
+        K = min(K, len(FIB))
+        self.K = K
+        # R5 reformulated: frequencies F(k)/phi
+        freqs = torch.tensor([FIB[k] / phi for k in range(K)], dtype=torch.float)
+        # R4 reformulated: asymmetric init.
+        # Positive: substrate-canonical decay F(k)/phi^(pi*k)
+        pos_init = torch.tensor(
+            [FIB[k] / (phi_pi ** (k + 1)) for k in range(K)], dtype=torch.float)
+        pos_init = pos_init / pos_init.sum()
+        # Negative: substrate-canonical EXPANSION F(k)*phi^(pi*k)
+        # (large k dominates -> peak at small |x| -> captures fine
+        # near-zero negative structure)
+        neg_init = torch.tensor(
+            [FIB[k] * (phi_pi ** (k + 1)) for k in range(K)], dtype=torch.float)
+        neg_init = neg_init / neg_init.sum()
+        self.tier_weights_pos = nn.Parameter(pos_init.clone())
+        self.tier_weights_neg = nn.Parameter(neg_init.clone())
+        self.register_buffer("phi", torch.tensor(phi, dtype=torch.float))
+        self.register_buffer("phi_pi", torch.tensor(phi_pi, dtype=torch.float))
+        self.register_buffer("freqs", freqs)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        log_phi = torch.log(self.phi)
+        x_expanded = x.unsqueeze(-1) * self.freqs
+        x_pos = x_expanded.clamp(min=0.0)
+        x_neg = (-x_expanded).clamp(min=0.0)
+        branch_pos = x_pos * (1.0 - torch.exp(-x_pos * log_phi))
+        branch_neg = -x_neg * torch.exp(-x_neg * log_phi)
+        pos_mask = (x_expanded > 0).to(x.dtype)
+        pos_sum = (branch_pos * pos_mask * self.tier_weights_pos).sum(dim=-1)
+        neg_sum = (branch_neg * (1.0 - pos_mask) * self.tier_weights_neg).sum(dim=-1)
+        f_sum = pos_sum + neg_sum
+        return self.phi_pi * torch.tanh(f_sum / self.phi_pi)
+
+
+class BinetFibActivation(nn.Module):
+    """Pure substrate activation — Binet's Fibonacci interpolation curve.
+
+    Replaces GELU entirely with the smooth continuous extension of the
+    Fibonacci sequence:
+
+        F(x) = (φ^x − cos(π·x)·φ^(−x)) / √5
+
+    Passes through Fibonacci numbers at integer x (F(0)=0, F(1)=1,
+    F(2)=1, F(3)=2, F(4)=3, F(5)=5, ...). Uses ONLY φ and π — the
+    substrate's canonical constants. No GELU underneath.
+
+    Bounded via tanh to ±φ^π (substrate's canonical contraction):
+
+        f(x) = φ^π · tanh( F_binet(x) / (√5 · φ^π) )
+
+    The tanh keeps activations finite and the gradient nonzero
+    everywhere. Per-layer learnable scale lets the model position
+    its input range relative to the curve.
+    """
+
+    def __init__(self, init_scale: float = 1.0):
+        super().__init__()
+        self.scale = nn.Parameter(torch.tensor(float(init_scale)))
+        # Substrate constants — store as buffers for device safety
+        phi = (1.0 + 5.0 ** 0.5) / 2.0
+        phi_pi = phi ** math.pi
+        self.register_buffer("phi", torch.tensor(phi, dtype=torch.float))
+        self.register_buffer("phi_pi", torch.tensor(phi_pi, dtype=torch.float))
+        self.register_buffer("sqrt5", torch.tensor(5.0 ** 0.5, dtype=torch.float))
+        self.register_buffer("pi", torch.tensor(math.pi, dtype=torch.float))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Scale input — model learns where its activations sit relative to
+        # the Binet curve's interesting region (small integers).
+        z = x * self.scale
+        # Clip z to a safe range so φ^z and φ^(-z) don't overflow.
+        # For φ ≈ 1.618 and float32, φ^z is finite up to z ≈ 88.
+        z = z.clamp(-30.0, 30.0)
+        phi_z = self.phi ** z                      # φ^x
+        phi_neg_z = self.phi ** (-z)                # φ^(-x)
+        cos_pi_z = torch.cos(self.pi * z)            # cos(π·x)
+        f_binet = (phi_z - cos_pi_z * phi_neg_z) / self.sqrt5
+        return self.phi_pi * torch.tanh(f_binet / (self.sqrt5 * self.phi_pi))
+
+
+class PhiPiFibActivation(nn.Module):
+    """Substrate-CANONICAL activation: GELU + sum of sin(F(k)·x) terms,
+    each weighted by the substrate's F(k)/φ^(π·k) probe-decay sequence
+    from phi_pi_fib.rs.
+
+        f(x) = GELU(x) + α · Σ_k [F(k)/φ^(π·k)] · sin(F(k)·x)
+
+    Substrate-canonical FORMULA via F(k)/φ^(π·k), smooth basis (sin),
+    gradient-friendly (no discretization), per-layer learnable substrate
+    strength α (init small so it starts as nearly-GELU and grows toward
+    full substrate coupling only if helpful).
+    """
+
+    def __init__(self, K: int = 5, init_alpha: float = 0.1):
+        super().__init__()
+        phi = (1.0 + 5.0 ** 0.5) / 2.0
+        phi_pi = phi ** math.pi      # ≈ 4.534
+        # Substrate-canonical sequence F(k)/φ^(π·k) from phi_pi_fib.rs
+        FIB = [1.0, 2.0, 3.0, 5.0, 8.0, 13.0, 21.0, 34.0, 55.0, 89.0]
+        K = min(K, len(FIB))
+        coeffs = torch.tensor([FIB[k] / (phi_pi ** (k + 1)) for k in range(K)],
+                                dtype=torch.float)
+        freqs = torch.tensor(FIB[:K], dtype=torch.float)
+        self.register_buffer("substrate_coeffs", coeffs)   # F(k)/φ^(πk)
+        self.register_buffer("substrate_freqs", freqs)     # F(k)
+        self.alpha = nn.Parameter(torch.tensor(float(init_alpha)))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        base = F.gelu(x)
+        # x: [..., D]. We add scalar wobble: sum_k coeffs[k] * sin(freqs[k] * x).
+        # Each term sin(F(k) * x) is element-wise, then weighted by F(k)/φ^(π·k).
+        # For numerical stability we evaluate all K terms in a vectorized way.
+        # Shape: [..., K] via x.unsqueeze(-1) * freqs (broadcast).
+        scaled = x.unsqueeze(-1) * self.substrate_freqs        # [..., K]
+        sin_terms = torch.sin(scaled)                            # [..., K]
+        correction = (sin_terms * self.substrate_coeffs).sum(dim=-1)  # [...]
+        return base + self.alpha * correction
+
+
+class SubstrateGELUSoft(nn.Module):
+    """Softer variant: blend GELU with attractor-snap by a learnable mix.
+    At mix=0 it's pure GELU; at mix=1 it's full snap. Uses reciprocal
+    Fibonacci attractors by default since they match post-GELU magnitudes."""
+
+    def __init__(self, init_scale: float = 3.0, inverse: bool = True):
+        super().__init__()
+        self.scale = nn.Parameter(torch.tensor(float(init_scale)))
+        # Initialize at low coupling — sigmoid(-2) ≈ 0.12 so 88% GELU, 12% snap
+        self.mix_raw = nn.Parameter(torch.tensor(-2.0))
+        self.inverse = inverse
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h = F.gelu(x)
+        h_scaled = h * self.scale
+        snapped = attractor_snap(h_scaled, inverse=self.inverse) / self.scale
+        mix = torch.sigmoid(self.mix_raw)
+        snap_path = h + (snapped - h).detach()
+        return (1 - mix) * h + mix * snap_path

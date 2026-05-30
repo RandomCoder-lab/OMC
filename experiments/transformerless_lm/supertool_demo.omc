@@ -1,0 +1,36 @@
+// ── The super-tool loop, in the language: address → (agent generates) → VERIFY → accept ──
+// The generator is me (the agent). The gate is the interpreter itself. Nothing
+// that fails its spec is ever kept.
+
+// Trusted reference (slow but correct for small n) — the verification oracle.
+fn ref_fib(n) {
+    if n < 2 { return n; }
+    return ref_fib(n - 1) + ref_fib(n - 2);
+}
+
+// The function to improve — starts as a deliberate stub.
+fn fast_fib(n) { return 0 - 1; }
+print("stub fast_fib(10) =");
+print(fast_fib(10));                 // -1
+
+// SUPER-TOOL MOVE (agent-generated): an iterative O(n) fib, checked vs ref_fib(0..25).
+h good_impl = "fn fast_fib(n) { if n < 2 { return n; } h a = 0; h b = 1; h i = 2; while i <= n { h c = a + b; a = b; b = c; i += 1; } return b; }";
+h spec = "h ok = 1; h k = 0; while k < 25 { if fast_fib(k) != ref_fib(k) { ok = 0; } k += 1; } ok";
+h r1 = fn_swap_verified("fast_fib", good_impl, spec);
+print("-- good candidate --");
+print(r1);                            // {accepted: true, ...}
+print("fast_fib(40) after accept =");
+print(fast_fib(40));                  // 102334155 — now O(n), generated + verified
+
+// SAFETY: a BROKEN candidate (n*n) must be REJECTED and rolled back.
+h bad_impl = "fn fast_fib(n) { return n * n; }";
+h r2 = fn_swap_verified("fast_fib", bad_impl, spec);
+print("-- bad candidate --");
+print(r2);                            // {accepted: false, error: ...}
+print("fast_fib(40) after reject (unchanged) =");
+print(fast_fib(40));                  // still 102334155 (rolled back)
+
+// Functions live in the address space too (exact-key bucketing).
+print("-- function addresses --");
+print(haddr_face("fast_fib"));
+print(haddr_face("ref_fib"));

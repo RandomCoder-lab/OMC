@@ -1,0 +1,19 @@
+// Phase 4 — correct-by-construction synthesis as a language service.
+print("-- a generated program (valid by construction) --");
+print(gen_omc(7));
+
+print("-- the guarantee: parse-rate over 50 generated programs, checked by the interpreter --");
+h ok = 0;
+h i = 0;
+while i < 50 {
+    h prog = gen_omc(i);
+    h chk = code_parse_check(prog);
+    if chk["ok"] { ok += 1; }
+    i += 1;
+}
+print(ok);          // expect 50 / 50  (standard LMs cannot guarantee this)
+
+print("-- generate -> VERIFY -> accept, in-language --");
+h prog = gen_omc(123);
+h chk = code_parse_check(prog);
+print(chk["ok"]);   // true — would be installed/kept only because it verifies

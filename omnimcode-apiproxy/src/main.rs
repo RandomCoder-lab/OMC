@@ -185,6 +185,17 @@ struct Args {
     /// 0 = disabled.
     #[arg(long, default_value_t = 0)]
     max_context_chars: usize,
+
+    // ── Hermes Auth Bridge ────────────────────────────────────────────────
+    /// Read the best Anthropic OAuth token from ~/.hermes/auth.json and
+    /// inject it into all upstream requests. When set, clients can omit
+    /// auth entirely — they just point ANTHROPIC_BASE_URL at this proxy.
+    #[arg(long, default_value_t = false)]
+    hermes_auth: bool,
+
+    /// Explicit path to hermes auth.json. Defaults to ~/.hermes/auth.json.
+    #[arg(long, default_value = "")]
+    hermes_auth_path: String,
 }
 
 // ── Upgrade 6: Per-IP rate limiter ────────────────────────────────────────
@@ -448,6 +459,75 @@ struct AppState {
 
     // ── upgrade 10: context window pruning ───────────────────────────────
     max_context_chars: usize,
+
+    // ── Hermes Auth Bridge ────────────────────────────────────────────────
+    /// When Some, override all upstream auth headers with this OAuth token
+    /// (read from ~/.hermes/auth.json at startup).
+    hermes_token: Option<String>,
+}
+
+/// Apply Hermes auth header override to a reqwest request builder.
+/// When `hermes_token` is Some, skip the client's x-api-key/authorization
+/// headers and inject our own `Authorization: Bearer <token>` instead.
+/// `skip_auth` indicates whether the caller already filtered auth headers.
+fn apply_hermes_auth(
+    mut req: reqwest::RequestBuilder,
+    hermes_token: &Option<String>,
+    client_headers: &HeaderMap,
+    pass_all: bool,
+) -> reqwest::RequestBuilder {
+    match hermes_token {
+        Some(tok) => {
+            // Forward non-auth headers from client (or all if pass_all).
+            for (k, v) in client_headers.iter() {
+                let ks = k.as_str();
+                if ks == "host" || ks == "content-length" { continue; }
+                if ks == "x-api-key" || ks == "authorization" { continue; } // replaced below
+                if pass_all || ks == "anthropic-version" || ks == "content-type" {
+                    req = req.header(k, v);
+                }
+            }
+            req = req.header("authorization", format!("Bearer {}", tok));
+            req
+        }
+        None => {
+            // Default: forward headers as the caller would have.
+            for (k, v) in client_headers.iter() {
+                let ks = k.as_str();
+                if ks == "host" || ks == "content-length" { continue; }
+                if pass_all || ks == "x-api-key" || ks == "authorization" || ks == "anthropic-version" {
+                    req = req.header(k, v);
+                }
+            }
+            req
+        }
+    }
+}
+
+/// Load the best Anthropic OAuth token from ~/.hermes/auth.json.
+/// Picks the credential with the highest priority (lowest number) from the
+/// `credential_pool.anthropic` array that has an access_token set.
+/// Returns None if the file doesn't exist or has no Anthropic credentials.
+fn load_hermes_token(path: &str) -> Option<String> {
+    let auth_path = if path.is_empty() {
+        let home = std::env::var("HOME").ok()?;
+        std::path::PathBuf::from(home).join(".hermes").join("auth.json")
+    } else {
+        std::path::PathBuf::from(path)
+    };
+    let content = std::fs::read_to_string(&auth_path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let pool = v["credential_pool"]["anthropic"].as_array()?;
+    // Sort by priority ascending, pick first with a non-empty access_token.
+    let mut creds: Vec<(i64, String)> = pool.iter().filter_map(|c| {
+        let priority = c["priority"].as_i64().unwrap_or(99);
+        let token = c["access_token"].as_str().unwrap_or("").to_string();
+        if token.is_empty() { None } else { Some((priority, token)) }
+    }).collect();
+    creds.sort_by_key(|(p, _)| *p);
+    let token = creds.into_iter().next()?.1;
+    info!("Hermes auth: loaded Anthropic token from {}", auth_path.display());
+    Some(token)
 }
 
 #[tokio::main]
@@ -528,6 +608,11 @@ async fn main() -> Result<()> {
         response_cache_ttl_secs: args.response_cache_ttl_secs,
         response_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         max_context_chars: args.max_context_chars,
+        hermes_token: if args.hermes_auth {
+            load_hermes_token(&args.hermes_auth_path)
+        } else {
+            None
+        },
     };
 
     let app = Router::new()
@@ -718,10 +803,8 @@ async fn dispatch_delegate(
         "max_tokens": max_tokens,
         "messages": [{"role": "user", "content": user_msg}]
     });
-    let mut req = state.http.post(&target_url).json(&req_body);
-    for (k, v) in headers.iter() {
-        if k != "host" && k != "content-length" { req = req.header(k, v); }
-    }
+    let req = state.http.post(&target_url).json(&req_body);
+    let req = apply_hermes_auth(req, &state.hermes_token, headers, true);
     let result = match req.send().await {
         Ok(r) => match r.json::<serde_json::Value>().await {
             Ok(body) => {
@@ -770,12 +853,8 @@ async fn dispatch_forward(
         "messages": [{"role": "user", "content": user_content}]
     });
 
-    let mut req = state.http.post(&target_url).json(&req_body);
-    for (k, v) in headers.iter() {
-        if k == "x-api-key" || k == "authorization" || k == "anthropic-version" {
-            req = req.header(k, v);
-        }
-    }
+    let req = state.http.post(&target_url).json(&req_body);
+    let req = apply_hermes_auth(req, &state.hermes_token, headers, false);
 
     match req.send().await {
         Ok(resp) => {
@@ -1076,10 +1155,8 @@ async fn handle_with_expand_loop(
         // Forward to upstream
         let url = format!("{}/v1/messages",
             state.upstream.trim_end_matches('/'));
-        let mut req = state.http.post(&url).body(current_body.to_vec());
-        for (k, v) in headers.iter() {
-            if k != "host" && k != "content-length" { req = req.header(k, v); }
-        }
+        let req = state.http.post(&url).body(current_body.to_vec());
+        let req = apply_hermes_auth(req, &state.hermes_token, headers, true);
         let upstream_resp = match req.send().await {
             Ok(r) => r,
             Err(e) => return error_response(StatusCode::BAD_GATEWAY,
@@ -1400,29 +1477,12 @@ async fn handle_with_expand_loop(
                                 "content": combined,
                             }],
                         });
-                        let mut req = state.http
+                        let req = state.http
                             .post(format!("{}/v1/messages",
                                 state.upstream.trim_end_matches('/')))
-                            .header("x-api-key",
-                                headers.get("x-api-key")
-                                    .and_then(|v| v.to_str().ok())
-                                    .unwrap_or(""))
-                            .header("anthropic-version",
-                                headers.get("anthropic-version")
-                                    .and_then(|v| v.to_str().ok())
-                                    .unwrap_or("2023-06-01"))
                             .header("content-type", "application/json")
                             .json(&req_body);
-                        // Forward all non-host / non-content-length headers
-                        for (k, v) in headers.iter() {
-                            let ks = k.as_str();
-                            if ks != "host" && ks != "content-length"
-                                && ks != "x-api-key"
-                                && ks != "anthropic-version"
-                                && ks != "content-type" {
-                                req = req.header(k, v);
-                            }
-                        }
+                        let req = apply_hermes_auth(req, &state.hermes_token, headers, false);
                         let summary = match req.send().await {
                             Ok(r) => match r.json::<Value>().await {
                                 Ok(body) => body["content"][0]["text"]
@@ -1889,12 +1949,8 @@ async fn passthrough(State(state): State<AppState>, req: Request) -> Response {
     let path = parts.uri.path().to_string();
     debug!("passthrough: {} {}", parts.method, path);
     let url = format!("{}{}", state.upstream.trim_end_matches('/'), path);
-    let mut req = state.http.request(parts.method, &url).body(body_bytes.to_vec());
-    for (k, v) in parts.headers.iter() {
-        if k != "host" && k != "content-length" {
-            req = req.header(k, v);
-        }
-    }
+    let req = state.http.request(parts.method, &url).body(body_bytes.to_vec());
+    let req = apply_hermes_auth(req, &state.hermes_token, &parts.headers, true);
     match req.send().await {
         Ok(r) => {
             let status = r.status();
@@ -3369,6 +3425,7 @@ mod tests {
                 s.insert(PROXY_CACHE_NAMESPACE.to_string());
                 s
             })),
+            hermes_token: None,
         }
     }
 
@@ -4186,6 +4243,7 @@ mod tests {
                 s.insert(PROXY_CACHE_NAMESPACE.to_string());
                 s
             })),
+            hermes_token: None,
         };
 
         // Register two more namespaces and persist.
@@ -4227,6 +4285,7 @@ mod tests {
                 }
                 s
             })),
+            hermes_token: None,
         };
 
         let loaded: HashSet<String> = state2.registered_namespaces.lock().unwrap().clone();

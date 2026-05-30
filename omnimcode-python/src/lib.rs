@@ -52,7 +52,7 @@ fn evaluate_circuit_fitness(
 fn omnimcode(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<OmnimcodeCircuit>()?;
     m.add_function(wrap_pyfunction!(evaluate_circuit_fitness, m)?)?;
-    m.add("__version__", "1.0.0")?;
+    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }
 

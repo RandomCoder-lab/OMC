@@ -1,0 +1,16 @@
+// Phase 6 step 1 — @dualband ROUTES: exact-memo fast path (the A→Z skip) + the gate.
+@dualband
+fn dfib(n) { if n < 2 { return n; } return dfib(n - 1) + dfib(n - 2); }
+
+print("-- @dualband now SKIPS via the exact-memo fast path (intractable without it) --");
+print(dfib(90));                  // 2880067194370816120 — instant
+print("-- the gate reads substrate coherence and recommends a route --");
+print(band_divergence("dfib"));   // divergence(fib(90), fib(89)) — Fibonacci resonates
+print(band_route("dfib"));
+
+// a sensitive (dissonant) function: snapping inputs changes the answer a lot
+@dualband
+fn chaotic(n) { return ((n * 7919) % 97); }
+print(chaotic(50));               // 93 (exact alpha — always correct)
+print(band_divergence("chaotic"));
+print(band_route("chaotic"));     // expect "linear" — gate closed, trust alpha

@@ -291,6 +291,59 @@ impl Value {
         Value::dict_from(std::collections::BTreeMap::new())
     }
 
+    /// Content hash (FNV1a-64) over a canonical encoding of this value.
+    /// Structural values (Array/Dict) recurse, so semantically-equal values
+    /// collide regardless of provenance — the basis for content-addressing
+    /// (the CAS heap), O(1) semantic equality (`same_value`), and `@memo`.
+    /// Ints hash by integer value (harmonic metadata ignored); floats by bit
+    /// pattern; dicts in BTreeMap (canonical) order.
+    pub fn content_hash(&self) -> u64 {
+        #[inline]
+        fn mix(h: &mut u64, byte: u8) {
+            *h ^= byte as u64;
+            *h = h.wrapping_mul(0x0000_0100_0000_01b3); // FNV-64 prime
+        }
+        fn mix_bytes(h: &mut u64, bs: &[u8]) {
+            for &b in bs {
+                mix(h, b);
+            }
+        }
+        fn go(h: &mut u64, v: &Value) {
+            match v {
+                Value::HInt(n) => { mix(h, b'i'); mix_bytes(h, &n.value.to_le_bytes()); }
+                Value::HFloat(f) => { mix(h, b'f'); mix_bytes(h, &(*f).to_bits().to_le_bytes()); }
+                Value::Bool(b) => { mix(h, b'b'); mix(h, *b as u8); }
+                Value::String(s) => { mix(h, b's'); mix_bytes(h, s.as_bytes()); }
+                Value::Null => { mix(h, b'0'); }
+                Value::Array(a) => {
+                    mix(h, b'a');
+                    let items = a.items.borrow();
+                    mix_bytes(h, &(items.len() as u64).to_le_bytes());
+                    for it in items.iter() {
+                        go(h, it);
+                    }
+                }
+                Value::Dict(d) => {
+                    mix(h, b'd');
+                    let m = d.borrow();
+                    mix_bytes(h, &(m.len() as u64).to_le_bytes());
+                    for (k, val) in m.iter() {
+                        mix_bytes(h, k.as_bytes());
+                        mix(h, 0);
+                        go(h, val);
+                    }
+                }
+                Value::Function { name, .. } => { mix(h, b'F'); mix_bytes(h, name.as_bytes()); }
+                // Circuit / Singularity: addressed coarsely (share a bucket) — not
+                // content-addressing targets in v1.
+                _ => { mix(h, b'?'); }
+            }
+        }
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325; // FNV1a-64 offset basis
+        go(&mut h, self);
+        h
+    }
+
     #[inline]
     pub fn to_int(&self) -> i64 {
         match self {

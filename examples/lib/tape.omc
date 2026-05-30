@@ -1,0 +1,502 @@
+# OMC-native autograd tape — replaces tape_* Rust builtins.
+#
+# Functional style: tape dict is threaded through all ops.
+# Because dicts are Rc-shared, any fn that receives tape and calls
+# dict_set(tape, ...) mutates the caller's copy — no global state needed.
+#
+# Node IDs are plain integers. The JIT can compile functions that
+# receive node IDs and do pure integer arithmetic on them.
+#
+# Tape schema (all arrays are mutable Rc-shared):
+#   vals : array of matrices — each matrix is array-of-rows (array-of-arrays)
+#   grads: array of gradient matrices, same shapes as vals, zero-init
+#   ops  : array of integer op codes (see below)
+#   p1s  : array of parent-1 node IDs (-1 = no parent)
+#   p2s  : array of parent-2 node IDs (-1 = no parent)
+#   n    : integer count of nodes pushed so far
+#
+# Op codes:
+#   0 = Const    — leaf, no gradient propagation
+#   1 = Var      — leaf, gradient accumulates here
+#   2 = Add      — p1 + p2, grad passes through to both
+#   3 = MatMul   — p1 @ p2
+#   4 = ReLU     — relu(p1)
+#   5 = MSE      — mean((p1 - p2)^2), p2 is const target
+#   6 = Sub      — p1 - p2
+
+# ---- tape lifecycle ----------------------------------------------------------
+
+fn otape_new() {
+    h t = dict_new();
+    dict_set(t, "vals",  []);
+    dict_set(t, "grads", []);
+    dict_set(t, "ops",   []);
+    dict_set(t, "p1s",   []);
+    dict_set(t, "p2s",   []);
+    dict_set(t, "n",     0);
+    return t;
+}
+
+fn _otape_push(tape, val, op, p1, p2) {
+    h id = dict_get(tape, "n");
+    arr_push(dict_get(tape, "vals"),  val);
+    arr_push(dict_get(tape, "grads"), _mat_zeros_like(val));
+    arr_push(dict_get(tape, "ops"),   op);
+    arr_push(dict_get(tape, "p1s"),   p1);
+    arr_push(dict_get(tape, "p2s"),   p2);
+    dict_set(tape, "n", id + 1);
+    return id;
+}
+
+fn otape_const(tape, mat) { return _otape_push(tape, mat, 0, -1, -1); }
+fn otape_var(tape, mat)   { return _otape_push(tape, mat, 1, -1, -1); }
+
+fn otape_value(tape, id) { return arr_get(dict_get(tape, "vals"),  id); }
+fn otape_grad(tape, id)  { return arr_get(dict_get(tape, "grads"), id); }
+
+# ---- forward ops (all return integer node ID) --------------------------------
+
+fn otape_add(tape, a_id, b_id) {
+    h a = arr_get(dict_get(tape, "vals"), a_id);
+    h b = arr_get(dict_get(tape, "vals"), b_id);
+    return _otape_push(tape, _mat_add(a, b), 2, a_id, b_id);
+}
+
+fn otape_sub(tape, a_id, b_id) {
+    h a = arr_get(dict_get(tape, "vals"), a_id);
+    h b = arr_get(dict_get(tape, "vals"), b_id);
+    return _otape_push(tape, _mat_sub(a, b), 6, a_id, b_id);
+}
+
+fn otape_matmul(tape, a_id, b_id) {
+    h a = arr_get(dict_get(tape, "vals"), a_id);
+    h b = arr_get(dict_get(tape, "vals"), b_id);
+    return _otape_push(tape, _mat_mul(a, b), 3, a_id, b_id);
+}
+
+fn otape_relu(tape, a_id) {
+    h a = arr_get(dict_get(tape, "vals"), a_id);
+    return _otape_push(tape, _mat_relu(a), 4, a_id, -1);
+}
+
+fn otape_mse(tape, pred_id, target_id) {
+    h pred   = arr_get(dict_get(tape, "vals"), pred_id);
+    h target = arr_get(dict_get(tape, "vals"), target_id);
+    h loss   = _mat_mse_scalar(pred, target);
+    return _otape_push(tape, [[loss]], 5, pred_id, target_id);
+}
+
+# ---- backward ----------------------------------------------------------------
+
+fn _mat_set_elem(mat, i, j, v) {
+    # Set mat[i][j] = v in-place (exploits Rc-shared row references).
+    h row = arr_get(mat, i);
+    row[j] = v;
+}
+
+fn _mat_add_into(dst, src) {
+    # dst[i][j] += src[i][j] in-place.
+    h rows = arr_len(dst);
+    h i = 0;
+    while i < rows {
+        h dr = arr_get(dst, i);
+        h sr = arr_get(src, i);
+        h j = 0;
+        while j < arr_len(dr) {
+            dr[j] = arr_get(dr, j) + arr_get(sr, j);
+            j += 1;
+        }
+        i += 1;
+    }
+}
+
+fn otape_backward(tape, loss_id) {
+    h vals  = dict_get(tape, "vals");
+    h grads = dict_get(tape, "grads");
+    h ops   = dict_get(tape, "ops");
+    h p1s   = dict_get(tape, "p1s");
+    h p2s   = dict_get(tape, "p2s");
+
+    # Seed: d(loss)/d(loss) = 1.0
+    _mat_set_elem(arr_get(grads, loss_id), 0, 0, 1.0);
+
+    h id = loss_id;
+    while id >= 0 {
+        h op = arr_get(ops, id);
+        h g  = arr_get(grads, id);
+        h p1 = arr_get(p1s, id);
+        h p2 = arr_get(p2s, id);
+
+        if op == 2 {
+            # Add: grad flows to both parents unchanged
+            if p1 >= 0 { _mat_add_into(arr_get(grads, p1), g); }
+            if p2 >= 0 { _mat_add_into(arr_get(grads, p2), g); }
+        }
+        elif op == 6 {
+            # Sub(p1 - p2): grad_p1 = g, grad_p2 = -g
+            if p1 >= 0 { _mat_add_into(arr_get(grads, p1), g); }
+            if p2 >= 0 { _mat_add_into(arr_get(grads, p2), _mat_scale(g, -1.0)); }
+        }
+        elif op == 3 {
+            # MatMul(a @ b): grad_a = g @ b^T, grad_b = a^T @ g
+            h a = arr_get(vals, p1);
+            h b = arr_get(vals, p2);
+            if p1 >= 0 { _mat_add_into(arr_get(grads, p1), _mat_mul(g, _mat_transpose(b))); }
+            if p2 >= 0 { _mat_add_into(arr_get(grads, p2), _mat_mul(_mat_transpose(a), g)); }
+        }
+        elif op == 4 {
+            # ReLU: grad * (val > 0)
+            if p1 >= 0 {
+                _mat_add_into(arr_get(grads, p1), _mat_relu_backward(arr_get(vals, p1), g));
+            }
+        }
+        elif op == 5 {
+            # MSE(pred, target): grad_pred = 2*(pred-target)/n, seeded with scalar g
+            if p1 >= 0 {
+                h pred   = arr_get(vals, p1);
+                h target = arr_get(vals, p2);
+                h scale  = arr_get(arr_get(g, 0), 0);
+                _mat_add_into(arr_get(grads, p1), _mat_mse_grad(pred, target, scale));
+            }
+        }
+        # op 0 (Const) and op 1 (Var): no further propagation
+        id -= 1;
+    }
+}
+
+# ---- SGD step ----------------------------------------------------------------
+
+fn otape_sgd_step(tape, var_ids, lr) {
+    h vals  = dict_get(tape, "vals");
+    h grads = dict_get(tape, "grads");
+    h i = 0;
+    while i < arr_len(var_ids) {
+        h id   = arr_get(var_ids, i);
+        h val  = arr_get(vals,  id);
+        h grad = arr_get(grads, id);
+        h rows = arr_len(val);
+        h r = 0;
+        while r < rows {
+            h vr = arr_get(val,  r);
+            h gr = arr_get(grad, r);
+            h j = 0;
+            while j < arr_len(vr) {
+                vr[j] = arr_get(vr, j) - lr * arr_get(gr, j);
+                gr[j] = 0.0;
+                j += 1;
+            }
+            r += 1;
+        }
+        i += 1;
+    }
+}
+
+fn otape_reset_all_grads(tape) {
+    # Zero every node's gradient — call before each backward to avoid
+    # accumulation across steps when the tape grows across iterations.
+    h vals  = dict_get(tape, "vals");
+    h grads = dict_get(tape, "grads");
+    h n = dict_get(tape, "n");
+    h i = 0;
+    while i < n {
+        grads[i] = _mat_zeros_like(arr_get(vals, i));
+        i += 1;
+    }
+}
+
+fn otape_zero_grad(tape, var_ids) {
+    h grads = dict_get(tape, "grads");
+    h i = 0;
+    while i < arr_len(var_ids) {
+        h id  = arr_get(var_ids, i);
+        h gm  = arr_get(grads, id);
+        h r = 0;
+        while r < arr_len(gm) {
+            h gr = arr_get(gm, r);
+            h j = 0;
+            while j < arr_len(gr) { gr[j] = 0.0; j += 1; }
+            r += 1;
+        }
+        i += 1;
+    }
+}
+
+# ---- matrix primitives -------------------------------------------------------
+
+fn _mat_zeros_like(m) {
+    h out = [];
+    h i = 0;
+    while i < arr_len(m) {
+        h src = arr_get(m, i);
+        h row = [];
+        h j = 0;
+        while j < arr_len(src) { arr_push(row, 0.0); j += 1; }
+        arr_push(out, row);
+        i += 1;
+    }
+    return out;
+}
+
+fn _mat_zeros(rows, cols) {
+    h out = [];
+    h i = 0;
+    while i < rows {
+        h row = [];
+        h j = 0;
+        while j < cols { arr_push(row, 0.0); j += 1; }
+        arr_push(out, row);
+        i += 1;
+    }
+    return out;
+}
+
+fn _mat_add(a, b) {
+    h out = [];
+    h i = 0;
+    while i < arr_len(a) {
+        h ra = arr_get(a, i);
+        h rb = arr_get(b, i);
+        h row = [];
+        h j = 0;
+        while j < arr_len(ra) { arr_push(row, arr_get(ra, j) + arr_get(rb, j)); j += 1; }
+        arr_push(out, row);
+        i += 1;
+    }
+    return out;
+}
+
+fn _mat_sub(a, b) {
+    h out = [];
+    h i = 0;
+    while i < arr_len(a) {
+        h ra = arr_get(a, i);
+        h rb = arr_get(b, i);
+        h row = [];
+        h j = 0;
+        while j < arr_len(ra) { arr_push(row, arr_get(ra, j) - arr_get(rb, j)); j += 1; }
+        arr_push(out, row);
+        i += 1;
+    }
+    return out;
+}
+
+# JIT-dispatched flat matmul kernel. Receives three flat 1-D float arrays
+# (row-major) plus dimension scalars. Writes results into `rf` in-place.
+# When OMC_HBIT_JIT=1 the entire triple loop runs as native LLVM code;
+# arr_get_f has return-type "float" so the compiler emits MulFloat/AddFloat
+# which the JIT lowerer correctly handles via f64 bit-pattern bitcasts.
+fn _mat_mul_flat(af, a_rows, a_cols, bf, b_rows, b_cols, rf) {
+    h i = 0;
+    while i < a_rows {
+        h j = 0;
+        while j < b_cols {
+            h sum = 0.0;
+            h k = 0;
+            while k < a_cols {
+                sum = sum + arr_get_f(af, i * a_cols + k) * arr_get_f(bf, k * b_cols + j);
+                k += 1;
+            }
+            rf[i * b_cols + j] = sum;
+            j += 1;
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+fn _mat_mul(a, b) {
+    h ra = arr_len(a);
+    h ca = arr_len(arr_get(a, 0));
+    h cb = arr_len(arr_get(b, 0));
+    h rb = arr_len(b);
+    # Flatten inputs to 1-D for JIT-dispatch.
+    h af = [];
+    h i = 0;
+    while i < ra {
+        h row = arr_get(a, i);
+        h j = 0;
+        while j < ca { arr_push(af, arr_get(row, j)); j += 1; }
+        i += 1;
+    }
+    h bf = [];
+    i = 0;
+    while i < rb {
+        h row = arr_get(b, i);
+        h j = 0;
+        while j < cb { arr_push(bf, arr_get(row, j)); j += 1; }
+        i += 1;
+    }
+    # Pre-allocate result flat array.
+    h rf = [];
+    h n = ra * cb;
+    i = 0;
+    while i < n { arr_push(rf, 0.0); i += 1; }
+    # Flat matmul — JIT-dispatched when OMC_HBIT_JIT=1.
+    _mat_mul_flat(af, ra, ca, bf, rb, cb, rf);
+    # Unflatten result.
+    h out = [];
+    i = 0;
+    while i < ra {
+        h row = [];
+        h j = 0;
+        while j < cb { arr_push(row, arr_get_f(rf, i * cb + j)); j += 1; }
+        arr_push(out, row);
+        i += 1;
+    }
+    return out;
+}
+
+fn _mat_transpose(a) {
+    h rows = arr_len(a);
+    h cols = arr_len(arr_get(a, 0));
+    h out = [];
+    h j = 0;
+    while j < cols {
+        h row = [];
+        h i = 0;
+        while i < rows { arr_push(row, arr_get(arr_get(a, i), j)); i += 1; }
+        arr_push(out, row);
+        j += 1;
+    }
+    return out;
+}
+
+fn _mat_scale(a, s) {
+    h out = [];
+    h i = 0;
+    while i < arr_len(a) {
+        h ra = arr_get(a, i);
+        h row = [];
+        h j = 0;
+        while j < arr_len(ra) { arr_push(row, arr_get(ra, j) * s); j += 1; }
+        arr_push(out, row);
+        i += 1;
+    }
+    return out;
+}
+
+fn _mat_relu(a) {
+    h out = [];
+    h i = 0;
+    while i < arr_len(a) {
+        h ra = arr_get(a, i);
+        h row = [];
+        h j = 0;
+        while j < arr_len(ra) {
+            h v = arr_get(ra, j);
+            if v > 0.0 { arr_push(row, v); } else { arr_push(row, 0.0); }
+            j += 1;
+        }
+        arr_push(out, row);
+        i += 1;
+    }
+    return out;
+}
+
+fn _mat_relu_backward(val, grad_out) {
+    h out = [];
+    h i = 0;
+    while i < arr_len(val) {
+        h rv = arr_get(val, i);
+        h rg = arr_get(grad_out, i);
+        h row = [];
+        h j = 0;
+        while j < arr_len(rv) {
+            if arr_get(rv, j) > 0.0 { arr_push(row, arr_get(rg, j)); }
+            else { arr_push(row, 0.0); }
+            j += 1;
+        }
+        arr_push(out, row);
+        i += 1;
+    }
+    return out;
+}
+
+fn _mat_mse_scalar(pred, target) {
+    h total = 0.0;
+    h n = 0.0;
+    h i = 0;
+    while i < arr_len(pred) {
+        h rp = arr_get(pred, i);
+        h rt = arr_get(target, i);
+        h j = 0;
+        while j < arr_len(rp) {
+            h d = arr_get(rp, j) - arr_get(rt, j);
+            total += d * d;
+            n += 1.0;
+            j += 1;
+        }
+        i += 1;
+    }
+    if n == 0.0 { return 0.0; }
+    return total / n;
+}
+
+fn _mat_mse_grad(pred, target, upstream_scale) {
+    # d(MSE)/d(pred) = 2*(pred-target)/n, scaled by upstream grad
+    h n = 0.0;
+    h i = 0;
+    while i < arr_len(pred) {
+        h rp = arr_get(pred, i);
+        h j = 0;
+        while j < arr_len(rp) { n += 1.0; j += 1; }
+        i += 1;
+    }
+    h out = [];
+    i = 0;
+    while i < arr_len(pred) {
+        h rp = arr_get(pred, i);
+        h rt = arr_get(target, i);
+        h row = [];
+        h j = 0;
+        while j < arr_len(rp) {
+            arr_push(row, upstream_scale * 2.0 * (arr_get(rp, j) - arr_get(rt, j)) / n);
+            j += 1;
+        }
+        arr_push(out, row);
+        i += 1;
+    }
+    return out;
+}
+
+# ---- LCG random for weight init ----------------------------------------------
+
+fn _tape_lcg(s) {
+    h s2 = s * 1103515245 + 12345;
+    return s2 - (s2 / 2147483648) * 2147483648;
+}
+
+fn _tape_uniform(s, bound) {
+    h s2 = _tape_lcg(s);
+    h f = (s2 - (s2 / 1000000) * 1000000) / 500000.0 - 1.0;
+    if f < 0.0 { f = 0.0 - f; }
+    h v = f * bound * 2.0 - bound;
+    h r = dict_new();
+    dict_set(r, "v", v);
+    dict_set(r, "s", s2);
+    return r;
+}
+
+fn otape_random_matrix(rows, cols, bound, seed) {
+    h mat = [];
+    h s = seed;
+    h i = 0;
+    while i < rows {
+        h row = [];
+        h j = 0;
+        while j < cols {
+            h ur = _tape_uniform(s, bound);
+            arr_push(row, dict_get(ur, "v"));
+            s = dict_get(ur, "s");
+            j += 1;
+        }
+        arr_push(mat, row);
+        i += 1;
+    }
+    h r = dict_new();
+    dict_set(r, "mat", mat);
+    dict_set(r, "seed", s);
+    return r;
+}
+
+fn otape_zeros_matrix(rows, cols) { return _mat_zeros(rows, cols); }

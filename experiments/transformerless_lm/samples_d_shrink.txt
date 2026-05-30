@@ -1,0 +1,72 @@
+# D-grow + K-shrink samples on TinyShakespeare
+# steps=2000  d_min=34  d_max=256  K_init=89  K_min=3
+# prompt: 'ROMEO:\nWhat light through'
+
+
+======================================================================
+fibgen_static  best_val=3.1477  params=338,088
+======================================================================
+ROMEO:
+What light through nstlo l s
+ ttda   t  irer  e oe totlean   od  e o o e ere heed l  htr 
+
+
+reolta e tiaol   nenl  seotett 
+o i ii
+neaeie  
+e eleeheettah nee  h hotthte e
+o  h
+r o  n e   h atd e heit sth th  ih hia a o s eh hsdit  h  
+e  
+o hr
+o he  
+oeh l  
+e eerh 
+ne t h tt aoo  et
+see
+esitt ste  ah hlt  heteres h t ed   o e h ee  r 
+eoeet e eahi  t   
+s hateo tistht ohho  ssetsse 
+rr
+n
+tooth ot ohto h sd a   
+
+e is
+at t  o
+   e hmai
+o h oras n
+eo to  i      oe oheiha     h o ai i 
+
+  nta  
+ee hhis  aeheehe e e
+
+======================================================================
+d_grow_k_shrink  best_val=3.3283  params=338,088
+======================================================================
+ROMEO:
+What light through iit o   e
+ ttisindt  nrer  r n ototoaan n nd ne o o e eaa heeo    htr 
+
+
+rd ota  
+tnnoh   nenl  eeieett 
+ooi in neaeie  
+
+ enneheoniah nee  h hn thta 
+
+o ahar ns n er 
+h a n i heie othnth nie hia no    eh os ie  h  
+e  aoano t hn nn eh a  
+raeent 
+ne t i tt aao   n  
+ehetitt hoe  aarh t  htteans h t et   o e h ea  r 
+eoeet e hahi  t   
+
+ hateo tisth
+ t
+ho  isea  e 
+rrii tooth otaohro h    a   
+
+i idn t tran    e htailoth trar nido too i n il oeionnoaan    r o ai i rndnnta 
+
+ e hhis  aeheehenene

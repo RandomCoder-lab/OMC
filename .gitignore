@@ -48,3 +48,22 @@ examples/game-ai-demo/Assets/Editor/OMNIcode/
 # Python bytecode caches
 **/__pycache__/
 **/*.pyc
+
+# Auto Claude data directory
+.auto-claude/
+
+# Auto Claude generated files
+.auto-claude-security.json
+.auto-claude-status
+.claude_settings.json
+.worktrees/
+.security-key
+logs/security/
+
+# Model checkpoints / substrate indexes — regenerable trained weights, far over GitHub's
+# 100MB file limit (e.g. omc_address_index.pt 1.8GB, omc_dual_index.pt 450MB; ~2.5GB total).
+# The MATH lives in the source + the .md ledgers; share weights via git-lfs / release assets / HF.
+*.pt
+# Python virtualenvs
+**/.venv/
+**/venv/

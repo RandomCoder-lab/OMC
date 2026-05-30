@@ -1,0 +1,8 @@
+// Cross-run persistence — PROCESS A (writer).
+@memo
+fn mfib(n) {
+    if n < 2 { return n; }
+    return mfib(n - 1) + mfib(n - 2);
+}
+h warm = mfib(50);                 // populates the @memo disk cache (no print)
+print(cas_put([10, 20, 30]));      // ONLY output: the CAS content key

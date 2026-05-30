@@ -1,11 +1,14 @@
 [package]
 name = "omnimcode-python"
-version.workspace = true
-edition.workspace = true
-authors.workspace = true
-license.workspace = true
+version = "1.3.0"
+edition = "2021"
+authors = ["The Architect <architect@sovereign-lattice.io>"]
+license = "MIT"
 description = "OMNIcode - Python Bindings for Harmonic Computing Language"
 repository = "https://github.com/sovereignlattice/omnimcode"
+
+# Empty workspace table to prevent cargo from looking for parent workspace
+[workspace]
 
 [lib]
 crate-type = ["cdylib"]
