@@ -1,0 +1,14 @@
+{
+  "domains": [
+    "detective",
+    "history",
+    "philosophy",
+    "romance",
+    "science"
+  ],
+  "passages": 8016,
+  "relations": 645,
+  "cross_rhymes": 1746,
+  "real_top_mean": 0.774,
+  "rand_top_mean": 0.406
+}

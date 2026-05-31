@@ -1,0 +1,84 @@
+{
+  "domains": [
+    "detective",
+    "history",
+    "philosophy",
+    "romance",
+    "science"
+  ],
+  "signature": {
+    "detective": [
+      "clear",
+      "miss",
+      "steps",
+      "cried",
+      "asked",
+      "glancing",
+      "rushed",
+      "dressed",
+      "note",
+      "remarked",
+      "save",
+      "see"
+    ],
+    "history": [
+      "return",
+      "reign",
+      "distinguished",
+      "obtained",
+      "displayed",
+      "received",
+      "restored",
+      "celebrated",
+      "acknowledged",
+      "filled",
+      "supplied",
+      "maintained"
+    ],
+    "philosophy": [
+      "belong",
+      "owing",
+      "suffering",
+      "concealed",
+      "learn",
+      "deceived",
+      "betray",
+      "attempt",
+      "loves",
+      "desires",
+      "regarded",
+      "question"
+    ],
+    "romance": [
+      "miss",
+      "replied",
+      "added",
+      "married",
+      "walk",
+      "pleased",
+      "wished",
+      "cried",
+      "satisfied",
+      "received",
+      "wish",
+      "dining"
+    ],
+    "science": [
+      "plants",
+      "groups",
+      "crossed",
+      "modified",
+      "produced",
+      "differ",
+      "vary",
+      "amount",
+      "existing",
+      "descended",
+      "tend",
+      "inherited"
+    ]
+  },
+  "cross_rhymes": 1437,
+  "real_top_mean": 0.572,
+  "rand_top_mean": 0.298
+}

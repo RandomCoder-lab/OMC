@@ -1,0 +1,13 @@
+{
+  "a": "pride_prejudice.txt",
+  "b": "tinyshakespeare.txt",
+  "passages_a": 1951,
+  "passages_b": 4114,
+  "bridges": 446,
+  "cross_pairs": 2352,
+  "connectable": 2349,
+  "connectivity_pct": 99.9,
+  "strength_max": 4.786,
+  "strength_med": 4.086,
+  "strength_min": 1.83
+}

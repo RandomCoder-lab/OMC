@@ -24,6 +24,7 @@ pub mod phi_pi_fib;    // O(log_phi_pi_fibonacci n) search algorithm [Tier 4]
 pub mod phi_disk;      // Phi Disk cache system [Tier 4]
 pub mod address;       // Dodecahedral content-addressing — uniform φ-address (Phase 1.1)
 pub mod cas;           // Disk-backed content-addressed value heap (Phase 2 persistence)
+pub mod addressed_memory; // In-core kNN datastore + IVF index (write-don't-train memory primitive)
 pub mod locality;      // Locality-bearing fingerprint — similarity primitive (Phase 1.2)
 pub mod synth;         // Correct-by-construction OMC generator (Phase 4)
 pub mod bytecode;      // VM bytecode + constant pool [Phase H]

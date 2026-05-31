@@ -2502,6 +2502,8 @@ impl Interpreter {
             // Content-addressed value heap (Phase 2.1)
             | "value_addr" | "value_hash" | "same_value"
             | "cas_put" | "cas_get" | "cas_has"
+            // In-core addressed memory — kNN datastore + IVF (write-don't-train primitive)
+            | "amem_new" | "amem_write" | "amem_index" | "amem_search" | "amem_len"
             // The super-tool as a language feature (Phase 3)
             | "fn_swap_verified" | "fns_on_face"
             // Locality fingerprint — similarity primitive (Phase 1.2)
@@ -6442,6 +6444,59 @@ impl Interpreter {
                     .map(|k| self.cas_store.contains_key(&k) || crate::cas::has("cas", k))
                     .unwrap_or(false);
                 Ok(Value::Bool(present))
+            }
+            // ── In-core addressed memory — write-don't-train kNN datastore + IVF ──
+            // amem_new() -> handle: allocate an empty datastore (hold the handle, pass it back).
+            "amem_new" => Ok(Value::HInt(HInt::new(crate::addressed_memory::amem_new()))),
+            // amem_write(handle, key_array, value) -> entry count. key_array is a numeric vector.
+            "amem_write" => {
+                if args.len() < 3 {
+                    return Err("amem_write requires (handle, key_array, value)".to_string());
+                }
+                let handle = self.eval_expr(&args[0])?.to_int();
+                let key = match self.eval_expr(&args[1])? {
+                    Value::Array(a) => a.items.borrow().iter().map(|v| v.to_float() as f32).collect::<Vec<f32>>(),
+                    _ => return Err("amem_write: key must be an array".to_string()),
+                };
+                let val = self.eval_expr(&args[2])?.to_int();
+                crate::addressed_memory::amem_write(handle, key, val).map(|n| Value::HInt(HInt::new(n)))
+            }
+            // amem_index(handle, [nlist=64], [iters=8], [seed=0]) -> cell count: build the IVF index.
+            "amem_index" => {
+                if args.is_empty() {
+                    return Err("amem_index requires (handle, [nlist], [iters], [seed])".to_string());
+                }
+                let handle = self.eval_expr(&args[0])?.to_int();
+                let nlist = if args.len() > 1 { self.eval_expr(&args[1])?.to_int() } else { 64 };
+                let iters = if args.len() > 2 { self.eval_expr(&args[2])?.to_int() } else { 8 };
+                let seed = if args.len() > 3 { self.eval_expr(&args[3])?.to_int() } else { 0 };
+                crate::addressed_memory::amem_index(handle, nlist, iters, seed)
+                    .map(|c| Value::HInt(HInt::new(c)))
+            }
+            // amem_search(handle, query_array, [k=5], [nprobe=4]) -> array of nearest values.
+            "amem_search" => {
+                if args.len() < 2 {
+                    return Err("amem_search requires (handle, query_array, [k], [nprobe])".to_string());
+                }
+                let handle = self.eval_expr(&args[0])?.to_int();
+                let query = match self.eval_expr(&args[1])? {
+                    Value::Array(a) => a.items.borrow().iter().map(|v| v.to_float() as f32).collect::<Vec<f32>>(),
+                    _ => return Err("amem_search: query must be an array".to_string()),
+                };
+                let k = if args.len() > 2 { self.eval_expr(&args[2])?.to_int() } else { 5 };
+                let nprobe = if args.len() > 3 { self.eval_expr(&args[3])?.to_int() } else { 4 };
+                let vals = crate::addressed_memory::amem_search(handle, query, k, nprobe)?;
+                Ok(Value::Array(HArray::from_vec(
+                    vals.into_iter().map(|v| Value::HInt(HInt::new(v))).collect(),
+                )))
+            }
+            // amem_len(handle) -> entry count.
+            "amem_len" => {
+                if args.is_empty() {
+                    return Err("amem_len requires (handle)".to_string());
+                }
+                let handle = self.eval_expr(&args[0])?.to_int();
+                crate::addressed_memory::amem_len(handle).map(|n| Value::HInt(HInt::new(n)))
             }
             // ── The super-tool as a language feature (Phase 3) ───────────────
             // fn_swap_verified(name, new_source, test_source) -> {accepted, error, result}
@@ -16019,6 +16074,8 @@ pub(crate) const HEAL_BUILTIN_NAMES: &[&str] = &[
     // Content-addressed value heap (Phase 2.1)
     "value_addr", "value_hash", "same_value",
     "cas_put", "cas_get", "cas_has",
+    // In-core addressed memory — kNN datastore + IVF (write-don't-train primitive)
+    "amem_new", "amem_write", "amem_index", "amem_search", "amem_len",
     // The super-tool as a language feature (Phase 3)
     "fn_swap_verified", "fns_on_face",
     // Locality fingerprint — similarity primitive (Phase 1.2)

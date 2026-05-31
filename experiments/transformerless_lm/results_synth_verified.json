@@ -1,0 +1,211 @@
+{
+  "n": 25,
+  "A": 0,
+  "B": 3,
+  "C": 3,
+  "D": 25,
+  "E": 21,
+  "novelty_E": 0.34,
+  "rows": [
+    {
+      "intent": "fn lf_add_break_jump(frame, idx) {",
+      "A": 0,
+      "B": 0,
+      "C": 0,
+      "D": 1,
+      "E": 1
+    },
+    {
+      "intent": "fn compiler_with_user_fns(uf) {",
+      "A": 0,
+      "B": 0,
+      "C": 0,
+      "D": 1,
+      "E": 1
+    },
+    {
+      "intent": "fn c_constants(c) {",
+      "A": 0,
+      "B": 0,
+      "C": 0,
+      "D": 1,
+      "E": 1
+    },
+    {
+      "intent": "fn c_ops(c) {",
+      "A": 0,
+      "B": 1,
+      "C": 0,
+      "D": 1,
+      "E": 0
+    },
+    {
+      "intent": "fn c_loop_stack(c) {",
+      "A": 0,
+      "B": 0,
+      "C": 0,
+      "D": 1,
+      "E": 1
+    },
+    {
+      "intent": "fn c_user_fns(c) {",
+      "A": 0,
+      "B": 0,
+      "C": 0,
+      "D": 1,
+      "E": 1
+    },
+    {
+      "intent": "fn c_var_types(c) {",
+      "A": 0,
+      "B": 0,
+      "C": 0,
+      "D": 1,
+      "E": 1
+    },
+    {
+      "intent": "fn c_fn_ret_types(c) {",
+      "A": 0,
+      "B": 0,
+      "C": 0,
+      "D": 1,
+      "E": 1
+    },
+    {
+      "intent": "fn c_pending_lambdas(c) {",
+      "A": 0,
+      "B": 0,
+      "C": 0,
+      "D": 1,
+      "E": 1
+    },
+    {
+      "intent": "fn c_pending_lambda_asts(c) {",
+      "A": 0,
+      "B": 0,
+      "C": 1,
+      "D": 1,
+      "E": 1
+    },
+    {
+      "intent": "fn c_add_const(c, con) {",
+      "A": 0,
+      "B": 0,
+      "C": 0,
+      "D": 1,
+      "E": 1
+    },
+    {
+      "intent": "fn c_emit(c, op) {",
+      "A": 0,
+      "B": 0,
+      "C": 0,
+      "D": 1,
+      "E": 0
+    },
+    {
+      "intent": "fn c_op_count(c) {",
+      "A": 0,
+      "B": 1,
+      "C": 1,
+      "D": 1,
+      "E": 1
+    },
+    {
+      "intent": "fn c_get_op(c, idx) {",
+      "A": 0,
+      "B": 0,
+      "C": 0,
+      "D": 1,
+      "E": 0
+    },
+    {
+      "intent": "fn c_set_op(c, idx, op) {",
+      "A": 0,
+      "B": 1,
+      "C": 0,
+      "D": 1,
+      "E": 0
+    },
+    {
+      "intent": "fn c_has_user_fn(c, name) {",
+      "A": 0,
+      "B": 0,
+      "C": 0,
+      "D": 1,
+      "E": 1
+    },
+    {
+      "intent": "fn c_push_loop(c, frame) {",
+      "A": 0,
+      "B": 0,
+      "C": 0,
+      "D": 1,
+      "E": 1
+    },
+    {
+      "intent": "fn c_pop_loop(c) {",
+      "A": 0,
+      "B": 0,
+      "C": 0,
+      "D": 1,
+      "E": 1
+    },
+    {
+      "intent": "fn c_loop_top(c) {",
+      "A": 0,
+      "B": 0,
+      "C": 0,
+      "D": 1,
+      "E": 1
+    },
+    {
+      "intent": "fn c_loop_depth(c) {",
+      "A": 0,
+      "B": 0,
+      "C": 0,
+      "D": 1,
+      "E": 1
+    },
+    {
+      "intent": "fn compiler_finish(c, name, params, param_types,",
+      "A": 0,
+      "B": 0,
+      "C": 0,
+      "D": 1,
+      "E": 1
+    },
+    {
+      "intent": "fn type_tag_of(s) {",
+      "A": 0,
+      "B": 0,
+      "C": 0,
+      "D": 1,
+      "E": 1
+    },
+    {
+      "intent": "fn make_error_pattern(pat, cat, expl, cause, fix",
+      "A": 0,
+      "B": 0,
+      "C": 1,
+      "D": 1,
+      "E": 1
+    },
+    {
+      "intent": "fn make_diagnostic_pos(line, col) {",
+      "A": 0,
+      "B": 0,
+      "C": 0,
+      "D": 1,
+      "E": 1
+    },
+    {
+      "intent": "fn format_pos(pos) {",
+      "A": 0,
+      "B": 0,
+      "C": 0,
+      "D": 1,
+      "E": 1
+    }
+  ]
+}

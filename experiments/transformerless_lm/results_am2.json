@@ -1,0 +1,20 @@
+{
+  "10000": {
+    "lm_loss": 2.5969,
+    "best_lambda": 0.25,
+    "best_loss": 2.5657,
+    "improve_pct": 1.2
+  },
+  "50000": {
+    "lm_loss": 2.5969,
+    "best_lambda": 0.2,
+    "best_loss": 2.5738,
+    "improve_pct": 0.89
+  },
+  "200000": {
+    "lm_loss": 2.5969,
+    "best_lambda": 0.25,
+    "best_loss": 2.5626,
+    "improve_pct": 1.32
+  }
+}

@@ -509,6 +509,57 @@ def _tool_predict(text: str, nav: Optional[MultiskillNavigator] = None) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Written-memory recall (the proven write-don't-train + IVF datastore; see written_memory.py)
+# ─────────────────────────────────────────────────────────────────────────────
+import os as _os
+
+_WM_CACHE: dict = {}          # store_path -> WrittenMemory (load once)
+
+
+def _find_wm_store() -> Optional[Path]:
+    """Locate a codemem store: $CODEMEM_STORE, then repo .codemem, then /tmp/omc_core.codemem."""
+    cands = []
+    if _os.environ.get("CODEMEM_STORE"):
+        cands.append(Path(_os.environ["CODEMEM_STORE"]))
+    cands += [_HERE / ".codemem", _HERE.parent.parent / ".codemem",
+              Path("/tmp/omc_core_bpe.codemem"), Path("/tmp/omc_core.codemem")]
+    return next((p for p in cands if (p / "memory.pt").exists()), None)
+
+
+def _get_wm(store_path: Optional[Path] = None):
+    """Lazily load (and cache) the WrittenMemory store. Returns None if unavailable."""
+    store_path = store_path or _find_wm_store()
+    if store_path is None:
+        return None
+    key = str(store_path)
+    if key not in _WM_CACHE:
+        try:
+            from written_memory import WrittenMemory
+            _WM_CACHE[key] = WrittenMemory.load(store_path)
+        except Exception as e:
+            print(f"[Init] WrittenMemory load failed ({store_path}): {e}", flush=True)
+            _WM_CACHE[key] = None
+    return _WM_CACHE[key]
+
+
+def _tool_recall(query: str) -> str:
+    """Recall real code from the written-memory datastore by hidden-state proximity, WITH provenance
+    (source position + the char the context predicts). The strong, proven retrieval path."""
+    wm = _get_wm()
+    if wm is None:
+        return ("[omc_recall] no written-memory store found. Build one:\n"
+                "  python codemem.py build <repo> -o .codemem")
+    hits = wm.nearest_contexts(query, k=5)
+    if not hits:
+        return f"[omc_recall] no contexts found for {query!r}"
+    lines = [f"omc_recall({query[:50]!r}) — {len(hits)} written contexts ({wm.K.shape[0]:,} entries):"]
+    for i, r in enumerate(hits, 1):
+        snip = r["snippet"].strip().replace("\n", " ")[:110]
+        lines.append(f"  [{i}] dist={r['distance']:.3f} pos={r['position']} →{r['predicted']!r}  {snip}")
+    return "\n".join(lines)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # OMCAssistant
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1356,7 +1407,11 @@ def main() -> None:
         except ImportError:
             return "[tool_complete] omc_tools not available"
 
-    for fn in [tool_search, tool_explain, tool_eval, tool_predict, tool_complete]:
+    def tool_recall(query: str) -> str:
+        """Recall real code from the written-memory datastore (write-don't-train + IVF) with provenance."""
+        return _tool_recall(query)
+
+    for fn in [tool_search, tool_explain, tool_eval, tool_predict, tool_complete, tool_recall]:
         entry = assistant.register_tool(fn, name=fn.__name__)
         print(f"  tool: {fn.__name__}  addr={addr_str(entry.addr)}", flush=True)
 

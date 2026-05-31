@@ -1,0 +1,7 @@
+{
+  "corpus": "pride_prejudice.txt",
+  "concepts": 43,
+  "passages": 1951,
+  "coherence_guided": 0.526,
+  "coherence_bfs": 0.163
+}

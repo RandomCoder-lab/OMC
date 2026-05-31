@@ -1,0 +1,9 @@
+{
+  "lm_only": 2.7959,
+  "fixed": 2.6221,
+  "fixed_lambda": 0.4,
+  "gain_fixed": 6.22,
+  "gated": 2.6704,
+  "gated_lambda": 0.75,
+  "gain_gated": 4.49
+}

@@ -1,0 +1,8 @@
+{
+  "vocab": 6000,
+  "dim": 64,
+  "auc_semantic": 0.707,
+  "auc_lexical": 0.185,
+  "entitiesA": 58,
+  "entitiesB": 47
+}

@@ -1,0 +1,12 @@
+{
+  "entities": 35,
+  "passages": 1951,
+  "recall_inverted": 1.0,
+  "recall_fuzzy": 0.685,
+  "cost_inverted_avg": 51,
+  "reach": {
+    "2": 100,
+    "3": 100,
+    "4": null
+  }
+}
