@@ -1,7 +1,7 @@
 // omnimcode-core/src/main.rs - OMNIcode Standalone Executable Entry Point
 
 use omnimcode_core::parser::Parser;
-use omnimcode_core::interpreter::Interpreter;
+use omnimcode_core::interpreter::{Interpreter, last_fixpoint_knowledge};
 use omnimcode_core::ast::{Expression, Statement};
 
 use std::env;
@@ -1602,6 +1602,12 @@ fn check_program(path: &str) -> i32 {
                  path, total_fail, fail_diags.len(), lint.len(), total_warn,
                  iters, outcome);
     }
+    // MAPE-K: the cross-pass Knowledge breakdown (what the healer did over ALL
+    // passes — the per-pass counter only sees the final clean pass).
+    let heal_summary = last_fixpoint_knowledge().summary();
+    if !heal_summary.is_empty() {
+        println!("  heal-summary (all passes): {}", heal_summary);
+    }
     for d in &fail_diags {
         println!("  heal: {}", d);
     }
@@ -1659,6 +1665,10 @@ fn execute_program(source: &str) -> Result<(), String> {
                 "--- OMC_HEAL: {} diagnostic(s) across {} iteration(s) ({}) ---",
                 diagnostics.len(), iters, outcome
             );
+            let heal_summary = last_fixpoint_knowledge().summary();
+            if !heal_summary.is_empty() {
+                eprintln!("  heal-summary (all passes): {}", heal_summary);
+            }
             for d in &diagnostics {
                 eprintln!("  {}", d);
             }

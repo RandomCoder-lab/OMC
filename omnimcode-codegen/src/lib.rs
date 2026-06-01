@@ -730,6 +730,49 @@ impl<'ctx> JitContext<'ctx> {
     /// `FunctionValue` so callers can verify it.
     ///
     /// Session B constraints:
+    /// Run a curated LLVM IR optimization pipeline over the module (mem2reg + scalar
+    /// peephole/redundancy passes) using LLVM's new pass manager. Run ONCE after all
+    /// functions are lowered, before extraction/execution.
+    ///
+    /// DELIBERATELY excludes Loop Strength Reduction and all loop passes: LSR crashed
+    /// non-deterministically at `OptimizationLevel::Default` on the LCSSA-form loops the
+    /// dual-band lowerer emits (see `new`), which is why the JIT engine itself runs at
+    /// `None`. These scalar passes recover most of that traded-away peephole optimization
+    /// WITHOUT touching the loop machinery that crashes.
+    ///
+    /// Conservative + non-fatal: only optimizes a module that VERIFIES (never hands
+    /// malformed IR to the optimizer — that's exactly the case that segfaults), and any
+    /// pass-pipeline error leaves the module untouched (the JIT still works, unoptimized).
+    pub fn optimize(&self) -> Result<(), CodegenError> {
+        use inkwell::passes::PassBuilderOptions;
+        use inkwell::targets::{CodeModel, InitializationConfig, RelocMode, Target, TargetMachine};
+        if let Err(msg) = self.module.verify() {
+            return Err(format!("module did not verify; optimization skipped: {}", msg.to_string()));
+        }
+        Target::initialize_native(&InitializationConfig::default())
+            .map_err(|e| format!("initialize_native: {}", e))?;
+        let triple = TargetMachine::get_default_triple();
+        let target = Target::from_triple(&triple).map_err(|e| e.to_string())?;
+        let tm = target
+            .create_target_machine(
+                &triple,
+                "", // generic CPU — IR-level passes don't need host tuning
+                "",
+                OptimizationLevel::None,
+                RelocMode::Default,
+                CodeModel::Default,
+            )
+            .ok_or_else(|| "create_target_machine returned None".to_string())?;
+        // Scalar pipeline ONLY — no loop passes, no LSR (the known crasher).
+        self.module
+            .run_passes(
+                "mem2reg,instcombine,reassociate,gvn,simplifycfg",
+                &tm,
+                PassBuilderOptions::create(),
+            )
+            .map_err(|e| e.to_string())
+    }
+
     /// - All params and the return type are `i64`.
     /// - Only the int-flavored op subset listed in the crate docs.
     /// - `Op::Call(name, _)` must target the function being lowered
@@ -983,6 +1026,17 @@ impl<'ctx> JitContext<'ctx> {
         if std::env::var("OMC_HBIT_JIT_DUMP_IR").as_deref() == Ok("1") {
             eprintln!("[OMC_HBIT_JIT_DUMP_IR]");
             eprintln!("{}", self.module.print_to_string().to_string());
+        }
+        // L1.5+ optional IR optimization (opt-in via OMC_HBIT_JIT_OPT=1): recover the
+        // peephole optimization traded away when the engine was lowered to
+        // OptimizationLevel::None (see `new`), via a scalar pipeline that EXCLUDES the LSR
+        // pass that crashed. Default OFF out of respect for that segfault history; verify-gated
+        // and non-fatal (a pass error leaves the module unoptimized-but-working). Runs ONCE here,
+        // after all functions are lowered + cleaned, before extraction triggers MCJIT codegen.
+        if std::env::var("OMC_HBIT_JIT_OPT").as_deref() == Ok("1") {
+            if let Err(e) = self.optimize() {
+                eprintln!("[OMC_HBIT_JIT_OPT] optimization skipped: {}", e);
+            }
         }
         // Phase 3: extract fn pointers for everything that survived
         // both lowering and dependency cleanup.

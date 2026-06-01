@@ -55,8 +55,13 @@ pub struct Interpreter {
     /// Functions declared `@memo` (Phase 2.2) — asserted pure, transparently
     /// memoized. Populated at definition after a best-effort purity check.
     memo_fns: HashSet<String>,
-    /// Memo results keyed by (fn name ⊕ argument content hashes).
+    /// Memo results keyed by (fn name ⊕ argument content hashes). BOUNDED (FIFO-evicted at
+    /// MEMO_CAP) so a long-running program can't leak memory — eviction is correctness-safe
+    /// because memo values are pure and also persisted to disk CAS (an evicted entry just
+    /// recomputes/reloads to the same value), so it never changes a result.
     memo_cache: HashMap<u64, Value>,
+    /// Insertion order of memo keys, for deterministic FIFO eviction when memo_cache is full.
+    memo_order: std::collections::VecDeque<u64>,
     /// Per-fn body-hash salt for `@memo` keys — editing a memoized function's
     /// body changes the salt, so a stale persisted result is never returned.
     memo_salt: HashMap<String, u64>,
@@ -168,6 +173,7 @@ impl Interpreter {
             cas_store: HashMap::new(),
             memo_fns: HashSet::new(),
             memo_cache: HashMap::new(),
+            memo_order: std::collections::VecDeque::new(),
             memo_salt: HashMap::new(),
             dualband_fns: HashSet::new(),
             dualband_depth: 0,
@@ -301,6 +307,23 @@ impl Interpreter {
         let result = self.call_function(name, &expr_args);
         self.locals.pop();
         result
+    }
+
+    /// Insert into the bounded memo cache with deterministic FIFO eviction. Correctness-safe:
+    /// memo values are pure + disk-persisted, so evicting one only forces a recompute/reload to
+    /// the SAME value — it never changes a result. Caps in-memory growth for long-running programs.
+    fn memo_put(&mut self, k: u64, v: Value) {
+        const MEMO_CAP: usize = 100_000;
+        if !self.memo_cache.contains_key(&k) {
+            while self.memo_cache.len() >= MEMO_CAP {
+                match self.memo_order.pop_front() {
+                    Some(old) => { self.memo_cache.remove(&old); }
+                    None => break,
+                }
+            }
+            self.memo_order.push_back(k);
+        }
+        self.memo_cache.insert(k, v);
     }
 
     /// xorshift64* — fast and tiny, sufficient for OMC scripting needs.
@@ -1053,22 +1076,36 @@ impl Interpreter {
         max_iter: usize,
     ) -> (Vec<Statement>, Vec<String>, usize, &'static str) {
         let mut all_diags: Vec<String> = Vec::new();
-        let mut prev_count: usize = usize::MAX;
+        // MAPE-K Knowledge: remember the diagnostic SETS already produced (not
+        // just the last count) and accumulate per-class heal activity across
+        // every pass. heal_ast resets the per-pass counters, so the loop sums
+        // them here; the signature history is what convergence reasons over.
+        let mut seen_signatures: Vec<u64> = Vec::new();
+        let mut knowledge = HealClassCounts::new();
         for iter in 0..max_iter {
             let (healed, diags) = self.heal_ast(statements);
             statements = healed;
+            knowledge.add(&last_heal_counts());
             let count = diags.len();
             if count == 0 {
+                store_fixpoint_knowledge(knowledge);
                 return (statements, all_diags, iter, "converged");
             }
-            // Same diagnostic count two iterations in a row → no progress.
-            if count == prev_count {
+            // A diagnostic set we've already produced ⇒ the healer is cycling:
+            // a genuine fixpoint (same residual every pass) or an oscillation.
+            // Count-equality alone would falsely stop when a pass fixes one
+            // diagnostic and reveals another (count flat, set changed) — that
+            // is real progress, so we continue while the set keeps changing.
+            let sig = diagnostic_signature(&diags);
+            if seen_signatures.contains(&sig) {
                 all_diags.extend(diags);
+                store_fixpoint_knowledge(knowledge);
                 return (statements, all_diags, iter + 1, "stuck");
             }
-            prev_count = count;
+            seen_signatures.push(sig);
             all_diags.extend(diags);
         }
+        store_fixpoint_knowledge(knowledge);
         (statements, all_diags, max_iter, "exhausted")
     }
 
@@ -2505,7 +2542,7 @@ impl Interpreter {
             // In-core addressed memory — kNN datastore + IVF (write-don't-train primitive)
             | "amem_new" | "amem_write" | "amem_index" | "amem_search" | "amem_len"
             // The super-tool as a language feature (Phase 3)
-            | "fn_swap_verified" | "fns_on_face"
+            | "fn_swap_verified" | "fns_on_face" | "fns_on_subface"
             // Locality fingerprint — similarity primitive (Phase 1.2)
             | "locality_fp" | "locality_sim" | "locality_nearest"
             // Content-addressed dispatch (Phase 3.1) — typo/variant-tolerant, via locality
@@ -6510,7 +6547,17 @@ impl Interpreter {
                 }
                 let nm = self.eval_expr(&args[0])?.to_string();
                 let new_src = self.eval_expr(&args[1])?.to_string();
-                let test_src = self.eval_expr(&args[2])?.to_string();
+                // The 3rd arg is the verification spec: a single test STRING (one property), OR an
+                // ARRAY of strings — an INVARIANT SET, where the swap is accepted only if EVERY
+                // invariant holds. A strong verify-gate checks invariants, not a single example.
+                let spec = self.eval_expr(&args[2])?;
+                let tests: Vec<String> = match &spec {
+                    Value::Array(arr) => arr.items.borrow().iter().map(|v| v.to_string()).collect(),
+                    other => vec![other.to_string()],
+                };
+                if tests.is_empty() {
+                    return Err("fn_swap_verified: empty invariant set".to_string());
+                }
 
                 // snapshot current state of `name` for rollback
                 let prev_fn = self.functions.get(&nm).cloned();
@@ -6538,44 +6585,58 @@ impl Interpreter {
                     return Ok(mk(false, Some(format!("candidate exec error: {}", e)), Value::Null));
                 }
 
-                // 2) run the test in a sandbox seeded with our state (sees the new fn,
-                //    can't mutate us).
-                let mut tester = Interpreter::new();
-                tester.globals = self.globals.clone();
-                tester.functions = self.functions.clone();
-                tester.memo_fns = self.memo_fns.clone();
-                tester.memo_salt = self.memo_salt.clone();
-                let test_outcome: Result<Value, String> = (|| {
-                    let mut tp = crate::parser::Parser::new(&test_src);
+                // 2+3) verify EVERY invariant in a FRESH sandbox seeded with our state (sees the
+                //    new fn, can't mutate us). Each invariant is run TWICE: a trustworthy
+                //    self-modification must be DETERMINISTIC — a candidate that passes only by
+                //    luck / hidden state / randomness is rejected even if one run is truthy. The
+                //    swap is accepted IFF every invariant runs clean, agrees across runs, and is
+                //    truthy; the first failing invariant rolls back and reports which one.
+                let run_test = |me: &Interpreter, src: &str| -> Result<Value, String> {
+                    let mut tester = Interpreter::new();
+                    tester.globals = me.globals.clone();
+                    tester.functions = me.functions.clone();
+                    tester.memo_fns = me.memo_fns.clone();
+                    tester.memo_salt = me.memo_salt.clone();
+                    let mut tp = crate::parser::Parser::new(src);
                     let tstmts = tp.parse().map_err(|e| format!("test parse error: {}", e))?;
                     tester.register_user_functions(&tstmts);
                     tester.execute(tstmts)?;
                     Ok(tester.last_expression_value.take().unwrap_or(Value::Null))
-                })();
-
-                // 3) accept iff the test ran clean AND returned a truthy value.
-                match test_outcome {
-                    Ok(v) => {
-                        let truthy = match &v {
-                            Value::Bool(b) => *b,
-                            Value::HInt(n) => n.value != 0,
-                            Value::Null => false,
-                            _ => true,
-                        };
-                        if truthy {
-                            Ok(mk(true, None, v))
-                        } else {
+                };
+                let n_inv = tests.len();
+                let mut last_ok = Value::Null;
+                for (idx, t) in tests.iter().enumerate() {
+                    let label = if n_inv > 1 { format!("invariant {}/{}: ", idx + 1, n_inv) } else { String::new() };
+                    match (run_test(self, t), run_test(self, t)) {
+                        (Ok(v1), Ok(v2)) => {
+                            if !values_equal(&v1, &v2) {
+                                restore_fn(&mut self.functions, &mut self.memo_fns, &mut self.memo_salt,
+                                           &nm, prev_fn.clone(), prev_memo, prev_salt);
+                                return Ok(mk(false, Some(format!(
+                                    "{}non-deterministic: different results across runs", label)), v1));
+                            }
+                            let truthy = match &v1 {
+                                Value::Bool(b) => *b,
+                                Value::HInt(n) => n.value != 0,
+                                Value::Null => false,
+                                _ => true,
+                            };
+                            if !truthy {
+                                restore_fn(&mut self.functions, &mut self.memo_fns, &mut self.memo_salt,
+                                           &nm, prev_fn.clone(), prev_memo, prev_salt);
+                                return Ok(mk(false, Some(format!("{}returned a non-truthy value", label)), v1));
+                            }
+                            last_ok = v1;
+                        }
+                        (Err(e), _) | (_, Err(e)) => {
                             restore_fn(&mut self.functions, &mut self.memo_fns, &mut self.memo_salt,
                                        &nm, prev_fn.clone(), prev_memo, prev_salt);
-                            Ok(mk(false, Some("test returned a non-truthy value".to_string()), v))
+                            return Ok(mk(false, Some(format!("{}test error: {}", label, e)), Value::Null));
                         }
                     }
-                    Err(e) => {
-                        restore_fn(&mut self.functions, &mut self.memo_fns, &mut self.memo_salt,
-                                   &nm, prev_fn.clone(), prev_memo, prev_salt);
-                        Ok(mk(false, Some(format!("test error: {}", e)), Value::Null))
-                    }
                 }
+                // every invariant held — deterministically + truthy → accept the swap
+                Ok(mk(true, None, last_ok))
             }
             // fns_on_face(face) -> [names]: defined functions whose name-address lands on
             // dodecahedral `face` (0-11). Exact-key bucketing — the proven use of haddr
@@ -6589,6 +6650,30 @@ impl Interpreter {
                     .functions
                     .keys()
                     .filter(|n| crate::address::haddr(n).face as i64 == face)
+                    .cloned()
+                    .collect();
+                names.sort();
+                Ok(Value::Array(HArray::from_vec(
+                    names.into_iter().map(Value::String).collect(),
+                )))
+            }
+            // fns_on_subface(face, sub) -> [names]: descend the EXISTING address hierarchy one
+            // level — functions whose name-address lands on dodecahedral `face` (0-11) AND
+            // sub_face `sub` (0-2). Same proven exact-key bucketing as fns_on_face, just finer;
+            // uses HAddr's already-computed sub_face, so it does not touch the χ²-uniform face result.
+            "fns_on_subface" => {
+                if args.len() < 2 {
+                    return Err("fns_on_subface requires (face, sub)".to_string());
+                }
+                let face = self.eval_expr(&args[0])?.to_int();
+                let sub = self.eval_expr(&args[1])?.to_int();
+                let mut names: Vec<String> = self
+                    .functions
+                    .keys()
+                    .filter(|n| {
+                        let a = crate::address::haddr(n);
+                        a.face as i64 == face && a.sub_face as i64 == sub
+                    })
                     .cloned()
                     .collect();
                 names.sort();
@@ -8199,8 +8284,8 @@ impl Interpreter {
                 for k in 0..av.data.len() {
                     let x = av.data[k];
                     out.data[k] = match name {
-                        "tape_exp"     => x.exp(),
-                        "tape_log"     => if x > 0.0 { x.ln() } else { f64::NEG_INFINITY },
+                        "tape_exp"     => x.min(709.0).exp(), // clamp: exp(x≳709) overflows to +∞ in f64 and poisons the tape (NaN loss/grads). 709≈ln(f64::MAX), so finite & identical for all realistic x; backward (dy·out) is bounded too.
+                        "tape_log"     => x.max(1e-12).ln(), // ε-clamped domain: x≤0 → large FINITE, never -∞ (a single -∞ logit poisons the whole tape into NaN loss/grads)
                         "tape_abs"     => x.abs(),
                         "tape_sin"     => x.sin(),
                         "tape_cos"     => x.cos(),
@@ -8836,7 +8921,16 @@ impl Interpreter {
                             let av = self.autograd_tape[a].value.clone();
                             let mut da = TapeMat::zeros(av.rows, av.cols);
                             for k in 0..av.data.len() {
-                                let coeff = (n as f64) * av.data[k].powi(n - 1);
+                                // d/dx x^n = n·x^(n-1). n==0 ⇒ x^0 is constant ⇒ derivative 0
+                                // (the formula gives 0·x^(-1) = 0·∞ = NaN at x=0). A non-finite
+                                // x^(n-1) (the n<0 pole at x=0, or overflow) ⇒ contribute no
+                                // gradient rather than poison the whole tape with ±∞/NaN.
+                                let coeff = if n == 0 {
+                                    0.0
+                                } else {
+                                    let p = av.data[k].powi(n - 1);
+                                    if p.is_finite() { (n as f64) * p } else { 0.0 }
+                                };
                                 da.data[k] = dy.data[k.min(dy.data.len() - 1)] * coeff;
                             }
                             self.autograd_tape[a].grad.add(&da);
@@ -8847,7 +8941,9 @@ impl Interpreter {
                             let mut da = TapeMat::zeros(av.rows, av.cols);
                             for k in 0..av.data.len() {
                                 let x = av.data[k];
-                                let g = if x != 0.0 { dy.data[k] / x } else { 0.0 };
+                                // ε-clamp matches the forward: bounded 1/ε at x≤0 instead of
+                                // 1/0 = ∞ — a finite gradient that pushes x back toward x>0.
+                                let g = dy.data[k] / x.max(1e-12);
                                 da.data[k] = g;
                             }
                             self.autograd_tape[a].grad.add(&da);
@@ -13498,7 +13594,7 @@ impl Interpreter {
             }
             // Cross-run: a result computed in a previous process is on disk (~/.omc/cas).
             if let Some(hit) = crate::cas::load("memo", h) {
-                self.memo_cache.insert(h, hit.clone());
+                self.memo_put(h, hit.clone());
                 return Ok(hit);
             }
             Some(h)
@@ -13586,7 +13682,7 @@ impl Interpreter {
 
         let result = self.return_value.take().unwrap_or(Value::Null);
         if let Some(k) = memo_key {
-            self.memo_cache.insert(k, result.clone());
+            self.memo_put(k, result.clone());
             crate::cas::store("memo", k, &result); // persist for future runs
         }
         // @dualband (Phase 6): compute the β band (same body, args snapped to the harmonic
@@ -15456,6 +15552,13 @@ std::thread_local! {
     /// Prevents runaway heals on pathological inputs.
     pub(crate) static HEAL_BUDGET_REMAINING: std::cell::Cell<u32>
         = const { std::cell::Cell::new(HEAL_BUDGET_PER_PASS) };
+    /// MAPE-K persistent Knowledge: per-class heal activity accumulated
+    /// ACROSS every pass of the last `heal_ast_until_fixpoint` run. Each
+    /// `heal_ast` pass resets the per-pass HEAL_CLASS_COUNTS, so without
+    /// this the loop would forget what it did on earlier iterations; this
+    /// is the durable "K" the loop's convergence reasoning is built on.
+    pub(crate) static HEAL_FIXPOINT_KNOWLEDGE: std::cell::RefCell<HealClassCounts>
+        = const { std::cell::RefCell::new(HealClassCounts::new()) };
 }
 
 /// Maximum number of heals a single `heal_ast` pass can apply. Calibrated
@@ -15533,6 +15636,56 @@ impl HealClassCounts {
             + self.str_concat + self.var_typo
             + self.null_arith + self.neg_index
     }
+    /// Accumulate another pass's counts into this one. Used by
+    /// `heal_ast_until_fixpoint` to build cross-pass Knowledge — each
+    /// `heal_ast` pass resets the per-pass counters, so the loop sums
+    /// them here to retain what fired over the whole fixpoint run.
+    pub fn add(&mut self, o: &HealClassCounts) {
+        self.typo += o.typo;
+        self.typo_substrate_hit += o.typo_substrate_hit;
+        self.typo_fallback += o.typo_fallback;
+        self.arity_pad += o.arity_pad;
+        self.arity_truncate += o.arity_truncate;
+        self.div_zero += o.div_zero;
+        self.mod_zero += o.mod_zero;
+        self.harmonic_index += o.harmonic_index;
+        self.missing_return += o.missing_return;
+        self.empty_index_safe += o.empty_index_safe;
+        self.reserved_var += o.reserved_var;
+        self.if_numeric += o.if_numeric;
+        self.str_concat += o.str_concat;
+        self.var_typo += o.var_typo;
+        self.null_arith += o.null_arith;
+        self.neg_index += o.neg_index;
+    }
+    /// Compact "class=count" listing of the non-zero heal classes, for
+    /// human-readable reports (`--check`, OMC_HEAL). Empty string if none.
+    /// (typo_substrate_hit / typo_fallback are sub-breakdowns of `typo`,
+    /// so they're omitted here to avoid double-counting — same as total().)
+    pub fn summary(&self) -> String {
+        let fields: [(&str, u32); 14] = [
+            ("typo", self.typo),
+            ("arity_pad", self.arity_pad),
+            ("arity_truncate", self.arity_truncate),
+            ("div_zero", self.div_zero),
+            ("mod_zero", self.mod_zero),
+            ("harmonic_index", self.harmonic_index),
+            ("missing_return", self.missing_return),
+            ("empty_index_safe", self.empty_index_safe),
+            ("reserved_var", self.reserved_var),
+            ("if_numeric", self.if_numeric),
+            ("str_concat", self.str_concat),
+            ("var_typo", self.var_typo),
+            ("null_arith", self.null_arith),
+            ("neg_index", self.neg_index),
+        ];
+        fields
+            .iter()
+            .filter(|(_, n)| *n > 0)
+            .map(|(name, n)| format!("{name}={n}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
 }
 
 /// Snapshot the per-pass heal counters. Call AFTER `heal_ast` to read
@@ -15540,6 +15693,36 @@ impl HealClassCounts {
 /// `heal_ast` invocation.
 pub fn last_heal_counts() -> HealClassCounts {
     HEAL_CLASS_COUNTS.with(|c| *c.borrow())
+}
+
+/// Snapshot the MAPE-K Knowledge accumulated across the LAST
+/// `heal_ast_until_fixpoint` run: per-class heal activity summed over
+/// every pass (vs `last_heal_counts`, which is only the final pass).
+/// Lets `--check` report total healing effort across the whole loop.
+pub fn last_fixpoint_knowledge() -> HealClassCounts {
+    HEAL_FIXPOINT_KNOWLEDGE.with(|k| *k.borrow())
+}
+
+fn store_fixpoint_knowledge(k: HealClassCounts) {
+    HEAL_FIXPOINT_KNOWLEDGE.with(|slot| *slot.borrow_mut() = k);
+}
+
+/// Order-independent signature of a diagnostic set. The fixpoint loop
+/// compares signatures (not raw counts) to decide convergence: equal
+/// counts with a CHANGED set means real progress (a pass fixed one
+/// diagnostic and revealed another) and must continue; a REPEATED set
+/// is a true cycle (genuine fixpoint or oscillation) and stops.
+fn diagnostic_signature(diags: &[String]) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut sorted: Vec<&String> = diags.iter().collect();
+    sorted.sort();
+    let mut h = DefaultHasher::new();
+    sorted.len().hash(&mut h);
+    for d in sorted {
+        d.hash(&mut h);
+    }
+    h.finish()
 }
 
 /// Substrate-routed hash of an identifier name, mirroring the OMC

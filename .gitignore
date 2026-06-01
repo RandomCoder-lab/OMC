@@ -67,3 +67,25 @@ logs/security/
 # Python virtualenvs
 **/.venv/
 **/venv/
+
+# regenerable built-web caches (dictweb/mind)
+experiments/transformerless_lm/.dictcache/
+experiments/transformerless_lm/.mindcache/
+experiments/transformerless_lm/library/
+
+# Knowledge-web DATA + caches — regenerable and FAR over GitHub's 100MB limit. NEVER commit.
+# knowledge.db (~5-9GB), derived.db, *.textbak / *.prefold_bak backups, WAL/SHM, embedding + fluency
+# caches, run logs/ledgers. The CODE (*.py) that builds them IS tracked; the data is shared elsewhere.
+experiments/transformerless_lm/*.db
+experiments/transformerless_lm/*.db-wal
+experiments/transformerless_lm/*.db-shm
+experiments/transformerless_lm/*.db.textbak
+experiments/transformerless_lm/*.prefold_bak
+experiments/transformerless_lm/knowledge_compressed.db*
+experiments/transformerless_lm/.kwebcache
+experiments/transformerless_lm/.fluencycache_*
+experiments/transformerless_lm/selfimprove_ledger.jsonl
+experiments/transformerless_lm/*.log
+# seed corpora (input data, downloadable/regenerable — e.g. dict_webster.txt is 27MB) + regenerable node lists
+experiments/transformerless_lm/corpora/
+experiments/transformerless_lm/nodes_new.json
