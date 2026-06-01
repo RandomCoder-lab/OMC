@@ -30,9 +30,11 @@ HERE = Path(__file__).parent
 WORD = re.compile(r"[a-z]+")
 
 
-def train_embedding(text, dim=64, window=5, max_vocab=6000, steps=4000, neg=5, seed=0, strip_top=1):
+def train_embedding(text, dim=64, window=5, max_vocab=6000, steps=4000, neg=5, seed=0, strip_top=1,
+                    return_matrix=False):
     """Distributional meaning from the corpus's own co-occurrence (skip-gram neg-sampling). Returns
-    (vec_fn, stoi). strip_top removes dominant common directions (all-but-the-top) to de-hub."""
+    (vec_fn, stoi), or (vec_fn, stoi, E) when return_matrix (E = the normalized embedding, for persistence).
+    strip_top removes dominant common directions (all-but-the-top) to de-hub."""
     torch.manual_seed(seed)
     toks = WORD.findall(text.lower())
     freq = {}
@@ -65,36 +67,99 @@ def train_embedding(text, dim=64, window=5, max_vocab=6000, steps=4000, neg=5, s
         top = Vt[:strip_top]
         E = Ec - (Ec @ top.t()) @ top
         E = E / (E.norm(dim=1, keepdim=True) + 1e-9)
-    return (lambda w: E[stoi[w]] if w in stoi else None), stoi
+    vecfn = lambda w: E[stoi[w]] if w in stoi else None
+    return (vecfn, stoi, E) if return_matrix else (vecfn, stoi)
 
 
 class ConceptSpace:
-    """Unified: addressed grounded graph + learned meaning. The closed loop lives in nav()/discover()."""
-    def __init__(self, corpus_text, top_n=45, embed_steps=4000, seed=0, log=print):
+    """Unified: addressed grounded graph + learned meaning. The closed loop lives in nav()/discover().
+    Build from one corpus (__init__) or many domains (from_texts); save/load to skip rebuild (persistence).
+    Edge evidence = the RICHEST passage (where the two concepts are CLOSEST = tightest relational quote)."""
+
+    def __init__(self, corpus_text=None, top_n=45, embed_steps=4000, seed=0, log=print, drop_hubs=True):
+        if corpus_text is None:
+            return                                             # empty shell for load()
         text = clean_text(corpus_text)
-        self.passages = split_passages(text)
-        self.plow = [" " + p.lower() + " " for p in self.passages]
+        passages = split_passages(text)
         ents = [e.lower() for e in extract_entities(text, top_n=top_n)]
-        # addressed inverted index (WHERE) + grounded co-occurrence with evidence passage (GROUND)
-        contains = lambda e, pl: any(s in pl for s in (
-            " " + e + " ", " " + e + ",", " " + e + ".", " " + e + "'", " " + e + ";"))
+        self._build(passages, [None] * len(passages), ents, text, embed_steps, seed, drop_hubs, log)
+
+    @classmethod
+    def from_texts(cls, labeled_texts, top_n_each=30, embed_steps=6000, seed=0, log=print, drop_hubs=False):
+        """Multi-domain: split EACH text separately (passages never span a book boundary), union the
+        per-text entities, train ONE shared meaning-space over all. Cross-domain links come from meaning/
+        shape (no shared passage across books) — honest by construction."""
+        self = cls.__new__(cls)
+        passages, pass_dom, parts, ents, seen = [], [], [], [], set()
+        for label, raw in labeled_texts:
+            t = clean_text(raw)
+            ps = split_passages(t)
+            passages += ps; pass_dom += [label] * len(ps); parts.append(t)
+            for e in extract_entities(t, top_n=top_n_each):
+                el = e.lower()
+                if el not in seen:
+                    seen.add(el); ents.append(el)
+            log(f"[connect] {label}: {len(ps)} passages")
+        self._build(passages, pass_dom, ents, "\n".join(parts), embed_steps, seed, drop_hubs, log)
+        return self
+
+    def _build(self, passages, pass_dom, ents, embed_text, embed_steps, seed, drop_hubs, log):
+        self.passages = passages
+        self.pass_dom = pass_dom
+        self.plow = [" " + p.lower() + " " for p in passages]
+        # addressed grounded graph: for each edge keep the RICHEST passage (concepts closest together).
         self.adj = {e: {} for e in ents}
-        for i, pl in enumerate(self.plow):
-            present = [e for e in ents if contains(e, pl)]
+        best_dist = {}
+        for i, p in enumerate(passages):
+            plo = p.lower()
+            pos = {}
+            for e in ents:
+                if e in plo:                                   # cheap gate before regex
+                    occ = [m.start() for m in re.finditer(r"\b" + re.escape(e) + r"\b", plo)]
+                    if occ:
+                        pos[e] = occ
+            present = list(pos)
             for a in present:
                 for b in present:
-                    if a != b and b not in self.adj[a]:
-                        self.adj[a][b] = i                     # evidence passage proving a~b
+                    if a == b:
+                        continue
+                    d = min(abs(x - y) for x in pos[a] for y in pos[b])
+                    if b not in self.adj[a] or d < best_dist.get((a, b), 1 << 30):
+                        self.adj[a][b] = i; best_dist[(a, b)] = d
         n = len(ents)
-        hubs = [e for e in ents if len(self.adj[e]) > 0.92 * (n - 1)]
-        self.ents = [e for e in ents if e not in hubs]
-        self.adj = {e: {b: i for b, i in self.adj[e].items() if b not in hubs} for e in self.ents}
-        log(f"[connect] {len(self.passages)} passages, {len(self.ents)} concepts "
-            f"(dropped hubs {hubs}); training meaning...")
+        hubs = [e for e in ents if len(self.adj[e]) > 0.92 * (n - 1)] if drop_hubs else []
+        ents = [e for e in ents if e not in hubs]
+        self.adj = {e: {b: i for b, i in self.adj[e].items() if b not in hubs} for e in ents}
+        log(f"[connect] {len(passages)} passages, {len(ents)} concepts (dropped hubs {hubs}); training meaning...")
         t0 = time.time()
-        self.vec, self.stoi = train_embedding(text, steps=embed_steps, seed=seed)
-        self.ents = [e for e in self.ents if self.vec(e) is not None]
+        _, self.stoi, self.E = train_embedding(embed_text, steps=embed_steps, seed=seed, return_matrix=True)
+        self.ents = [e for e in ents if self.vec(e) is not None]
         log(f"[connect] meaning learned ({time.time()-t0:.0f}s). Loop ready.")
+
+    def vec(self, w):                                          # method (not a closure) so it survives save/load
+        i = self.stoi.get(w)
+        return self.E[i] if i is not None else None
+
+    def save(self, path):
+        import json
+        p = Path(path); p.mkdir(parents=True, exist_ok=True)
+        torch.save(self.E, p / "E.pt")
+        (p / "space.json").write_text(json.dumps(dict(
+            stoi=self.stoi, passages=self.passages, ents=self.ents, adj=self.adj,
+            pass_dom=getattr(self, "pass_dom", None))))
+
+    @classmethod
+    def load(cls, path):
+        import json
+        p = Path(path)
+        self = cls.__new__(cls)
+        self.E = torch.load(p / "E.pt")
+        d = json.loads((p / "space.json").read_text())
+        self.stoi = d["stoi"]; self.passages = d["passages"]; self.ents = d["ents"]
+        self.adj = {a: {b: int(i) for b, i in dd.items()} for a, dd in d["adj"].items()}
+        self.pass_dom = d.get("pass_dom")
+        self.plow = [" " + s.lower() + " " for s in self.passages]
+        return self
 
     def relate(self, a, b):                                    # learned meaning-relatedness
         va, vb = self.vec(a), self.vec(b)

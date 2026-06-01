@@ -513,3 +513,102 @@ of status), history:RECEIVED ≈ romance:MARRIED (entering a new state/union). H
 leakage (steps/clear inflect too); the marquee selection≈deduction did NOT cleanly surface (signature
 verbs are domain-characteristic, but cross-domain NEAREST pairs skew to generic process verbs). Process
 granularity is real but coarse. DISCIPLINE LESSON: don't rationalize a hand-list as "grammar" — derive it.
+
+---
+
+## BUILD-22 — mind.py: ONE agent you chat with + a CORPUS-DERIVED voice (2026-05-30)
+
+Integrated the organs into one conversational agent (mind.py): char-skills + ConceptSpace
+(WHERE/GROUND/MEANING/REASON) + entity resolution + corpus-derived voice. Routes a message to: exact
+char-answer / connect-two-concepts (grounded path) / explore-X (discover hidden links) / what-is-X-like
+(meaning neighbors) / honest "I don't know". Keeps hubs (drop_hubs=False added to ConceptSpace) so you can
+ask about the protagonist. Transparent resolution (says when it maps your word to a near concept). Refuses
+out-of-corpus concepts honestly ("I don't know Rome").
+
+AGNOSTIC-VOICE FIX (user: "derive the voice from the corpus" + flagged my interpretive return-templates):
+the output path injected MY interpretation ("Likely the same kind of thing", "Honestly, I think they're
+unrelated"). Same law as the word-lists, reaching the output. FIX = cvoice.py CorpusNarrator: the
+connective language between concepts is EXTRACTED from the evidence passage (link_span: the text spanning
+the two entities = the corpus's own words for their relationship), never templated. Authored tokens reduced
+to structural scaffolding (arrows, "[meaning=N]" label, section headers) — metadata, not asserted content;
+confidence = the derived number (dropped "I think"/"I'm reaching" register words). Also removed voice.py's
+hand-coded _PRON/_PLACEPREP type-inference lists (another lurking violation). Result: Darcy~Wickham,
+Pemberley→London→Longbourn etc. now rendered in the CORPUS'S words + derived scores. The voice is the text
+speaking. HONEST: some spans noisy when entities are far apart in a passage (head+tail truncation); edge's
+representative passage is whatever the graph stored (could pick richest span — refinement). Files: mind.py,
+cvoice.py; voice.py (BUILD-19 templated version) kept for the record.
+
+---
+
+## BUILD-23 — mind.py refinements: richest-span, multi-domain, persistence + a meaning-arbiter honesty fix (2026-05-30)
+
+All three "addressing makes it possible" upgrades to ConceptSpace/mind:
+1. RICHEST-SPAN edges: adj[a][b] now stores the passage where a,b are CLOSEST (min char distance over all
+   co-occurrences), so quotes are tight relational spans ("…Darcy nor Wickham…") not rambling lists.
+2. MULTI-DOMAIN (mind --multi): ConceptSpace.from_texts splits EACH book separately (passages never span a
+   boundary), unions per-book entities, trains ONE shared meaning-space. 5 books, 131 concepts.
+3. PERSISTENCE: ConceptSpace.save/load (E.pt + space.json); mind caches to .mindcache/<label> →
+   reload 0.01s vs ~15s build. (train_embedding gained return_matrix=True so E is serializable.)
+
+HONESTY FIX (surfaced by multi-domain): cross-book generic shared tokens (e.g. "Sir") created spurious
+grounded paths — "Darcy → Sir → Holmes" with learned meaning = -0.04 (UNRELATED). The agent was trusting a
+token-path over its own meaning-judge. FIX: the MEANING-JUDGE is the arbiter — connect() requires a
+grounded path AND relatedness >= 0.2; below that it reports the path as a generic-token bridge with the
+score, not a connection. (Darcy~Holmes -0.04 → honestly rejected; Holmes~Watson 0.47 → real, quoted.)
+This is the integer-substrate corollary in action: addressing finds candidates (where), the learned float
+decides what's real (meaning). Files: connect.py (from_texts/save/load/richest-span/vec-method), mind.py.
+
+---
+
+## BUILD-24 — the DICTIONARY concept-web (every word addressed) + persistence (2026-05-30)
+
+User reframed the vision: feed the system a LITERAL dictionary (and ultimately ALL knowledge fields) —
+not hardcoded, fed as DATA (the agnostic law forbids hardcoding lists in CODE, not feeding corpora).
+Correct: "meaning is use", so the dictionary is the agnostic way to address the whole language WITH
+meaning (each word's definition is its context; definitions cross-reference → a concept graph).
+
+dictweb.py (Webster's 1913, 27.6MB, public domain, fetched to corpora/dict_webster.txt): structural parse
+(caps headword + Defn text; NO hardcoded vocabulary) → 88,519 single-word headwords → top 6,000 most-
+REFERENCED as concept nodes → 301,054 definitional edges (A→B iff B in A's definition; evidence = A's
+own entry) → embedding over ALL definitions (meaning cross-verified across the whole vocabulary).
+Connect any two concepts through definitional chains, grounded in the dictionary's own words:
+  love → most → pride (+0.69) · fear → companion → lose → courage (+0.60) · water → fire (+0.56) ·
+  light → mind (+0.21, "light which illumines... makes clear to the mind").
+Meaning-neighbors learned from definitions alone: force ~ energy/tension/friction/electricity/heat
+(physics cluster!); mind ~ understanding/intellect/faculty/perception/brain. The vision working: a general
+dot-connector over the whole language, agnostic (dictionary = data), grounded in definitions.
+
+PERSISTENCE (user: "it doesn't save so it has this info on hand later, right?"): added DictWeb.save/load
+(E.pt + web.json; node-entries only). Build+save once (~3min, embedding 166s), reload 0.1s from a 17MB
+.dictcache (gitignored, regenerable). Mirrors ConceptSpace.save/load. Honest scope: 6,000-node subset of
+88k headwords for tractability; multi-word/abbrev headwords dropped; the cross-FIELD layer (textbooks on
+top of the dictionary backbone) is the next densification — the dictionary is the connective tissue the
+narrow field corpora (web.py, weak) were missing.
+
+---
+
+## BUILD-25 — the UNIFIED knowledge web: dictionary backbone + all fields, cross-verified, SAVED (2026-05-30)
+
+The full vision realized at this scale (user: "implement the others and have them saved" + "entirety of
+human knowledge piece by piece, agnosticism as the ability to do so"). kweb.py / KnowledgeWeb fuses:
+  * dictionary (Webster 88,519 headwords → 6,000 concept nodes + definitional edges + broad meaning), and
+  * 8 fields (astronomy/detective/history/language/philosophy/physics/romance/science) layered ON the
+    backbone: domain co-occurrence edges (within ~14 tokens) + domain meaning,
+into ONE shared addressed space → 1,660,806 edges, one cross-verified embedding (170s). Every concept is
+DEFINED (dict) AND USED (fields) — its address triangulated by every field that touches it. connect()
+runs grounded paths through definitions OR domain text, each hop tagged ⟨def⟩/⟨field⟩, and flags which
+fields it crosses. Real cross-field grounded results: star→period→time (+0.47, sci+def), war→justice
+(+0.39, history), motion→anything→matter (+0.33, philosophy+romance), fear→courage (+0.59), water→fire.
+Far stronger than web.py (fields-only, weak) — the dictionary IS the connective tissue. PERSISTED:
+KnowledgeWeb.save/load, .kwebcache (gitignored), reload ~1s vs ~3min build. Adding a new field = append a
+corpus + rebuild (or incrementally extend). The agnostic substrate scales to "all knowledge piece by
+piece" — each field a data layer, none hardcoded. HONEST scope: 6,000-node subset; field corpora are
+single public-domain books (not full textbooks); meaning is distributional (definitional+domain), not
+understanding. It's the structure of knowledge made navigable — a different cognition than a human mind
+(unbiased, exhaustive, grounded, but no leap-beyond-data, no qualia) — the complement to a reasoner.
+
+- [growth] rebuild#1 over 75 texts/13 fields: 6,000 nodes, 6.95M edges (vs 1.66M at 8 books), saved .kwebcache 301MB. Multi-hop cross-field chains added (deep_connect): war→law→justice (religion+science), light→meaning→truth (science+religion). Honest: denser web = shallower paths + some generic bridges; broader not always sharper.
+
+- [growth] NO-CAP accumulation (user): ingest --seq (unlimited sequential Gutenberg, subject auto-labeled from metadata); soft cap removed. HARD limit = DISK (3.7GB free; ~2.5GB held by old *.pt indexes NOT deleted). Disk guards baked into ingest (stop <1.2GB) + kweb (skip rebuild <1.5GB) so growth never crashes the box. Generic connections embraced as valid (human-like association). Loop continues seq-ingest + periodic rebuild until disk-guard or user stop.
+
+- [growth] INCREMENTAL "stack then integrate" built (user insight): kweb.add_field appends a field's passages+edges to the saved web in O(new text) — no retrain (6,000 dict nodes are fixed, vectors stay valid). stack.py = incremental driver (tracks .kwebcache/stacked.json, adds only new library texts, re-saves). Full kweb --rebuild becomes RARE (only to refresh cross-verification/embedding). Growth cost: O(new) not O(total). Disk freed to 42G (user removed old *.pt indexes).

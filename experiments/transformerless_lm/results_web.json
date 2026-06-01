@@ -1,0 +1,14 @@
+{
+  "fields": [
+    "astronomy",
+    "detective",
+    "history",
+    "language",
+    "philosophy",
+    "physics",
+    "romance",
+    "science"
+  ],
+  "passages": 11460,
+  "concepts": 320
+}
