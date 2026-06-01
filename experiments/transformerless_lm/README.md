@@ -1,4 +1,52 @@
-# Transformerless LM — first end-to-end measurement
+# Transformerless LM
+
+This directory began as a transformer **positional-encoding** experiment (CRT-PE, below) and grew into a
+fully **web-native addressed language model** — an LM with *no token-prediction model at all*. Both lines
+live here; the web-native LM is the current frontier, the CRT-PE result is its measured origin.
+
+---
+
+## The web-native addressed LM (current line)
+
+**Thesis:** *addressing is execution.* Concepts are addressed nodes in a knowledge web (passages + weighted
+co-occurrence edges); a sentence "executes" by traversing its concept-addresses, and a thought is *created*
+by recombining distant addresses across sources. No weights are trained for generation — the web is the model.
+
+Two oracles, both derived from the web and both empirically validated (held-out):
+
+| layer | question | how | measured |
+|---|---|---|---|
+| **WHAT** (`langexec.py`) | does a thought *resolve*? | traverse concept-addresses over **hub-damped PMI** edges | AUC **0.91–0.98** real-vs-salad (survives a common-word steelman) |
+| **HOW** (`fluency.py`) | does it read like the web speaks? | transition stats counted from the corpus (agnostic, trigram) | AUC **0.86** fluent-vs-scrambled, held-out |
+
+Built on those:
+- `thinkloop.py` — heal a faulting thought *up* the resolve gradient to a coherent fixpoint.
+- `realize.py` — resolved concepts → fluent grounded sentence (template / compose / **hybrid**).
+- `engine.py` + `agent.py` — a router (recall | relate | decline) and tool-use (exact char-counting,
+  arithmetic, cross-source bridging). Frame-word detection is **agnostic** (interrogative-context, not a
+  hand-coded keyword list).
+- `create.py` — recombine *distant* concepts across sources into a thought no single passage states,
+  3-gated (coherence + support + meaning) and graded WARRANTED/SUGGESTIVE/WEAK with its weakest link shown.
+- `selfimprove.py` — write-don't-train of self-*verified* thoughts (a MAPE-K loop); measured cold→warm
+  improvement (mean confidence 0.48→0.79, instant-recalls 0→16/20 on a fixed probe set).
+- `webmind.py` — the unified mind. `python3 webmind.py --demo` (showcase) · `--report` · `--think "…"`.
+
+**Lossless 45% compression** (`compress_web.py` + `finalize_compressed.py`): the LM was asked how to
+compress *itself*; it surfaced dictionary-encoding + entropy-coding, which we applied — node-string
+**interning** (TEXT→int32) + **zlib** passages → **9.78 GB → 5.33 GB, verified lossless**. Presented back
+to all readers via SQLite **views** (`kdb.py` registers an `unzip` fn + detects the schema), so nothing
+else changed. The interned INT index fits in cache, which in turn unblocks fast corpus folding
+(`ghost_fold.py` reconnected 17.7k orphaned nodes; `se_fold_i.py` folds science into the compact DB).
+
+Honest limits: fluency is a trigram floor (a small neural model lifts it); recall can answer with a full
+passage span; coverage is corpus-bound (science is ~1% of the current web — folding more is the lever, not
+hand-tuning). Nothing here claims to rival a frontier LLM at open generation — the claim is a **grounded,
+hallucination-resistant, self-calibrating** knowledge-and-synthesis engine that runs on near-zero compute.
+See `MORNING.md` for an orientation written for a returning reader.
+
+---
+
+## Origin: CRT-PE — first end-to-end measurement
 
 **The headline:** the harmonic CRT-PE substitution beats the standard sinusoidal-PE transformer on a tiny char-level LM with **mean −19.9% validation loss across 5 seeds**, winning 4 of 5 seeds. This is the first end-to-end empirical evidence that the harmonic substrate substitutions identified by the experiments-0–12 series carry over to a real LM training task.
 

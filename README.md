@@ -291,7 +291,7 @@ If you're trying to understand how OMC got here, **read the [GitHub Releases](ht
 | `omnimcode-gdextension/` | Godot 4 GDExtension binding |
 | `omnimcode-python/` | Python bindings via PyO3 |
 | `experiments/prometheus_parity/` | Substrate-attention A/B harness — pure OMC vs PyTorch |
-| `experiments/transformerless_lm/` | PyTorch CRT-PE vs sinusoidal training |
+| `experiments/transformerless_lm/` | CRT-PE vs sinusoidal training, **and** a web-native *addressed* LM (no token-prediction model — execution-over-the-web + lossless 45% web compression). See its `README.md`. |
 | `experiments/hybrid_llm/` | Per-component substrate substitution experiments |
 | `experiments/substrate_primitives/` | Substrate vs native vs OMC search benchmarks |
 | `examples/lib/` | `prometheus.omc`, `fibtier.omc`, `substrate.omc`, `harmonic_anomaly`, np/pd/sklearn/torch interop wrappers |
